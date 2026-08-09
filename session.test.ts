@@ -11,6 +11,7 @@ import {
   playwrightTransportAttribution,
   readSessionFromBrowser,
   readSessionInSubprocess,
+  readSessionWorkerCommand,
   restoreOriginStorage,
   runReadSessionWorker,
   TELEGRAM_AUTH_INDEXEDDB_RULES,
@@ -71,6 +72,20 @@ test("readSessionInSubprocess returns the worker bundle and uses the current Bun
     "ws://127.0.0.1:9222/devtools/browser/id",
   ]);
   expect(killed).toBe(false);
+});
+
+test("compiled session workers re-enter the executable without an embedded script path", () => {
+  expect(readSessionWorkerCommand("ws://capture", true)).toEqual([
+    process.execPath,
+    "--read-session-worker",
+    "ws://capture",
+  ]);
+  expect(readSessionWorkerCommand("ws://capture", false)).toEqual([
+    process.execPath,
+    import.meta.path.replace(/session\.test\.ts$/, "session.ts"),
+    "--read-session-worker",
+    "ws://capture",
+  ]);
 });
 
 test("readSessionInSubprocess preserves worker errors and rejects partial output", async () => {

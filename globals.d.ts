@@ -5,6 +5,8 @@ declare module "*.html" {
 }
 declare module "*.css";
 
+declare const ALIASMODE_COMPILED: boolean;
+
 declare module "*playwright-core/lib/generated/storageScriptSource.js" {
   export const source: string;
 }

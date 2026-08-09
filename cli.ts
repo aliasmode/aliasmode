@@ -26,7 +26,14 @@ import { serveDashboard } from "./web.ts";
 import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
 import { RemoteCoordinator } from "./remote.ts";
-import { playwrightTransportAttribution, readSessionInSubprocess, writeSession } from "./session.ts";
+import {
+  playwrightTransportAttribution,
+  readSession,
+  readSessionInSubprocess,
+  READ_SESSION_WORKER_ARG,
+  runReadSessionWorker,
+  writeSession,
+} from "./session.ts";
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
 import { ensureStateDirectories, resolveStateRoot, statePaths } from "./paths.ts";
 import { migrateLegacyState } from "./migration.ts";
@@ -349,6 +356,19 @@ async function importPath(store: ProfileStore, target: string | undefined, defau
   );
 }
 
+export async function dispatchReadSessionWorker(
+  argv: string[],
+  deps: Parameters<typeof runReadSessionWorker>[1] = {
+    readSession,
+    write: (value) => Bun.write(Bun.stdout, value),
+    exit: (code) => process.exit(code),
+  },
+): Promise<boolean> {
+  if (argv[0] !== READ_SESSION_WORKER_ARG) return false;
+  await runReadSessionWorker(argv, deps);
+  return true;
+}
+
 async function main() {
   // Playwright-over-CDP on Bun emits occasional stray websocket rejections
   // ("ws.WebSocket 'upgrade' event is not implemented in bun"). Left unhandled,
@@ -368,7 +388,10 @@ async function main() {
     process.exit(1);
   });
 
-  const [cmd, ...rest] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  if (await dispatchReadSessionWorker(argv)) return;
+
+  const [cmd, ...rest] = argv;
   const paths = statePaths(resolveStateRoot(rest));
   const desktop = has(rest, "desktop-stdio");
   if (desktop && cmd !== "start") throw new Error("--desktop-stdio is supported only by the start command");
@@ -429,10 +452,11 @@ async function main() {
     case "__sidecar-smoke": {
       const endpoint = flag(rest, "cdp-endpoint");
       if (!endpoint) throw new Error("compiled sidecar smoke requires --cdp-endpoint");
-      const { chromium } = await import("playwright-core");
-      const browser = await chromium.connectOverCDP(endpoint);
-      await browser.close();
-      console.log("compiled sidecar connected over Playwright CDP");
+      const bundle = JSON.parse(await readSessionInSubprocess(endpoint));
+      if (!bundle || typeof bundle !== "object" || !Array.isArray(bundle.cookies)) {
+        throw new Error("compiled sidecar capture returned an invalid session bundle");
+      }
+      console.log("compiled sidecar captured a session over Playwright CDP");
       break;
     }
     case "install-browser": {

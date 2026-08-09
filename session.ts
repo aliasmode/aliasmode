@@ -18,7 +18,8 @@ const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
 const SESSION_WRITE_TIMEOUT_MS = 90_000;
 const SESSION_DISCONNECT_TIMEOUT_MS = 5_000;
 const SESSION_SUBPROCESS_TIMEOUT_MS = 85_000;
-const READ_SESSION_WORKER_ARG = "--read-session-worker";
+export const READ_SESSION_WORKER_ARG = "--read-session-worker";
+const RUNNING_COMPILED = typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true;
 const PLAYWRIGHT_TRANSPORT_STATS = Symbol.for("aliasmode.playwrightTransportStats");
 
 export interface PlaywrightTransportAttribution {
@@ -613,6 +614,15 @@ interface ReadSessionSubprocessOptions {
   spawn?: (argv: string[]) => ReadSessionSubprocess;
 }
 
+export function readSessionWorkerCommand(
+  ws: string,
+  compiled = RUNNING_COMPILED,
+): string[] {
+  return compiled
+    ? [process.execPath, READ_SESSION_WORKER_ARG, ws]
+    : [process.execPath, import.meta.path, READ_SESSION_WORKER_ARG, ws];
+}
+
 /** Isolate repeated captures so Windows reclaims Playwright/Bun native allocations after every read. */
 export async function readSessionInSubprocess(
   ws: string,
@@ -620,7 +630,7 @@ export async function readSessionInSubprocess(
 ): Promise<string> {
   const timeoutMs = Math.max(1, options.timeoutMs ?? SESSION_SUBPROCESS_TIMEOUT_MS);
   const spawn = options.spawn ?? ((argv: string[]) => Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" }));
-  const child = spawn([process.execPath, import.meta.path, READ_SESSION_WORKER_ARG, ws]);
+  const child = spawn(readSessionWorkerCommand(ws));
   const stdout = new Response(child.stdout).text();
   const stderr = new Response(child.stderr).text();
   let timedOut = false;

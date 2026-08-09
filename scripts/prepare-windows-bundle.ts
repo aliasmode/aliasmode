@@ -42,6 +42,7 @@ async function compileSidecar(cwd: string, output: string): Promise<void> {
     "build",
     "--compile",
     "--target=bun-windows-x64",
+    "--define=ALIASMODE_COMPILED=true",
     "--external=chromium-bidi",
     "--external=electron",
     "cli.ts",
