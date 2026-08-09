@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "basePath": "/v1",
+  "authorization": {
+    "accessToken": "Authorization: Bearer <supabase-access-token>",
+    "deviceCredential": "X-AliasMode-Device: <device-credential>",
+    "requirements": [
+      "verified_email",
+      "current_legal_acceptance",
+      "active_workspace_membership",
+      "active_device"
+    ]
+  },
+  "workspace": {
+    "membershipsPerAccount": 1,
+    "roles": ["owner", "member"],
+    "profileVisibility": "all_members",
+    "addMember": "existing_verified_empty_workspace_account_only"
+  },
+  "profiles": {
+    "portableSchemaVersion": 1,
+    "concurrentOpen": "advisory_warning",
+    "closeConflict": "mandatory_compare_and_swap_first_valid_close_wins",
+    "merge": false,
+    "trash": {
+      "trashAndRestore": ["owner", "member"],
+      "purge": ["owner"],
+      "activeOpenBlocksTrash": true,
+      "automaticExpiry": false
+    }
+  },
+  "endpoints": {
+    "status": "GET /v1/status",
+    "bootstrap": "POST /v1/account/bootstrap",
+    "acceptLegal": "POST /v1/account/legal",
+    "requestDeletion": "POST /v1/account/deletion-request",
+    "members": "GET|POST|DELETE /v1/workspace/members",
+    "devices": "GET|POST|DELETE /v1/devices",
+    "profiles": "GET|POST /v1/profiles",
+    "profile": "GET|PATCH /v1/profiles/:id",
+    "open": "POST /v1/profiles/:id/open",
+    "heartbeat": "POST /v1/open-sessions/:id/heartbeat",
+    "close": "PUT /v1/open-sessions/:id/close",
+    "abandon": "POST /v1/open-sessions/:id/abandon",
+    "trash": "POST /v1/profiles/:id/trash",
+    "restore": "POST /v1/profiles/:id/restore",
+    "purge": "DELETE /v1/profiles/:id/purge",
+    "events": "POST /v1/events"
+  },
+  "errorCodes": [
+    "authentication_required",
+    "email_not_verified",
+    "legal_acceptance_required",
+    "device_revoked",
+    "membership_revoked",
+    "workspace_conflict",
+    "profile_not_found",
+    "profile_trashed",
+    "profile_open",
+    "version_conflict",
+    "validation_failed",
+    "rate_limited",
+    "internal_error"
+  ],
+  "analyticsEvents": [
+    "install_completed",
+    "cloud_signup_completed",
+    "profile_created",
+    "profile_imported",
+    "browser_opened",
+    "profile_restored_on_second_device",
+    "teammate_added",
+    "app_error"
+  ]
+}

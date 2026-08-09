@@ -1,0 +1,278 @@
+export const CLOUD_API_VERSION = 1 as const;
+export const CLOUD_API_BASE_PATH = "/v1" as const;
+
+export type WorkspaceRole = "owner" | "member";
+export type OpenSessionStatus = "open" | "accepted" | "stale" | "abandoned";
+export type PendingSyncStatus = "pending" | "retrying" | "conflict";
+
+export type CloudErrorCode =
+  | "authentication_required"
+  | "email_not_verified"
+  | "legal_acceptance_required"
+  | "device_revoked"
+  | "membership_revoked"
+  | "workspace_conflict"
+  | "profile_not_found"
+  | "profile_trashed"
+  | "profile_open"
+  | "version_conflict"
+  | "validation_failed"
+  | "rate_limited"
+  | "internal_error";
+
+export interface CloudError {
+  ok: false;
+  error: {
+    code: CloudErrorCode;
+    message: string;
+    currentVersion?: number;
+  };
+}
+
+export interface LegalVersions {
+  terms: string;
+  privacy: string;
+  acceptableUse: string;
+}
+
+export interface LegalAcceptance extends LegalVersions {
+  acceptedAt: number;
+}
+
+export interface CloudAccount {
+  id: string;
+  email: string;
+  emailVerified: boolean;
+}
+
+export interface CloudWorkspace {
+  id: string;
+  ownerAccountId: string;
+  name: string;
+  role: WorkspaceRole;
+}
+
+export interface CloudMember {
+  accountId: string;
+  email: string;
+  role: WorkspaceRole;
+  joinedAt: number;
+}
+
+export interface CloudDevice {
+  id: string;
+  label: string;
+  platform: "windows" | "macos" | "linux";
+  appVersion: string;
+  createdAt: number;
+  lastSeenAt: number;
+  revokedAt: number | null;
+  current: boolean;
+}
+
+export interface CloudCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+}
+
+export interface CloudOriginStorage {
+  origin: string;
+  localStorage: Array<{ name: string; value: string }>;
+  indexedDB?: unknown[];
+}
+
+export interface PortableSessionV1 {
+  cookies: CloudCookie[];
+  origins?: CloudOriginStorage[];
+  telegramClient?: "a" | "k";
+}
+
+export interface CloudProxy {
+  type: "http" | "https" | "socks5";
+  host: string;
+  port: string;
+  user: string;
+  pass: string;
+}
+
+/** Complete portable state. The server stores this only as an encrypted envelope. */
+export interface PortableProfileV1 {
+  schemaVersion: 1;
+  profile: {
+    id: string;
+    accId: string;
+    name: string;
+    group: string;
+    platform: string;
+    username: string;
+    password: string;
+    email: string;
+    emailPassword: string;
+    twofa: string;
+    proxy: CloudProxy | null;
+    proxyError?: string;
+    extensionAssignments: string[];
+    tags: string[];
+    ua: string;
+    timezone: string;
+    screenWidth: number;
+    screenHeight: number;
+    fingerprintSeed: number;
+  };
+  session: PortableSessionV1;
+}
+
+export interface CloudProfileSummary {
+  id: string;
+  name: string;
+  group: string;
+  platform: string;
+  tags: string[];
+  version: number;
+  trashedAt: number | null;
+  trashedBy: string | null;
+  updatedAt: number;
+  activeOpens: CloudOpenWarning[];
+}
+
+export interface CloudOpenWarning {
+  registrationId: string;
+  accountId: string;
+  memberEmail: string;
+  deviceId: string;
+  deviceLabel: string;
+  openedAt: number;
+  heartbeatAt: number;
+}
+
+export interface CloudStatusResponse {
+  ok: true;
+  account: CloudAccount;
+  workspace: CloudWorkspace;
+  device: CloudDevice;
+  legal: {
+    current: LegalVersions;
+    accepted: LegalAcceptance | null;
+  };
+}
+
+export interface BootstrapRequest {
+  device: {
+    installationId: string;
+    label: string;
+    platform: CloudDevice["platform"];
+    appVersion: string;
+  };
+}
+
+export interface BootstrapResponse extends CloudStatusResponse {
+  deviceCredential: string | null;
+}
+
+export interface AcceptLegalRequest {
+  versions: LegalVersions;
+}
+
+export interface AddMemberRequest {
+  email: string;
+}
+
+export interface ListProfilesResponse {
+  ok: true;
+  profiles: CloudProfileSummary[];
+}
+
+export interface CreateProfileRequest {
+  migrationId?: string;
+  payload: PortableProfileV1;
+}
+
+export interface CreateProfileResponse {
+  ok: true;
+  profile: CloudProfileSummary;
+  payloadDigest: string;
+}
+
+export interface UpdateProfileRequest {
+  expectedVersion: number;
+  payload: PortableProfileV1;
+}
+
+export interface OpenProfileRequest {
+  deviceId: string;
+}
+
+export interface OpenProfileResponse {
+  ok: true;
+  registrationId: string;
+  baseVersion: number;
+  payload: PortableProfileV1;
+  activeOpens: CloudOpenWarning[];
+}
+
+export interface OpenHeartbeatResponse {
+  ok: true;
+  revoked: false;
+  activeOpens: CloudOpenWarning[];
+}
+
+export interface CloseOpenRequest {
+  expectedVersion: number;
+  payload: PortableProfileV1;
+}
+
+export interface CloseOpenResponse {
+  ok: true;
+  status: "accepted";
+  version: number;
+}
+
+export interface CloseOpenConflict extends CloudError {
+  error: CloudError["error"] & {
+    code: "version_conflict";
+    currentVersion: number;
+  };
+}
+
+export interface TrashProfileRequest {
+  expectedVersion: number;
+}
+
+export interface RestoreProfileRequest {
+  expectedVersion: number;
+}
+
+export interface DeletionRequestResponse {
+  ok: true;
+  requestId: string;
+  status: "pending";
+}
+
+export const ANALYTICS_EVENTS = [
+  "install_completed",
+  "cloud_signup_completed",
+  "profile_created",
+  "profile_imported",
+  "browser_opened",
+  "profile_restored_on_second_device",
+  "teammate_added",
+  "app_error",
+] as const;
+
+export type AnalyticsEventName = (typeof ANALYTICS_EVENTS)[number];
+
+export interface AnalyticsEventRequest {
+  name: AnalyticsEventName;
+  appVersion: string;
+  mode: "local" | "cloud";
+  platform: CloudDevice["platform"];
+  errorCategory?: string;
+}
+
+export type CloudResult<T> = T | CloudError;

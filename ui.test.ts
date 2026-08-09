@@ -1,0 +1,854 @@
+import { test, expect } from "bun:test";
+import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { ProfileStore } from "./store.ts";
+import { Launcher } from "./launcher.ts";
+import { parseExport } from "./parse.ts";
+import { listUiProfiles, handleUiRequest } from "./ui.ts";
+
+const SAMPLE = `id=k1d0cd11
+name=sophia
+group=va1
+username=account-user
+password=SECRETpw
+email=mailbox@example.com
+emailpassword=MAILSECRETpw
+fakey=TOTPSEED
+cookie=[{"name":"auth_token","value":"COOKIEVAL","domain":".x.com","path":"/","expires":4070908800}]
+proxytype=http
+proxy=1.2.3.4:8080:proxyuser:PROXYPASS
+ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/143.0.0.0 Safari/537.36
+resolution=1680*1050
+******************`;
+
+function store(): ProfileStore {
+  const s = new ProfileStore(":memory:");
+  for (const p of parseExport(SAMPLE).profiles) s.upsertProfile(p);
+  return s;
+}
+
+test("listUiProfiles exposes metadata but redacts every secret", () => {
+  const s = store();
+  const list = listUiProfiles(s);
+  const p = list[0]!;
+  expect(p.proxy).toBe("1.2.3.4:8080"); // host:port only
+  expect(p.cookieCount).toBe(1);
+  expect(p.screen).toBe("1680x1050");
+  expect(p.running).toBe(false);
+
+  const json = JSON.stringify(list);
+  for (const secret of ["account-user", "SECRETpw", "MAILSECRETpw", "mailbox@example.com", "TOTPSEED", "COOKIEVAL", "PROXYPASS", "proxyuser"]) {
+    expect(json.includes(secret)).toBe(false);
+  }
+  s.close();
+});
+
+test("a quarantined legacy proxy stays visible and repairable without exposing credentials", async () => {
+  const s = store();
+  const raw = JSON.stringify({ type: "socks4", host: "legacy.example", port: "1080", user: "legacy-user", pass: "legacy-pass" });
+  (s as any)["db"].query("UPDATE profiles SET proxy_json = ? WHERE id = ?").run(raw, "k1d0cd11");
+
+  const roster = listUiProfiles(s);
+  expect(roster).toHaveLength(1);
+  expect(roster[0]!.proxy).toBeNull();
+  expect(roster[0]!.proxyError).toContain("unsupported proxy type");
+  expect(JSON.stringify(roster)).not.toContain("legacy-pass");
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+  );
+  const edit = (await response!.json()).profile;
+  expect(edit.proxy).toBe("");
+  expect(edit.proxyError).toContain("unsupported proxy type");
+  s.close();
+});
+
+test("full profile edit keeps account and mailbox credentials in separate fields", async () => {
+  const s = store();
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+  );
+  const edit = (await response!.json()).profile;
+  expect(edit).toMatchObject({
+    username: "account-user",
+    password: "SECRETpw",
+    email: "mailbox@example.com",
+    emailPassword: "MAILSECRETpw",
+    twofa: "TOTPSEED",
+  });
+  const updated = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: {
+        username: "account-user", password: "linkedin-pass",
+        email: "new-mail@example.com", emailPassword: "new-mail-pass", twofa: "NEWSEED",
+      } }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(updated!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")).toMatchObject({
+    username: "account-user", password: "linkedin-pass",
+    email: "new-mail@example.com", emailPassword: "new-mail-pass", twofa: "NEWSEED",
+  });
+  s.close();
+});
+
+test("listUiProfiles reflects running status from the launches table", () => {
+  const s = store();
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
+  const p = listUiProfiles(s)[0]!;
+  expect(p.running).toBe(true);
+  expect(p.debugPort).toBe(9412);
+  s.close();
+});
+
+test("open/close routes call the launcher", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const launcher: any = {
+    start: async (id: string) => { calls.push(`start:${id}`); return { ws: "ws://x", port: 9333 }; },
+    stop: async (id: string) => { calls.push(`stop:${id}`); return true; },
+  };
+  const open = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/open", { method: "POST" }), launcher, s);
+  expect((await open!.json()).ok).toBe(true);
+  const close = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/close", { method: "POST" }), launcher, s);
+  expect((await close!.json()).ok).toBe(true);
+  expect(calls).toEqual(["start:k1d0cd11", "stop:k1d0cd11"]);
+  s.close();
+});
+
+test("remote open returns an advisory warning as a success", async () => {
+  const s = store();
+  const remote: any = {
+    open: async () => ({
+      ok: true,
+      port: 9333,
+      warning: "Possible concurrent use; session sync is disabled for this browser.",
+    }),
+  };
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/open", { method: "POST" }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toEqual({
+    ok: true,
+    port: 9333,
+    warning: "Possible concurrent use; session sync is disabled for this browser.",
+  });
+  s.close();
+});
+
+test("open on an unknown profile 404s without touching the launcher", async () => {
+  const s = store();
+  const launcher: any = { start: async () => { throw new Error("must not be called"); } };
+  const res = await handleUiRequest(new Request("http://x/ui/api/profiles/nope/open", { method: "POST" }), launcher, s);
+  expect(res!.status).toBe(404);
+  s.close();
+});
+
+test("GET /ui/api/health is independent of launcher and hub state", async () => {
+  const s = store();
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/health"),
+    new Proxy({}, { get: () => { throw new Error("launcher must not be touched"); } }) as any,
+    s,
+    new Proxy({}, { get: () => { throw new Error("hub must not be touched"); } }) as any,
+  );
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toMatchObject({ ok: true, version: expect.any(String), root: process.cwd() });
+  s.close();
+});
+
+test("GET /ui/api/profiles clears a stale launch row before reporting status", async () => {
+  const s = store();
+  // A launch row whose browser is gone (crash / external teardown).
+  s.recordLaunch({
+    profileId: "k1d0cd11",
+    pid: 99999,
+    debugPort: 9999,
+    ws: "ws://x",
+    startedAt: 1,
+    binaryPath: "/fake",
+    userDataDir: "/tmp/ui-recon/k1d0cd11",
+    processGroupId: 99999,
+    rootStartTime: "1",
+  });
+  const launcher = new Launcher({
+    store: s,
+    binaryPath: "/fake",
+    unsafeDisableIdentityGates: true,
+    dataRoot: "/tmp/ui-recon",
+    spawn: () => ({ pid: 1, kill() {} }),
+    fetch: async () => ({ ok: false, json: async () => ({}) }), // CDP port is dead
+    ensureCookies: async () => ({ injected: false }),
+    killPid: async () => {},
+    isPidAlive: () => false,
+    cdpReadyTimeoutMs: 100,
+  });
+
+  const res = await handleUiRequest(new Request("http://x/ui/api/profiles"), launcher, s);
+  const body = await res!.json();
+  expect(body.profiles[0].running).toBe(false); // not shown as running
+  expect(body.healthSources).toEqual([]);
+  expect(s.getLaunch("k1d0cd11")).toBeNull(); // stale row reconciled away
+  s.close();
+});
+
+test("GET /ui/api/profiles carries remote health and node freshness through local launch overlays", async () => {
+  const s = store();
+  const launcher: any = { reconcileOrphans: async () => {} };
+  const remote: any = {
+    listRoster: async () => ({
+      profiles: [{
+        id: "k1d0cd11",
+        name: "sophia",
+        group: "va1",
+        healthStatus: "suspended",
+        healthObservedAt: 1_000,
+      }],
+      healthSources: [{ sourceId: "node-a", lastSnapshotAt: 1_000, stale: false }],
+    }),
+  };
+
+  const res = await handleUiRequest(new Request("http://x/ui/api/profiles"), launcher, s, remote);
+  expect(await res!.json()).toEqual({
+    profiles: [{
+      id: "k1d0cd11",
+      name: "sophia",
+      group: "va1",
+      healthStatus: "suspended",
+      healthObservedAt: 1_000,
+      running: false,
+    }],
+    healthSources: [{ sourceId: "node-a", lastSnapshotAt: 1_000, stale: false }],
+  });
+  s.close();
+});
+
+test("GET /ui/api/profiles returns a JSON error when remote roster loading fails", async () => {
+  const s = store();
+  const launcher: any = { reconcileOrphans: async () => {} };
+  const remote: any = { listRoster: async () => { throw new Error("hub roster unavailable"); } };
+
+  const res = await handleUiRequest(new Request("http://x/ui/api/profiles"), launcher, s, remote);
+  expect(res!.status).toBe(502);
+  expect(res!.headers.get("content-type")).toContain("application/json");
+  const body = await res!.json();
+  expect(body.error).toBe("profile roster failed: hub roster unavailable");
+  s.close();
+});
+
+test("GET /ui/api/profiles returns a JSON error when local reconciliation fails", async () => {
+  const s = store();
+  const launcher: any = { reconcileOrphans: async () => { throw new Error("process scan unavailable"); } };
+
+  const res = await handleUiRequest(new Request("http://x/ui/api/profiles"), launcher, s);
+  expect(res!.status).toBe(500);
+  expect(res!.headers.get("content-type")).toContain("application/json");
+  expect((await res!.json()).error).toBe("profile roster failed: process scan unavailable");
+  s.close();
+});
+
+test("move route reassigns selected profiles' group", async () => {
+  const s = store();
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/move", { method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"], group: "newgrp" }) }),
+    {} as any,
+    s,
+  );
+  const body = await res!.json();
+  expect(body.ok).toBe(true);
+  expect(body.moved).toBe(1);
+  expect(listUiProfiles(s)[0]!.group).toBe("newgrp");
+  s.close();
+});
+
+test("move route with no ids is a 400", async () => {
+  const s = store();
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/move", { method: "POST", body: JSON.stringify({ ids: [], group: "x" }) }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(400);
+  s.close();
+});
+
+test("upload route imports profiles from posted files", async () => {
+  const s = new ProfileStore(":memory:");
+  // No proxy line → geoip is skipped (no network in the test).
+  const NOPROXY = `id=k1up0001\nname=uploaded\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************`;
+  const form = new FormData();
+  form.append("files", new File([NOPROXY], "export.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  const body = await res!.json();
+  expect(body.ok).toBe(true);
+  expect(body.profiles).toBe(1);
+  expect(s.getProfile("k1up0001")!.group).toBe("ug");
+  s.close();
+});
+
+test("upload route applies group override in local mode", async () => {
+  const s = new ProfileStore(":memory:");
+  const NOPROXY = `id=k1up0001\nname=uploaded\ngroup=fromfile\ncookie=[]\nresolution=1280*720\n******************`;
+  const form = new FormData();
+  form.append("group", "selected");
+  form.append("files", new File([NOPROXY], "export.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect((await res!.json()).ok).toBe(true);
+  expect(s.getProfile("k1up0001")!.group).toBe("selected");
+  s.close();
+});
+
+test("upload route forwards overrides in remote mode", async () => {
+  const s = new ProfileStore(":memory:");
+  const form = new FormData();
+  form.append("group", "hubgrp");
+  form.append("platform", "telegram.org");
+  form.append("files", new File(["x"], "export.txt", { type: "text/plain" }));
+  let gotOverride: any = null;
+  const remote = {
+    importToHub: async (_uploads: any, override: any) => {
+      gotOverride = override;
+      return { files: 1, profiles: 0 };
+    },
+  } as any;
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect((await res!.json()).ok).toBe(true);
+  expect(gotOverride).toEqual({ group: "hubgrp", platform: "telegram.org" });
+  s.close();
+});
+
+test("upload route with no files is a 400", async () => {
+  const s = new ProfileStore(":memory:");
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: new FormData() }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(400);
+  s.close();
+});
+
+test("bulk update validates every row before atomically writing any profile", async () => {
+  const s = store();
+  const first = s.getProfile("k1d0cd11")!;
+  s.upsertProfile({ ...first, id: "k1d0cd22", name: "second" });
+  const csv = [
+    "id,name,proxy,proxytype",
+    "k1d0cd11,renamed,proxy.example:8080:u:p,http",
+    "k1d0cd22,also-renamed,malformed,http",
+  ].join("\n");
+  const form = new FormData();
+  form.append("files", new File([csv], "updates.csv", { type: "text/csv" }));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  const body = await res!.json();
+  expect(res!.status).toBe(400);
+  expect(body.updated).toBe(0);
+  expect(body.errors).toEqual([{ id: "k1d0cd22", error: expect.stringContaining("proxy must be") }]);
+  expect(s.getProfile("k1d0cd11")!.name).toBe("sophia");
+  expect(s.getProfile("k1d0cd22")!.name).toBe("second");
+  s.close();
+});
+
+test("a short CSV update row preserves omitted trailing identity fields", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.timezone = "America/Los_Angeles";
+  s.upsertProfile(before);
+  const form = new FormData();
+  form.append("files", new File([
+    "id,name,proxy,proxytype,resolution\n" +
+    "k1d0cd11,renamed",
+  ], "updates.csv", { type: "text/csv" }));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+
+  expect(res!.status).toBe(200);
+  const after = s.getProfile("k1d0cd11")!;
+  expect(after.name).toBe("renamed");
+  expect(after.proxy).toEqual(before.proxy);
+  expect(after.timezone).toBe("America/Los_Angeles");
+  expect([after.screenWidth, after.screenHeight]).toEqual([before.screenWidth, before.screenHeight]);
+  s.close();
+});
+
+test("single edits reject malformed resolutions without changing stored identity", async () => {
+  for (const resolution of ["", "0x0", "319x1080", "99999x1080", "1920xnope"]) {
+    const s = store();
+    const before = s.getProfile("k1d0cd11")!;
+    const res = await handleUiRequest(
+      new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+        method: "POST",
+        body: JSON.stringify({ set: { resolution } }),
+      }),
+      {} as any,
+      s,
+    );
+    expect(res!.status).toBe(500);
+    expect((await res!.json()).error).toContain("invalid resolution");
+    const after = s.getProfile("k1d0cd11")!;
+    expect([after.screenWidth, after.screenHeight]).toEqual([before.screenWidth, before.screenHeight]);
+    s.close();
+  }
+});
+
+test("a malformed nonblank proxy edit is rejected without removing the existing proxy", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.timezone = "America/Los_Angeles";
+  s.upsertProfile(before);
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxy: "proxy.example:not-a-port" } }),
+    }),
+    {} as any,
+    s,
+  );
+
+  expect(res!.status).toBe(500);
+  expect((await res!.json()).error).toContain("invalid proxy port");
+  const after = s.getProfile("k1d0cd11")!;
+  expect(after.proxy).toEqual(before.proxy);
+  expect(after.timezone).toBe("America/Los_Angeles");
+  s.close();
+});
+
+test("an explicit blank proxy edit removes the proxy and clears its stale timezone", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.timezone = "America/Los_Angeles";
+  s.upsertProfile(before);
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxy: "" } }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.proxy).toBeNull();
+  expect(s.getProfile("k1d0cd11")!.timezone).toBe("");
+  s.close();
+});
+
+test("an IPv6 proxy round-trips through the edit view without losing its identity", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.proxy = { type: "socks5", host: "2001:db8::1", port: "1080", user: "user", pass: "p:ss" };
+  before.timezone = "America/New_York";
+  s.upsertProfile(before);
+
+  const detail = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+  );
+  const edit = (await detail!.json()).profile;
+  expect(edit.proxy).toBe("[2001:db8::1]:1080:user:p:ss");
+
+  const saved = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxy: edit.proxy, proxyType: edit.proxyType } }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(saved!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.proxy).toEqual(before.proxy);
+  expect(s.getProfile("k1d0cd11")!.timezone).toBe("America/New_York");
+  s.close();
+});
+
+test("extension assignment is atomic and blocked when any selected profile is open", async () => {
+  const s = store();
+  const first = s.getProfile("k1d0cd11")!;
+  s.upsertProfile({ ...first, id: "k1d0cd22", name: "second", extensions: [] });
+  s.addExtension({ id: "ext-one", name: "Extension One", loadDir: "/tmp/ext-one" });
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/extensions", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11", "k1d0cd22"], extensionId: "ext-one", op: "add" }),
+    }),
+    {} as any,
+    s,
+  );
+
+  expect(res!.status).toBe(409);
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual([]);
+  expect(s.getProfile("k1d0cd22")!.extensions).toEqual([]);
+  s.close();
+});
+
+test("extension deletion cannot mutate the persona of an open profile", async () => {
+  const s = store();
+  s.addExtension({ id: "ext-one", name: "Extension One", loadDir: "/tmp/ext-one" });
+  expect(s.assignExtension(["k1d0cd11"], "ext-one", true)).toBe(1);
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/extensions/delete", {
+      method: "POST",
+      body: JSON.stringify({ id: "ext-one" }),
+    }),
+    {} as any,
+    s,
+  );
+
+  expect(res!.status).toBe(409);
+  expect(s.getExtension("ext-one")).not.toBeNull();
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["ext-one"]);
+  s.close();
+});
+
+test("local edits are rejected while the profile browser is open", async () => {
+  const s = store();
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { resolution: "1366x768" } }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(409);
+  expect([s.getProfile("k1d0cd11")!.screenWidth, s.getProfile("k1d0cd11")!.screenHeight]).not.toEqual([1366, 768]);
+  s.close();
+});
+
+test("mobile persona conversion preserves the account and replaces only incoherent device fields", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/146.0.0.0 Mobile Safari/537.36";
+  before.screenWidth = 412;
+  before.screenHeight = 915;
+  before.timezone = "America/New_York";
+  before.tags = ["priority"];
+  before.extensions = ["ext-one"];
+  s.upsertProfile(before);
+
+  const detail = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11"), {} as any, s);
+  const edit = (await detail!.json()).profile;
+  expect(edit.mobilePersona).toBe(true);
+  expect(edit.desktopConversion.platform).toBe("windows");
+  expect(edit.desktopConversion.screenChanged).toBe(true);
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/convert-mobile", { method: "POST" }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(200);
+  const body = await res!.json();
+  expect(body).toMatchObject({ ok: true, changed: true, platform: "windows", screenChanged: true });
+
+  const after = s.getProfile("k1d0cd11")!;
+  expect(after.ua).toContain("Windows NT 10.0");
+  expect(after.ua.toLowerCase()).not.toContain("mobile");
+  expect(after.screenWidth).toBeGreaterThanOrEqual(1024);
+  for (const key of ["id", "accId", "username", "password", "email", "emailPassword", "twofa", "proxy", "timezone", "fingerprintSeed", "cookies", "seeded", "tags", "extensions"] as const) {
+    expect(after[key]).toEqual(before[key]);
+  }
+  s.close();
+});
+
+test("mobile persona conversion is idempotent and refuses local mutation while open", async () => {
+  const s = store();
+  const p = s.getProfile("k1d0cd11")!;
+  p.ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) Mobile/15E148";
+  s.upsertProfile(p);
+  s.recordLaunch({ profileId: p.id, pid: 123, debugPort: 9333, ws: "ws://live", startedAt: 1 });
+
+  const blocked = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/convert-mobile", { method: "POST" }),
+    {} as any,
+    s,
+  );
+  expect(blocked!.status).toBe(409);
+  expect(s.getProfile(p.id)!.ua).toContain("iPhone");
+
+  s.clearLaunch(p.id);
+  const converted = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/convert-mobile", { method: "POST" }),
+    {} as any,
+    s,
+  );
+  expect((await converted!.json()).platform).toBe("macos");
+  const repeated = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/convert-mobile", { method: "POST" }),
+    {} as any,
+    s,
+  );
+  expect(await repeated!.json()).toEqual({ ok: true, changed: false });
+  s.close();
+});
+
+test("remote mobile persona conversion saves a fresh hub profile without touching the local cache", async () => {
+  const s = store();
+  const hubProfile = s.getProfile("k1d0cd11")!;
+  hubProfile.ua = "Mozilla/5.0 (Linux; Android 13; Mobile) Chrome/145.0.0.0 Safari/537.36";
+  let saved: typeof hubProfile | null = null;
+  const remote = {
+    getProfile: async () => structuredClone(hubProfile),
+    saveProfile: async (profile: typeof hubProfile) => { saved = structuredClone(profile); },
+  } as any;
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/convert-mobile", { method: "POST" }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect(res!.status).toBe(200);
+  expect(saved!.ua).toContain("Windows NT 10.0");
+  expect(saved!.fingerprintSeed).toBe(hubProfile.fingerprintSeed);
+  expect(saved!.cookies).toEqual(hubProfile.cookies);
+  expect(s.getProfile("k1d0cd11")!.ua).not.toContain("Android");
+  s.close();
+});
+
+test("bulk updates reject all rows when any target profile is open", async () => {
+  const s = store();
+  const first = s.getProfile("k1d0cd11")!;
+  s.upsertProfile({ ...first, id: "k1bulk02", name: "second-before" });
+  s.recordLaunch({ profileId: "k1bulk02", pid: 123, debugPort: 9334, ws: "ws://live", startedAt: 1 });
+  const form = new FormData();
+  form.append("file", new File([
+    [
+      "id,name",
+      "k1d0cd11,first-after",
+      "k1bulk02,second-after",
+    ].join("\n"),
+  ], "updates.csv", { type: "text/csv" }));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(409);
+  expect(s.getProfile("k1d0cd11")!.name).toBe("sophia");
+  expect(s.getProfile("k1bulk02")!.name).toBe("second-before");
+  s.close();
+});
+
+test("export route fails explicitly in remote mode", async () => {
+  const s = new ProfileStore(":memory:");
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/export", { method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }) }),
+    {} as any,
+    s,
+    {} as any,
+  );
+  expect(res!.status).toBe(400);
+  const body = await res!.json();
+  expect(body.ok).toBe(false);
+  expect(body.error).toContain("remote mode");
+  s.close();
+});
+
+test("create (local mode) adds a new profile", async () => {
+  const s = new ProfileStore(":memory:");
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles", { method: "POST", body: JSON.stringify({ name: "fresh", group: "g" }) }),
+    {} as any,
+    s,
+  );
+  const body = await res!.json();
+  expect(body.ok).toBe(true);
+  expect(s.getProfile(body.id)!.name).toBe("fresh");
+  s.close();
+});
+
+test("create in remote mode delegates to the hub (not the local store)", async () => {
+  const s = new ProfileStore(":memory:");
+  const remote = { createProfile: async (input: any) => ({ id: "remote-" + (input.name || "x") }) } as any;
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles", { method: "POST", body: JSON.stringify({ name: "rp" }) }),
+    {} as any,
+    s,
+    remote,
+  );
+  const body = await res!.json();
+  expect(body.ok).toBe(true);
+  expect(body.id).toBe("remote-rp");
+  expect(s.getProfile("remote-rp")).toBeNull(); // went to the hub, not created locally
+  s.close();
+});
+
+test("export in remote mode pulls every selected profile from the hub, not the local launch cache", async () => {
+  const s = store(); // local launch cache holds only k1d0cd11
+  // Two accounts that live on the hub roster but were never opened on this
+  // machine — exactly what the launch cache can't serve. Selecting these and
+  // exporting used to silently produce a file missing both rows.
+  const base = parseExport(SAMPLE).profiles[0]!;
+  const hubProfiles: Record<string, any> = {
+    hub0001: { ...base, id: "hub0001", name: "alpha" },
+    hub0002: { ...base, id: "hub0002", name: "bravo" },
+  };
+  const fetched: string[] = [];
+  const remote = {
+    async getProfiles(ids: string[]) {
+      fetched.push(...ids);
+      return ids.map((id) => hubProfiles[id]).filter(Boolean);
+    },
+  } as any;
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["hub0001", "hub0002"], format: "csv" }),
+    }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect(res!.status).toBe(200);
+  expect(res!.headers.get("content-disposition")).toContain("aliasmode-export.csv");
+  const text = await res!.text();
+  expect(fetched).toEqual(["hub0001", "hub0002"]); // resolved against the hub, not the local store
+  const rows = text.trim().split("\n");
+  expect(rows.length).toBe(3); // header + both selected accounts (not just the locally-cached one)
+  expect(text).toContain("hub0001");
+  expect(text).toContain("hub0002");
+  expect(text).not.toContain("k1d0cd11"); // the local-cache fallback is gone
+  s.close();
+});
+
+test("delete (standalone) stops the browser AND removes the profile's user-data dir", async () => {
+  const s = store();
+  const dataRoot = join("/tmp", `ui-del-${process.pid}-${s.count()}`);
+  const calls: string[] = [];
+  const launcher: any = {
+    stop: async (id: string) => { calls.push(`stop:${id}`); return true; },
+    userDataDir: (id: string) => join(dataRoot, id),
+    removeUserDataDir: (id: string) => { rmSync(join(dataRoot, id), { recursive: true, force: true }); return true; },
+  };
+  // Simulate an opened profile: a launch row + persistent session on disk.
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
+  const dir = join(dataRoot, "k1d0cd11");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "Cookies"), "logged-in");
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/delete", { method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }) }),
+    launcher,
+    s,
+  );
+  const body = await res!.json();
+  expect(body.ok).toBe(true);
+  expect(body.deleted).toBe(1);
+  expect(calls).toContain("stop:k1d0cd11"); // running browser stopped first
+  expect(existsSync(dir)).toBe(false); // the on-disk session is actually gone
+  expect(s.getProfile("k1d0cd11")).toBeNull();
+
+  rmSync(dataRoot, { recursive: true, force: true });
+  s.close();
+});
+
+test("delete preserves the profile and user-data when browser teardown is unconfirmed", async () => {
+  const s = store();
+  const dataRoot = join("/tmp", `ui-del-held-${process.pid}-${s.count()}`);
+  const dir = join(dataRoot, "k1d0cd11");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "Cookies"), "logged-in");
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
+  const launcher: any = {
+    stop: async () => false,
+    removeUserDataDir: () => { throw new Error("must not remove a live profile"); },
+  };
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/delete", { method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }) }),
+    launcher,
+    s,
+  );
+  const body = await res!.json();
+  expect(body.deleted).toBe(0);
+  expect(body.locked).toEqual(["k1d0cd11"]);
+  expect(s.getProfile("k1d0cd11")).not.toBeNull();
+  expect(existsSync(dir)).toBe(true);
+  rmSync(dataRoot, { recursive: true, force: true });
+  s.close();
+});
+
+test("delete always waits on launcher.stop even before a launch row exists", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const launcher: any = {
+    stop: async (id: string) => { calls.push(id); return true; },
+    removeUserDataDir: () => true,
+  };
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/delete", { method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }) }),
+    launcher,
+    s,
+  );
+
+  expect(await res!.json()).toMatchObject({ ok: true, deleted: 1, locked: [] });
+  expect(calls).toEqual(["k1d0cd11"]);
+  expect(s.getProfile("k1d0cd11")).toBeNull();
+  s.close();
+});
+
+test("delete with an unknown id never touches the launcher (no rmSync on a crafted path)", async () => {
+  const s = store();
+  const launcher: any = {
+    stop: async () => { throw new Error("must not be called"); },
+    userDataDir: () => { throw new Error("must not be called"); },
+  };
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/delete", { method: "POST", body: JSON.stringify({ ids: ["../../etc"] }) }),
+    launcher,
+    s,
+  );
+  expect((await res!.json()).deleted).toBe(0);
+  s.close();
+});
+
+test("handleUiRequest returns null for non-ui paths (falls through to the AdsPower API)", async () => {
+  const s = store();
+  const res = await handleUiRequest(new Request("http://x/api/v1/status"), {} as any, s);
+  expect(res).toBeNull();
+  s.close();
+});

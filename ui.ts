@@ -1,0 +1,658 @@
+/**
+ * Dashboard API — the `/ui/api/*` namespace consumed by the web UI.
+ *
+ * Kept entirely separate from the AdsPower-compatible API (server.ts /
+ * handleRequest) so the `/api/v1|v2/*` compatibility contract is never touched.
+ *
+ * SECURITY: responses are redacted. They expose profile metadata (proxy
+ * host:port, cookie COUNT, group, etc.) but NEVER secrets — no password, 2FA,
+ * cookie values, or proxy credentials. Same rule the `inspect` command follows.
+ */
+
+import type { Launcher } from "./launcher.ts";
+import type { ProfileStore } from "./store.ts";
+import type { AutomationHealthStatus } from "./remote-types.ts";
+import type { RemoteCoordinator } from "./remote.ts";
+import type { Profile } from "./types.ts";
+import { importInbox, importBuffers, type ImportOverrides } from "./inbox.ts";
+import { buildNewProfile, type NewProfileInput } from "./create.ts";
+import { attachTimezones } from "./geoip.ts";
+import { parseUpdateFile, serializeCsv, serializeAdsTxt, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { generateTotp } from "./totp.ts";
+import { installExtension, removeExtensionFiles } from "./extensions.ts";
+import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
+import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
+import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
+import { join, resolve } from "node:path";
+
+/** Redacted, dashboard-safe view of a profile + its live status. */
+export interface UiProfile {
+  id: string;
+  name: string;
+  group: string;
+  /** Account platform: "x.com", "telegram.org", or "" (none). */
+  platform: string;
+  /** "host:port" only — never user/pass. Null when the profile has no proxy. */
+  proxy: string | null;
+  /** Safe validation message for a quarantined legacy proxy. */
+  proxyError?: string;
+  timezone: string;
+  cookieCount: number;
+  seeded: boolean;
+  screen: string;
+  mobilePersona?: boolean;
+  /** Whether a 2FA secret is stored (drives the row's authenticator button). */
+  has2fa: boolean;
+  running: boolean;
+  debugPort?: number;
+  startedAt?: number;
+  healthStatus?: AutomationHealthStatus;
+  healthObservedAt?: number | null;
+}
+
+/**
+ * Map the store into redacted UiProfiles joined with running state. Status comes
+ * from the launches table, which is authoritative for every browser THIS manager
+ * started — campaign-launched or dashboard-launched alike (one manager per box).
+ */
+export function listUiProfiles(store: ProfileStore): UiProfile[] {
+  const launches = new Map(store.listLaunches().map((l) => [l.profileId, l]));
+  return store.listProfiles().map((p) => {
+    const l = launches.get(p.id);
+    return {
+      id: p.id,
+      name: p.name,
+      group: p.group,
+      platform: p.platform ?? "",
+      tags: p.tags ?? [],
+      proxy: p.proxy ? proxyHostPort(p.proxy) : null,
+      ...(p.proxyError ? { proxyError: p.proxyError } : {}),
+      timezone: p.timezone,
+      cookieCount: p.cookies.length,
+      seeded: p.seeded,
+      screen: `${p.screenWidth}x${p.screenHeight}`,
+      has2fa: !!(p.twofa && p.twofa.trim()),
+      mobilePersona: isMobileUserAgent(p.ua),
+      running: !!l,
+      debugPort: l?.debugPort,
+      startedAt: l?.startedAt,
+    };
+  });
+}
+
+async function readLatestDiagnose(): Promise<unknown | null> {
+  try {
+    const f = Bun.file("reports/diagnose-latest.json");
+    if (!(await f.exists())) return null;
+    return await f.json();
+  } catch {
+    return null;
+  }
+}
+
+const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const APPLICATION_ROOT = resolve(import.meta.dir);
+
+let appVersionPromise: Promise<string> | null = null;
+function appVersion(): Promise<string> {
+  if (!appVersionPromise) {
+    appVersionPromise = (async () => {
+      try {
+        const file = Bun.file(join(APPLICATION_ROOT, "VERSION.txt"));
+        if (!(await file.exists())) return "dev";
+        return (await file.text()).trim() || "dev";
+      } catch {
+        return "dev";
+      }
+    })();
+  }
+  return appVersionPromise;
+}
+
+/**
+ * Full editable detail for the Edit modal — UNLIKE the redacted list view, this
+ * DOES include the account secrets and full proxy creds, because you can't edit
+ * what you can't see. Safe only because the dashboard is loopback-only (same
+ * trust boundary as the `inspect` command).
+ */
+function profileEditView(p: Profile) {
+  const px = p.proxy;
+  const proxy = px ? proxyLegacyString(px) : "";
+  const conversion = isMobileUserAgent(p.ua) ? convertMobilePersonaToDesktop(p) : null;
+  return {
+    id: p.id, name: p.name, group: p.group, platform: p.platform ?? "",
+    proxyType: px?.type ?? "http", proxy,
+    ...(p.proxyError ? { proxyError: p.proxyError } : {}),
+    username: p.username, password: p.password,
+    email: p.email ?? "", emailPassword: p.emailPassword ?? "", twofa: p.twofa,
+    resolution: `${p.screenWidth}*${p.screenHeight}`,
+    extensions: p.extensions ?? [],
+    tags: (p.tags ?? []).join(", "),
+    cookieCount: p.cookies.length, seeded: p.seeded,
+    mobilePersona: !!conversion,
+    ...(conversion ? {
+      desktopConversion: {
+        platform: conversion.platform,
+        resolution: `${conversion.profile.screenWidth}*${conversion.profile.screenHeight}`,
+        screenChanged: conversion.screenChanged,
+      },
+    } : {}),
+  };
+}
+
+/**
+ * Apply a partial field set onto a profile in place. Only keys present in `set`
+ * change — everything else (cookies, fingerprint seed, seeded) is preserved.
+ * This is what makes single-edit and file bulk-update safe. Shared by both.
+ */
+function applyEdits(p: Profile, set: Record<string, unknown>): void {
+  if ("name" in set) p.name = String(set.name ?? "");
+  if ("group" in set) p.group = String(set.group ?? "");
+  if ("platform" in set) p.platform = String(set.platform ?? "");
+  if ("username" in set) p.username = String(set.username ?? "");
+  if ("password" in set) p.password = String(set.password ?? "");
+  if ("email" in set) p.email = String(set.email ?? "");
+  if ("emailPassword" in set) p.emailPassword = String(set.emailPassword ?? "");
+  if ("twofa" in set) p.twofa = String(set.twofa ?? "");
+  if ("resolution" in set) {
+    const r = parseStrictResolution(set.resolution);
+    p.screenWidth = r.width;
+    p.screenHeight = r.height;
+  }
+  if ("proxy" in set) {
+    p.proxy = parseStrictProxy(set.proxyType ?? p.proxy?.type ?? "http", set.proxy);
+    delete p.proxyError;
+    // A timezone belongs to a particular egress. Passing an empty value lets
+    // store persistence preserve it only when the canonical proxy is unchanged.
+    p.timezone = "";
+  }
+  if ("extensions" in set) {
+    p.extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
+  }
+  if ("tags" in set) {
+    p.tags = Array.isArray(set.tags)
+      ? set.tags.map(String)
+      : String(set.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+  }
+}
+
+/**
+ * Handle a `/ui/api/*` request. Returns null for any other path so the caller
+ * can fall through to the AdsPower API handler.
+ */
+export async function handleUiRequest(
+  req: Request,
+  launcher: Launcher,
+  store: ProfileStore,
+  remote?: RemoteCoordinator | null,
+): Promise<Response | null> {
+  const { pathname } = new URL(req.url);
+  if (!pathname.startsWith("/ui/api/")) return null;
+
+  // Dependency-free readiness probe for the Windows updater. Unlike the
+  // profile roster it does not touch CDP, the process scanner, SQLite rows, or
+  // the remote hub, so an upstream outage cannot masquerade as a failed update.
+  if (pathname === "/ui/api/health" && req.method === "GET") {
+    return Response.json({ ok: true, version: await appVersion(), root: APPLICATION_ROOT });
+  }
+
+  if (pathname === "/ui/api/profiles" && req.method === "GET") {
+    try {
+      if (remote) {
+        // Remote mode: the roster is the hub's (with lock + session status); layer
+        // on this machine's local running state. Probe live CDP ports first and drop
+        // launch rows for browsers the user closed manually (or that crashed) — else
+        // the row lingers and the profile shows "running" with a stale Close button.
+        // remote.listRoster() then releases the now-orphaned hub lock for those.
+        await launcher.reconcileOrphans();
+        const roster = await remote.listRoster();
+        const profiles = roster.profiles.map((p) => {
+          const l = store.getLaunch(p.id);
+          return { ...p, running: !!l, debugPort: l?.debugPort };
+        });
+        return Response.json({ profiles, healthSources: roster.healthSources });
+      }
+      // Probe live CDP ports and clear stale launch rows first: a crash or an
+      // external debug-port teardown leaves the row in SQLite, which would
+      // otherwise show "running" forever and hide the Open action. reconcileOrphans
+      // probes active() per launch and drops dead rows (it never kills processes).
+      await launcher.reconcileOrphans();
+      return Response.json({ profiles: listUiProfiles(store), healthSources: [] });
+    } catch (error) {
+      // Bun renders an uncaught route exception as an HTML 500 page. The React
+      // client then cannot expose the actual hub/reconciliation error and only
+      // sees "Unexpected token '<'". Keep this API JSON-shaped even on failure.
+      return Response.json(
+        { ok: false, error: `profile roster failed: ${msg(error)}` },
+        { status: remote ? 502 : 500 },
+      );
+    }
+  }
+
+  if (pathname === "/ui/api/profiles" && req.method === "POST") {
+    // Create a new profile: unique id → unique seed → unique fingerprint/UA.
+    try {
+      const input = (await req.json()) as NewProfileInput;
+      if (remote) {
+        const { id } = await remote.createProfile(input);
+        return Response.json({ ok: true, id });
+      }
+      const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
+      if (profile.proxy) await attachTimezones([profile]).catch(() => {}); // best-effort tz
+      store.upsertProfile(profile);
+      return Response.json({ ok: true, id: profile.id });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 400 });
+    }
+  }
+
+  if (pathname === "/ui/api/profiles/move" && req.method === "POST") {
+    try {
+      const body = (await req.json()) as { ids?: unknown; group?: unknown };
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      const group = typeof body.group === "string" ? body.group.trim() : "";
+      if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
+      const moved = remote ? await remote.move(ids, group) : store.setGroup(ids, group);
+      return Response.json({ ok: true, moved, group });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/profiles/delete" && req.method === "POST") {
+    try {
+      const body = (await req.json()) as { ids?: unknown };
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
+      if (remote) {
+        const r = await remote.deleteProfiles(ids);
+        return Response.json({ ok: true, ...r });
+      }
+      // Standalone: stop any running browser, then remove BOTH the SQLite rows
+      // and the persistent user-data dir — the saved login/session lives on disk
+      // there, so dropping only the rows leaves it behind and a re-import of the
+      // same id would silently resume the old session. removeUserDataDir refuses
+      // any path that escapes the data root, so a crafted/legacy id stays safe.
+      const locked: string[] = [];
+      let deleted = 0;
+      for (const id of ids) {
+        if (!store.getProfile(id)) continue;
+        // stop() is also the serialization barrier for a start still in
+        // preflight, before that start has recorded a launch row.
+        if ((await launcher.stop(id)) !== true) {
+          locked.push(id);
+          continue;
+        }
+        launcher.removeUserDataDir(id);
+        store.deleteProfile(id);
+        deleted++;
+      }
+      return Response.json({ ok: true, deleted, locked });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/import" && req.method === "POST") {
+    // In remote mode the local inbox isn't the source of truth — importing there
+    // would write to the local launch-cache, never reaching the hub roster.
+    if (remote) return Response.json({ ok: false, error: "remote mode: import via the hub (upload in the dashboard)" }, { status: 400 });
+    try {
+      const r = await importInbox(store);
+      return Response.json({ ok: true, ...r });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/import/upload" && req.method === "POST") {
+    try {
+      const form = await req.formData();
+      const uploads: { name: string; bytes: Uint8Array }[] = [];
+      const override = importOverridesFromForm(form);
+      for (const [, value] of form) {
+        if (value instanceof File) uploads.push({ name: value.name, bytes: new Uint8Array(await value.arrayBuffer()) });
+      }
+      if (uploads.length === 0) return Response.json({ ok: false, error: "no files uploaded" }, { status: 400 });
+      const r = remote ? await remote.importToHub(uploads, override) : await importBuffers(store, uploads, console.log, override);
+      return Response.json({ ok: true, ...r });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/export" && req.method === "POST") {
+    if (remote) {
+      return Response.json({ ok: false, error: "remote mode: export from the hub, not this launch cache" }, { status: 400 });
+    }
+    return Response.json({ ok: false, error: "export is not available" }, { status: 404 });
+  }
+
+  if (pathname === "/ui/api/diagnose/latest" && req.method === "GET") {
+    return Response.json({ report: await readLatestDiagnose() });
+  }
+
+  if (pathname === "/ui/api/profiles/export" && req.method === "POST") {
+    // Export selected profiles for offline editing. Returns the file directly
+    // (not JSON) so the browser saves it. Both formats carry `id` so the file
+    // can be re-uploaded through /ui/api/profiles/update-file.
+    try {
+      const body = (await req.json()) as { ids?: unknown; format?: unknown };
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      const format = body.format === "txt" ? "txt" : "csv";
+      // Remote mode: the roster (and the secrets export needs) live on the hub —
+      // the local store is just a launch cache, so reading it here would silently
+      // drop every selected account that wasn't opened on this machine. Pull each
+      // from the hub instead, the same full-fidelity fetch Open/Edit already use.
+      const profiles = remote
+        ? await remote.getProfiles(ids, format === "txt")
+        : ids.map((id) => store.getProfile(id)).filter((p): p is Profile => !!p);
+      const text = format === "txt" ? serializeAdsTxt(profiles) : serializeCsv(profiles);
+      return new Response(text, {
+        headers: {
+          "content-type": `${format === "txt" ? "text/plain" : "text/csv"}; charset=utf-8`,
+          "content-disposition": `attachment; filename=aliasmode-export.${format}`,
+        },
+      });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/profiles/update-file" && req.method === "POST") {
+    // File-based bulk update (AdsPower "Update profile"): re-upload an edited
+    // export. Rows matched to existing profiles by `id`; only columns present in
+    // the file change. Unknown ids reported, never created.
+    if (remote) return Response.json({ ok: false, error: "remote mode: update via the hub" }, { status: 400 });
+    try {
+      const form = await req.formData();
+      let updated = 0, skipped = 0;
+      const notFound: string[] = [];
+      const errors: Array<{ id: string; error: string }> = [];
+      const pending = new Map<string, Profile>();
+      for (const [, value] of form) {
+        if (!(value instanceof File)) continue;
+        const summary = parseUpdateFile(decodeText(new Uint8Array(await value.arrayBuffer())));
+        skipped += summary.skipped;
+        for (const u of summary.updates) {
+          if (!isSafeProfileId(u.id)) {
+            errors.push({ id: u.id, error: PROFILE_ID_ERROR });
+            continue;
+          }
+          const p = pending.get(u.id) ?? store.getProfile(u.id);
+          if (!p) { notFound.push(u.id); continue; }
+          try {
+            applyEdits(p, u.set);
+            pending.set(u.id, p);
+          } catch (error) {
+            errors.push({ id: u.id, error: msg(error) });
+          }
+        }
+      }
+      // Validate the entire upload before opening a transaction. A bad row
+      // reports its id and leaves every otherwise-valid row untouched.
+      if (errors.length) {
+        return Response.json({ ok: false, updated: 0, skipped, notFound, errors }, { status: 400 });
+      }
+      const liveIds = [...pending.keys()].filter((id) => !!store.getLaunch(id));
+      if (liveIds.length > 0) {
+        return Response.json(
+          { ok: false, error: `profile(s) ${liveIds.join(", ")} are currently open; no profiles were changed` },
+          { status: 409 },
+        );
+      }
+      store.upsertProfiles([...pending.values()]);
+      updated = pending.size;
+      return Response.json({ ok: true, updated, skipped, notFound, errors: [] });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/groups/rename" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const body = (await req.json()) as { from?: unknown; to?: unknown };
+      const from = String(body.from ?? "").trim(), to = String(body.to ?? "").trim();
+      if (!from || !to) return Response.json({ ok: false, error: "from and to group names required" }, { status: 400 });
+      return Response.json({ ok: true, moved: store.renameGroup(from, to) });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/groups/delete" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const body = (await req.json()) as { name?: unknown };
+      const name = String(body.name ?? "").trim();
+      if (!name) return Response.json({ ok: false, error: "group name required" }, { status: 400 });
+      return Response.json({ ok: true, ungrouped: store.deleteGroup(name) });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  // --- Extensions registry (upload / list / delete) ---
+  if (pathname === "/ui/api/extensions" && req.method === "GET") {
+    return Response.json({ ok: true, extensions: store.listExtensions().map((e) => ({ id: e.id, name: e.name })) });
+  }
+
+  if (pathname === "/ui/api/extensions/upload" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const form = await req.formData();
+      const installed: Array<{ id: string; name: string }> = [];
+      for (const [, value] of form) {
+        if (!(value instanceof File)) continue;
+        const id = "ext" + crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+        const bytes = new Uint8Array(await value.arrayBuffer());
+        const fallback = value.name.replace(/\.(zip|crx)$/i, "");
+        const { loadDir, name } = await installExtension(bytes, id, fallback);
+        store.addExtension({ id, name, loadDir });
+        installed.push({ id, name });
+      }
+      if (!installed.length) return Response.json({ ok: false, error: "no files uploaded" }, { status: 400 });
+      return Response.json({ ok: true, installed });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/extensions/delete" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const body = (await req.json()) as { id?: unknown };
+      const id = String(body.id ?? "").trim();
+      if (!id) return Response.json({ ok: false, error: "extension id required" }, { status: 400 });
+      const liveIds = store.listProfiles()
+        .filter((profile) => profile.extensions?.includes(id) && store.getLaunch(profile.id))
+        .map((profile) => profile.id);
+      if (liveIds.length > 0) {
+        return Response.json(
+          { ok: false, error: `extension is assigned to open profile(s) ${liveIds.join(", ")}; close them before deleting it` },
+          { status: 409 },
+        );
+      }
+      store.unassignExtension(id); // drop it from any profile that had it
+      store.deleteExtension(id);
+      removeExtensionFiles(id);
+      return Response.json({ ok: true });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  // Bulk assign / unassign one extension across many selected profiles.
+  if (pathname === "/ui/api/profiles/extensions" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const body = (await req.json()) as { ids?: unknown; extensionId?: unknown; op?: unknown };
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      const extId = String(body.extensionId ?? "").trim();
+      const add = body.op !== "remove";
+      if (!ids.length || !extId) return Response.json({ ok: false, error: "ids and extensionId required" }, { status: 400 });
+      if (add && !store.getExtension(extId)) return Response.json({ ok: false, error: "unknown extension" }, { status: 404 });
+      const liveIds = [...new Set(ids.filter((id) => !!store.getLaunch(id)))];
+      if (liveIds.length > 0) {
+        return Response.json(
+          { ok: false, error: `profile(s) ${liveIds.join(", ")} are currently open; no extension assignments were changed` },
+          { status: 409 },
+        );
+      }
+      return Response.json({ ok: true, updated: store.assignExtension(ids, extId, add) });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  // Bring a running profile's browser window to the foreground.
+  const raise = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/raise$/);
+  if (raise && req.method === "POST") {
+    // Raising the window is a purely LOCAL operation (the browser runs on this operator in both
+    // modes; bringToFront uses the local launch record + CDP), so it works in remote mode too.
+    try {
+      await launcher.bringToFront(decodeURIComponent(raise[1]!));
+      return Response.json({ ok: true });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  // Live 2FA code (TOTP) for a profile — the authenticator. Returns only the
+  // current code (never the secret), so the redacted list can offer quick-copy.
+  const totp = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/totp$/);
+  if (totp && req.method === "GET") {
+    const p = store.getProfile(decodeURIComponent(totp[1]!));
+    if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    const r = generateTotp(p.twofa ?? "");
+    if (!r) return Response.json({ ok: true, code: null });
+    return Response.json({ ok: true, code: r.code, secondsRemaining: r.secondsRemaining, period: r.period });
+  }
+
+  // Single-profile edit detail (WITH secrets) for the Edit modal.
+  const single = pathname.match(/^\/ui\/api\/profiles\/([^/]+)$/);
+  if (single && req.method === "GET") {
+    const p = remote
+      ? await remote.getProfile(decodeURIComponent(single[1]!)).catch(() => null)
+      : store.getProfile(decodeURIComponent(single[1]!));
+    if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    return Response.json({ ok: true, profile: profileEditView(p) });
+  }
+
+  // Apply edits to one profile (Edit modal save).
+  const upd = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/update$/);
+  if (upd && req.method === "POST") {
+    try {
+      const id = decodeURIComponent(upd[1]!);
+      if (!isSafeProfileId(id)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+      const body = (await req.json()) as { set?: unknown };
+      const set = body.set && typeof body.set === "object" ? (body.set as Record<string, unknown>) : {};
+      // Remote: fetch the live profile from the hub, apply the edits, save it back. Local: the store.
+      const p = remote ? await remote.getProfile(id).catch(() => null) : store.getProfile(id);
+      if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+      if (!remote && store.getLaunch(id)) {
+        return Response.json(
+          { ok: false, error: "profile is currently open; close it before editing identity fields" },
+          { status: 409 },
+        );
+      }
+      applyEdits(p, set);
+      if (remote) await remote.saveProfile(p);
+      else store.upsertProfile(p);
+      return Response.json({ ok: true });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  // Explicit one-time migration for imported mobile personas. AliasMode cannot
+  // reproduce a phone/tablet coherently with its desktop kernel, but the
+  // account/session data remains useful. Preserve it while replacing only the
+  // impossible device claim with the closest stable desktop persona.
+  const convertMobile = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/convert-mobile$/);
+  if (convertMobile && req.method === "POST") {
+    try {
+      const id = decodeURIComponent(convertMobile[1]!);
+      if (!isSafeProfileId(id)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+      const p = remote ? await remote.getProfile(id).catch(() => null) : store.getProfile(id);
+      if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+      if (!isMobileUserAgent(p.ua)) {
+        return Response.json({ ok: true, changed: false });
+      }
+      if (!remote && store.getLaunch(id)) {
+        return Response.json(
+          { ok: false, error: "profile is currently open; close it before converting its device persona" },
+          { status: 409 },
+        );
+      }
+      const conversion = convertMobilePersonaToDesktop(p);
+      if (remote) await remote.saveProfile(conversion.profile);
+      else store.upsertProfile(conversion.profile);
+      return Response.json({
+        ok: true,
+        changed: true,
+        platform: conversion.platform,
+        resolution: `${conversion.profile.screenWidth}x${conversion.profile.screenHeight}`,
+        screenChanged: conversion.screenChanged,
+      });
+    } catch (e) {
+      const error = msg(e);
+      const status = /currently open|in use/i.test(error) ? 409 : 500;
+      return Response.json({ ok: false, error }, { status });
+    }
+  }
+
+  const action = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/(open|close|clear-cache)$/);
+  if (action && req.method === "POST") {
+    const id = decodeURIComponent(action[1]!);
+    if (remote) {
+      try {
+        if (action[2] === "open") {
+          const force = new URL(req.url).searchParams.get("force") === "1";
+          const r = await remote.open(id, [], force);
+          if (r.ok) return Response.json({ ok: true, port: r.port, warning: r.warning });
+          return Response.json(
+            { ok: false, error: r.lockedBy ? `in use by ${r.lockedBy}` : (r.error ?? "open failed"), lockedBy: r.lockedBy },
+            { status: r.lockedBy ? 409 : 500 },
+          );
+        }
+        if (action[2] === "close") {
+          return (await remote.close(id))
+            ? Response.json({ ok: true })
+            : Response.json({ ok: false, error: "browser teardown unconfirmed" }, { status: 500 });
+        }
+        return Response.json({ ok: true }); // clear-cache: not applicable in remote mode
+      } catch (e) {
+        return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+      }
+    }
+    if (!store.getProfile(id)) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    try {
+      if (action[2] === "open") {
+        const r = await launcher.start(id);
+        return Response.json({ ok: true, port: r.port });
+      }
+      if (action[2] === "close") {
+        return (await launcher.stop(id))
+          ? Response.json({ ok: true })
+          : Response.json({ ok: false, error: "browser teardown unconfirmed" }, { status: 500 });
+      }
+      const r = await launcher.clearCache(id);
+      return Response.json({ ok: true, cleared: r.cleared });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  return Response.json({ error: `unknown ui route: ${pathname}` }, { status: 404 });
+}
+
+function importOverridesFromForm(form: FormData): ImportOverrides {
+  const override: ImportOverrides = {};
+  const group = form.get("group");
+  if (typeof group === "string" && group.trim()) override.group = group.trim();
+  const platform = form.get("platform");
+  if (typeof platform === "string" && platform.trim()) override.platform = platform.trim();
+  return override;
+}

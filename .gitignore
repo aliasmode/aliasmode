@@ -1,0 +1,25 @@
+node_modules/
+*.log
+dist/
+target/
+src-tauri/target/
+*.msi
+*.exe
+*.dmg
+
+# Local Claude Code state
+.claude/
+
+# Local config and secrets
+.env
+.env.*
+profiles.sqlite*
+profiles/
+inbox/*.txt
+reports/
+*.export.txt
+*adspower-export*.txt
+extensions/
+
+# Per-install device identity
+.operator-id

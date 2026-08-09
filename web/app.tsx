@@ -1,0 +1,1393 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import "./styles.css";
+import { parsePastedProxy } from "./proxy-input.ts";
+import {
+  type UiProfile,
+  type HealthSource,
+  type HealthStatus,
+  type DiagnoseReport,
+  type EditProfile,
+  type Extension,
+  fetchProfiles,
+  fetchHealth,
+  fetchDiagnose,
+  openProfile,
+  closeProfile,
+  raiseProfile,
+  fetchExtensions,
+  uploadExtensions,
+  removeExtension,
+  assignExtensionBulk,
+  uploadExports,
+  moveProfiles,
+  deleteProfiles,
+  createProfile,
+  fetchProfileEdit,
+  updateProfile,
+  convertMobileProfile,
+  exportProfiles,
+  updateFromFile,
+  renameGroup,
+  deleteGroup,
+  fetchTotp,
+} from "./api.ts";
+
+/** Run async tasks with bounded concurrency (so "Open 50" isn't 50 at once). */
+async function runPool<T>(items: T[], n: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let i = 0;
+  const worker = async () => { while (i < items.length) await fn(items[i++]!); };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+}
+
+// ---- CSV / AdsPower-txt import helpers (ported from the old dashboard) -------
+const genId = () => "cp" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+const oneLine = (s: unknown) => String(s ?? "").replace(/[\r\n]+/g, " ").trim();
+
+/** Build one AdsPower `key=value` record block — the format the importer reads. */
+function adsBlock(f: Record<string, string>): string {
+  return [
+    `id=${f.id || genId()}`,
+    `group=${oneLine(f.group)}`,
+    `platform=${oneLine(f.platform)}`,
+    `name=${oneLine(f.name)}`,
+    `username=${oneLine(f.username)}`,
+    `password=${oneLine(f.password)}`,
+    `email=${oneLine(f.email)}`,
+    `emailpassword=${oneLine(f.emailPassword)}`,
+    `fakey=${oneLine(f.twofa)}`,
+    `cookie=${f.cookie && f.cookie.trim() ? oneLine(f.cookie) : "[]"}`,
+    `proxytype=${f.proxyType || "http"}`,
+    `proxy=${oneLine(f.proxy)}`,
+    `ua=${oneLine(f.ua)}`,
+    `resolution=${f.resolution || "1920*1080"}`,
+    "******************",
+  ].join("\n");
+}
+
+/**
+ * CSV → AdsPower record blocks. Columns map onto AdsPower fields (header aliases
+ * tolerated); group/platform fall back to the dialog pickers when a row leaves
+ * them blank. A header-less file is read positionally as name,proxy,user,pass,2fa.
+ */
+function csvToBlocks(text: string, defaultGroup: string, defaultPlatform: string): string[] {
+  const rows = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!rows.length) return [];
+  const cells = (l: string) => l.split(",").map((c) => c.trim());
+  const headerish = /\b(name|group|platform|user(name)?|email|proxy|pass(word)?|2fa|twofa|fakey|ua|resolution|screen)\b/i.test(rows[0]!);
+  let cols: string[] | null = null, start = 0;
+  if (headerish) { cols = cells(rows[0]!).map((c) => c.toLowerCase()); start = 1; }
+  const find = (...names: string[]) => (cols ? cols.findIndex((c) => names.includes(c)) : -1);
+  const ix = cols ? {
+    name: find("name", "profile", "profile name"), group: find("group"),
+    platform: find("platform", "site"), proxy: find("proxy"), proxyType: find("proxytype", "proxy type"),
+    username: find("username", "user", "login"), password: find("password", "pass", "pwd"),
+    email: find("email", "mail"), emailPassword: find("emailpassword", "email_password", "mailpassword", "mail_password"),
+    twofa: find("twofa", "2fa", "fakey", "otp"), ua: find("ua", "user-agent", "useragent"),
+    resolution: find("resolution", "screen"),
+  } : null;
+  const get = (c: string[], k: keyof NonNullable<typeof ix>) => (ix && ix[k] >= 0 ? (c[ix[k]] || "") : "");
+  const blocks: string[] = [];
+  for (let i = start; i < rows.length; i++) {
+    const c = cells(rows[i]!);
+    const f = cols
+      ? {
+          name: get(c, "name"), proxy: get(c, "proxy"), proxyType: get(c, "proxyType") || "http",
+          username: get(c, "username") || get(c, "email"), password: get(c, "password"),
+          email: get(c, "email"), emailPassword: get(c, "emailPassword"), twofa: get(c, "twofa"),
+          ua: get(c, "ua"), resolution: get(c, "resolution"),
+          group: get(c, "group") || defaultGroup, platform: get(c, "platform") || defaultPlatform,
+        }
+      : {
+          name: c[0] || "", proxy: c[1] || "", proxyType: "http",
+          username: c[2] || "", password: c[3] || "", email: "", emailPassword: "", twofa: c[4] || "", ua: "", resolution: "",
+          group: defaultGroup, platform: defaultPlatform,
+        };
+    (f as any).id = genId();
+    blocks.push(adsBlock(f as any));
+  }
+  return blocks;
+}
+
+/** Turn a picked file list into upload-ready Files (CSV → AdsPower .txt; .txt passthrough). */
+async function prepUploads(files: FileList | File[], defaultGroup = "", defaultPlatform = ""): Promise<File[]> {
+  const out: File[] = [];
+  for (const f of Array.from(files)) {
+    if (/\.csv$/i.test(f.name)) {
+      const blocks = csvToBlocks(await f.text(), defaultGroup, defaultPlatform);
+      if (blocks.length) out.push(new File([blocks.join("\n")], f.name.replace(/\.csv$/i, ".txt"), { type: "text/plain" }));
+    } else {
+      out.push(f);
+    }
+  }
+  return out;
+}
+
+const CSV_TEMPLATE =
+  "name,group,platform,proxy,username,password,email,emailpassword,twofa\n" +
+  "alice_warmup,Warmup,x.com,1.2.3.4:8080:proxyuser:proxypass,alice_user,SuperSecret1,alice@example.com,MailboxSecret1,JBSWY3DPEHPK3PXP\n" +
+  "bob_eu,EU,telegram.org,,bob_user,SuperSecret2,bob@example.com,MailboxSecret2,\n" +
+  "carol_noproxy,Warmup,,,carol_user,SuperSecret3,carol@example.com,MailboxSecret3,KRSXG5CTMVRXEZLU\n";
+
+const TXT_EXAMPLE =
+  "id=k1example01\ngroup=Warmup\nplatform=x.com\nname=alice_warmup\nusername=alice@example.com\n" +
+  "password=SuperSecret1\nemail=mailbox@example.com\nemailpassword=MailboxSecret1\nfakey=JBSWY3DPEHPK3PXP\ncookie=[]\nproxytype=http\n" +
+  "proxy=1.2.3.4:8080:proxyuser:proxypass\nua=\nresolution=1920*1080\n******************\n";
+
+// Example sheet for the Update-from-file flow. The FIRST column (id) is what
+// matches each row to an existing profile — keep it. Edit the other columns;
+// delete any column you don't want to change.
+const UPDATE_TEMPLATE_CSV =
+  "id,name,group,platform,proxy,proxytype,username,password,twofa,resolution\n" +
+  "<paste-the-profile-id-here>,New name,Warmup,x.com,1.2.3.4:8080:user:pass,http,new@example.com,NewPass1,JBSWY3DPEHPK3PXP,1920*1080\n";
+
+function downloadText(name: string, text: string, type: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+const REFRESH_MS = 3000;
+
+function StatusDot({ running }: { running: boolean }) {
+  return <span className={`dot ${running ? "on" : ""}`} title={running ? "running" : "stopped"} />;
+}
+
+function HealthBadge({ profile }: { profile: UiProfile }) {
+  const status = profile.healthStatus ?? "no_data";
+  const labels: Record<HealthStatus, string> = {
+    suspended: "Suspended",
+    alive: "Alive",
+    no_data: "No data",
+  };
+  const observed = profile.healthObservedAt
+    ? `Observed ${new Date(profile.healthObservedAt).toLocaleString()}`
+    : "No fresh automation observation";
+  return <span className={`health-badge ${status}`} title={observed}>{labels[status]}</span>;
+}
+
+function HealthSources({ sources }: { sources: HealthSource[] }) {
+  if (sources.length === 0) return <span className="health-sources none">No health nodes</span>;
+  return (
+    <div className="health-sources" aria-label="Automation node freshness">
+      {sources.map((source) => (
+        <span
+          key={source.sourceId}
+          className={`health-source${source.stale ? " stale" : ""}`}
+          title={`Last snapshot ${new Date(source.lastSnapshotAt).toLocaleString()}`}
+        >
+          {source.sourceId} · {source.stale ? "stale" : "fresh"} · {new Date(source.lastSnapshotAt).toLocaleTimeString()}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function PlatformPill({ platform }: { platform: string }) {
+  if (platform === "x.com") return <span className="chip">X / Twitter</span>;
+  if (platform === "telegram.org") return <span className="chip">Telegram</span>;
+  if (platform) return <span className="chip">{platform}</span>;
+  return <span className="muted">—</span>;
+}
+
+/**
+ * Group selector used in every dialog: a styled <select> of existing groups
+ * plus "➕ New group…", which flips to an inline text field so you can create a
+ * group on the fly. Consistent with the other modal selects (no native datalist).
+ */
+function GroupPicker({ value, onChange, groups }: { value: string; onChange: (v: string) => void; groups: string[] }) {
+  const [creating, setCreating] = useState(false);
+  if (creating) {
+    return (
+      <div className="grouppick">
+        <input autoFocus placeholder="new group name" value={value} onChange={(e) => onChange(e.target.value)} />
+        <button type="button" className="gp-back" title="Pick an existing group" onClick={() => { setCreating(false); onChange(""); }}>↩</button>
+      </div>
+    );
+  }
+  return (
+    <select
+      value={groups.includes(value) ? value : ""}
+      onChange={(e) => {
+        if (e.target.value === "__new__") { setCreating(true); onChange(""); }
+        else onChange(e.target.value);
+      }}
+    >
+      <option value="">(ungrouped)</option>
+      {groups.map((g) => <option key={g} value={g}>{g}</option>)}
+      <option value="__new__">➕ New group…</option>
+    </select>
+  );
+}
+
+const KNOWN_PLATFORMS: { value: string; label: string }[] = [
+  { value: "", label: "(none)" },
+  { value: "x.com", label: "Twitter / X" },
+  { value: "telegram.org", label: "Telegram" },
+  { value: "linkedin.com", label: "LinkedIn" },
+];
+function PlatformPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const known = KNOWN_PLATFORMS.some((p) => p.value === value);
+  const [creating, setCreating] = useState(false);
+  if (creating || (!!value && !known)) {
+    return (
+      <div className="grouppick">
+        <input autoFocus placeholder="new platform (e.g. linkedin.com)" value={value} onChange={(e) => onChange(e.target.value)} />
+        <button type="button" className="gp-back" title="Pick a known platform" onClick={() => { setCreating(false); onChange(""); }}>↩</button>
+      </div>
+    );
+  }
+  return (
+    <select value={value} onChange={(e) => { if (e.target.value === "__new__") { setCreating(true); onChange(""); } else onChange(e.target.value); }}>
+      {KNOWN_PLATFORMS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+      <option value="__new__">➕ New platform…</option>
+    </select>
+  );
+}
+
+async function copyPlainText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("copy failed");
+}
+
+function CopyField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await copyPlainText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <div className="fld grow">
+      <span>{label}</span>
+      <div className="copyfield">
+        <input value={value} onChange={(event) => onChange(event.target.value)} />
+        <button type="button" onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+      </div>
+    </div>
+  );
+}
+
+const BLANK_FORM = { name: "", group: "", platform: "", proxyType: "http", host: "", port: "", user: "", pass: "", screen: "" };
+
+function App() {
+  const [profiles, setProfiles] = useState<UiProfile[]>([]);
+  const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
+  const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
+  const [appVersion, setAppVersion] = useState("");
+  const [diag, setDiag] = useState<DiagnoseReport | null>(null);
+  const [showDiag, setShowDiag] = useState(false);
+  const [q, setQ] = useState("");
+  const [group, setGroup] = useState("all");
+  const [groupsOpen, setGroupsOpen] = useState(true);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Two error slots so an auto-refresh can't silently wipe why an action failed:
+  // actionErr is sticky (Open/Close/move/import), connErr tracks load() only.
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [connErr, setConnErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null); // transient success banner
+  const [loaded, setLoaded] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [moveTarget, setMoveTarget] = useState("");
+  const [newMode, setNewMode] = useState(false);
+  const [newGroup, setNewGroup] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState<string | null>(null);
+  const [form, setForm] = useState(BLANK_FORM);
+  const [proxyPaste, setProxyPaste] = useState("");
+  const [proxyPasteOk, setProxyPasteOk] = useState<string | null>(null);
+  // Edit modal + bulk export/update + group rename
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<Record<string, string>>({});
+  const [editErr, setEditErr] = useState<string | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+  const [editMobile, setEditMobile] = useState<NonNullable<EditProfile["desktopConversion"]> | null>(null);
+  const [editTotp, setEditTotp] = useState<{ code: string; secs: number } | null>(null);
+  const [twoFaFlash, setTwoFaFlash] = useState<{ id: string; code: string } | null>(null);
+  const [editExts, setEditExts] = useState<string[]>([]);
+  // Extensions registry + manager modal
+  const [extensions, setExtensions] = useState<Extension[]>([]);
+  const [showExts, setShowExts] = useState(false);
+  const [extBusy, setExtBusy] = useState(false);
+  const [extErr, setExtErr] = useState<string | null>(null);
+  const extFileRef = useRef<HTMLInputElement>(null);
+  const [bulkExt, setBulkExt] = useState(""); // extension chosen for bulk assign
+  // Update-from-file modal (export → edit → re-upload, matched by id)
+  const [showUpdate, setShowUpdate] = useState(false);
+  const [updateFile, setUpdateFile] = useState<File | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateErr, setUpdateErr] = useState<string | null>(null);
+  const [updateResult, setUpdateResult] = useState<string | null>(null);
+  const [updateOver, setUpdateOver] = useState(false);
+  const updateFileRef = useRef<HTMLInputElement>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState("");
+  // Bulk add accounts (CSV / AdsPower .txt with group + platform assignment)
+  const [showBulk, setShowBulk] = useState(false);
+  const [bulkFiles, setBulkFiles] = useState<File[]>([]);
+  const [bulkGroup, setBulkGroup] = useState("");
+  const [bulkPlatform, setBulkPlatform] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkErr, setBulkErr] = useState<string | null>(null);
+  const [bulkOver, setBulkOver] = useState(false);
+  const bulkFileRef = useRef<HTMLInputElement>(null);
+
+  const load = async () => {
+    try {
+      const roster = await fetchProfiles();
+      setProfiles(roster.profiles);
+      setHealthSources(roster.healthSources);
+      setConnErr(null); // manages connectivity only; never clears an action error
+    } catch (e) {
+      setConnErr(String(e));
+    } finally {
+      setLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    fetchHealth().then((health) => setAppVersion(health.version)).catch(() => {});
+    fetchDiagnose().then(setDiag).catch(() => {});
+    fetchExtensions().then(setExtensions).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(load, REFRESH_MS);
+    return () => clearInterval(t);
+  }, []);
+
+  // Live 2FA code in the Edit modal: fetch the current TOTP, count it down
+  // locally, and refetch when the window rolls over.
+  useEffect(() => {
+    if (!editId) { setEditTotp(null); return; }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetchTotp(editId);
+        if (alive) setEditTotp(r.code ? { code: r.code, secs: r.secondsRemaining ?? 30 } : null);
+      } catch { if (alive) setEditTotp(null); }
+    };
+    tick();
+    const timer = setInterval(() => {
+      setEditTotp((t) => {
+        if (!t) return t;
+        if (t.secs <= 1) { tick(); return t; }
+        return { ...t, secs: t.secs - 1 };
+      });
+    }, 1000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [editId]);
+
+  const groups = useMemo(
+    () => ["all", ...Array.from(new Set(profiles.map((p) => p.group).filter(Boolean))).sort()],
+    [profiles],
+  );
+
+  const filtered = profiles.filter((p) => {
+    if (group !== "all" && p.group !== group) return false;
+    if (healthFilter !== "all" && (p.healthStatus ?? "no_data") !== healthFilter) return false;
+    if (q) {
+      const s = q.toLowerCase();
+      if (!p.id.toLowerCase().includes(s) && !p.name.toLowerCase().includes(s)) return false;
+    }
+    return true;
+  });
+
+  const runningCount = profiles.filter((p) => p.running).length;
+  const selectedMobileCount = profiles.filter((p) => selected.has(p.id) && p.mobilePersona).length;
+  const existingGroups = groups.slice(1); // drop the "all" pseudo-group
+  const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
+
+  const toggle = (id: string) =>
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const allFilteredSelected = filtered.length > 0 && filtered.every((p) => selected.has(p.id));
+  const toggleAll = () =>
+    setSelected((s) => {
+      const n = new Set(s);
+      if (allFilteredSelected) filtered.forEach((p) => n.delete(p.id));
+      else filtered.forEach((p) => n.add(p.id));
+      return n;
+    });
+
+  const moveSelected = async () => {
+    const ids = [...selected];
+    const group = newMode ? newGroup.trim() : moveTarget;
+    if (ids.length === 0 || !group) return;
+    setActionErr(null);
+    try {
+      const r = await moveProfiles(ids, group);
+      if (r.ok === false) {
+        setActionErr(r.error || "move failed");
+        return;
+      }
+      setSelected(new Set());
+      setNewMode(false);
+      setNewGroup("");
+      setMoveTarget("");
+      await load();
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+
+  const deleteSelected = async () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (!confirm(`Delete ${ids.length} profile(s)? This removes them from the roster (and any saved session). This can't be undone.`)) return;
+    setActionErr(null);
+    try {
+      const r = await deleteProfiles(ids);
+      if (r.ok === false) {
+        setActionErr(r.error || "delete failed");
+        return;
+      }
+      // Any that were open elsewhere are refused, not deleted — surface that.
+      if (r.locked && r.locked.length) setActionErr(`${r.locked.length} in use, not deleted: ${r.locked.join(", ")}`);
+      setSelected(new Set());
+      await load();
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+
+  const act = async (id: string, fn: (id: string) => Promise<any>) => {
+    setActionErr(null);
+    setBusy((b) => ({ ...b, [id]: true }));
+    try {
+      const r = await fn(id);
+      await load(); // refresh first; load() no longer clears action errors
+      if (r && r.ok === false) setActionErr(r.error || "action failed");
+      else if (r && r.warning) setActionErr(`Opened — ${r.warning}`);
+    } catch (e) {
+      await load().catch(() => {});
+      setActionErr(String(e));
+    } finally {
+      setBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const doUpload = async (files: FileList | File[]) => {
+    setActionErr(null);
+    try {
+      const list = await prepUploads(files); // CSV → AdsPower .txt; .txt passthrough
+      if (list.length === 0) return;
+      const r = await uploadExports(list);
+      await load();
+      if (r.ok) {
+        const issues = r.errors?.length ? ` Reported ${r.errors.length} invalid record(s); invalid proxies were quarantined for repair.` : "";
+        alert(`Imported ${r.profiles} profile(s) from ${r.files} file(s).${issues}`);
+      }
+      else setActionErr(r.error || "import failed");
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+
+  // ---- Bulk add accounts (CSV / .txt with group + platform assignment) ----
+  const openBulk = () => {
+    setBulkFiles([]);
+    setBulkGroup(group !== "all" ? group : "");
+    setBulkPlatform("");
+    setBulkErr(null);
+    setShowBulk(true);
+  };
+  const closeBulk = () => { setShowBulk(false); setBulkFiles([]); setBulkErr(null); };
+  const submitBulk = async () => {
+    if (!bulkFiles.length) return;
+    setBulkBusy(true);
+    setBulkErr(null);
+    try {
+      const list = await prepUploads(bulkFiles, bulkGroup.trim(), bulkPlatform);
+      if (!list.length) throw new Error("no rows found in the file(s)");
+      // Apply the chosen group/platform to every imported profile (works for
+      // AdsPower .txt too, where the group otherwise comes from the file).
+      const r = await uploadExports(list, { group: bulkGroup.trim(), platform: bulkPlatform });
+      if (r.ok) {
+        closeBulk();
+        await load();
+        const issues = r.errors?.length ? ` Reported ${r.errors.length} invalid record(s); invalid proxies were quarantined for repair.` : "";
+        alert(`Imported ${r.profiles} profile(s) from ${r.files} file(s).${issues}`);
+      }
+      else setBulkErr(r.error || "import failed");
+    } catch (e) {
+      setBulkErr(String(e));
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const setF = (k: keyof typeof BLANK_FORM, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  // Open prefilled with the folder you're browsing; close always resets so a
+  // cancelled draft never leaks into the next open.
+  const openCreate = () => {
+    setForm({ ...BLANK_FORM, group: group !== "all" ? group : "" });
+    setProxyPaste("");
+    setProxyPasteOk(null);
+    setCreateErr(null);
+    setShowCreate(true);
+  };
+  const closeCreate = () => {
+    setShowCreate(false);
+    setForm(BLANK_FORM);
+    setProxyPaste("");
+    setProxyPasteOk(null);
+    setCreateErr(null);
+  };
+  const applyProxyPaste = (raw: string) => {
+    try {
+      const parsed = parsePastedProxy(raw, form.proxyType === "socks5" ? "socks5" : "http");
+      setForm((current) => ({
+        ...current,
+        proxyType: parsed.type,
+        host: parsed.host,
+        port: parsed.port,
+        user: parsed.user,
+        pass: parsed.pass,
+      }));
+      setProxyPaste("");
+      setProxyPasteOk(`✓ ${parsed.type.toUpperCase()} proxy fields filled`);
+      setCreateErr(null);
+    } catch (error) {
+      setProxyPasteOk(null);
+      setCreateErr(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const submitCreate = async () => {
+    setCreating(true);
+    setCreateErr(null);
+    try {
+      const r = await createProfile({
+        name: form.name,
+        group: form.group,
+        platform: form.platform,
+        screen: form.screen,
+        proxy: form.host.trim() ? { type: form.proxyType, host: form.host, port: form.port, user: form.user, pass: form.pass } : null,
+      });
+      if (r.ok) {
+        closeCreate();
+        await load();
+      } else {
+        setCreateErr(r.error || "create failed"); // shown inside the modal
+      }
+    } catch (e) {
+      setCreateErr(String(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  // ---- Edit one profile (full detail) ----
+  const setEF = (k: string, v: string) => setEditForm((f) => ({ ...f, [k]: v }));
+  const openEdit = async (id: string) => {
+    setActionErr(null);
+    try {
+      const p: EditProfile = await fetchProfileEdit(id);
+      setEditForm({
+        name: p.name, group: p.group, platform: p.platform,
+        proxyType: p.proxyType || "http", proxy: p.proxy,
+        proxyError: p.proxyError ?? "",
+        username: p.username, password: p.password,
+        email: p.email, emailPassword: p.emailPassword, twofa: p.twofa,
+        resolution: p.resolution, tags: p.tags,
+      });
+      setEditExts(p.extensions ?? []);
+      setEditMobile(p.desktopConversion ?? null);
+      setEditErr(null);
+      setEditId(id);
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+  const closeEdit = () => { setEditId(null); setEditForm({}); setEditErr(null); setEditMobile(null); };
+  const saveEdit = async () => {
+    if (!editId) return;
+    setEditSaving(true);
+    setEditErr(null);
+    try {
+      const r = await updateProfile(editId, {
+        name: editForm.name ?? "", group: editForm.group ?? "", platform: editForm.platform ?? "",
+        proxy: editForm.proxy ?? "", proxyType: editForm.proxyType ?? "http",
+        username: editForm.username ?? "", password: editForm.password ?? "",
+        email: editForm.email ?? "", emailPassword: editForm.emailPassword ?? "", twofa: editForm.twofa ?? "",
+        resolution: editForm.resolution ?? "", extensions: editExts, tags: editForm.tags ?? "",
+      });
+      if (r.ok) { closeEdit(); await load(); }
+      else setEditErr(r.error || "save failed");
+    } catch (e) {
+      setEditErr(String(e));
+    } finally {
+      setEditSaving(false);
+    }
+  };
+  const convertEditedMobile = async () => {
+    if (!editId || !editMobile) return;
+    const platform = editMobile.platform === "macos" ? "macOS" : "Windows";
+    const screenNote = editMobile.screenChanged ? ` Its mobile-sized screen will become ${editMobile.resolution}.` : " Its existing desktop-sized screen will be kept.";
+    if (!confirm(
+      `Convert this imported mobile persona to a stable ${platform} desktop persona?\n\n` +
+      `Cookies, login/session, credentials, proxy, timezone, fingerprint seed, tags and extensions are preserved.${screenNote}\n\n` +
+      "The website may treat the first launch as a new desktop device and request verification. Other unsaved edits in this dialog are not included.",
+    )) return;
+    setEditSaving(true);
+    setEditErr(null);
+    try {
+      const r = await convertMobileProfile(editId);
+      if (!r.ok) { setEditErr(r.error || "conversion failed"); return; }
+      closeEdit();
+      await load();
+      flash(`Converted profile to a stable ${platform} desktop persona`);
+    } catch (e) {
+      setEditErr(String(e));
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  // ---- Extensions manager (upload / delete) ----
+  const reloadExtensions = async () => { try { setExtensions(await fetchExtensions()); } catch {} };
+  const doUploadExtensions = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    if (!list.length) return;
+    setExtBusy(true);
+    setExtErr(null);
+    try {
+      const r = await uploadExtensions(list);
+      if (!r.ok) setExtErr(r.error || "upload failed");
+      await reloadExtensions();
+    } catch (e) {
+      setExtErr(String(e));
+    } finally {
+      setExtBusy(false);
+    }
+  };
+  const doRemoveExtension = async (id: string, name: string) => {
+    if (!confirm(`Remove extension "${name}"? It will be unassigned from all profiles.`)) return;
+    setExtErr(null);
+    try {
+      const r = await removeExtension(id);
+      if (!r.ok) setExtErr(r.error || "remove failed");
+      setEditExts((xs) => xs.filter((x) => x !== id));
+      await reloadExtensions();
+    } catch (e) {
+      setExtErr(String(e));
+    }
+  };
+  const toggleEditExt = (id: string) =>
+    setEditExts((xs) => (xs.includes(id) ? xs.filter((x) => x !== id) : [...xs, id]));
+  const bulkAssignExt = async (op: "add" | "remove") => {
+    const ids = [...selected];
+    if (!ids.length || !bulkExt) return;
+    setActionErr(null);
+    try {
+      const r = await assignExtensionBulk(ids, bulkExt, op);
+      if (r.ok === false) { setActionErr(r.error || "extension assign failed"); return; }
+      await load();
+      const name = extensions.find((x) => x.id === bulkExt)?.name ?? "extension";
+      flash(`${op === "add" ? "Added" : "Removed"} “${name}” ${op === "add" ? "to" : "from"} ${r.updated} profile(s)`);
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+
+  // ---- 2FA quick-copy (row authenticator button) ----
+  const copy2fa = async (id: string) => {
+    setActionErr(null);
+    try {
+      const r = await fetchTotp(id);
+      if (!r.code) { setActionErr("no 2FA secret on this profile"); return; }
+      try { await navigator.clipboard.writeText(r.code); } catch {}
+      setTwoFaFlash({ id, code: r.code });
+      setTimeout(() => setTwoFaFlash((f) => (f && f.id === id ? null : f)), 4000);
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+
+  // ---- Bulk open / close (bounded concurrency) ----
+  const bulkRun = async (op: (id: string) => Promise<any>, pick: (p: UiProfile) => boolean) => {
+    const ids = [...selected].filter((id) => { const p = profiles.find((x) => x.id === id); return p && pick(p); });
+    if (!ids.length) return;
+    setActionErr(null);
+    setBusy((b) => { const n = { ...b }; ids.forEach((id) => (n[id] = true)); return n; });
+    await runPool(ids, 4, async (id) => { try { await op(id); } catch {} });
+    await load();
+    setBusy((b) => { const n = { ...b }; ids.forEach((id) => delete n[id]); return n; });
+  };
+  const openSelected = () => bulkRun(openProfile, (p) => !p.running && !p.mobilePersona);
+  const closeSelected = () => bulkRun(closeProfile, (p) => p.running);
+  const convertSelectedMobile = async () => {
+    const ids = [...selected].filter((id) => profiles.find((p) => p.id === id)?.mobilePersona);
+    if (!ids.length) return;
+    if (!confirm(
+      `Convert ${ids.length} selected mobile persona(s) to stable desktop personas?\n\n` +
+      "Account data, sessions, proxies, timezones and fingerprint seeds are preserved. Android keeps the Windows desktop family used by older AliasMode; iPhone/iPad keeps macOS. A website may request device verification on first launch.",
+    )) return;
+    setActionErr(null);
+    setBusy((b) => { const n = { ...b }; ids.forEach((id) => (n[id] = true)); return n; });
+    const failed: string[] = [];
+    await runPool(ids, 4, async (id) => {
+      try {
+        const r = await convertMobileProfile(id);
+        if (!r.ok) failed.push(`${id}: ${r.error || "conversion failed"}`);
+      } catch (e) {
+        failed.push(`${id}: ${String(e)}`);
+      }
+    });
+    await load().catch(() => {});
+    setBusy((b) => { const n = { ...b }; ids.forEach((id) => delete n[id]); return n; });
+    if (failed.length) setActionErr(`${ids.length - failed.length} converted; ${failed.length} failed — ${failed.join("; ")}`);
+    else flash(`Converted ${ids.length} mobile persona(s) to stable desktop personas`);
+  };
+
+  // ---- Export selected → file ----
+  const exportSelected = async (format: "csv" | "txt") => {
+    setExportOpen(false);
+    if (!selected.size) return;
+    try { await exportProfiles([...selected], format); }
+    catch (e) { setActionErr(String(e)); }
+  };
+
+  // ---- Transient success banner ----
+  const flash = (m: string) => { setNotice(m); setTimeout(() => setNotice((cur) => (cur === m ? null : cur)), 3500); };
+
+  // ---- File-based bulk update (export → edit → re-upload, matched by id) ----
+  const openUpdate = () => { setShowUpdate(true); setUpdateFile(null); setUpdateErr(null); setUpdateResult(null); };
+  const submitUpdate = async () => {
+    if (!updateFile) return;
+    setUpdateBusy(true); setUpdateErr(null); setUpdateResult(null);
+    try {
+      const r = await updateFromFile([updateFile]);
+      if (!r.ok) { setUpdateErr(r.error || "update failed"); return; }
+      let m = `Updated ${r.updated} profile(s)`;
+      if (r.notFound?.length) m += ` · ${r.notFound.length} id(s) in the file matched no profile`;
+      if (r.skipped) m += ` · ${r.skipped} row(s) skipped (no id)`;
+      setUpdateResult(m);
+      await load();
+    } catch (e) {
+      setUpdateErr(String(e));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  // ---- Group rename / delete ----
+  const startRename = (g: string) => { setRenaming(g); setRenameVal(g); };
+  const commitRename = async () => {
+    const from = renaming, to = renameVal.trim();
+    setRenaming(null);
+    if (!from || !to || to === from) return;
+    setActionErr(null);
+    try {
+      const r = await renameGroup(from, to);
+      if (r.ok === false) setActionErr(r.error || "rename failed");
+      else { if (group === from) setGroup(to); await load(); }
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+  const removeGroup = async (g: string) => {
+    const n = countFor(g);
+    if (!confirm(`Delete group "${g}"?${n ? ` Its ${n} profile(s) move to Ungrouped (not deleted).` : ""}`)) return;
+    setActionErr(null);
+    try {
+      const r = await deleteGroup(g);
+      if (r.ok === false) setActionErr(r.error || "delete failed");
+      else { if (group === g) setGroup("all"); await load(); }
+    } catch (e) {
+      setActionErr(String(e));
+    }
+  };
+
+  const diagWhen = diag ? new Date(diag.generatedAt).toLocaleTimeString() : null;
+
+  return (
+    <div
+      className="app"
+      onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
+      onDragLeave={(e) => { e.preventDefault(); if (e.currentTarget === e.target) setDragging(false); }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        if (e.dataTransfer.files?.length) doUpload(e.dataTransfer.files);
+      }}
+    >
+      {dragging && <div className="dropzone">Drop AdsPower <code>.txt</code> or <code>.csv</code> files to import</div>}
+
+      <aside className="sidebar">
+        <div className="brandrow"><div className="brand">AliasMode</div>{appVersion && <span className="appversion">{appVersion}</span>}</div>
+        <div className="newrow">
+          <button className="newbtn" onClick={openCreate}>+ New Profile</button>
+          <button className="importbtn" title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>
+        </div>
+        <div className={`folder${group === "all" ? " active" : ""}`} onClick={() => setGroup("all")}>
+          <span>All profiles</span><span className="cnt">{profiles.length}</span>
+        </div>
+        <div className="sidesection">
+          <button className="sidehead" onClick={() => setGroupsOpen((o) => !o)}>
+            <span className={`chev${groupsOpen ? " open" : ""}`}>▸</span>
+            <span>Groups</span>
+            <span className="grow" />
+            <span className="cnt">{existingGroups.length}</span>
+          </button>
+          {groupsOpen && <div className="folders">
+          {existingGroups.length === 0 && <div className="folders-empty">No groups yet</div>}
+          {existingGroups.map((g) => (
+            <div
+              key={g}
+              className={`folder${group === g ? " active" : ""}`}
+              onClick={() => { if (renaming !== g) setGroup(g); }}
+            >
+              {renaming === g ? (
+                <input
+                  className="renameinput"
+                  autoFocus
+                  value={renameVal}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setRenameVal(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") setRenaming(null); }}
+                  onBlur={commitRename}
+                />
+              ) : (
+                <>
+                  <span className="fname">{g}</span>
+                  <span className="gactions">
+                    <button title="Rename group" onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>
+                    <button title="Delete group" onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>
+                  </span>
+                  <span className="cnt">{countFor(g)}</span>
+                </>
+              )}
+            </div>
+          ))}
+          </div>}
+        </div>
+        <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>
+      </aside>
+
+      <div className="main">
+      <header className="toolbar">
+        <input className="search" placeholder="search id or name…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select
+          className="health-filter"
+          aria-label="Health filter"
+          value={healthFilter}
+          onChange={(e) => setHealthFilter(e.target.value as "all" | HealthStatus)}
+        >
+          <option value="all">All health</option>
+          <option value="suspended">Suspended</option>
+          <option value="alive">Alive</option>
+          <option value="no_data">No data</option>
+        </select>
+        <span className="spacer" />
+        <HealthSources sources={healthSources} />
+      </header>
+
+      {(actionErr ?? connErr) && (
+        <div className="error">
+          <span>{actionErr ?? connErr}</span>
+          <button className="dismiss" onClick={() => { setActionErr(null); setConnErr(null); }}>×</button>
+        </div>
+      )}
+      {notice && <div className="notice" onClick={() => setNotice(null)}>{notice}</div>}
+
+      <div className={`actionbar${selected.size ? " active" : ""}`}>
+        <span className="count">{selected.size ? `${selected.size} selected` : "No selection"}</span>
+        <button className="btn open sm" disabled={!selected.size} onClick={openSelected}>Open</button>
+        <button className="btn close sm" disabled={!selected.size} onClick={closeSelected}>Close</button>
+        {selectedMobileCount > 0 && <button className="abtn convert" onClick={convertSelectedMobile}>Convert mobile ({selectedMobileCount})</button>}
+        <div className="exportwrap">
+          <button className="abtn" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>Export ▾</button>
+          {exportOpen && selected.size > 0 && (
+            <div className="exportmenu" onMouseLeave={() => setExportOpen(false)}>
+              <button onClick={() => exportSelected("csv")}>Export as CSV</button>
+              <button onClick={() => exportSelected("txt")}>Export as AdsPower .txt</button>
+            </div>
+          )}
+        </div>
+        <button className="abtn" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">Edit from file</button>
+        <span className="vsep" />
+        <span className="movelbl">Move to</span>
+        {newMode ? (
+          <input className="moveinput" autoFocus placeholder="new group name" value={newGroup} onChange={(e) => setNewGroup(e.target.value)} />
+        ) : (
+          <select
+            disabled={!selected.size}
+            value={moveTarget}
+            onChange={(e) => (e.target.value === "__new__" ? setNewMode(true) : setMoveTarget(e.target.value))}
+          >
+            <option value="">choose group…</option>
+            {existingGroups.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+            <option value="__new__">+ new group…</option>
+          </select>
+        )}
+        {newMode && (
+          <button className="link" onClick={() => { setNewMode(false); setNewGroup(""); }}>cancel</button>
+        )}
+        <button className="primary" disabled={!selected.size || (newMode ? !newGroup.trim() : !moveTarget)} onClick={moveSelected}>
+          Move
+        </button>
+        {extensions.length > 0 && (
+          <>
+            <span className="vsep" />
+            <div className="extctl">
+              <span className="extctl-lbl">🧩 Extension</span>
+              <select className="extctl-sel" disabled={!selected.size} value={bulkExt} onChange={(e) => setBulkExt(e.target.value)}>
+                <option value="">choose…</option>
+                {extensions.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+              </select>
+              <button className="extctl-btn" disabled={!selected.size || !bulkExt} onClick={() => bulkAssignExt("add")}>Add</button>
+              <button className="extctl-btn" disabled={!selected.size || !bulkExt} onClick={() => bulkAssignExt("remove")}>Remove</button>
+            </div>
+          </>
+        )}
+        <span className="spacer" />
+        <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>
+      </div>
+
+      <div className="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th className="chk"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAll} /></th>
+              <th></th>
+              <th>id</th>
+              <th>name</th>
+              <th>group</th>
+              <th>platform</th>
+              <th>tags</th>
+              <th>proxy</th>
+              <th>health</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((p) => (
+              <tr key={p.id} className={p.running ? "running" : ""}>
+                <td className="chk"><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} /></td>
+                <td><StatusDot running={p.running} /></td>
+                <td className="mono">{p.id}</td>
+                <td>{p.name}</td>
+                <td>{p.group ? <span className="chip">{p.group}</span> : <span className="muted">—</span>}</td>
+                <td><PlatformPill platform={p.platform} /></td>
+                <td className="tags">{p.tags?.length ? p.tags.map((t) => <span key={t} className="chip">{t}</span>) : <span className="muted">—</span>}</td>
+                <td className="mono" title={p.proxyError}>{p.proxyError ? "⚠ invalid — edit" : p.proxy ?? "—"}</td>
+                <td><HealthBadge profile={p} /></td>
+                <td className="act">
+                  {p.has2fa && (
+                    <button
+                      className={`btn twofa${twoFaFlash?.id === p.id ? " flash" : ""}`}
+                      title="Copy current 2FA code"
+                      onClick={() => copy2fa(p.id)}
+                    >
+                      {twoFaFlash?.id === p.id ? `✓ ${twoFaFlash.code}` : "2FA"}
+                    </button>
+                  )}
+                  <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>
+                  {p.running ? (
+                    <>
+                      <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>⧉</button>
+                      <button className="btn close" disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>Close</button>
+                    </>
+                  ) : p.mobilePersona ? (
+                    p.lockedBy ? (
+                      <span className="lockedby" title={`in use by ${p.lockedBy}; close it there before conversion`}>🔒 {p.lockedBy} · mobile persona</span>
+                    ) : (
+                      <button className="btn convert" disabled={busy[p.id]} title="Convert this unsupported mobile persona to a coherent desktop device" onClick={() => openEdit(p.id)}>Convert device</button>
+                    )
+                  ) : p.lockedBy ? (
+                    <span className="lockedby" title={`session writer: ${p.lockedBy}; this browser will not save its session back`}>
+                      ⚠ {p.lockedBy}{" "}
+                      <button className="btn open" disabled={busy[p.id]} onClick={() => act(p.id, openProfile)}>Open</button>
+                    </span>
+                  ) : (
+                    <button className="btn open" disabled={busy[p.id]} onClick={() => act(p.id, openProfile)}>Open</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {loaded && filtered.length === 0 && (
+              <tr>
+                <td colSpan={10} className="empty">
+                  {profiles.length === 0
+                    ? "No profiles yet — drop an AdsPower export in the inbox and click Import."
+                    : "No profiles match the current filters."}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {showDiag && diag && (
+        <div className="diagpanel">
+          <div className="when">Last diagnose: {diagWhen}</div>
+          {diag.analysis.verdicts.map((v, i) => (
+            <div className="v" key={i}>{v}</div>
+          ))}
+        </div>
+      )}
+
+      <footer className="statusbar">
+        <span>{profiles.length} profiles · {runningCount} running</span>
+        {diag && (
+          <span className="diag" onClick={() => setShowDiag((s) => !s)}>
+            Diagnose · last {diagWhen} {showDiag ? "▾" : "▸"}
+          </span>
+        )}
+      </footer>
+      </div>
+
+      {showCreate && (
+        <div className="modal-backdrop" onClick={closeCreate}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">New profile</div>
+            <div className="modal-body">
+              {createErr && <div className="modal-err">{createErr}</div>}
+              <label className="fld">
+                <span>Name</span>
+                <input value={form.name} placeholder="auto if blank" onChange={(e) => setF("name", e.target.value)} />
+              </label>
+              <label className="fld">
+                <span>Folder</span>
+                <GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={existingGroups} />
+              </label>
+              <label className="fld">
+                <span>Platform</span>
+                <PlatformPicker value={form.platform} onChange={(v) => setF("platform", v)} />
+              </label>
+              <div className="proxy-paste-row">
+                <label className="fld grow">
+                  <span>Paste proxy to autofill <span className="muted">(select type first · host:port:username:password)</span></span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={proxyPaste}
+                    placeholder="Paste here — credentials stay hidden"
+                    onChange={(e) => { setProxyPaste(e.target.value); setProxyPasteOk(null); }}
+                    onPaste={(e) => {
+                      const pasted = e.clipboardData.getData("text");
+                      if (pasted) { e.preventDefault(); applyProxyPaste(pasted); }
+                    }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyProxyPaste(proxyPaste); } }}
+                  />
+                </label>
+                <button type="button" disabled={!proxyPaste.trim()} onClick={() => applyProxyPaste(proxyPaste)}>Autofill</button>
+              </div>
+              {proxyPasteOk && <div className="proxy-paste-ok">{proxyPasteOk}</div>}
+              <div className="fld-row">
+                <label className="fld">
+                  <span>Proxy type</span>
+                  <select value={form.proxyType} onChange={(e) => setF("proxyType", e.target.value)}>
+                    <option value="http">http</option>
+                    <option value="socks5">socks5</option>
+                  </select>
+                </label>
+                <label className="fld grow">
+                  <span>Host</span>
+                  <input value={form.host} placeholder="proxy host (blank = no proxy)" onChange={(e) => setF("host", e.target.value)} />
+                </label>
+                <label className="fld port">
+                  <span>Port</span>
+                  <input value={form.port} inputMode="numeric" onChange={(e) => setF("port", e.target.value)} />
+                </label>
+              </div>
+              <div className="fld-row">
+                <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
+                <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
+              </div>
+              <div className="fld-row">
+                <label className="fld grow">
+                  <span>Screen</span>
+                  <input value={form.screen} placeholder="auto — e.g. 1920x1080" onChange={(e) => setF("screen", e.target.value)} />
+                </label>
+                <label className="fld grow">
+                  <span>Browser version</span>
+                  <input value="CloakBrowser · latest installed" readOnly className="ro" />
+                </label>
+              </div>
+              <div className="hint">A unique browser, user-agent &amp; fingerprint are generated from a fresh seed. Timezone is set from the proxy automatically.</div>
+            </div>
+            <div className="modal-foot">
+              <button className="link" onClick={closeCreate}>Cancel</button>
+              <button className="primary" disabled={creating} onClick={submitCreate}>{creating ? "Creating…" : "Create"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editId && (
+        <div className="modal-backdrop" onClick={closeEdit}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">Edit profile <span className="mono muted">{editId}</span></div>
+            <div className="modal-body">
+              {editErr && <div className="modal-err">{editErr}</div>}
+              {editForm.proxyError && <div className="modal-err">Stored proxy quarantined: {editForm.proxyError}. Replace it below or clear the field.</div>}
+              {editMobile && (
+                <div className="persona-warning">
+                  <strong>Imported mobile persona cannot open safely</strong>
+                  <span>
+                    Older AliasMode opened it as a desktop browser anyway: Android became Windows; iPhone/iPad became macOS. That looked usable, but it was not coherent mobile emulation.
+                  </span>
+                  <span>
+                    Convert it once to {editMobile.platform === "macos" ? "macOS" : "Windows"} desktop. Cookies, login/session, proxy, timezone, credentials and fingerprint seed stay intact
+                    {editMobile.screenChanged ? `; the mobile-sized screen becomes ${editMobile.resolution}` : "; the existing desktop-sized screen stays intact"}.
+                  </span>
+                  <button className="persona-convert" disabled={editSaving} onClick={convertEditedMobile}>
+                    {editSaving ? "Converting…" : `Convert to ${editMobile.platform === "macos" ? "macOS" : "Windows"} desktop`}
+                  </button>
+                </div>
+              )}
+              <label className="fld">
+                <span>Name</span>
+                <input value={editForm.name ?? ""} onChange={(e) => setEF("name", e.target.value)} />
+              </label>
+              <label className="fld">
+                <span>Folder</span>
+                <GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={existingGroups} />
+              </label>
+              <label className="fld">
+                <span>Platform</span>
+                <PlatformPicker value={editForm.platform ?? ""} onChange={(v) => setEF("platform", v)} />
+              </label>
+              <label className="fld">
+                <span>Tags <span className="muted">(comma-separated)</span></span>
+                <input value={editForm.tags ?? ""} placeholder="e.g. warmup, us, priority" onChange={(e) => setEF("tags", e.target.value)} />
+              </label>
+              <div className="fld-row">
+                <label className="fld">
+                  <span>Proxy type</span>
+                  <select value={editForm.proxyType ?? "http"} onChange={(e) => setEF("proxyType", e.target.value)}>
+                    <option value="http">http</option>
+                    <option value="socks5">socks5</option>
+                  </select>
+                </label>
+                <label className="fld grow">
+                  <span>Proxy (host:port:user:pass)</span>
+                  <input value={editForm.proxy ?? ""} placeholder="blank = no proxy" onChange={(e) => setEF("proxy", e.target.value)} />
+                </label>
+              </div>
+              <div className="fld-row">
+                <CopyField label="Username" value={editForm.username ?? ""} onChange={(value) => setEF("username", value)} />
+                <CopyField label="Password" value={editForm.password ?? ""} onChange={(value) => setEF("password", value)} />
+              </div>
+              <div className="fld-row">
+                <CopyField label="Email" value={editForm.email ?? ""} onChange={(value) => setEF("email", value)} />
+                <CopyField label="Email password" value={editForm.emailPassword ?? ""} onChange={(value) => setEF("emailPassword", value)} />
+              </div>
+              <div className="fld-row">
+                <CopyField label="2FA secret" value={editForm.twofa ?? ""} onChange={(value) => setEF("twofa", value)} />
+                <label className="fld grow"><span>Screen</span><input value={editForm.resolution ?? ""} placeholder="e.g. 1920x1080" onChange={(e) => setEF("resolution", e.target.value)} /></label>
+              </div>
+              {editTotp && (
+                <div className="authrow">
+                  <span className="authlabel">Authenticator</span>
+                  <span className="authcode">{editTotp.code.slice(0, 3)} {editTotp.code.slice(3)}</span>
+                  <span className="authsecs" title="seconds until it refreshes">{editTotp.secs}s</span>
+                  <button className="tlink" onClick={() => navigator.clipboard?.writeText(editTotp.code)}>Copy</button>
+                </div>
+              )}
+              <div className="fld">
+                <span>Extensions</span>
+                {extensions.length === 0 ? (
+                  <div className="hint" style={{ marginTop: 0 }}>None uploaded yet — add some via 🧩 Extensions in the sidebar.</div>
+                ) : (
+                  <div className="extassign">
+                    {extensions.map((x) => (
+                      <label key={x.id} className="extchk">
+                        <input type="checkbox" checked={editExts.includes(x.id)} onChange={() => toggleEditExt(x.id)} />
+                        <span>{x.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="hint">Cookies &amp; fingerprint are preserved — only the fields above change. Extensions load when the browser opens.</div>
+            </div>
+            <div className="modal-foot">
+              <button className="link" onClick={closeEdit}>Cancel</button>
+              <button className="primary" disabled={editSaving} onClick={saveEdit}>{editSaving ? "Saving…" : "Save changes"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBulk && (
+        <div className="modal-backdrop" onClick={closeBulk}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">Import accounts</div>
+            <div className="modal-body">
+              {bulkErr && <div className="modal-err">{bulkErr}</div>}
+              <div
+                className={`bulkdrop${bulkOver ? " over" : ""}`}
+                onClick={() => bulkFileRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); if (!bulkOver) setBulkOver(true); }}
+                onDragLeave={(e) => { e.preventDefault(); setBulkOver(false); }}
+                onDrop={(e) => { e.preventDefault(); setBulkOver(false); if (e.dataTransfer.files?.length) setBulkFiles(Array.from(e.dataTransfer.files)); }}
+              >
+                <div className="big">⤓</div>
+                <div>Drag &amp; drop, or <b>click to choose</b></div>
+                <div className="sub">CSV (template columns) or an AdsPower <code>.txt</code> export · max 1000</div>
+              </div>
+              <input
+                ref={bulkFileRef}
+                type="file"
+                multiple
+                accept=".csv,.txt,text/plain,text/csv"
+                style={{ display: "none" }}
+                onChange={(e) => { if (e.target.files) setBulkFiles(Array.from(e.target.files)); e.target.value = ""; }}
+              />
+              {bulkFiles.length > 0 && <div className="bulkfiles">Selected: <b>{bulkFiles.map((f) => f.name).join(", ")}</b></div>}
+              <label className="fld">
+                <span>Assign to group</span>
+                <GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />
+              </label>
+              <label className="fld">
+                <span>Platform</span>
+                <select value={bulkPlatform} onChange={(e) => setBulkPlatform(e.target.value)}>
+                  <option value="">None</option>
+                  <option value="x.com">X / Twitter</option>
+                  <option value="telegram.org">Telegram</option>
+                </select>
+              </label>
+              <div className="hint">
+                Defaults for CSV rows that leave group/platform blank; an AdsPower <code>.txt</code> keeps whatever's in the file.
+                <div className="tlinks">
+                  <button className="tlink" onClick={() => downloadText("aliasmode-template.csv", CSV_TEMPLATE, "text/csv")}>⤓ CSV template</button>
+                  <button className="tlink" onClick={() => downloadText("aliasmode-example.txt", TXT_EXAMPLE, "text/plain")}>⤓ AdsPower .txt example</button>
+                </div>
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="link" onClick={closeBulk}>Cancel</button>
+              <button className="primary" disabled={bulkBusy || !bulkFiles.length} onClick={submitBulk}>{bulkBusy ? "Importing…" : "Import"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showExts && (
+        <div className="modal-backdrop" onClick={() => setShowExts(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">Extensions</div>
+            <div className="modal-body">
+              {extErr && <div className="modal-err">{extErr}</div>}
+              <div className="hint" style={{ marginTop: 0 }}>
+                Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Assign it to profiles in each profile's <b>Edit</b> dialog — it loads when that browser opens.
+              </div>
+              {extensions.length === 0 ? (
+                <div className="hint">No extensions uploaded yet.</div>
+              ) : (
+                <div className="extlist">
+                  {extensions.map((x) => (
+                    <div key={x.id} className="extrow">
+                      <span className="extname">{x.name}</span>
+                      <span className="spacer" />
+                      <button className="extrm" onClick={() => doRemoveExtension(x.id, x.name)}>Remove</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <input
+                ref={extFileRef}
+                type="file"
+                multiple
+                accept=".zip,.crx,application/zip,application/x-chrome-extension"
+                style={{ display: "none" }}
+                onChange={(e) => { if (e.target.files) doUploadExtensions(e.target.files); e.target.value = ""; }}
+              />
+            </div>
+            <div className="modal-foot">
+              <button className="link" onClick={() => setShowExts(false)}>Done</button>
+              <button className="primary" disabled={extBusy} onClick={() => extFileRef.current?.click()}>{extBusy ? "Uploading…" : "+ Upload extension"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showUpdate && (
+        <div className="modal-backdrop" onClick={() => setShowUpdate(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">Update profiles from file</div>
+            <div className="modal-body">
+              {updateErr && <div className="modal-err">{updateErr}</div>}
+              {updateResult && <div className="modal-ok">{updateResult}</div>}
+              <ol className="steps">
+                <li><b>Export</b> the profiles you want to change — that gives you a file with each profile's <code>id</code> (how rows are matched).</li>
+                <li><b>Edit</b> the columns you want (name, username, password, 2FA, proxy…). Keep the <code>id</code> column; delete any column you don't want to touch.</li>
+                <li><b>Re-upload</b> the edited file below. Matched by <code>id</code>; cookies &amp; fingerprints are preserved.</li>
+              </ol>
+              <div className="updexport">
+                {selected.size > 0 ? (
+                  <span>
+                    Export {selected.size} selected:&nbsp;
+                    <button className="tlink" onClick={() => exportSelected("csv")}>⤓ CSV</button>
+                    &nbsp;·&nbsp;
+                    <button className="tlink" onClick={() => exportSelected("txt")}>⤓ .txt</button>
+                  </span>
+                ) : (
+                  <span className="hint" style={{ margin: 0 }}>Tip: select profiles first, then export here to get an editable file.</span>
+                )}
+                <span className="grow" />
+                <button className="tlink" onClick={() => downloadText("aliasmode-update-template.csv", UPDATE_TEMPLATE_CSV, "text/csv")}>⤓ example sheet</button>
+              </div>
+              <div
+                className={`bulkdrop${updateOver ? " over" : ""}`}
+                onClick={() => updateFileRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); if (!updateOver) setUpdateOver(true); }}
+                onDragLeave={(e) => { e.preventDefault(); setUpdateOver(false); }}
+                onDrop={(e) => { e.preventDefault(); setUpdateOver(false); if (e.dataTransfer.files?.[0]) setUpdateFile(e.dataTransfer.files[0]); }}
+              >
+                <div className="big">⤒</div>
+                <div>Drag &amp; drop the edited file, or <b>click to choose</b></div>
+                <div className="sub">CSV or AdsPower <code>.txt</code> with an <code>id</code> column</div>
+              </div>
+              <input
+                ref={updateFileRef}
+                type="file"
+                accept=".csv,.txt,text/plain,text/csv"
+                style={{ display: "none" }}
+                onChange={(e) => { if (e.target.files?.[0]) setUpdateFile(e.target.files[0]); e.target.value = ""; }}
+              />
+              {updateFile && <div className="bulkfiles">Selected: <b>{updateFile.name}</b></div>}
+            </div>
+            <div className="modal-foot">
+              <button className="link" onClick={() => setShowUpdate(false)}>Close</button>
+              <button className="primary" disabled={updateBusy || !updateFile} onClick={submitUpdate}>{updateBusy ? "Updating…" : "Update profiles"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = createRoot(document.getElementById("root")!);
+root.render(<App />);
