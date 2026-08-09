@@ -4,3 +4,7 @@ declare module "*.html" {
   export default content;
 }
 declare module "*.css";
+
+declare module "*playwright-core/lib/generated/storageScriptSource.js" {
+  export const source: string;
+}

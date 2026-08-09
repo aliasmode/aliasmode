@@ -78,3 +78,24 @@ jobs:
             if (-not $browser.HasExited) { Stop-Process -Id $browser.Id -Force }
           }
       - run: bunx tauri build --bundles nsis
+      - name: Stage unsigned installer and checksum
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($installers.Count)"
+          }
+          $artifact = ".\artifacts\windows"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          Copy-Item $installers[0].FullName $artifact
+          $installer = Join-Path $artifact $installers[0].Name
+          $sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  $($installers[0].Name)" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-unsigned
+          path: |
+            artifacts/windows/*.exe
+            artifacts/windows/SHA256SUMS.txt
+          if-no-files-found: error

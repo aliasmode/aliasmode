@@ -7,9 +7,7 @@
  * cookies alone can never roam a Telegram session, so origin storage roams too.
  */
 
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { source as playwrightStorageScriptSource } from "./node_modules/playwright-core/lib/generated/storageScriptSource.js";
 import type { CookieRecord } from "./types.ts";
 
 const SESSION_URLS = ["https://x.com", "https://web.telegram.org", "https://www.linkedin.com", "https://linkedin.com"];
@@ -696,18 +694,8 @@ export async function harvestCookies(ws: string, urls: string[]): Promise<Cookie
   }
 }
 
-const require = createRequire(import.meta.url);
-const PLAYWRIGHT_PACKAGE_DIR = dirname(require.resolve("playwright-core/package.json"));
-const STORAGE_SCRIPT_URL = pathToFileURL(join(PLAYWRIGHT_PACKAGE_DIR, "lib", "generated", "storageScriptSource.js")).href;
-let storageScriptSourcePromise: Promise<string> | null = null;
-
 async function storageScriptSource(): Promise<string> {
-  storageScriptSourcePromise ??= import(STORAGE_SCRIPT_URL).then((mod: any) => {
-    const source = mod.source ?? mod.default?.source;
-    if (typeof source !== "string") throw new Error("Playwright storage script source not found");
-    return source;
-  });
-  return storageScriptSourcePromise;
+  return playwrightStorageScriptSource;
 }
 
 /**
