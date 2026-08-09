@@ -19,7 +19,7 @@ jobs:
           bun-version: 1.2.21
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85
+          toolchain: 1.89
           components: rustfmt
       - run: bun install --frozen-lockfile
       - run: bun test
@@ -36,7 +36,7 @@ jobs:
           bun-version: 1.2.21
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85
+          toolchain: 1.89
       - run: bun install --frozen-lockfile
       - run: bun run desktop:prepare
       - name: Smoke-test compiled sidecar CDP runtime
