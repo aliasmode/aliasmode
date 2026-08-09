@@ -224,16 +224,19 @@ export async function importInbox(
 /**
  * Watch the inbox and re-import whenever a file appears or changes. Debounced
  * so a burst of editor/copy events collapses into one import. Returns a stop
- * function. Best-effort: watch failures are logged, not thrown.
+ * function that waits for any active import. Best-effort: watch failures are
+ * logged, not thrown.
  */
 export function watchInbox(
   store: ProfileStore,
   dir = DEFAULT_INBOX,
   log: (msg: string) => void = console.log,
-): () => void {
+): () => Promise<void> {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   let timer: ReturnType<typeof setTimeout> | null = null;
   let watcher: ReturnType<typeof watch> | null = null;
+  let stopped = false;
+  let inFlight = Promise.resolve();
 
   // Signature of the inbox's .txt files (name+size). Used to skip re-importing
   // — and re-running the geoip batch — when a watch event didn't actually change
@@ -255,15 +258,19 @@ export function watchInbox(
       .join("|");
   let lastSig = "";
 
-  const tryImport = async () => {
+  const runImport = async () => {
+    if (stopped) return;
     // Don't import a file that's still being copied in. If it isn't settled yet,
     // reschedule instead of dropping — a completed export must never sit
     // unimported because the copy happened to finish between two size samples.
     if (!(await inboxStable(dir).catch(() => true))) {
-      log(`inbox: a file is still being written — will retry shortly`);
-      timer = setTimeout(tryImport, 1000);
+      if (!stopped) {
+        log(`inbox: a file is still being written — will retry shortly`);
+        timer = setTimeout(tryImport, 1000);
+      }
       return;
     }
+    if (stopped) return;
     // No-op events shouldn't re-run the import (and burn ip-api's budget).
     const current = inboxSig();
     if (current === lastSig) return;
@@ -277,8 +284,14 @@ export function watchInbox(
     }
   };
 
+  const tryImport = () => {
+    inFlight = inFlight.then(runImport, runImport);
+    return inFlight;
+  };
+
   try {
     watcher = watch(dir, (_event, filename) => {
+      if (stopped) return;
       // When the OS gives a filename (always on Windows) filter to .txt up
       // front. A null filename (some Linux/dir events) falls through to
       // tryImport, whose signature check no-ops when nothing actually changed.
@@ -290,8 +303,10 @@ export function watchInbox(
   } catch (err) {
     log(`inbox watch unavailable (${err}); use \`import\` manually instead`);
   }
-  return () => {
+  return async () => {
+    stopped = true;
     if (timer) clearTimeout(timer);
     watcher?.close();
+    await inFlight;
   };
 }

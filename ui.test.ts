@@ -1,10 +1,16 @@
 import { test, expect } from "bun:test";
-import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileStore } from "./store.ts";
 import { Launcher } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { listUiProfiles, handleUiRequest } from "./ui.ts";
+import { AppConfigStore } from "./app-config.ts";
+import { CloudAuthRuntime } from "./cloud-auth.ts";
+import type { CloudConnectionRuntime } from "./cloud-connection.ts";
+import { PendingSyncRuntime } from "./pending-sync.ts";
+import type { SupabaseAuthClient } from "./supabase-auth.ts";
 
 const SAMPLE = `id=k1d0cd11
 name=sophia
@@ -164,7 +170,21 @@ test("GET /ui/api/health is independent of launcher and hub state", async () => 
     new Proxy({}, { get: () => { throw new Error("hub must not be touched"); } }) as any,
   );
   expect(res!.status).toBe(200);
-  expect(await res!.json()).toMatchObject({ ok: true, version: expect.any(String), root: process.cwd() });
+  expect(await res!.json()).toMatchObject({ ok: true, version: expect.any(String), root: import.meta.dir });
+  s.close();
+});
+
+test("GET /ui/api/health uses desktop parent metadata when supplied", async () => {
+  const s = store();
+  const health = { version: "0.1.0-beta.1", root: "C:\\AliasMode", instance: "ab".repeat(32) };
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/health"),
+    {} as any,
+    s,
+    null,
+    { health },
+  );
+  expect(await res!.json()).toEqual({ ok: true, ...health });
   s.close();
 });
 
@@ -850,5 +870,408 @@ test("handleUiRequest returns null for non-ui paths (falls through to the AdsPow
   const s = store();
   const res = await handleUiRequest(new Request("http://x/api/v1/status"), {} as any, s);
   expect(res).toBeNull();
+  s.close();
+});
+
+test("app mode API exposes unconfigured first launch and persists Local selection", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+
+  const initial = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode"),
+    {} as any,
+    s,
+    null,
+    { appConfig },
+  );
+  expect(await initial!.json()).toEqual({ version: 1, mode: "unconfigured", localAnalytics: false });
+
+  const selected = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "local" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig },
+  );
+  expect(await selected!.json()).toEqual({
+    ok: true,
+    config: { version: 1, mode: "local", localAnalytics: false },
+    restartRequired: true,
+  });
+  expect(appConfig.read().mode).toBe("local");
+  s.close();
+});
+
+test("app mode API uses the packaged Cloud endpoint", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "cloud", cloudUrl: "https://attacker.example" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, defaultCloudUrl: "https://cloud.aliasmode.test" },
+  );
+  expect(await response!.json()).toEqual({
+    ok: true,
+    config: {
+      version: 1,
+      mode: "cloud",
+      cloudUrl: "https://cloud.aliasmode.test",
+      localAnalytics: false,
+    },
+    restartRequired: true,
+  });
+  const profiles = await handleUiRequest(
+    new Request("http://x/ui/api/profiles"),
+    {} as any,
+    s,
+    null,
+    { appConfig },
+  );
+  expect(profiles!.status).toBe(503);
+  expect((await profiles!.json()).error).toContain("authentication is required");
+  s.close();
+});
+
+test("Cloud auth API accepts verified sign-in without exposing extra user metadata", async () => {
+  const s = store();
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: {
+          id: "account1",
+          email: "user@example.com",
+          email_confirmed_at: "verified",
+          privateMetadata: "must-not-leak",
+        },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  const cloudConnection = {
+    async bootstrap() {
+      return {
+        device: { id: "device1" },
+        deviceCredential: "device-credential",
+        legal: { current: { terms: "1", privacy: "1", acceptableUse: "1" }, accepted: null },
+      };
+    },
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = new PendingSyncRuntime(
+    join(mkdtempSync(join(tmpdir(), "aliasmode-ui-pending-")), "pending.sqlite"),
+  );
+  const queueKey = Buffer.alloc(32, 7).toString("base64");
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth/signin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", password: "password", queueKey }),
+    }),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection, pendingSync },
+  );
+  expect(await response!.json()).toEqual({
+    ok: true,
+    authenticated: true,
+    refreshToken: "refresh-token",
+    deviceId: "device1",
+    deviceCredential: "device-credential",
+    expiresAt: 61_000,
+    legal: { current: { terms: "1", privacy: "1", acceptableUse: "1" }, accepted: null },
+    user: { id: "account1", email: "user@example.com" },
+  });
+  expect(cloudAuth.accessToken()).toBe("access-token");
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud auth API creates a pending-sync key only for a new queue", async () => {
+  const s = store();
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  const cloudConnection = {
+    async bootstrap() {
+      return {
+        device: { id: "device1" },
+        deviceCredential: "device-credential",
+        legal: { current: { terms: "1", privacy: "1", acceptableUse: "1" }, accepted: null },
+      };
+    },
+    clearDevice() {},
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = new PendingSyncRuntime(
+    join(mkdtempSync(join(tmpdir(), "aliasmode-ui-pending-")), "pending.sqlite"),
+  );
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth/signin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", password: "password" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection, pendingSync },
+  );
+  const body = await response!.json();
+  expect(body.queueKey).toMatch(/^[A-Za-z0-9+/]{43}=$/);
+  expect(pendingSync.queue()).toBeDefined();
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud auth API does not replace an existing queue when its key is missing", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-pending-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  pendingSync.initialize().queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 1,
+  });
+  pendingSync.close();
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  let bootstrapCalls = 0;
+  let cleared = 0;
+  const cloudConnection = {
+    async bootstrap() { bootstrapCalls++; throw new Error("must not bootstrap"); },
+    clearDevice() { cleared++; },
+  } as unknown as CloudConnectionRuntime;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth/signin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", password: "password" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection, pendingSync },
+  );
+  expect(response!.status).toBe(400);
+  expect((await response!.json()).error).toContain("requires its stored encryption key");
+  expect(bootstrapCalls).toBe(0);
+  expect(cleared).toBe(0);
+  expect(cloudAuth.accessToken()).toBeUndefined();
+  expect(existsSync(path)).toBe(true);
+  s.close();
+});
+
+test("Cloud auth API restores rotated credentials with the stored queue key", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-pending-")), "pending.sqlite");
+  const created = new PendingSyncRuntime(path);
+  const queueKey = created.initialize().createdKey!;
+  created.close();
+  const pendingSync = new PendingSyncRuntime(path);
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      return {
+        accessToken: "restored-access-token",
+        refreshToken: "rotated-refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  let restoredCredential = "";
+  let restoredDevice = "";
+  const cloudConnection = {
+    accountId() { return undefined; },
+    restoreCredential(value: string) { restoredCredential = value; },
+    client: {
+      async status() {
+        return {
+          account: { id: "account1" },
+          device: { id: "device1" },
+          legal: { current: { terms: "1", privacy: "1", acceptableUse: "1" }, accepted: null },
+        };
+      },
+    },
+    restoreAccount() {},
+    restoreDevice(deviceId: string) { restoredDevice = deviceId; },
+    clearDevice() {},
+  } as unknown as CloudConnectionRuntime;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        refreshToken: "stored-refresh-token",
+        deviceCredential: "device-credential",
+        queueKey,
+      }),
+    }),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection, pendingSync },
+  );
+  const body = await response!.json();
+  expect(body).toMatchObject({
+    ok: true,
+    authenticated: true,
+    refreshToken: "rotated-refresh-token",
+    deviceId: "device1",
+  });
+  expect(body.queueKey).toBeUndefined();
+  expect(restoredCredential).toBe("device-credential");
+  expect(restoredDevice).toBe("device1");
+  expect(pendingSync.queue()).toBeDefined();
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud profile routes use the Cloud browser coordinator without local fallback", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-browser-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const calls: string[] = [];
+  const cloudBrowser = {
+    async listRoster() {
+      calls.push("list");
+      return { profiles: [{ id: "cloud1", name: "Cloud profile" }], healthSources: [] };
+    },
+    async open(profileId: string) {
+      calls.push(`open:${profileId}`);
+      return { ok: true, port: 9222 };
+    },
+    async close() { return true; },
+    async resumeAfterAuthentication() {},
+    async retryPending() {},
+    async releaseAll() { return true; },
+  } as any;
+
+  const roster = await handleUiRequest(
+    new Request("http://x/ui/api/profiles"),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(await roster!.json()).toEqual({
+    profiles: [{ id: "cloud1", name: "Cloud profile" }],
+    healthSources: [],
+  });
+  const opened = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/cloud1/open", { method: "POST" }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(await opened!.json()).toEqual({ ok: true, port: 9222 });
+  expect(calls).toEqual(["list", "open:cloud1"]);
+
+  const unsupported = await handleUiRequest(
+    new Request("http://x/ui/api/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "must-not-write-local" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(unsupported!.status).toBe(501);
+  expect(s.getProfile("must-not-write-local")).toBeNull();
+  s.close();
+});
+
+test("app mode API reports when Cloud is unavailable in the build", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "cloud" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig: new AppConfigStore(join(root, "config.json")) },
+  );
+  expect(response!.status).toBe(503);
+  expect((await response!.json()).error).toContain("not configured");
+  s.close();
+});
+
+test("app mode API rejects cross-origin JSON requests", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({ mode: "local" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig },
+  );
+  expect(response!.status).toBe(403);
+  expect(appConfig.read().mode).toBe("unconfigured");
+  s.close();
+});
+
+test("app mode API rejects cross-site simple requests", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "text/plain", origin: "https://attacker.example" },
+      body: JSON.stringify({ mode: "local" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig },
+  );
+  expect(response!.status).toBe(415);
+  expect(appConfig.read().mode).toBe("unconfigured");
   s.close();
 });

@@ -46,6 +46,72 @@ export interface DiagnoseReport {
 
 export interface HealthResult { ok: boolean; version: string; root: string; }
 
+export interface AppModeConfig {
+  version: 1;
+  mode: "unconfigured" | "local" | "cloud";
+  cloudUrl?: string;
+  localAnalytics: boolean;
+}
+
+export async function fetchAppMode(): Promise<AppModeConfig> {
+  const path = "/ui/api/app-mode";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (body.mode !== "unconfigured" && body.mode !== "local" && body.mode !== "cloud") {
+    throw new Error(body.error || "AliasMode returned an invalid application mode");
+  }
+  return body as AppModeConfig;
+}
+
+export async function selectAppMode(mode: "local" | "cloud"): Promise<any> {
+  const path = "/ui/api/app-mode";
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Could not save AliasMode mode");
+  return body;
+}
+
+export interface CloudAuthState {
+  authenticated: boolean;
+  expiresAt?: number;
+  user?: { id: string; email?: string };
+}
+
+export async function fetchCloudAuth(): Promise<CloudAuthState> {
+  const path = "/ui/api/cloud-auth";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud authentication is unavailable");
+  return { authenticated: body.authenticated === true, expiresAt: body.expiresAt, user: body.user };
+}
+
+async function cloudAuthAction(action: string, input: Record<string, string>): Promise<any> {
+  const path = `/ui/api/cloud-auth/${action}`;
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud authentication failed");
+  return body;
+}
+
+export const signUpCloud = (email: string, password: string) =>
+  cloudAuthAction("signup", { email, password });
+export const signInCloud = (email: string, password: string, queueKey?: string) =>
+  cloudAuthAction("signin", { email, password, ...(queueKey ? { queueKey } : {}) });
+export const restoreCloudSession = (
+  refreshToken: string,
+  deviceCredential: string,
+  queueKey: string,
+) => cloudAuthAction("restore", { refreshToken, deviceCredential, queueKey });
+export const signOutCloud = () => cloudAuthAction("signout", {});
+
 export async function fetchHealth(): Promise<HealthResult> {
   const path = "/ui/api/health";
   const response = await fetch(path);

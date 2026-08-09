@@ -10,6 +10,12 @@ import index from "./web/index.html";
 import type { Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
+import type { AppConfigStore } from "./app-config.ts";
+import type { CloudAuthRuntime } from "./cloud-auth.ts";
+import type { CloudConnectionRuntime } from "./cloud-connection.ts";
+import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type { PendingSyncRuntime } from "./pending-sync.ts";
+import type { StatePaths } from "./paths.ts";
 import {
   handleRequest,
   handleRemoteBrowserControl,
@@ -17,7 +23,7 @@ import {
   isAdsPowerBrowserControl,
   isLoopbackAddress,
 } from "./server.ts";
-import { handleUiRequest } from "./ui.ts";
+import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
 import { handleUserApi } from "./adspower-users.ts";
 import {
   LifecycleAdmissionController,
@@ -30,6 +36,13 @@ export interface DashboardServerOptions {
   store: ProfileStore;
   /** When set, the dashboard routes profiles/open/close/import/move via the hub. */
   remote?: RemoteCoordinator | null;
+  appConfig?: AppConfigStore;
+  paths?: StatePaths;
+  defaultCloudUrl?: string;
+  cloudAuth?: CloudAuthRuntime;
+  cloudConnection?: CloudConnectionRuntime;
+  pendingSync?: PendingSyncRuntime;
+  cloudBrowser?: CloudBrowserLifecycle;
   port?: number;
   /**
    * Bind address. Loopback only by default — the dashboard and API are
@@ -39,6 +52,8 @@ export interface DashboardServerOptions {
   hostname?: string;
   log?: (msg: string) => void;
   lifecycleAdmissionOptions?: LifecycleAdmissionOptions;
+  lifecycleAdmission?: LifecycleAdmissionController;
+  health?: UiHealthMetadata | null;
 }
 
 function escapeHtml(s: unknown): string {
@@ -93,7 +108,7 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
 export function serveDashboard(opts: DashboardServerOptions) {
   const { launcher, store, port = 50400, hostname = "127.0.0.1" } = opts;
   const log = opts.log ?? ((m) => console.log(`[aliasmode] ${m}`));
-  const admission = new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
+  const admission = opts.lifecycleAdmission ?? new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
   const lifecycle = { admission };
   const server = Bun.serve({
     port,
@@ -118,11 +133,26 @@ export function serveDashboard(opts: DashboardServerOptions) {
       }
 
       return dispatchWithLifecycleAdmission(req, admission, async () => {
+        const ui = await handleUiRequest(req, launcher, store, opts.remote, {
+          appConfig: opts.appConfig,
+          paths: opts.paths,
+          defaultCloudUrl: opts.defaultCloudUrl,
+          cloudAuth: opts.cloudAuth,
+          cloudConnection: opts.cloudConnection,
+          pendingSync: opts.pendingSync,
+          cloudBrowser: opts.cloudBrowser,
+          health: opts.health,
+        });
+        if (ui) return ui;
+        if (opts.appConfig?.read().mode === "cloud" && !opts.remote) {
+          return Response.json(
+            { ok: false, error: "AliasMode Cloud authentication is required" },
+            { status: 503 },
+          );
+        }
         // Per-profile identity "card" (AdsPower-style landing page). Opened as a tab and
         // pointed to by the bookmark, so an operator can always see which account a window is.
         if (reqUrl.pathname === "/card") return renderProfileCard(store, reqUrl.searchParams.get("id") ?? "");
-        const ui = await handleUiRequest(req, launcher, store, opts.remote);
-        if (ui) return ui;
         // AdsPower-compatible profile management (create/list/delete/update +
         // group/list) so a full AdsPower REST client works by repointing its base
         // URL alone. Served in BOTH modes: in remote mode it routes create/list/

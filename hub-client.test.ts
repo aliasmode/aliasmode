@@ -22,7 +22,9 @@ test("client authenticates and reads a compatible roster snapshot", async () => 
     return json({ ok: true, owner: "cloud-user", profiles: [{ id: "legacy" }] });
   });
 
-  expect(await client.getRosterSnapshot()).toEqual({ profiles: [{ id: "legacy" }], healthSources: [] });
+  const snapshot = await client.getRosterSnapshot();
+  expect(snapshot.profiles[0]?.id).toBe("legacy");
+  expect(snapshot.healthSources).toEqual([]);
   expect(url).toBe("https://cloud.example/hub/profiles");
   expect(auth).toBe("Bearer token");
   expect(client.owner).toBe("cloud-user");

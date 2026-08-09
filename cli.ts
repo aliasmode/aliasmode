@@ -15,23 +15,43 @@
  *   bun cli.ts serve   [--port 50400] [--headless]
  *   bun cli.ts list
  *
- * Common flags: --db <path>  --data-root <dir>  --port <n>
+ * Common flags: --db <path>  --state-root <dir>  --migrate-from <legacy-dir>
+ *               --data-root <dir>  --port <n>
  */
 
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
 import { ProfileStore } from "./store.ts";
 import { Launcher } from "./launcher.ts";
 import { serveDashboard } from "./web.ts";
-import type { LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
+import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
 import { RemoteCoordinator } from "./remote.ts";
 import { playwrightTransportAttribution, readSessionInSubprocess, writeSession } from "./session.ts";
-import { importBuffers, importInbox, watchInbox, DEFAULT_INBOX } from "./inbox.ts";
+import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
+import { ensureStateDirectories, resolveStateRoot, statePaths } from "./paths.ts";
+import { migrateLegacyState } from "./migration.ts";
+import { AppConfigStore, legacyHubUrl } from "./app-config.ts";
+import { CloudAuthRuntime } from "./cloud-auth.ts";
+import { CloudConnectionRuntime } from "./cloud-connection.ts";
+import { CloudBrowserCoordinator } from "./cloud-browser.ts";
+import { PendingSyncRuntime } from "./pending-sync.ts";
+import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
 import { statSync, mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { hostname } from "node:os";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
+import {
+  DESKTOP_PROTOCOL,
+  DesktopCredentialBridge,
+  ManagedDesktopRuntime,
+  desktopHealthMetadata,
+  desktopReadyRecord,
+  isDesktopShutdownCommand,
+  type DesktopHealthMetadata,
+} from "./desktop-runtime.ts";
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(`--${name}`);
@@ -200,10 +220,54 @@ async function observeShutdownAttempt(
   return result;
 }
 
-function makeLauncher(store: ProfileStore, rest: string[], remoteMode = false): Launcher {
+function attachDesktopControl(
+  runtime: ManagedDesktopRuntime,
+  health: DesktopHealthMetadata,
+  port: number,
+  credentials: DesktopCredentialBridge,
+): void {
+  let input = "";
+  let exiting = false;
+  const shutdown = () => {
+    if (exiting) return;
+    exiting = true;
+    void runtime.shutdown()
+      .then(() => {
+        process.stdout.write(
+          `${JSON.stringify({ protocol: DESKTOP_PROTOCOL, event: "shutdown-complete", nonce: health.instance })}\n`,
+          () => process.exit(0),
+        );
+      })
+      .catch((error) => {
+        console.error(`desktop shutdown cleanup unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
+        process.stdout.write(
+          `${JSON.stringify({ protocol: DESKTOP_PROTOCOL, event: "shutdown-failed", nonce: health.instance })}\n`,
+          () => process.exit(1),
+        );
+      });
+  };
+
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk: string) => {
+    input += chunk;
+    for (;;) {
+      const newline = input.indexOf("\n");
+      if (newline < 0) break;
+      const line = input.slice(0, newline).trim();
+      input = input.slice(newline + 1);
+      if (credentials.handleLine(line)) continue;
+      if (isDesktopShutdownCommand(line, health.instance)) shutdown();
+    }
+  });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.stdout.write(`${JSON.stringify(desktopReadyRecord(health.instance, port))}\n`);
+}
+
+function makeLauncher(store: ProfileStore, rest: string[], remoteMode = false, defaultDataRoot = "profiles"): Launcher {
   return new Launcher({
     store,
-    dataRoot: flag(rest, "data-root") ?? "profiles",
+    dataRoot: flag(rest, "data-root") ?? defaultDataRoot,
     headless: has(rest, "headless"),
     // Explicit canary-only escape hatch for constrained test hosts where a
     // full browser identity probe cannot complete. Never enable in production.
@@ -227,10 +291,51 @@ function makeLauncher(store: ProfileStore, rest: string[], remoteMode = false): 
   });
 }
 
-async function importPath(store: ProfileStore, target: string | undefined): Promise<void> {
+function makeCloudBrowser(
+  launcher: Launcher,
+  store: ProfileStore,
+  connection: CloudConnectionRuntime | undefined,
+  pendingSync: PendingSyncRuntime | undefined,
+): CloudBrowserCoordinator | undefined {
+  if (!connection || !pendingSync) return undefined;
+  return new CloudBrowserCoordinator({
+    cloud: connection.client,
+    launcher,
+    store,
+    queue: () => pendingSync.queue(),
+    accountId: () => connection.accountId(),
+    deviceId: () => connection.deviceId(),
+    readSession: readSessionInSubprocess,
+    writeSession,
+  });
+}
+
+function installCloudShutdown(cloudBrowser: CloudBrowserCoordinator): void {
+  let shutdownInFlight: Promise<void> | null = null;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shutdownInFlight) {
+      process.exit(signal === "SIGINT" ? 130 : 143);
+      return;
+    }
+    console.error(`received ${signal}; capturing and closing Cloud browsers`);
+    shutdownInFlight = drainRemoteShutdown(
+      () => cloudBrowser.releaseAll(true),
+      { maxDrainMs: DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS },
+    )
+      .then(() => process.exit(0))
+      .catch((error) => {
+        console.error(`Cloud shutdown cleanup unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(1);
+      });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+async function importPath(store: ProfileStore, target: string | undefined, defaultInbox: string): Promise<void> {
   // No arg, or a directory → import the inbox / that directory.
   if (!target || target.startsWith("--") || isDir(target ?? "")) {
-    const dir = !target || target.startsWith("--") ? DEFAULT_INBOX : target;
+    const dir = !target || target.startsWith("--") ? defaultInbox : target;
     const r = await importInbox(store, dir);
     console.log(`imported ${r.profiles} profile(s) from ${r.files} file(s) in ${dir}; stripped ${r.cookiesStripped} extension cookie(s); reported ${r.errors.length} invalid record(s)`);
     return;
@@ -264,22 +369,73 @@ async function main() {
   });
 
   const [cmd, ...rest] = process.argv.slice(2);
-  const dbPath = flag(rest, "db") ?? "profiles.sqlite";
+  const paths = statePaths(resolveStateRoot(rest));
+  const desktop = has(rest, "desktop-stdio");
+  if (desktop && cmd !== "start") throw new Error("--desktop-stdio is supported only by the start command");
+  const desktopHealth = desktop
+    ? desktopHealthMetadata(process.env, flag(rest, "desktop-root"))
+    : null;
+  const desktopCredentials = desktopHealth
+    ? new DesktopCredentialBridge(desktopHealth.instance)
+    : null;
+  const migrationSource = flag(rest, "migrate-from") ?? process.env.ALIASMODE_LEGACY_ROOT;
+  if (migrationSource && (cmd === "start" || cmd === "serve")) {
+    const migration = migrateLegacyState(migrationSource, paths);
+    if (migration.status === "migrated") {
+      console.log(`migrated ${migration.profileCount} legacy profile(s) into ${paths.root}`);
+    }
+  }
+  ensureStateDirectories(paths);
+  const appConfig = new AppConfigStore(paths.config);
+  const defaultCloudUrl = process.env.ALIASMODE_CLOUD_URL;
+  const savedMode = appConfig.read();
+  const cloudAuth = savedMode.mode === "cloud" && process.env.ALIASMODE_SUPABASE_URL && process.env.ALIASMODE_SUPABASE_ANON_KEY
+    ? new CloudAuthRuntime(
+        new SupabaseAuthClient({
+          baseUrl: process.env.ALIASMODE_SUPABASE_URL,
+          anonKey: process.env.ALIASMODE_SUPABASE_ANON_KEY,
+        }),
+        undefined,
+        desktopCredentials
+          ? (refreshToken) => desktopCredentials.persistRefreshToken(refreshToken)
+          : undefined,
+        desktopCredentials
+          ? () => desktopCredentials.clearCloudSessionCredentials()
+          : undefined,
+      )
+    : undefined;
+  const dbPath = flag(rest, "db") ?? paths.database;
+  const cloudConnection = cloudAuth && defaultCloudUrl
+    ? new CloudConnectionRuntime({
+        baseUrl: defaultCloudUrl,
+        accessToken: () => cloudAuth.accessTokenOrRefresh(),
+        installation: {
+          installationId: defaultOperatorName(dbPath),
+          label: hostname(),
+          platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux",
+          appVersion: process.env.ALIASMODE_APP_VERSION ?? "0.1.0-beta.1",
+        },
+      })
+    : undefined;
+  const pendingSync = cloudAuth ? new PendingSyncRuntime(paths.pendingSync) : undefined;
   const lifecycleAdmissionOptions = cmd === "start" || cmd === "serve"
     ? lifecycleAdmissionOptionsFromEnv()
+    : undefined;
+  const lifecycleAdmission = lifecycleAdmissionOptions
+    ? new LifecycleAdmissionController(lifecycleAdmissionOptions)
     : undefined;
 
   switch (cmd) {
     case "install-browser": {
       console.log("Installing the official CloakBrowser binary (one-time download)...");
-      const installed = await installCloakBrowser();
+      const installed = await installCloakBrowser({ cwd: paths.root });
       console.log(`CloakBrowser installed and pinned:\n${installed.path}\nSHA-256 ${installed.sha256}`);
       console.log("Restart AliasMode to use it.");
       break;
     }
     case "import": {
       const store = new ProfileStore(dbPath);
-      await importPath(store, rest[0]);
+      await importPath(store, rest[0], paths.inbox);
       console.log(`store now holds ${store.count()} profile(s) at ${dbPath}`);
       store.close();
       break;
@@ -288,9 +444,10 @@ async function main() {
       const store = new ProfileStore(dbPath);
       const port = Number(flag(rest, "port") ?? 50400);
 
-      // Remote (team) mode: when HUB_URL is set, the roster + lock + sessions all
-      // come from the hub; the local store is just a launch cache.
-      const hubUrl = process.env.HUB_URL;
+      // Persisted mode is authoritative. The legacy HUB_URL fallback exists only
+      // for existing installations that have not completed first-run selection.
+      const configuredMode = savedMode;
+      const hubUrl = legacyHubUrl(configuredMode);
       if (hubUrl) {
         const password = process.env.HUB_PASSWORD ?? "";
         if (!password) {
@@ -302,7 +459,7 @@ async function main() {
         // attributes locks to this id; a per-operator token overrides it.
         const owner = defaultOperatorName(dbPath);
         console.log(`local instance "${owner}" (hub lock attribution: this box's operator id)`);
-        const launcher = makeLauncher(store, rest, true);
+        const launcher = makeLauncher(store, rest, true, paths.profiles);
         await launcher.reconcileOrphans();
         const coord = new RemoteCoordinator({
           hub: new HubClient(hubUrl, password, owner),
@@ -316,12 +473,44 @@ async function main() {
         // and let another operator open the same account.
         await coord.reclaimSurvivors();
         startMemoryAttributionLog(coord);
-        let shutdownInFlight: Promise<void> | null = null;
-        let firstShutdownSignal: NodeJS.Signals | null = null;
         const configuredShutdownTimeout = Number(process.env.ALIASMODE_SHUTDOWN_TIMEOUT_MS);
         const shutdownTimeoutMs = Number.isFinite(configuredShutdownTimeout) && configuredShutdownTimeout > 0
           ? Math.max(1_000, Math.floor(configuredShutdownTimeout))
           : DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS;
+        console.log(`remote mode: hub ${hubUrl} (authenticated operator identity is token-derived)`);
+        const server = serveDashboard({
+          launcher,
+          store,
+          remote: coord,
+          port,
+          lifecycleAdmission,
+          appConfig,
+          paths,
+          defaultCloudUrl,
+          cloudAuth,
+          cloudConnection,
+          pendingSync,
+          health: desktopHealth,
+        });
+
+        if (desktopHealth) {
+          const assignedPort = server.port;
+          if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
+          attachDesktopControl(new ManagedDesktopRuntime({
+            server,
+            admission: lifecycleAdmission!,
+            store,
+            launcher,
+            remoteShutdown: (remainingMs) => drainRemoteShutdown(
+              () => coord.releaseAll(),
+              { maxDrainMs: Math.min(shutdownTimeoutMs, remainingMs) },
+            ),
+          }), desktopHealth, assignedPort, desktopCredentials!);
+          break;
+        }
+
+        let shutdownInFlight: Promise<void> | null = null;
+        let firstShutdownSignal: NodeJS.Signals | null = null;
         const shutdown = (signal: NodeJS.Signals) => {
           if (shutdownInFlight) {
             const exitCode = signal === "SIGINT" ? 130 : 143;
@@ -352,8 +541,6 @@ async function main() {
         };
         process.on("SIGINT", shutdown);
         process.on("SIGTERM", shutdown);
-        console.log(`remote mode: hub ${hubUrl} (authenticated operator identity is token-derived)`);
-        serveDashboard({ launcher, store, remote: coord, port, lifecycleAdmissionOptions });
         break;
       }
 
@@ -361,11 +548,47 @@ async function main() {
       // before imports. Otherwise a stale crash row makes the hardened importer
       // reject startup before it has a chance to prove the row dead.
       console.log("standalone mode (no HUB_URL) — local only, NOT connected to a hub");
-      const launcher = makeLauncher(store, rest);
+      const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", paths.profiles);
       await launcher.reconcileOrphans();
-      await launcher.certifySurvivors();
+      if (savedMode.mode !== "cloud") await launcher.certifySurvivors();
+      const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);
       startMemoryAttributionLog();
-      const r = await importInbox(store, DEFAULT_INBOX).catch((error) => {
+      if (configuredMode.mode === "cloud") {
+        console.log("cloud mode: waiting for verified authentication before loading profiles");
+        if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser);
+        const server = serveDashboard({
+          launcher,
+          store,
+          port,
+          lifecycleAdmission,
+          appConfig,
+          paths,
+          defaultCloudUrl,
+          cloudAuth,
+          cloudConnection,
+          pendingSync,
+          cloudBrowser,
+          health: desktopHealth,
+        });
+        if (desktopHealth) {
+          const assignedPort = server.port;
+          if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
+          attachDesktopControl(new ManagedDesktopRuntime({
+            server,
+            admission: lifecycleAdmission!,
+            store,
+            launcher,
+            ...(cloudBrowser ? {
+              remoteShutdown: (remainingMs: number) => drainRemoteShutdown(
+                () => cloudBrowser.releaseAll(true),
+                { maxDrainMs: Math.min(DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS, remainingMs) },
+              ),
+            } : {}),
+          }), desktopHealth, assignedPort, desktopCredentials!);
+        }
+        break;
+      }
+      const r = await importInbox(store, paths.inbox).catch((error) => {
         // A live certified survivor can legitimately block a queued identity
         // replacement. Keep serving the safe stored profile and let the inbox
         // watcher retry after it closes; never discard the import error.
@@ -373,21 +596,53 @@ async function main() {
         return null;
       });
       if (r) console.log(`imported ${r.profiles} profile(s) from ${r.files} file(s); store holds ${store.count()}`);
-      watchInbox(store, DEFAULT_INBOX);
-      serveDashboard({ launcher, store, port, lifecycleAdmissionOptions });
+      const stopInbox = watchInbox(store, paths.inbox);
+      const server = serveDashboard({
+        launcher,
+        store,
+        port,
+        lifecycleAdmission,
+        appConfig,
+        paths,
+        defaultCloudUrl,
+        cloudAuth,
+        cloudConnection,
+        pendingSync,
+        health: desktopHealth,
+      });
+      if (desktopHealth) {
+        const assignedPort = server.port;
+        if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
+        attachDesktopControl(new ManagedDesktopRuntime({
+          server,
+          admission: lifecycleAdmission!,
+          store,
+          launcher,
+          stopInbox,
+        }), desktopHealth, assignedPort, desktopCredentials!);
+      }
       break;
     }
     case "serve": {
       const store = new ProfileStore(dbPath);
-      const launcher = makeLauncher(store, rest);
+      const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", paths.profiles);
       await launcher.reconcileOrphans();
-      await launcher.certifySurvivors();
+      if (savedMode.mode !== "cloud") await launcher.certifySurvivors();
+      const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);
       startMemoryAttributionLog();
+      if (cloudBrowser) installCloudShutdown(cloudBrowser);
       serveDashboard({
         launcher,
         store,
         port: Number(flag(rest, "port") ?? 50400),
-        lifecycleAdmissionOptions,
+        lifecycleAdmission,
+        appConfig,
+        paths,
+        defaultCloudUrl,
+        cloudAuth,
+        cloudConnection,
+        pendingSync,
+        cloudBrowser,
       });
       break;
     }
@@ -400,8 +655,8 @@ async function main() {
         console.error("no profiles imported yet — run `import` or `start` first");
         process.exit(1);
       }
-      mkdirSync("reports", { recursive: true });
-      const out = flag(rest, "out") ?? `reports/diagnose-latest.json`;
+      mkdirSync(paths.reports, { recursive: true });
+      const out = flag(rest, "out") ?? resolve(paths.reports, "diagnose-latest.json");
       // Write after every profile so a partial/interrupted run still leaves a
       // usable report on disk instead of nothing.
       const report = await runDiagnostics({

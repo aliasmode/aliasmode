@@ -9,6 +9,14 @@ import {
   type DiagnoseReport,
   type EditProfile,
   type Extension,
+  type AppModeConfig,
+  type CloudAuthState,
+  fetchAppMode,
+  fetchCloudAuth,
+  signInCloud,
+  signUpCloud,
+  restoreCloudSession,
+  selectAppMode,
   fetchProfiles,
   fetchHealth,
   fetchDiagnose,
@@ -285,10 +293,61 @@ function CopyField({ label, value, onChange }: { label: string; value: string; o
   );
 }
 
+type DesktopInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+function desktopInvoke(): DesktopInvoke | undefined {
+  return (window as any).__TAURI_INTERNALS__?.invoke as DesktopInvoke | undefined;
+}
+
+async function readDesktopCloudCredentials(): Promise<{
+  refreshToken?: string;
+  deviceCredential?: string;
+  queueKey?: string;
+} | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const [refreshToken, deviceCredential, queueKey] = await Promise.all([
+    invoke("credential_get", { key: "refresh_token" }),
+    invoke("credential_get", { key: "device_credential" }),
+    invoke("credential_get", { key: "queue_encryption_key" }),
+  ]);
+  return {
+    ...(typeof refreshToken === "string" && refreshToken ? { refreshToken } : {}),
+    ...(typeof deviceCredential === "string" && deviceCredential ? { deviceCredential } : {}),
+    ...(typeof queueKey === "string" && queueKey ? { queueKey } : {}),
+  };
+}
+
+async function storeDesktopCloudCredentials(
+  refreshToken: string,
+  deviceCredential: string,
+  createdQueueKey?: string,
+): Promise<boolean> {
+  const invoke = desktopInvoke();
+  if (!invoke) return false;
+  if (createdQueueKey) {
+    await invoke("credential_set", { key: "queue_encryption_key", secret: createdQueueKey });
+  }
+  await invoke("credential_set", { key: "device_credential", secret: deviceCredential });
+  await invoke("credential_set", { key: "refresh_token", secret: refreshToken });
+  return true;
+}
+
 const BLANK_FORM = { name: "", group: "", platform: "", proxyType: "http", host: "", port: "", user: "", pass: "", screen: "" };
 
 function App() {
   const [profiles, setProfiles] = useState<UiProfile[]>([]);
+  const [appMode, setAppMode] = useState<AppModeConfig | null>(null);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [modeErr, setModeErr] = useState<string | null>(null);
+  const [restartRequired, setRestartRequired] = useState(false);
+  const [cloudAuth, setCloudAuth] = useState<CloudAuthState | null>(null);
+  const [authView, setAuthView] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authErr, setAuthErr] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
   const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
@@ -365,17 +424,144 @@ function App() {
     }
   };
 
+  const chooseMode = async (mode: "local" | "cloud") => {
+    setModeBusy(true);
+    setModeErr(null);
+    try {
+      const result = await selectAppMode(mode);
+      setAppMode(result.config);
+      setRestartRequired(result.restartRequired === true);
+    } catch (error) {
+      setModeErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const submitCloudAuth = async () => {
+    setAuthBusy(true);
+    setAuthErr(null);
+    setAuthNotice(null);
+    try {
+      if (authView === "signup") {
+        const result = await signUpCloud(authEmail, authPassword);
+        setAuthNotice(result.verificationRequired
+          ? "Check your email, verify the account, then sign in."
+          : "Account created. You can sign in now.");
+        setAuthView("signin");
+      } else {
+        const stored = await readDesktopCloudCredentials();
+        const result = await signInCloud(authEmail, authPassword, stored?.queueKey);
+        if (typeof result.refreshToken !== "string" || !result.refreshToken) {
+          throw new Error("Cloud did not return a refresh token");
+        }
+        if (typeof result.deviceCredential !== "string" || !result.deviceCredential) {
+          throw new Error("Cloud did not return a device credential");
+        }
+        if (!stored?.queueKey && (typeof result.queueKey !== "string" || !result.queueKey)) {
+          throw new Error("Cloud did not initialize encrypted pending sync");
+        }
+        const persisted = await storeDesktopCloudCredentials(
+          result.refreshToken,
+          result.deviceCredential,
+          typeof result.queueKey === "string" ? result.queueKey : undefined,
+        );
+        setCloudAuth({ authenticated: true, expiresAt: result.expiresAt, user: result.user });
+        setAuthPassword("");
+        if (!persisted) setAuthNotice("Signed in for this run; desktop credential storage is unavailable.");
+      }
+    } catch (error) {
+      setAuthErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
   useEffect(() => {
+    fetchAppMode().then(setAppMode).catch((error) => {
+      setConnErr(String(error));
+      setLoaded(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (appMode?.mode !== "cloud" || restartRequired) return;
+    let active = true;
+    const restore = async () => {
+      try {
+        const state = await fetchCloudAuth();
+        if (state.authenticated) {
+          if (active) setCloudAuth(state);
+          return;
+        }
+        const stored = await readDesktopCloudCredentials();
+        if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
+          if (active) setCloudAuth(state);
+          return;
+        }
+        const result = await restoreCloudSession(
+          stored.refreshToken,
+          stored.deviceCredential,
+          stored.queueKey,
+        );
+        await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
+        if (active) {
+          setCloudAuth({ authenticated: true, expiresAt: result.expiresAt, user: result.user });
+          setAuthErr(null);
+        }
+      } catch (error) {
+        if (active) {
+          setCloudAuth({ authenticated: false });
+          setAuthErr(error instanceof Error ? error.message : String(error));
+        }
+      }
+    };
+    void restore();
+    return () => { active = false; };
+  }, [appMode?.mode, restartRequired]);
+
+  useEffect(() => {
+    if (
+      appMode?.mode !== "cloud" ||
+      restartRequired ||
+      !cloudAuth?.authenticated ||
+      !cloudAuth.expiresAt
+    ) return;
+    const delay = Math.max(1_000, cloudAuth.expiresAt - Date.now() - 60_000);
+    const timer = window.setTimeout(async () => {
+      try {
+        const stored = await readDesktopCloudCredentials();
+        if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
+          throw new Error("stored Cloud credentials are incomplete");
+        }
+        const result = await restoreCloudSession(
+          stored.refreshToken,
+          stored.deviceCredential,
+          stored.queueKey,
+        );
+        await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
+        setCloudAuth({ authenticated: true, expiresAt: result.expiresAt, user: result.user });
+      } catch (error) {
+        setCloudAuth({ authenticated: false });
+        setAuthErr(error instanceof Error ? error.message : String(error));
+      }
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [appMode?.mode, restartRequired, cloudAuth?.authenticated, cloudAuth?.expiresAt]);
+
+  useEffect(() => {
+    if (!appMode || appMode.mode !== "local" || restartRequired) return;
     load();
     fetchHealth().then((health) => setAppVersion(health.version)).catch(() => {});
     fetchDiagnose().then(setDiag).catch(() => {});
     fetchExtensions().then(setExtensions).catch(() => {});
-  }, []);
+  }, [appMode?.mode, restartRequired]);
 
   useEffect(() => {
+    if (!appMode || appMode.mode !== "local" || restartRequired) return;
     const t = setInterval(load, REFRESH_MS);
     return () => clearInterval(t);
-  }, []);
+  }, [appMode?.mode, restartRequired]);
 
   // Live 2FA code in the Edit modal: fetch the current TOTP, count it down
   // locally, and refetch when the window rolls over.
@@ -823,6 +1009,75 @@ function App() {
       setActionErr(String(e));
     }
   };
+
+  if (!appMode || appMode.mode !== "local" || restartRequired) {
+    return (
+      <main className="onboarding">
+        <section className="onboarding-card" aria-labelledby="onboarding-title">
+          <div className="onboarding-brand">AliasMode <span>by Xreacher</span></div>
+          {restartRequired ? (
+            <>
+              <h1 id="onboarding-title">Your mode is ready</h1>
+              <p>Quit and reopen AliasMode to start in {appMode?.mode === "cloud" ? "Cloud" : "Local"} mode.</p>
+              <button className="mode-primary" type="button" onClick={() => window.close()}>Quit AliasMode</button>
+            </>
+          ) : appMode?.mode === "cloud" ? (
+            cloudAuth?.authenticated ? (
+              <>
+                <h1 id="onboarding-title">Cloud account connected</h1>
+                <p>{cloudAuth.user?.email ?? "Verified account"}</p>
+                <div className="mode-error" role="status">Cloud workspace synchronization is still initializing.</div>
+                {authNotice && <div className="auth-notice" role="status">{authNotice}</div>}
+                <button className="mode-primary" type="button" disabled={modeBusy} onClick={() => chooseMode("local")}>Use Local instead</button>
+                {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
+              </>
+            ) : (
+              <>
+                <h1 id="onboarding-title">{authView === "signin" ? "Sign in to AliasMode Cloud" : "Create your Cloud account"}</h1>
+                <p>Verified accounts can synchronize portable profiles across authorized devices.</p>
+                <form className="auth-form" onSubmit={(event) => { event.preventDefault(); void submitCloudAuth(); }}>
+                  <label>Email<input type="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} /></label>
+                  <label>Password<input type="password" autoComplete={authView === "signin" ? "current-password" : "new-password"} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} /></label>
+                  {authErr && <div className="mode-error" role="alert">{authErr}</div>}
+                  {authNotice && <div className="auth-notice" role="status">{authNotice}</div>}
+                  <button className="mode-primary" type="submit" disabled={authBusy}>{authBusy ? "Working…" : authView === "signin" ? "Sign in" : "Create account"}</button>
+                </form>
+                <div className="auth-actions">
+                  <button type="button" onClick={() => { setAuthErr(null); setAuthNotice(null); setAuthView(authView === "signin" ? "signup" : "signin"); }}>
+                    {authView === "signin" ? "Create an account" : "Back to sign in"}
+                  </button>
+                  <button type="button" disabled={modeBusy} onClick={() => chooseMode("local")}>Use Local instead</button>
+                </div>
+                {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
+              </>
+            )
+          ) : appMode ? (
+            <>
+              <h1 id="onboarding-title">How do you want to use AliasMode?</h1>
+              <p>Choose where browser profiles live for this installation.</p>
+              <div className="mode-options">
+                <button className="mode-option primary" type="button" disabled={modeBusy} onClick={() => chooseMode("cloud")}>
+                  <strong>AliasMode Cloud</strong>
+                  <span>Sync profiles across authorized devices and work with your team.</span>
+                </button>
+                <button className="mode-option" type="button" disabled={modeBusy} onClick={() => chooseMode("local")}>
+                  <strong>AliasMode Local</strong>
+                  <span>No account. Profile data stays on this computer and analytics is off.</span>
+                </button>
+              </div>
+              {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
+            </>
+          ) : (
+            <>
+              <h1 id="onboarding-title">Starting AliasMode</h1>
+              <p>{connErr ?? "Loading your configuration…"}</p>
+              {connErr && <button className="mode-primary" type="button" onClick={() => window.location.reload()}>Try again</button>}
+            </>
+          )}
+        </section>
+      </main>
+    );
+  }
 
   const diagWhen = diag ? new Date(diag.generatedAt).toLocaleTimeString() : null;
 

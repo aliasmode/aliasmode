@@ -179,6 +179,11 @@ export interface AcceptLegalRequest {
   versions: LegalVersions;
 }
 
+export interface AcceptLegalResponse {
+  ok: true;
+  accepted: LegalVersions & { acceptedAt: number };
+}
+
 export interface AddMemberRequest {
   email: string;
 }
@@ -194,6 +199,19 @@ export interface CreateProfileRequest {
 }
 
 export interface CreateProfileResponse {
+  ok: true;
+  profile: CloudProfileSummary;
+  payloadDigest: string;
+}
+
+export interface GetProfileResponse {
+  ok: true;
+  profile: CloudProfileSummary;
+  payload: PortableProfileV1;
+  payloadDigest: string;
+}
+
+export interface UpdateProfileResponse {
   ok: true;
   profile: CloudProfileSummary;
   payloadDigest: string;
@@ -238,6 +256,19 @@ export interface CloseOpenConflict extends CloudError {
     code: "version_conflict";
     currentVersion: number;
   };
+}
+
+export interface AbandonOpenResponse {
+  ok: true;
+}
+
+export interface ProfileMutationResponse {
+  ok: true;
+  profile: CloudProfileSummary;
+}
+
+export interface PurgeProfileResponse {
+  ok: true;
 }
 
 export interface TrashProfileRequest {
