@@ -2,6 +2,7 @@ name: Client CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -37,4 +38,43 @@ jobs:
         with:
           toolchain: 1.85
       - run: bun install --frozen-lockfile
-      - run: bun run desktop:build:nsis
+      - run: bun run desktop:prepare
+      - name: Smoke-test compiled sidecar CDP runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $smoke = Join-Path $env:RUNNER_TEMP "aliasmode-sidecar-smoke"
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          Copy-Item ".\src-tauri\binaries\aliasmode-sidecar-x86_64-pc-windows-msvc.exe" "$smoke\aliasmode-sidecar.exe"
+          $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
+          $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
+          $browser = Start-Process -PassThru $browserPath -ArgumentList @(
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--remote-debugging-port=9222",
+            "--user-data-dir=$smoke\browser-profile"
+          )
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              try {
+                Invoke-RestMethod "http://127.0.0.1:9222/json/version" | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw "CloakBrowser CDP endpoint did not become ready" }
+            Push-Location $smoke
+            try {
+              & ".\aliasmode-sidecar.exe" __sidecar-smoke --cdp-endpoint "http://127.0.0.1:9222" --state-root "$smoke\state"
+              if ($LASTEXITCODE -ne 0) { throw "compiled sidecar smoke exited with code $LASTEXITCODE" }
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            if (-not $browser.HasExited) { Stop-Process -Id $browser.Id -Force }
+          }
+      - run: bunx tauri build --bundles nsis

@@ -426,6 +426,15 @@ async function main() {
     : undefined;
 
   switch (cmd) {
+    case "__sidecar-smoke": {
+      const endpoint = flag(rest, "cdp-endpoint");
+      if (!endpoint) throw new Error("compiled sidecar smoke requires --cdp-endpoint");
+      const { chromium } = await import("playwright-core");
+      const browser = await chromium.connectOverCDP(endpoint);
+      await browser.close();
+      console.log("compiled sidecar connected over Playwright CDP");
+      break;
+    }
     case "install-browser": {
       console.log("Installing the official CloakBrowser binary (one-time download)...");
       const installed = await installCloakBrowser({ cwd: paths.root });
