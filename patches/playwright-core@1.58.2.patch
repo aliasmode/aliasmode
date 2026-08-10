@@ -154,3 +154,17 @@ index 2502a8e..211c914 100644
      await promise;
    }
  }
+diff --git a/lib/server/browserContext.js b/lib/server/browserContext.js
+--- a/lib/server/browserContext.js
++++ b/lib/server/browserContext.js
+@@ -214,6 +214,10 @@ class BrowserContext extends import_instrumentation.SdkObject {
+     return await this.doGetCookies(urls);
+   }
+   async clearCookies(options) {
++    if (!options.name && !options.domain && !options.path) {
++      await this.doClearCookies();
++      return;
++    }
+     const currentCookies = await this.cookies();
+     await this.doClearCookies();
+     const matches = (cookie, prop, value) => {

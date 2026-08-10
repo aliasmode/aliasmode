@@ -455,13 +455,36 @@ export async function runCompiledSidecarSmoke(
     assertAlive: assertCdpAlive,
   },
 ): Promise<void> {
-  await deps.writeSession(endpoint, JSON.stringify({ cookies: [], origins: [] }));
+  const smokeCookie = {
+    name: "aliasmode_smoke",
+    value: "live",
+    domain: ".x.com",
+    path: "/",
+    expires: -1,
+    httpOnly: false,
+    secure: true,
+    sameSite: "Lax",
+  };
+  const smokeBundle = JSON.stringify({
+    cookies: [smokeCookie],
+    origins: [{
+      origin: "https://web.telegram.org",
+      localStorage: [{ name: "aliasmode_smoke", value: "live" }],
+    }],
+  });
+  await deps.writeSession(endpoint, smokeBundle);
+  await deps.assertAlive(endpoint);
+  // The second authoritative write exercises cookie clearing against pre-existing browser state.
+  await deps.writeSession(endpoint, smokeBundle);
   await deps.assertAlive(endpoint);
   await deps.navigate(endpoint);
   await deps.assertAlive(endpoint);
   const bundle = JSON.parse(await deps.readSession(endpoint));
   if (!bundle || typeof bundle !== "object" || !Array.isArray(bundle.cookies)) {
     throw new Error("compiled sidecar capture returned an invalid session bundle");
+  }
+  if (!bundle.cookies.some((cookie: any) => cookie?.name === smokeCookie.name && cookie?.value === smokeCookie.value)) {
+    throw new Error("compiled sidecar capture lost the restored cookie");
   }
   await deps.assertAlive(endpoint);
 }

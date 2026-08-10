@@ -228,7 +228,7 @@ test("writeSessionToBrowser bounds a hung origin restore and disconnects", async
   };
   const bundle = normalizeBundle({
     cookies: [],
-    origins: [{ origin: "https://x.com", localStorage: [{ name: "auth", value: "value" }] }],
+    origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "value" }] }],
   });
 
   await expect(writeSessionToBrowser(browser, bundle, {
@@ -236,6 +236,42 @@ test("writeSessionToBrowser bounds a hung origin restore and disconnects", async
     disconnectTimeoutMs: 5,
   })).rejects.toThrow("session restore exceeded 5ms");
   expect(closes).toBe(1);
+});
+
+test("writeSessionToBrowser restores cookie auth without opening a cookie-platform origin", async () => {
+  let opened = false;
+  let cleared = false;
+  let injected: any[] = [];
+  let currentUrl = "about:blank";
+  const context = {
+    pages: () => [],
+    async newPage() {
+      opened = true;
+      return {
+        async goto(url: string) { currentUrl = url; },
+        url: () => currentUrl,
+        async evaluate() {},
+        async close() {},
+      };
+    },
+    async route() {},
+    async unroute() {},
+    async clearCookies() { cleared = true; },
+    async addCookies(cookies: any[]) { injected = cookies; },
+  };
+  const browser = {
+    contexts: () => [context],
+    async close() {},
+  };
+
+  await writeSessionToBrowser(browser, normalizeBundle({
+    cookies: [{ name: "sessionid", value: "live", domain: ".instagram.com", path: "/" }],
+    origins: [{ origin: "https://www.instagram.com", localStorage: [{ name: "incidental", value: "state" }] }],
+  }));
+
+  expect(opened).toBe(false);
+  expect(cleared).toBe(true);
+  expect(injected.map((cookie) => cookie.name)).toEqual(["sessionid"]);
 });
 
 test("writeSessionToBrowser bounds hung cookie clear and injection", async () => {
@@ -423,11 +459,13 @@ test("normalizeOriginStorage filters malformed localStorage entries but keeps we
   expect(result?.indexedDB).toBeUndefined();
 });
 
-test("normalizeOriginStorage keeps indexedDB records when present, even with empty localStorage", () => {
-  const idb = [{ name: "tweb", version: 1, stores: [] }];
-  const result = normalizeOriginStorage("https://x.com", { localStorage: [], indexedDB: idb });
-  expect(result?.localStorage).toEqual([]);
-  expect(result?.indexedDB).toEqual(idb);
+test("normalizeOriginStorage rejects origin storage for cookie-auth platforms", () => {
+  const storage = {
+    localStorage: [{ name: "auth", value: "value" }],
+    indexedDB: [{ name: "cache", version: 1, stores: [] }],
+  };
+  expect(normalizeOriginStorage("https://x.com", storage)).toBeNull();
+  expect(normalizeOriginStorage("https://www.instagram.com", storage)).toBeNull();
 });
 
 test("normalizeOriginStorage drops Telegram cache DBs but keeps the A/K passcode DBs", () => {
@@ -461,11 +499,12 @@ test("normalizeBundle distinguishes a legacy cookie-only bundle from a modern on
   expect(normalizeBundle({ cookies: [], origins: [] }).hasOrigins).toBe(true); // modern: explicitly empty
 });
 
-test("normalizeBundle drops origin entries for unsupported platforms and malformed shapes", () => {
+test("normalizeBundle keeps only Telegram origin storage and drops malformed shapes", () => {
   const bundle = normalizeBundle({
     cookies: [],
     origins: [
       { origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "live" }] },
+      { origin: "https://www.instagram.com", localStorage: [{ name: "incidental", value: "state" }] },
       { origin: "https://evil.com", localStorage: [{ name: "steal", value: "me" }] },
       { localStorage: [{ name: "no-origin-field", value: "x" }] },
       null,
@@ -537,7 +576,7 @@ test("restoreOriginStorage is a no-op when the bundle carries no supported origi
       return { async goto() {}, async evaluate() {}, async close() {} };
     },
   };
-  await restoreOriginStorage(ctx, [{ origin: "https://evil.com", localStorage: [{ name: "x", value: "y" }] }]);
+  await restoreOriginStorage(ctx, [{ origin: "https://www.instagram.com", localStorage: [{ name: "x", value: "y" }] }]);
   expect(opened).toBe(false); // nothing to restore → never even opens a page
 });
 
@@ -592,6 +631,33 @@ test("collectSessionFromContext includes storage from pages loaded before CDP at
     },
   ]);
   expect(bundle.telegramClient).toBe("a");
+});
+
+test("collectSessionFromContext ignores origin storage for cookie-auth platforms", async () => {
+  let evaluations = 0;
+  const ctx = {
+    async storageState() {
+      return {
+        cookies: [{ name: "sessionid", value: "live", domain: ".instagram.com", path: "/" }],
+        origins: [{ origin: "https://www.instagram.com", localStorage: [{ name: "incidental", value: "state" }] }],
+      };
+    },
+    pages() {
+      return [{
+        url: () => "https://www.instagram.com/",
+        async evaluate() {
+          evaluations++;
+          return { localStorage: [{ name: "incidental", value: "state" }] };
+        },
+      }];
+    },
+  };
+
+  const bundle = await collectSessionFromContext(ctx);
+
+  expect(bundle.cookies.map((cookie) => cookie.name)).toEqual(["sessionid"]);
+  expect(bundle.origins).toEqual([]);
+  expect(evaluations).toBe(0);
 });
 
 test("collectSessionFromContext does not walk Telegram cache IndexedDB when localStorage auth exists", async () => {
