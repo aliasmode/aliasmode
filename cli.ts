@@ -37,7 +37,12 @@ import {
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
 import { ensureStateDirectories, resolveStateRoot, statePaths } from "./paths.ts";
 import { migrateLegacyState } from "./migration.ts";
-import { AppConfigStore, legacyHubUrl } from "./app-config.ts";
+import {
+  AppConfigStore,
+  legacyHubUrl,
+  normalizeSecureServiceUrl,
+  type AppConfig,
+} from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
@@ -66,6 +71,46 @@ function flag(args: string[], name: string): string | undefined {
 }
 function has(args: string[], name: string): boolean {
   return args.includes(`--${name}`);
+}
+
+export const OFFICIAL_CLOUD_URL = "https://cloud.aliasmode.com";
+export const OFFICIAL_CLOUD_ANON_KEY = "aliasmode-direct-gotrue";
+
+export interface CloudRuntimeConfiguration {
+  apiUrl: string;
+  authUrl: string;
+  anonKey: string;
+}
+
+function nonblank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+export function selectedCloudUrl(
+  config: AppConfig,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return nonblank(env.ALIASMODE_CLOUD_URL) ?? config.cloudUrl ?? OFFICIAL_CLOUD_URL;
+}
+
+export function cloudRuntimeConfiguration(
+  config: AppConfig,
+  env: Record<string, string | undefined> = process.env,
+): CloudRuntimeConfiguration | null {
+  if (config.mode !== "cloud") return null;
+  const cloudUrl = normalizeSecureServiceUrl(
+    selectedCloudUrl(config, env),
+    "AliasMode Cloud",
+  );
+  return {
+    apiUrl: cloudUrl,
+    authUrl: normalizeSecureServiceUrl(
+      nonblank(env.ALIASMODE_SUPABASE_URL) ?? cloudUrl,
+      "AliasMode Auth",
+    ),
+    anonKey: nonblank(env.ALIASMODE_SUPABASE_ANON_KEY) ?? OFFICIAL_CLOUD_ANON_KEY,
+  };
 }
 
 export function lifecycleAdmissionOptionsFromEnv(
@@ -410,13 +455,14 @@ async function main() {
   }
   ensureStateDirectories(paths);
   const appConfig = new AppConfigStore(paths.config);
-  const defaultCloudUrl = process.env.ALIASMODE_CLOUD_URL;
   const savedMode = appConfig.read();
-  const cloudAuth = savedMode.mode === "cloud" && process.env.ALIASMODE_SUPABASE_URL && process.env.ALIASMODE_SUPABASE_ANON_KEY
+  const defaultCloudUrl = selectedCloudUrl(savedMode);
+  const cloudConfig = cloudRuntimeConfiguration(savedMode);
+  const cloudAuth = cloudConfig
     ? new CloudAuthRuntime(
         new SupabaseAuthClient({
-          baseUrl: process.env.ALIASMODE_SUPABASE_URL,
-          anonKey: process.env.ALIASMODE_SUPABASE_ANON_KEY,
+          baseUrl: cloudConfig.authUrl,
+          anonKey: cloudConfig.anonKey,
         }),
         undefined,
         desktopCredentials
@@ -428,9 +474,9 @@ async function main() {
       )
     : undefined;
   const dbPath = flag(rest, "db") ?? paths.database;
-  const cloudConnection = cloudAuth && defaultCloudUrl
+  const cloudConnection = cloudAuth && cloudConfig
     ? new CloudConnectionRuntime({
-        baseUrl: defaultCloudUrl,
+        baseUrl: cloudConfig.apiUrl,
         accessToken: () => cloudAuth.accessTokenOrRefresh(),
         installation: {
           installationId: defaultOperatorName(dbPath),
