@@ -7,7 +7,20 @@ import {
   OFFICIAL_CLOUD_ANON_KEY,
   OFFICIAL_CLOUD_URL,
   RemoteShutdownTimeoutError,
+  selectedCloudUrl,
 } from "./cli.ts";
+
+const cloudMode = {
+  version: 1 as const,
+  mode: "cloud" as const,
+  localAnalytics: false,
+};
+
+const localMode = {
+  version: 1 as const,
+  mode: "local" as const,
+  localAnalytics: false,
+};
 
 test("CLI dispatches the session worker before normal command parsing", async () => {
   const events: string[] = [];
@@ -33,7 +46,7 @@ test("CLI dispatches the session worker before normal command parsing", async ()
 });
 
 test("official Cloud configuration works without environment variables", () => {
-  expect(cloudRuntimeConfiguration("cloud", {})).toEqual({
+  expect(cloudRuntimeConfiguration(cloudMode, {})).toEqual({
     apiUrl: OFFICIAL_CLOUD_URL,
     authUrl: OFFICIAL_CLOUD_URL,
     anonKey: OFFICIAL_CLOUD_ANON_KEY,
@@ -41,7 +54,7 @@ test("official Cloud configuration works without environment variables", () => {
 });
 
 test("Cloud configuration preserves explicit staging overrides", () => {
-  expect(cloudRuntimeConfiguration("cloud", {
+  expect(cloudRuntimeConfiguration(cloudMode, {
     ALIASMODE_CLOUD_URL: "http://127.0.0.1:3000/",
     ALIASMODE_SUPABASE_URL: "http://localhost:9999/",
     ALIASMODE_SUPABASE_ANON_KEY: "staging-public-key",
@@ -52,21 +65,51 @@ test("Cloud configuration preserves explicit staging overrides", () => {
   });
 });
 
+test("persisted Cloud URL configures both API and Auth", () => {
+  const savedMode = { ...cloudMode, cloudUrl: "https://saved.aliasmode.test" };
+  expect(cloudRuntimeConfiguration(savedMode, {})).toEqual({
+    apiUrl: "https://saved.aliasmode.test",
+    authUrl: "https://saved.aliasmode.test",
+    anonKey: OFFICIAL_CLOUD_ANON_KEY,
+  });
+});
+
+test("nonblank environment Cloud URL overrides the persisted selection", () => {
+  const savedMode = { ...cloudMode, cloudUrl: "https://saved.aliasmode.test" };
+  const env = { ALIASMODE_CLOUD_URL: "https://override.aliasmode.test/" };
+  expect(selectedCloudUrl(savedMode, env)).toBe("https://override.aliasmode.test/");
+  expect(cloudRuntimeConfiguration(savedMode, env)).toMatchObject({
+    apiUrl: "https://override.aliasmode.test",
+    authUrl: "https://override.aliasmode.test",
+  });
+});
+
+test("blank Cloud overrides fall back to official configuration", () => {
+  expect(cloudRuntimeConfiguration(cloudMode, {
+    ALIASMODE_CLOUD_URL: "  ",
+    ALIASMODE_SUPABASE_URL: "\t",
+    ALIASMODE_SUPABASE_ANON_KEY: " ",
+  })).toEqual({
+    apiUrl: OFFICIAL_CLOUD_URL,
+    authUrl: OFFICIAL_CLOUD_URL,
+    anonKey: OFFICIAL_CLOUD_ANON_KEY,
+  });
+});
+
 test("Local mode does not initialize or validate Cloud configuration", () => {
-  expect(cloudRuntimeConfiguration("local", {
+  const invalidEnv = {
     ALIASMODE_CLOUD_URL: "not a URL",
     ALIASMODE_SUPABASE_URL: "not a URL",
     ALIASMODE_SUPABASE_ANON_KEY: "",
-  })).toBeNull();
+  };
+  expect(selectedCloudUrl(localMode, invalidEnv)).toBe("not a URL");
+  expect(cloudRuntimeConfiguration(localMode, invalidEnv)).toBeNull();
 });
 
 test("Cloud mode rejects invalid explicit configuration", () => {
-  expect(() => cloudRuntimeConfiguration("cloud", {
+  expect(() => cloudRuntimeConfiguration(cloudMode, {
     ALIASMODE_CLOUD_URL: "http://cloud.example.com",
   })).toThrow("AliasMode Cloud URL must use HTTPS");
-  expect(() => cloudRuntimeConfiguration("cloud", {
-    ALIASMODE_SUPABASE_ANON_KEY: "",
-  })).toThrow("ALIASMODE_SUPABASE_ANON_KEY must not be empty");
 });
 
 test("lifecycle admission env config is optional and parses positive integers", () => {

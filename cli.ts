@@ -41,7 +41,7 @@ import {
   AppConfigStore,
   legacyHubUrl,
   normalizeSecureServiceUrl,
-  type AppMode,
+  type AppConfig,
 } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
@@ -82,23 +82,34 @@ export interface CloudRuntimeConfiguration {
   anonKey: string;
 }
 
+function nonblank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+export function selectedCloudUrl(
+  config: AppConfig,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return nonblank(env.ALIASMODE_CLOUD_URL) ?? config.cloudUrl ?? OFFICIAL_CLOUD_URL;
+}
+
 export function cloudRuntimeConfiguration(
-  mode: AppMode,
+  config: AppConfig,
   env: Record<string, string | undefined> = process.env,
 ): CloudRuntimeConfiguration | null {
-  if (mode !== "cloud") return null;
-  const anonKey = env.ALIASMODE_SUPABASE_ANON_KEY ?? OFFICIAL_CLOUD_ANON_KEY;
-  if (!anonKey.trim()) throw new Error("ALIASMODE_SUPABASE_ANON_KEY must not be empty");
+  if (config.mode !== "cloud") return null;
+  const cloudUrl = normalizeSecureServiceUrl(
+    selectedCloudUrl(config, env),
+    "AliasMode Cloud",
+  );
   return {
-    apiUrl: normalizeSecureServiceUrl(
-      env.ALIASMODE_CLOUD_URL ?? OFFICIAL_CLOUD_URL,
-      "AliasMode Cloud",
-    ),
+    apiUrl: cloudUrl,
     authUrl: normalizeSecureServiceUrl(
-      env.ALIASMODE_SUPABASE_URL ?? OFFICIAL_CLOUD_URL,
+      nonblank(env.ALIASMODE_SUPABASE_URL) ?? cloudUrl,
       "AliasMode Auth",
     ),
-    anonKey,
+    anonKey: nonblank(env.ALIASMODE_SUPABASE_ANON_KEY) ?? OFFICIAL_CLOUD_ANON_KEY,
   };
 }
 
@@ -444,9 +455,9 @@ async function main() {
   }
   ensureStateDirectories(paths);
   const appConfig = new AppConfigStore(paths.config);
-  const defaultCloudUrl = process.env.ALIASMODE_CLOUD_URL ?? OFFICIAL_CLOUD_URL;
   const savedMode = appConfig.read();
-  const cloudConfig = cloudRuntimeConfiguration(savedMode.mode);
+  const defaultCloudUrl = selectedCloudUrl(savedMode);
+  const cloudConfig = cloudRuntimeConfiguration(savedMode);
   const cloudAuth = cloudConfig
     ? new CloudAuthRuntime(
         new SupabaseAuthClient({
