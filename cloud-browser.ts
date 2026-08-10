@@ -68,8 +68,8 @@ export interface CloudBrowserOptions {
   queue: () => PendingSyncQueue | undefined;
   accountId: () => string | undefined;
   deviceId: () => string | undefined;
-  readSession: (ws: string) => Promise<string>;
-  writeSession: (ws: string, bundle: string) => Promise<void>;
+  readSession: (endpoint: string) => Promise<string>;
+  writeSession: (endpoint: string, bundle: string) => Promise<void>;
   heartbeatMs?: number;
   setIntervalFn?: (fn: () => void, ms: number) => unknown;
   clearIntervalFn?: (handle: unknown) => void;
@@ -105,6 +105,10 @@ function safeErrorType(error: unknown): string {
   if (error instanceof CloudApiError) return "CloudApiError";
   if (error instanceof TypeError) return "TypeError";
   return error instanceof Error ? "Error" : "unknown";
+}
+
+function localCdpEndpoint(port: number): string {
+  return `http://127.0.0.1:${port}`;
 }
 
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
@@ -259,7 +263,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
-      await this.options.writeSession(launched.ws, sessionBundle);
+      await this.options.writeSession(localCdpEndpoint(launched.port), sessionBundle);
 
       stage = "version_commit";
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
@@ -356,7 +360,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     try {
       const profile = this.options.store.getProfile(profileId);
       if (!profile) throw new Error("Cloud profile cache is missing");
-      const sessionBundle = await this.options.readSession(launch.ws);
+      const sessionBundle = await this.options.readSession(localCdpEndpoint(launch.debugPort));
       pendingId = queue.enqueue({
         accountId,
         profileId,
@@ -534,7 +538,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (!launch || !profile) return false;
     let pendingId: string;
     try {
-      const sessionBundle = await this.options.readSession(launch.ws);
+      const sessionBundle = await this.options.readSession(localCdpEndpoint(launch.debugPort));
       pendingId = queue.enqueue({
         accountId: open.accountId,
         profileId: open.profileId,
