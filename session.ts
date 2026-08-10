@@ -7,9 +7,7 @@
  * cookies alone can never roam a Telegram session, so origin storage roams too.
  */
 
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { source as playwrightStorageScriptSource } from "./node_modules/playwright-core/lib/generated/storageScriptSource.js";
 import type { CookieRecord } from "./types.ts";
 
 const SESSION_URLS = ["https://x.com", "https://web.telegram.org", "https://www.linkedin.com", "https://linkedin.com"];
@@ -20,7 +18,8 @@ const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
 const SESSION_WRITE_TIMEOUT_MS = 90_000;
 const SESSION_DISCONNECT_TIMEOUT_MS = 5_000;
 const SESSION_SUBPROCESS_TIMEOUT_MS = 85_000;
-const READ_SESSION_WORKER_ARG = "--read-session-worker";
+export const READ_SESSION_WORKER_ARG = "--read-session-worker";
+const RUNNING_COMPILED = typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true;
 const PLAYWRIGHT_TRANSPORT_STATS = Symbol.for("aliasmode.playwrightTransportStats");
 
 export interface PlaywrightTransportAttribution {
@@ -615,6 +614,15 @@ interface ReadSessionSubprocessOptions {
   spawn?: (argv: string[]) => ReadSessionSubprocess;
 }
 
+export function readSessionWorkerCommand(
+  ws: string,
+  compiled = RUNNING_COMPILED,
+): string[] {
+  return compiled
+    ? [process.execPath, READ_SESSION_WORKER_ARG, ws]
+    : [process.execPath, import.meta.path, READ_SESSION_WORKER_ARG, ws];
+}
+
 /** Isolate repeated captures so Windows reclaims Playwright/Bun native allocations after every read. */
 export async function readSessionInSubprocess(
   ws: string,
@@ -622,7 +630,7 @@ export async function readSessionInSubprocess(
 ): Promise<string> {
   const timeoutMs = Math.max(1, options.timeoutMs ?? SESSION_SUBPROCESS_TIMEOUT_MS);
   const spawn = options.spawn ?? ((argv: string[]) => Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" }));
-  const child = spawn([process.execPath, import.meta.path, READ_SESSION_WORKER_ARG, ws]);
+  const child = spawn(readSessionWorkerCommand(ws));
   const stdout = new Response(child.stdout).text();
   const stderr = new Response(child.stderr).text();
   let timedOut = false;
@@ -696,18 +704,8 @@ export async function harvestCookies(ws: string, urls: string[]): Promise<Cookie
   }
 }
 
-const require = createRequire(import.meta.url);
-const PLAYWRIGHT_PACKAGE_DIR = dirname(require.resolve("playwright-core/package.json"));
-const STORAGE_SCRIPT_URL = pathToFileURL(join(PLAYWRIGHT_PACKAGE_DIR, "lib", "generated", "storageScriptSource.js")).href;
-let storageScriptSourcePromise: Promise<string> | null = null;
-
 async function storageScriptSource(): Promise<string> {
-  storageScriptSourcePromise ??= import(STORAGE_SCRIPT_URL).then((mod: any) => {
-    const source = mod.source ?? mod.default?.source;
-    if (typeof source !== "string") throw new Error("Playwright storage script source not found");
-    return source;
-  });
-  return storageScriptSourcePromise;
+  return playwrightStorageScriptSource;
 }
 
 /**

@@ -3,6 +3,10 @@ node_modules/
 dist/
 target/
 src-tauri/target/
+src-tauri/gen/
+src-tauri/generated/
+src-tauri/binaries/
+src-tauri/resources/cloakbrowser/
 *.msi
 *.exe
 *.dmg

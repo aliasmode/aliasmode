@@ -8,6 +8,7 @@ const HASH_KEY = "CLOAKBROWSER_BINARY_SHA256";
 
 export interface BrowserInstallOptions {
   cwd?: string;
+  cacheDir?: string;
   runInstaller?: () => Promise<{ code: number; output: string }>;
   exists?: (path: string) => boolean;
   hashFile?: (path: string) => Promise<string>;
@@ -24,15 +25,13 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function runOfficialInstaller(cwd: string): Promise<{ code: number; output: string }> {
-  const env = { ...process.env };
+async function runOfficialInstaller(cwd: string, cacheDir?: string): Promise<{ code: number; output: string }> {
   // This command exists to repair a missing/stale deployment. Do not let the
-  // wrapper treat the very override we are replacing as its install target.
-  // Keep CLOAKBROWSER_LICENSE_KEY so licensed servers still receive their
-  // entitled build, but force the source/download path back to the official one.
-  delete env.CLOAKBROWSER_BINARY_PATH;
-  delete env.CLOAKBROWSER_BINARY_SHA256;
-  delete env.CLOAKBROWSER_DOWNLOAD_URL;
+  // wrapper treat a local CloakBrowser override as its install target.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("CLOAKBROWSER_")),
+  );
+  if (cacheDir) env.CLOAKBROWSER_CACHE_DIR = cacheDir;
   const child = Bun.spawn(
     [process.execPath, "x", `cloakbrowser@${WRAPPER_VERSION}`, "install"],
     { cwd, env, stdout: "pipe", stderr: "inherit" },
@@ -60,7 +59,10 @@ export function browserEnvText(current: string, binaryPath: string, sha256: stri
 /** Download the official signed binary, pin its exact path/hash, and return both. */
 export async function installCloakBrowser(opts: BrowserInstallOptions = {}): Promise<{ path: string; sha256: string }> {
   const cwd = resolve(opts.cwd ?? process.cwd());
-  const run = opts.runInstaller ?? (() => runOfficialInstaller(cwd));
+  const run = opts.runInstaller ?? (() => runOfficialInstaller(
+    cwd,
+    opts.cacheDir ? resolve(opts.cacheDir) : undefined,
+  ));
   const exists = opts.exists ?? existsSync;
   const result = await run();
   if (result.code !== 0) throw new Error(`official CloakBrowser installer exited with code ${result.code}`);

@@ -1,0 +1,101 @@
+name: Client CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    name: Ubuntu tests and checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+          components: rustfmt
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+  windows:
+    name: Windows NSIS installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - run: bun install --frozen-lockfile
+      - run: bun run desktop:prepare
+      - name: Smoke-test compiled sidecar CDP runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $smoke = Join-Path $env:RUNNER_TEMP "aliasmode-sidecar-smoke"
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          Copy-Item ".\src-tauri\binaries\aliasmode-sidecar-x86_64-pc-windows-msvc.exe" "$smoke\aliasmode-sidecar.exe"
+          $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
+          $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
+          $browser = Start-Process -PassThru $browserPath -ArgumentList @(
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--remote-debugging-port=9222",
+            "--user-data-dir=$smoke\browser-profile"
+          )
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              try {
+                Invoke-RestMethod "http://127.0.0.1:9222/json/version" | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw "CloakBrowser CDP endpoint did not become ready" }
+            Push-Location $smoke
+            try {
+              & ".\aliasmode-sidecar.exe" __sidecar-smoke --cdp-endpoint "http://127.0.0.1:9222" --state-root "$smoke\state"
+              if ($LASTEXITCODE -ne 0) { throw "compiled sidecar smoke exited with code $LASTEXITCODE" }
+            } finally {
+              Pop-Location
+            }
+          } finally {
+            if (-not $browser.HasExited) { Stop-Process -Id $browser.Id -Force }
+          }
+      - run: bunx tauri build --bundles nsis
+      - name: Stage unsigned installer and checksum
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($installers.Count)"
+          }
+          $artifact = ".\artifacts\windows"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          Copy-Item $installers[0].FullName $artifact
+          $installer = Join-Path $artifact $installers[0].Name
+          $sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  $($installers[0].Name)" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-unsigned
+          path: |
+            artifacts/windows/*.exe
+            artifacts/windows/SHA256SUMS.txt
+          if-no-files-found: error

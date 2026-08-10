@@ -1,9 +1,33 @@
 import { expect, test } from "bun:test";
 import {
+  dispatchReadSessionWorker,
   drainRemoteShutdown,
   lifecycleAdmissionOptionsFromEnv,
   RemoteShutdownTimeoutError,
 } from "./cli.ts";
+
+test("CLI dispatches the session worker before normal command parsing", async () => {
+  const events: string[] = [];
+  expect(await dispatchReadSessionWorker(["list"], {
+    async readSession() { throw new Error("must not run"); },
+    async write(value) { events.push(value); },
+    exit(code) { events.push(`exit:${code}`); },
+  })).toBe(false);
+  expect(events).toEqual([]);
+
+  expect(await dispatchReadSessionWorker(["--read-session-worker", "ws://capture"], {
+    async readSession(ws) {
+      expect(ws).toBe("ws://capture");
+      return "captured bundle";
+    },
+    async write(value) { events.push(value); },
+    exit(code) { events.push(`exit:${code}`); },
+  })).toBe(true);
+  expect(events).toEqual([
+    JSON.stringify({ ok: true, bundle: "captured bundle" }),
+    "exit:0",
+  ]);
+});
 
 test("lifecycle admission env config is optional and parses positive integers", () => {
   expect(lifecycleAdmissionOptionsFromEnv({})).toEqual({});

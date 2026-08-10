@@ -4,3 +4,9 @@ declare module "*.html" {
   export default content;
 }
 declare module "*.css";
+
+declare const ALIASMODE_COMPILED: boolean;
+
+declare module "*playwright-core/lib/generated/storageScriptSource.js" {
+  export const source: string;
+}

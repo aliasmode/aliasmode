@@ -13,6 +13,12 @@ import type { Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
 import type { AutomationHealthStatus } from "./remote-types.ts";
 import type { RemoteCoordinator } from "./remote.ts";
+import type { AppConfigStore } from "./app-config.ts";
+import type { CloudAuthRuntime } from "./cloud-auth.ts";
+import type { CloudConnectionRuntime } from "./cloud-connection.ts";
+import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type { PendingSyncRuntime } from "./pending-sync.ts";
+import type { StatePaths } from "./paths.ts";
 import type { Profile } from "./types.ts";
 import { importInbox, importBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
@@ -24,6 +30,13 @@ import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
 import { join, resolve } from "node:path";
+
+/** Readiness metadata supplied by the desktop parent process. */
+export interface UiHealthMetadata {
+  version: string;
+  root: string;
+  instance: string;
+}
 
 /** Redacted, dashboard-safe view of a profile + its live status. */
 export interface UiProfile {
@@ -80,9 +93,9 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
   });
 }
 
-async function readLatestDiagnose(): Promise<unknown | null> {
+async function readLatestDiagnose(reportsRoot = "reports"): Promise<unknown | null> {
   try {
-    const f = Bun.file("reports/diagnose-latest.json");
+    const f = Bun.file(join(reportsRoot, "diagnose-latest.json"));
     if (!(await f.exists())) return null;
     return await f.json();
   } catch {
@@ -91,6 +104,17 @@ async function readLatestDiagnose(): Promise<unknown | null> {
 }
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+function rejectUntrustedJsonMutation(req: Request): Response | null {
+  if (!req.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return Response.json({ ok: false, error: "application/json is required" }, { status: 415 });
+  }
+  const origin = req.headers.get("origin");
+  if (origin && origin !== new URL(req.url).origin) {
+    return Response.json({ ok: false, error: "cross-origin requests are forbidden" }, { status: 403 });
+  }
+  return null;
+}
 const APPLICATION_ROOT = resolve(import.meta.dir);
 
 let appVersionPromise: Promise<string> | null = null;
@@ -176,6 +200,17 @@ function applyEdits(p: Profile, set: Record<string, unknown>): void {
   }
 }
 
+export interface UiRuntimeOptions {
+  appConfig?: AppConfigStore;
+  paths?: StatePaths;
+  defaultCloudUrl?: string;
+  cloudAuth?: CloudAuthRuntime;
+  cloudConnection?: CloudConnectionRuntime;
+  pendingSync?: PendingSyncRuntime;
+  cloudBrowser?: CloudBrowserLifecycle;
+  health?: UiHealthMetadata | null;
+}
+
 /**
  * Handle a `/ui/api/*` request. Returns null for any other path so the caller
  * can fall through to the AdsPower API handler.
@@ -185,6 +220,7 @@ export async function handleUiRequest(
   launcher: Launcher,
   store: ProfileStore,
   remote?: RemoteCoordinator | null,
+  options: UiRuntimeOptions = {},
 ): Promise<Response | null> {
   const { pathname } = new URL(req.url);
   if (!pathname.startsWith("/ui/api/")) return null;
@@ -193,11 +229,193 @@ export async function handleUiRequest(
   // profile roster it does not touch CDP, the process scanner, SQLite rows, or
   // the remote hub, so an upstream outage cannot masquerade as a failed update.
   if (pathname === "/ui/api/health" && req.method === "GET") {
-    return Response.json({ ok: true, version: await appVersion(), root: APPLICATION_ROOT });
+    return Response.json(options.health
+      ? { ok: true, ...options.health }
+      : { ok: true, version: await appVersion(), root: APPLICATION_ROOT });
+  }
+
+  if (pathname === "/ui/api/app-mode" && req.method === "GET") {
+    return Response.json(options.appConfig?.read() ?? { version: 1, mode: "local", localAnalytics: false });
+  }
+
+  if (pathname === "/ui/api/app-mode" && req.method === "POST") {
+    if (!options.appConfig) return Response.json({ ok: false, error: "app configuration is unavailable" }, { status: 503 });
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    try {
+      const body = await req.json() as { mode?: unknown };
+      if (body.mode !== "local" && body.mode !== "cloud") {
+        return Response.json({ ok: false, error: "mode must be local or cloud" }, { status: 400 });
+      }
+      const cloudUrl = options.defaultCloudUrl;
+      if (body.mode === "cloud" && !cloudUrl) {
+        return Response.json(
+          { ok: false, error: "AliasMode Cloud is not configured in this build" },
+          { status: 503 },
+        );
+      }
+      const config = options.appConfig.setMode(body.mode, cloudUrl);
+      return Response.json({ ok: true, config, restartRequired: true });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+  }
+
+  if (pathname === "/ui/api/cloud-auth" && req.method === "GET") {
+    if (!options.cloudAuth) {
+      return Response.json({ ok: false, error: "AliasMode Cloud authentication is unavailable" }, { status: 503 });
+    }
+    return Response.json({ ok: true, ...options.cloudAuth.state() });
+  }
+
+  if (pathname.startsWith("/ui/api/cloud-auth/") && req.method === "POST") {
+    if (!options.cloudAuth) {
+      return Response.json({ ok: false, error: "AliasMode Cloud authentication is unavailable" }, { status: 503 });
+    }
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    try {
+      const body = await req.json() as {
+        email?: unknown;
+        password?: unknown;
+        refreshToken?: unknown;
+        deviceId?: unknown;
+        deviceCredential?: unknown;
+        queueKey?: unknown;
+      };
+      if (pathname === "/ui/api/cloud-auth/signup") {
+        if (typeof body.email !== "string" || typeof body.password !== "string") {
+          return Response.json({ ok: false, error: "email and password are required" }, { status: 400 });
+        }
+        const result = await options.cloudAuth.signUp(body.email, body.password);
+        return Response.json({
+          ok: true,
+          verificationRequired: result.verificationRequired,
+          user: { id: result.user.id, email: result.user.email },
+        });
+      }
+      if (pathname === "/ui/api/cloud-auth/signin") {
+        if (typeof body.email !== "string" || typeof body.password !== "string") {
+          return Response.json({ ok: false, error: "email and password are required" }, { status: 400 });
+        }
+        if (!options.cloudConnection || !options.pendingSync) {
+          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+        }
+        if (body.queueKey !== undefined && (typeof body.queueKey !== "string" || !body.queueKey)) {
+          return Response.json({ ok: false, error: "stored queue encryption key is invalid" }, { status: 400 });
+        }
+        const activeQueue = options.pendingSync.queue();
+        const pending = activeQueue
+          ? { queue: activeQueue, createdKey: undefined }
+          : options.pendingSync.hasStoredState() || body.queueKey
+            ? options.pendingSync.initialize(body.queueKey as string | undefined)
+            : undefined;
+        try {
+          const result = await options.cloudAuth.signIn(body.email, body.password);
+          const bootstrap = await options.cloudConnection.bootstrap();
+          const initialized = pending ?? options.pendingSync.initialize();
+          await options.cloudBrowser?.resumeAfterAuthentication();
+          return Response.json({
+            ok: true,
+            authenticated: true,
+            refreshToken: result.refreshToken,
+            deviceId: bootstrap.device.id,
+            deviceCredential: bootstrap.deviceCredential,
+            ...(initialized.createdKey ? { queueKey: initialized.createdKey } : {}),
+            expiresAt: result.expiresAt,
+            legal: bootstrap.legal,
+            user: { id: result.user?.id, email: result.user?.email },
+          });
+        } catch (error) {
+          options.pendingSync.close();
+          options.cloudAuth.clear();
+          options.cloudConnection.clearDevice();
+          throw error;
+        }
+      }
+      if (pathname === "/ui/api/cloud-auth/restore") {
+        if (typeof body.refreshToken !== "string" || !body.refreshToken) {
+          return Response.json({ ok: false, error: "refresh token is required" }, { status: 400 });
+        }
+        if (!options.cloudConnection || typeof body.deviceCredential !== "string" || !body.deviceCredential) {
+          return Response.json({ ok: false, error: "stored device credential is required" }, { status: 400 });
+        }
+        if (!options.pendingSync || typeof body.queueKey !== "string" || !body.queueKey) {
+          return Response.json({ ok: false, error: "stored queue encryption key is required" }, { status: 400 });
+        }
+        try {
+          const queueWasInitialized = !!options.pendingSync.queue();
+          if (!queueWasInitialized) options.pendingSync.initialize(body.queueKey);
+          const priorAccountId = options.cloudConnection.accountId();
+          const result = await options.cloudAuth.restore(body.refreshToken);
+          options.cloudConnection.restoreCredential(body.deviceCredential);
+          const status = await options.cloudConnection.client.status();
+          options.cloudConnection.restoreAccount(status.account.id);
+          options.cloudConnection.restoreDevice(status.device.id, body.deviceCredential);
+          if (!queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id)) {
+            await options.cloudBrowser?.resumeAfterAuthentication();
+          }
+          return Response.json({
+            ok: true,
+            authenticated: true,
+            refreshToken: result.refreshToken,
+            deviceId: status.device.id,
+            expiresAt: result.expiresAt,
+            legal: status.legal,
+            user: { id: result.user?.id, email: result.user?.email },
+          });
+        } catch (error) {
+          options.pendingSync.close();
+          options.cloudAuth.clear();
+          options.cloudConnection.clearDevice();
+          throw error;
+        }
+      }
+      if (pathname === "/ui/api/cloud-auth/signout") {
+        if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          return Response.json(
+            { ok: false, error: "Cloud browsers could not be closed safely" },
+            { status: 409 },
+          );
+        }
+        options.pendingSync?.close();
+        options.cloudConnection?.clearDevice();
+        await options.cloudAuth.signOut();
+        return Response.json({ ok: true });
+      }
+      return Response.json({ ok: false, error: "unknown Cloud auth action" }, { status: 404 });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+  }
+
+  if (options.appConfig?.read().mode === "cloud" && !remote && !options.cloudBrowser) {
+    return Response.json(
+      { ok: false, error: "AliasMode Cloud authentication is required" },
+      { status: 503 },
+    );
+  }
+
+  const cloudLifecycleRoute =
+    (pathname === "/ui/api/profiles" && req.method === "GET") ||
+    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache)$/.test(pathname));
+  if (
+    options.appConfig?.read().mode === "cloud" &&
+    options.cloudBrowser &&
+    !remote &&
+    !cloudLifecycleRoute
+  ) {
+    return Response.json(
+      { ok: false, error: "This Cloud profile operation is not available yet" },
+      { status: 501 },
+    );
   }
 
   if (pathname === "/ui/api/profiles" && req.method === "GET") {
     try {
+      if (options.cloudBrowser) {
+        return Response.json(await options.cloudBrowser.listRoster());
+      }
       if (remote) {
         // Remote mode: the roster is the hub's (with lock + session status); layer
         // on this machine's local running state. Probe live CDP ports first and drop
@@ -224,7 +442,7 @@ export async function handleUiRequest(
       // sees "Unexpected token '<'". Keep this API JSON-shaped even on failure.
       return Response.json(
         { ok: false, error: `profile roster failed: ${msg(error)}` },
-        { status: remote ? 502 : 500 },
+        { status: remote || options.cloudBrowser ? 502 : 500 },
       );
     }
   }
@@ -298,7 +516,7 @@ export async function handleUiRequest(
     // would write to the local launch-cache, never reaching the hub roster.
     if (remote) return Response.json({ ok: false, error: "remote mode: import via the hub (upload in the dashboard)" }, { status: 400 });
     try {
-      const r = await importInbox(store);
+      const r = await importInbox(store, options.paths?.inbox);
       return Response.json({ ok: true, ...r });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
@@ -329,7 +547,7 @@ export async function handleUiRequest(
   }
 
   if (pathname === "/ui/api/diagnose/latest" && req.method === "GET") {
-    return Response.json({ report: await readLatestDiagnose() });
+    return Response.json({ report: await readLatestDiagnose(options.paths?.reports) });
   }
 
   if (pathname === "/ui/api/profiles/export" && req.method === "POST") {
@@ -448,7 +666,7 @@ export async function handleUiRequest(
         const id = "ext" + crypto.randomUUID().replace(/-/g, "").slice(0, 12);
         const bytes = new Uint8Array(await value.arrayBuffer());
         const fallback = value.name.replace(/\.(zip|crx)$/i, "");
-        const { loadDir, name } = await installExtension(bytes, id, fallback);
+        const { loadDir, name } = await installExtension(bytes, id, fallback, options.paths?.extensions);
         store.addExtension({ id, name, loadDir });
         installed.push({ id, name });
       }
@@ -476,7 +694,7 @@ export async function handleUiRequest(
       }
       store.unassignExtension(id); // drop it from any profile that had it
       store.deleteExtension(id);
-      removeExtensionFiles(id);
+      removeExtensionFiles(id, options.paths?.extensions);
       return Response.json({ ok: true });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
@@ -606,6 +824,24 @@ export async function handleUiRequest(
   const action = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/(open|close|clear-cache)$/);
   if (action && req.method === "POST") {
     const id = decodeURIComponent(action[1]!);
+    if (options.cloudBrowser) {
+      try {
+        if (action[2] === "open") {
+          const result = await options.cloudBrowser.open(id);
+          return result.ok
+            ? Response.json({ ok: true, port: result.port, warning: result.warning })
+            : Response.json({ ok: false, error: result.error ?? "open failed" }, { status: 500 });
+        }
+        if (action[2] === "close") {
+          return await options.cloudBrowser.close(id)
+            ? Response.json({ ok: true })
+            : Response.json({ ok: false, error: "browser teardown unconfirmed" }, { status: 500 });
+        }
+        return Response.json({ ok: true });
+      } catch (error) {
+        return Response.json({ ok: false, error: msg(error) }, { status: 500 });
+      }
+    }
     if (remote) {
       try {
         if (action[2] === "open") {

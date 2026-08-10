@@ -40,6 +40,17 @@ bun cli.ts start
 
 The dashboard and compatibility API bind to loopback only.
 
+### Windows desktop beta
+
+Desktop packaging requires Windows x64, Bun, the Rust MSVC toolchain, WebView2, and Visual Studio C++ Build Tools. The approved Alias Loop icon is included at `src-tauri/icons/icon.ico`.
+
+```sh
+bun run desktop:prepare
+bun run desktop:build:nsis
+```
+
+The build produces a per-user NSIS installer. Beta installers are unsigned until release signing is configured. The build obtains CloakBrowser through the pinned official wrapper, verifies the staged executable hash, and packages the separately licensed runtime as a third-party resource. AliasMode verifies the installed executable again before startup and before every browser launch.
+
 ## Browser runtime
 
 AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The CloakBrowser binary is not part of this repository or the Apache-2.0 license.
