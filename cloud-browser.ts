@@ -263,7 +263,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
+      await this.options.launcher.verifyRunningIdentity(profileId);
       await this.options.writeSession(localCdpEndpoint(launched.port), sessionBundle);
+      await this.options.launcher.verifyRunningIdentity(profileId);
 
       stage = "version_commit";
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
@@ -360,7 +362,17 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     try {
       const profile = this.options.store.getProfile(profileId);
       if (!profile) throw new Error("Cloud profile cache is missing");
-      const sessionBundle = await this.options.readSession(localCdpEndpoint(launch.debugPort));
+      await this.options.launcher.verifyRunningIdentity(profileId);
+      const verifiedLaunch = this.options.store.getLaunch(profileId);
+      if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) {
+        throw new Error("Cloud browser identity changed before session capture");
+      }
+      const sessionBundle = await this.options.readSession(localCdpEndpoint(verifiedLaunch.debugPort));
+      await this.options.launcher.verifyRunningIdentity(profileId);
+      const capturedLaunch = this.options.store.getLaunch(profileId);
+      if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) {
+        throw new Error("Cloud browser identity changed during session capture");
+      }
       pendingId = queue.enqueue({
         accountId,
         profileId,
@@ -538,7 +550,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (!launch || !profile) return false;
     let pendingId: string;
     try {
-      const sessionBundle = await this.options.readSession(localCdpEndpoint(launch.debugPort));
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const verifiedLaunch = this.options.store.getLaunch(open.profileId);
+      if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) return false;
+      const sessionBundle = await this.options.readSession(localCdpEndpoint(verifiedLaunch.debugPort));
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const capturedLaunch = this.options.store.getLaunch(open.profileId);
+      if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) return false;
       pendingId = queue.enqueue({
         accountId: open.accountId,
         profileId: open.profileId,

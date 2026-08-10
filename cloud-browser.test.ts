@@ -54,6 +54,7 @@ function setup(options: {
   let closeCalls = 0;
   let abandonCalls = 0;
   let startCalls = 0;
+  let verifyCalls = 0;
   const opened: OpenProfileResponse = {
     ok: true,
     registrationId: "registration1",
@@ -130,7 +131,7 @@ function setup(options: {
       expect(queue.getOpen("profile1", "account1")?.phase).toBe("running");
       expect(store.getLaunch("profile1")?.sessionBaseVersion).toBe(4);
     },
-    async verifyRunningIdentity() {},
+    async verifyRunningIdentity() { verifyCalls++; },
   };
   const coordinator = new CloudBrowserCoordinator({
     cloud: cloud as any,
@@ -164,6 +165,7 @@ function setup(options: {
     queue,
     closeCalls: () => closeCalls,
     abandonCalls: () => abandonCalls,
+    verifyCalls: () => verifyCalls,
   };
 }
 
@@ -185,6 +187,7 @@ test("Cloud browser restores the authoritative session before navigation", async
   ]);
   expect(result).toMatchObject({ ok: true, ws: "ws://browser", port: 9222 });
   expect(state.events).toEqual(["cloud-open", "start", "restore", "navigate"]);
+  expect(state.verifyCalls()).toBe(2);
   expect(state.navigatedUrls).toEqual([["https://x.com/messages"]]);
   expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
     registrationId: "registration1",
