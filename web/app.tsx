@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import aliasLoopUrl from "./alias-loop.svg";
 import { parsePastedProxy } from "./proxy-input.ts";
 import {
   type UiProfile,
@@ -195,9 +196,20 @@ function HealthSources({ sources }: { sources: HealthSource[] }) {
   );
 }
 
+const KNOWN_PLATFORMS: { value: string; label: string }[] = [
+  { value: "", label: "(none)" },
+  { value: "x.com", label: "Twitter / X" },
+  { value: "instagram.com", label: "Instagram" },
+  { value: "facebook.com", label: "Facebook" },
+  { value: "tiktok.com", label: "TikTok" },
+  { value: "linkedin.com", label: "LinkedIn" },
+  { value: "reddit.com", label: "Reddit" },
+  { value: "telegram.org", label: "Telegram" },
+];
+
 function PlatformPill({ platform }: { platform: string }) {
-  if (platform === "x.com") return <span className="chip">X / Twitter</span>;
-  if (platform === "telegram.org") return <span className="chip">Telegram</span>;
+  const known = KNOWN_PLATFORMS.find((candidate) => candidate.value === platform);
+  if (known?.value) return <span className="chip">{known.label}</span>;
   if (platform) return <span className="chip">{platform}</span>;
   return <span className="muted">—</span>;
 }
@@ -232,12 +244,6 @@ function GroupPicker({ value, onChange, groups }: { value: string; onChange: (v:
   );
 }
 
-const KNOWN_PLATFORMS: { value: string; label: string }[] = [
-  { value: "", label: "(none)" },
-  { value: "x.com", label: "Twitter / X" },
-  { value: "telegram.org", label: "Telegram" },
-  { value: "linkedin.com", label: "LinkedIn" },
-];
 function PlatformPicker({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const known = KNOWN_PLATFORMS.some((p) => p.value === value);
   const [creating, setCreating] = useState(false);
@@ -254,6 +260,44 @@ function PlatformPicker({ value, onChange }: { value: string; onChange: (v: stri
       {KNOWN_PLATFORMS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
       <option value="__new__">➕ New platform…</option>
     </select>
+  );
+}
+
+function ModeSwitchConfirmation({
+  mode,
+  busy,
+  error,
+  onConfirm,
+  onCancel,
+}: {
+  mode: "local" | "cloud";
+  busy: boolean;
+  error: string | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const toLocal = mode === "local";
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal mode-confirm" role="dialog" aria-modal="true" aria-labelledby="mode-confirm-title" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head" id="mode-confirm-title">Switch to {toLocal ? "Local" : "Cloud"}?</div>
+        <div className="modal-body">
+          <p>
+            {toLocal
+              ? "Cloud profiles will not appear until you switch back. Local mode does not contact AliasMode Cloud."
+              : "Your Local profiles stay on this computer. AliasMode does not upload them to Cloud automatically."}
+          </p>
+          <p className="hint">AliasMode must restart after this change.</p>
+          {error && <div className="modal-err" role="alert">{error}</div>}
+        </div>
+        <div className="modal-foot">
+          <button className="link" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
+          <button className="primary" type="button" disabled={busy} onClick={onConfirm}>
+            {busy ? "Switching…" : `Switch to ${toLocal ? "Local" : "Cloud"}`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -343,6 +387,8 @@ function App() {
   const [modeBusy, setModeBusy] = useState(false);
   const [modeErr, setModeErr] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
+  const [showAccount, setShowAccount] = useState(false);
+  const [pendingMode, setPendingMode] = useState<"local" | "cloud" | null>(null);
   const [cloudAuth, setCloudAuth] = useState<CloudAuthState | null>(null);
   const [authView, setAuthView] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
@@ -378,6 +424,7 @@ function App() {
   const [proxyPasteOk, setProxyPasteOk] = useState<string | null>(null);
   // Edit modal + bulk export/update + group rename
   const [editId, setEditId] = useState<string | null>(null);
+  const [editExpectedVersion, setEditExpectedVersion] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [editErr, setEditErr] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
@@ -428,17 +475,32 @@ function App() {
     }
   };
 
-  const chooseMode = async (mode: "local" | "cloud") => {
+  const chooseMode = async (mode: "local" | "cloud"): Promise<boolean> => {
     setModeBusy(true);
     setModeErr(null);
     try {
       const result = await selectAppMode(mode);
       setAppMode(result.config);
       setRestartRequired(result.restartRequired === true);
+      return true;
     } catch (error) {
       setModeErr(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       setModeBusy(false);
+    }
+  };
+
+  const requestModeSwitch = (mode: "local" | "cloud") => {
+    setModeErr(null);
+    setPendingMode(mode);
+  };
+
+  const confirmModeSwitch = async () => {
+    if (!pendingMode) return;
+    if (await chooseMode(pendingMode)) {
+      setPendingMode(null);
+      setShowAccount(false);
     }
   };
 
@@ -500,7 +562,10 @@ function App() {
   };
 
   useEffect(() => {
-    fetchAppMode().then(setAppMode).catch((error) => {
+    fetchAppMode().then((config) => {
+      setAppMode(config);
+      setRestartRequired(config.restartRequired === true);
+    }).catch((error) => {
       setConnErr(String(error));
       setLoaded(true);
     });
@@ -600,7 +665,7 @@ function App() {
   // Live 2FA code in the Edit modal: fetch the current TOTP, count it down
   // locally, and refetch when the window rolls over.
   useEffect(() => {
-    if (!editId) { setEditTotp(null); return; }
+    if (!editId || isCloudMode) { setEditTotp(null); return; }
     let alive = true;
     const tick = async () => {
       try {
@@ -617,7 +682,7 @@ function App() {
       });
     }, 1000);
     return () => { alive = false; clearInterval(timer); };
-  }, [editId]);
+  }, [editId, isCloudMode]);
 
   const groups = useMemo(
     () => ["all", ...Array.from(new Set(profiles.map((p) => p.group).filter(Boolean))).sort()],
@@ -838,27 +903,34 @@ function App() {
       });
       setEditExts(p.extensions ?? []);
       setEditMobile(p.desktopConversion ?? null);
+      setEditExpectedVersion(p.expectedVersion ?? null);
       setEditErr(null);
       setEditId(id);
     } catch (e) {
       setActionErr(String(e));
     }
   };
-  const closeEdit = () => { setEditId(null); setEditForm({}); setEditErr(null); setEditMobile(null); };
+  const closeEdit = () => { setEditId(null); setEditExpectedVersion(null); setEditForm({}); setEditErr(null); setEditMobile(null); };
   const saveEdit = async () => {
     if (!editId) return;
     setEditSaving(true);
     setEditErr(null);
     try {
+      if (isCloudMode && editExpectedVersion === null) throw new Error("Cloud profile version is missing; close and reopen Edit");
       const r = await updateProfile(editId, {
         name: editForm.name ?? "", group: editForm.group ?? "", platform: editForm.platform ?? "",
         proxy: editForm.proxy ?? "", proxyType: editForm.proxyType ?? "http",
         username: editForm.username ?? "", password: editForm.password ?? "",
         email: editForm.email ?? "", emailPassword: editForm.emailPassword ?? "", twofa: editForm.twofa ?? "",
-        resolution: editForm.resolution ?? "", extensions: editExts, tags: editForm.tags ?? "",
-      });
+        resolution: editForm.resolution ?? "", tags: editForm.tags ?? "",
+        ...(!isCloudMode ? { extensions: editExts } : {}),
+      }, isCloudMode ? editExpectedVersion ?? undefined : undefined);
       if (r.ok) { closeEdit(); await load(); }
-      else setEditErr(r.error || "save failed");
+      else if (r.status === 409) {
+        const message = r.error || "Cloud profile changed; reopen Edit before saving";
+        closeEdit();
+        setActionErr(message);
+      } else setEditErr(r.error || "save failed");
     } catch (e) {
       setEditErr(String(e));
     } finally {
@@ -1046,7 +1118,8 @@ function App() {
 
   if (!appMode || !workspaceReady || restartRequired) {
     return (
-      <main className="onboarding">
+      <>
+        <main className="onboarding">
         <section className="onboarding-card" aria-labelledby="onboarding-title">
           <div className="onboarding-brand">AliasMode <span>by Xreacher</span></div>
           {restartRequired ? (
@@ -1072,9 +1145,9 @@ function App() {
                   disabled={authBusy || !cloudAuth.legal}
                   onClick={() => void acceptCurrentLegal()}
                 >
-                  {authBusy ? "Working…" : cloudAuth.legal ? "Accept and continue" : "Checking workspace…"}
+                  {authBusy ? "Working…" : cloudAuth.legal ? "Accept and continue to Cloud" : "Checking workspace…"}
                 </button>
-                <button className="mode-primary" type="button" disabled={modeBusy} onClick={() => chooseMode("local")}>Use Local instead</button>
+                <button className="mode-secondary" type="button" disabled={modeBusy} onClick={() => requestModeSwitch("local")}>Stay Local</button>
                 {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               </>
             ) : (
@@ -1092,7 +1165,7 @@ function App() {
                   <button type="button" onClick={() => { setAuthErr(null); setAuthNotice(null); setAuthView(authView === "signin" ? "signup" : "signin"); }}>
                     {authView === "signin" ? "Create an account" : "Back to sign in"}
                   </button>
-                  <button type="button" disabled={modeBusy} onClick={() => chooseMode("local")}>Use Local instead</button>
+                  <button type="button" disabled={modeBusy} onClick={() => requestModeSwitch("local")}>Stay Local</button>
                 </div>
                 {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               </>
@@ -1120,8 +1193,18 @@ function App() {
               {connErr && <button className="mode-primary" type="button" onClick={() => window.location.reload()}>Try again</button>}
             </>
           )}
-        </section>
-      </main>
+          </section>
+        </main>
+        {pendingMode && (
+          <ModeSwitchConfirmation
+            mode={pendingMode}
+            busy={modeBusy}
+            error={modeErr}
+            onConfirm={() => void confirmModeSwitch()}
+            onCancel={() => { if (!modeBusy) setPendingMode(null); }}
+          />
+        )}
+      </>
     );
   }
 
@@ -1142,7 +1225,10 @@ function App() {
       {!isCloudMode && dragging && <div className="dropzone">Drop AdsPower <code>.txt</code> or <code>.csv</code> files to import</div>}
 
       <aside className="sidebar">
-        <div className="brandrow"><div className="brand">AliasMode</div>{appVersion && <span className="appversion">{appVersion}</span>}</div>
+        <div className="brandrow">
+          <div className="brand"><img src={aliasLoopUrl} alt="" />AliasMode</div>
+          {appVersion && <span className="appversion">{appVersion}</span>}
+        </div>
         <div className="newrow">
           <button className="newbtn" onClick={openCreate}>+ New Profile</button>
           {!isCloudMode && <button className="importbtn" title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>}
@@ -1193,12 +1279,17 @@ function App() {
         </div>
         {!isCloudMode && <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>}
         <button
-          className="extbtn"
+          className="account-button"
           type="button"
-          disabled={modeBusy}
-          onClick={() => void chooseMode(isCloudMode ? "local" : "cloud")}
+          aria-label="Open Account and Settings"
+          title="Account & Settings"
+          onClick={() => { setModeErr(null); setShowAccount(true); }}
         >
-          {modeBusy ? "Switching mode…" : `Switch to ${isCloudMode ? "Local" : "Cloud"}`}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="8" r="3.5" />
+            <path d="M5.5 20c.5-4 2.7-6 6.5-6s6 2 6.5 6" />
+          </svg>
+          <span>Account &amp; Settings</span>
         </button>
         {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
       </aside>
@@ -1325,7 +1416,7 @@ function App() {
                       {twoFaFlash?.id === p.id ? `✓ ${twoFaFlash.code}` : "2FA"}
                     </button>
                   )}
-                  {!isCloudMode && <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>}
+                  {(!isCloudMode || (!p.running && !p.lockedBy)) && <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>}
                   {p.running ? (
                     <>
                       {!isCloudMode && <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>⧉</button>}
@@ -1381,6 +1472,44 @@ function App() {
         )}
       </footer>
       </div>
+
+      {showAccount && (
+        <div className="modal-backdrop" onClick={() => setShowAccount(false)}>
+          <div className="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="account-settings-title" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head" id="account-settings-title">Account &amp; Settings</div>
+            <div className="modal-body">
+              <section className="settings-section">
+                <h2>Account</h2>
+                <div className="settings-row"><span>Signed in as</span><strong>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local · no account"}</strong></div>
+                <div className="settings-row"><span>Mode</span><strong>{isCloudMode ? "AliasMode Cloud" : "AliasMode Local"}</strong></div>
+                <div className="settings-row"><span>App version</span><strong className="mono">{appVersion || "—"}</strong></div>
+              </section>
+              <section className="settings-section">
+                <h2>Workspace</h2>
+                <p>{isCloudMode ? "Your Cloud workspace and member controls will live here." : "Local mode has no Cloud workspace."}</p>
+              </section>
+              <section className="settings-mode">
+                <button type="button" disabled={modeBusy} onClick={() => requestModeSwitch(isCloudMode ? "local" : "cloud")}>
+                  Switch to {isCloudMode ? "Local" : "Cloud"}
+                </button>
+                <p>{isCloudMode ? "Local mode keeps this installation offline from AliasMode Cloud." : "Cloud mode requires an account and does not upload Local profiles automatically."}</p>
+              </section>
+              {modeErr && <div className="modal-err" role="alert">{modeErr}</div>}
+            </div>
+            <div className="modal-foot"><button className="link" type="button" onClick={() => setShowAccount(false)}>Close</button></div>
+          </div>
+        </div>
+      )}
+
+      {pendingMode && (
+        <ModeSwitchConfirmation
+          mode={pendingMode}
+          busy={modeBusy}
+          error={modeErr}
+          onConfirm={() => void confirmModeSwitch()}
+          onCancel={() => { if (!modeBusy) setPendingMode(null); }}
+        />
+      )}
 
       {showCreate && (
         <div className="modal-backdrop" onClick={closeCreate}>
@@ -1467,7 +1596,7 @@ function App() {
             <div className="modal-body">
               {editErr && <div className="modal-err">{editErr}</div>}
               {editForm.proxyError && <div className="modal-err">Stored proxy quarantined: {editForm.proxyError}. Replace it below or clear the field.</div>}
-              {editMobile && (
+              {!isCloudMode && editMobile && (
                 <div className="persona-warning">
                   <strong>Imported mobile persona cannot open safely</strong>
                   <span>
@@ -1523,7 +1652,7 @@ function App() {
                 <CopyField label="2FA secret" value={editForm.twofa ?? ""} onChange={(value) => setEF("twofa", value)} />
                 <label className="fld grow"><span>Screen</span><input value={editForm.resolution ?? ""} placeholder="e.g. 1920x1080" onChange={(e) => setEF("resolution", e.target.value)} /></label>
               </div>
-              {editTotp && (
+              {!isCloudMode && editTotp && (
                 <div className="authrow">
                   <span className="authlabel">Authenticator</span>
                   <span className="authcode">{editTotp.code.slice(0, 3)} {editTotp.code.slice(3)}</span>
@@ -1531,8 +1660,9 @@ function App() {
                   <button className="tlink" onClick={() => navigator.clipboard?.writeText(editTotp.code)}>Copy</button>
                 </div>
               )}
-              <div className="fld">
-                <span>Extensions</span>
+              {!isCloudMode && (
+                <div className="fld">
+                  <span>Extensions</span>
                 {extensions.length === 0 ? (
                   <div className="hint" style={{ marginTop: 0 }}>None uploaded yet — add some via 🧩 Extensions in the sidebar.</div>
                 ) : (
@@ -1545,8 +1675,9 @@ function App() {
                     ))}
                   </div>
                 )}
-              </div>
-              <div className="hint">Cookies &amp; fingerprint are preserved — only the fields above change. Extensions load when the browser opens.</div>
+                </div>
+              )}
+              <div className="hint">Cookies &amp; fingerprint are preserved — only the fields above change.{!isCloudMode && " Extensions load when the browser opens."}</div>
             </div>
             <div className="modal-foot">
               <button className="link" onClick={closeEdit}>Cancel</button>
@@ -1589,9 +1720,7 @@ function App() {
               <label className="fld">
                 <span>Platform</span>
                 <select value={bulkPlatform} onChange={(e) => setBulkPlatform(e.target.value)}>
-                  <option value="">None</option>
-                  <option value="x.com">X / Twitter</option>
-                  <option value="telegram.org">Telegram</option>
+                  {KNOWN_PLATFORMS.map((platform) => <option key={platform.value} value={platform.value}>{platform.label}</option>)}
                 </select>
               </label>
               <div className="hint">

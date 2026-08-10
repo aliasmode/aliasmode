@@ -788,9 +788,13 @@ test("start reports a live-but-CDP-unresponsive browser as retryable failure wit
   store.close();
 });
 
-test("platformHomeUrl lands each platform on its own home page (incl. LinkedIn)", () => {
+test("platformHomeUrl lands supported platforms on their home pages", () => {
   expect(platformHomeUrl("linkedin.com")).toBe("https://www.linkedin.com/feed/");
   expect(platformHomeUrl("x.com")).toBe("https://x.com/home");
+  expect(platformHomeUrl("instagram.com")).toBe("https://www.instagram.com/");
+  expect(platformHomeUrl("facebook")).toBe("https://www.facebook.com/");
+  expect(platformHomeUrl("www.tiktok.com")).toBe("https://www.tiktok.com/");
+  expect(platformHomeUrl("reddit")).toBe("https://www.reddit.com/");
   expect(platformHomeUrl("telegram.org")).toBe("https://web.telegram.org/k/"); // standalone compatibility
   expect(platformHomeUrl("telegram.org", "a")).toBe("https://web.telegram.org/a/");
   expect(platformHomeUrl("telegram.org", "k")).toBe("https://web.telegram.org/k/");

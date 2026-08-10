@@ -5,6 +5,8 @@ export interface StatePaths {
   root: string;
   database: string;
   profiles: string;
+  cloudDatabase: string;
+  cloudProfiles: string;
   extensions: string;
   inbox: string;
   reports: string;
@@ -34,6 +36,8 @@ export function statePaths(root: string): StatePaths {
     root: absolute,
     database: resolve(absolute, "profiles.sqlite"),
     profiles: resolve(absolute, "profiles"),
+    cloudDatabase: resolve(absolute, "cloud-cache", "profiles.sqlite"),
+    cloudProfiles: resolve(absolute, "cloud-cache", "profiles"),
     extensions: resolve(absolute, "extensions"),
     inbox: resolve(absolute, "inbox"),
     reports: resolve(absolute, "reports"),
@@ -45,8 +49,26 @@ export function statePaths(root: string): StatePaths {
   };
 }
 
+export function profileDataPaths(
+  paths: StatePaths,
+  cloud: boolean,
+  explicitDatabase?: string,
+  explicitProfiles?: string,
+): { database: string; profiles: string } {
+  const local = {
+    database: explicitDatabase ? resolve(explicitDatabase) : paths.database,
+    profiles: explicitProfiles ? resolve(explicitProfiles) : paths.profiles,
+  };
+  return cloud
+    ? {
+        database: explicitDatabase ? `${local.database}.cloud-cache` : paths.cloudDatabase,
+        profiles: explicitProfiles ? resolve(local.profiles, "cloud-cache") : paths.cloudProfiles,
+      }
+    : local;
+}
+
 export function ensureStateDirectories(paths: StatePaths): void {
-  for (const path of [paths.root, paths.profiles, paths.extensions, paths.inbox, paths.reports, paths.browser]) {
+  for (const path of [paths.root, paths.profiles, paths.cloudProfiles, paths.extensions, paths.inbox, paths.reports, paths.browser]) {
     mkdirSync(path, { recursive: true });
   }
 }

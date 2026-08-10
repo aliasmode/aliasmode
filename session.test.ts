@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   bundleHasRestorableLogin,
+  bundleLoggedInPlatforms,
   bundleTelegramClient,
   collectSessionFromContext,
   decodeReadSessionResult,
@@ -304,7 +305,11 @@ test("writeSessionToBrowser bounds disconnect and preserves a primary restore fa
 
 test("bundleHasRestorableLogin: true only when injecting the bundle can put a login back", () => {
   expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "auth_token", value: "x", domain: ".x.com" }] }))).toBe(true); // X cookie
+  expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "sessionid", value: "x", domain: ".instagram.com" }] }))).toBe(true);
+  expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "c_user", value: "1", domain: ".facebook.com" }] }))).toBe(true);
+  expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "sessionid_ss", value: "x", domain: ".tiktok.com" }] }))).toBe(true);
   expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "li_at", value: "x", domain: ".linkedin.com" }] }))).toBe(true); // LinkedIn cookie
+  expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "reddit_session", value: "x", domain: ".reddit.com" }] }))).toBe(true);
   expect(
     bundleHasRestorableLogin(JSON.stringify({ cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "live" }] }] })),
   ).toBe(true); // Telegram origin storage
@@ -317,6 +322,29 @@ test("bundleHasRestorableLogin: true only when injecting the bundle can put a lo
   ).toBe(false); // incidental Telegram storage, not auth
   expect(bundleHasRestorableLogin(JSON.stringify({ cookies: [{ name: "stel_token", value: "x", domain: "web.telegram.org" }] }))).toBe(false); // Telegram cookies alone don't restore Web auth
   expect(bundleHasRestorableLogin("not-json")).toBe(false);
+});
+
+test("bundleLoggedInPlatforms recognizes each supported auth marker", () => {
+  const bundle = JSON.stringify({
+    cookies: [
+      { name: "auth_token", value: "x", domain: ".x.com" },
+      { name: "sessionid", value: "i", domain: ".instagram.com" },
+      { name: "c_user", value: "1", domain: ".facebook.com" },
+      { name: "sessionid_ss", value: "t", domain: ".tiktok.com" },
+      { name: "li_at", value: "l", domain: ".linkedin.com" },
+      { name: "reddit_session", value: "r", domain: ".reddit.com" },
+    ],
+    origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "tg" }] }],
+  });
+  expect([...bundleLoggedInPlatforms(bundle, Date.now())].sort()).toEqual([
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "reddit.com",
+    "telegram.org",
+    "tiktok.com",
+    "x.com",
+  ]);
 });
 
 test("bundleHasRestorableLogin: logged-OUT Telegram state must NOT read as restorable (no spurious reset/roam)", () => {
@@ -361,10 +389,14 @@ test("Telegram client/signature recognizes current accountN storage and preserve
   expect(bundleTelegramClient(JSON.stringify({ origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "kz_version", value: '"K"' }] }] }))).toBe("k");
 });
 
-test("isSessionCookie matches the four supported platform hosts (incl. subdomains) and rejects others", () => {
+test("isSessionCookie matches supported platform hosts and rejects others", () => {
   expect(isSessionCookie({ domain: ".x.com" })).toBe(true);
   expect(isSessionCookie({ domain: "x.com" })).toBe(true);
   expect(isSessionCookie({ domain: "web.telegram.org" })).toBe(true);
+  expect(isSessionCookie({ domain: ".instagram.com" })).toBe(true);
+  expect(isSessionCookie({ domain: ".facebook.com" })).toBe(true);
+  expect(isSessionCookie({ domain: ".tiktok.com" })).toBe(true);
+  expect(isSessionCookie({ domain: ".reddit.com" })).toBe(true);
   expect(isSessionCookie({ domain: ".linkedin.com" })).toBe(true);
   expect(isSessionCookie({ domain: "www.linkedin.com" })).toBe(true);
   expect(isSessionCookie({ domain: "evil.com" })).toBe(false);

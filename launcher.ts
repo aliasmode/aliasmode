@@ -227,6 +227,10 @@ export function isTelegramPlatform(platform: string | undefined): boolean {
 export function platformHomeUrl(platform: string | undefined, telegramClient: "a" | "k" = "k"): string | null {
   const p = (platform || "").trim().toLowerCase();
   if (p === "x.com" || p === "x" || p === "twitter" || p === "twitter.com") return "https://x.com/home";
+  if (p === "instagram" || p === "instagram.com" || p === "www.instagram.com") return "https://www.instagram.com/";
+  if (p === "facebook" || p === "facebook.com" || p === "www.facebook.com") return "https://www.facebook.com/";
+  if (p === "tiktok" || p === "tiktok.com" || p === "www.tiktok.com") return "https://www.tiktok.com/";
+  if (p === "reddit" || p === "reddit.com" || p === "www.reddit.com") return "https://www.reddit.com/";
   if (isTelegramPlatform(p)) return `https://web.telegram.org/${telegramClient}/`;
   if (p === "linkedin.com" || p === "linkedin") return "https://www.linkedin.com/feed/";
   return null;

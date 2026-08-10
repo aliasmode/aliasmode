@@ -10,7 +10,20 @@
 import { source as playwrightStorageScriptSource } from "./node_modules/playwright-core/lib/generated/storageScriptSource.js";
 import type { CookieRecord } from "./types.ts";
 
-const SESSION_URLS = ["https://x.com", "https://web.telegram.org", "https://www.linkedin.com", "https://linkedin.com"];
+const SESSION_URLS = [
+  "https://x.com",
+  "https://web.telegram.org",
+  "https://www.linkedin.com",
+  "https://linkedin.com",
+  "https://www.instagram.com",
+  "https://instagram.com",
+  "https://www.facebook.com",
+  "https://facebook.com",
+  "https://www.tiktok.com",
+  "https://tiktok.com",
+  "https://www.reddit.com",
+  "https://reddit.com",
+];
 const SESSION_ORIGINS = [...new Set(SESSION_URLS.map((url) => new URL(url).origin))];
 const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
@@ -172,7 +185,12 @@ export function normalizeOriginStorage(origin: string, storage: any): OriginStor
 // excluded here for reset safety: Telegram Web's restorable auth is in origin storage, not cookies.
 const AUTH_COOKIES: Array<{ platform: string; parentDomain: string; cookie: string }> = [
   { platform: "x.com", parentDomain: "x.com", cookie: "auth_token" },
+  { platform: "instagram.com", parentDomain: "instagram.com", cookie: "sessionid" },
+  { platform: "facebook.com", parentDomain: "facebook.com", cookie: "c_user" },
+  { platform: "tiktok.com", parentDomain: "tiktok.com", cookie: "sessionid" },
+  { platform: "tiktok.com", parentDomain: "tiktok.com", cookie: "sessionid_ss" },
   { platform: "linkedin.com", parentDomain: "linkedin.com", cookie: "li_at" },
+  { platform: "reddit.com", parentDomain: "reddit.com", cookie: "reddit_session" },
 ];
 
 function parseBundle(bundle: string): any | null {
@@ -357,7 +375,7 @@ export function bundleLoggedInPlatforms(bundle: string, now: number): Set<string
 }
 
 /**
- * True if injecting this bundle would put a login BACK — a valued auth cookie (X/LinkedIn) or roamable
+ * True if injecting this bundle would put a login BACK — a valued supported-platform auth cookie or
  * origin storage (Telegram's localStorage/IndexedDB). Used to decide whether it's safe to reset a
  * profile's local volatile storage after a crash: only when the bundle we're about to inject can restore
  * the login. On a first-migration open the hub has no session, the fallback bundle is just the import

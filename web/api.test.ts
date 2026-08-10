@@ -9,6 +9,7 @@ import {
   restoreCloudSession,
   selectAppMode,
   signInCloud,
+  updateProfile,
 } from "./api.ts";
 
 const realFetch = globalThis.fetch;
@@ -113,6 +114,18 @@ test("Cloud workspace becomes ready only after current legal acceptance", () => 
     authenticated: true,
     legal: { current, accepted: { ...current, acceptedAt: 1 } },
   })).toBe(true);
+});
+
+test("profile update forwards Cloud expectedVersion and response status", async () => {
+  let body: unknown;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return Response.json({ ok: false, error: "reload required" }, { status: 409 });
+  }) as unknown as typeof fetch;
+
+  const result = await updateProfile("profile1", { name: "Changed" }, 7);
+  expect(body).toEqual({ set: { name: "Changed" }, expectedVersion: 7 });
+  expect(result).toMatchObject({ ok: false, error: "reload required", status: 409 });
 });
 
 test("app mode client sends Cloud selection with JSON", async () => {

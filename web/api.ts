@@ -6,7 +6,7 @@ export interface UiProfile {
   id: string;
   name: string;
   group: string;
-  /** Account platform: "x.com", "telegram.org", or "" (none). */
+  /** Canonical account platform domain, or "" (none). */
   platform: string;
   /** Free-form custom tags. */
   tags: string[];
@@ -51,6 +51,7 @@ export interface AppModeConfig {
   mode: "unconfigured" | "local" | "cloud";
   cloudUrl?: string;
   localAnalytics: boolean;
+  restartRequired?: boolean;
 }
 
 export async function fetchAppMode(): Promise<AppModeConfig> {
@@ -297,6 +298,8 @@ export interface EditProfile {
     resolution: string;
     screenChanged: boolean;
   };
+  /** Present only for Cloud profiles and required for optimistic saves. */
+  expectedVersion?: number;
 }
 
 // ---- 2FA authenticator: current TOTP code (never the secret) ----------------
@@ -317,13 +320,14 @@ export async function fetchProfileEdit(id: string): Promise<EditProfile> {
   return body.profile;
 }
 
-export async function updateProfile(id: string, set: Record<string, unknown>): Promise<any> {
+export async function updateProfile(id: string, set: Record<string, unknown>, expectedVersion?: number): Promise<any> {
   const r = await fetch(`/ui/api/profiles/${encodeURIComponent(id)}/update`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ set }),
+    body: JSON.stringify({ set, ...(expectedVersion === undefined ? {} : { expectedVersion }) }),
   });
-  return apiJson(r, `/ui/api/profiles/${encodeURIComponent(id)}/update`);
+  const body = await apiJson(r, `/ui/api/profiles/${encodeURIComponent(id)}/update`);
+  return { ...body, status: r.status };
 }
 
 export async function convertMobileProfile(id: string): Promise<any> {
