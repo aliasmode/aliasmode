@@ -254,6 +254,43 @@ test("Cloud browser refuses reopen while an older close remains unsynchronized",
   state.store.close();
 });
 
+test("Cloud authentication secures a previous account browser before legal acceptance", async () => {
+  const state = setup();
+  state.store.upsertProfile(decodePortableProfile(payload()).profile);
+  state.store.recordLaunch({
+    profileId: "profile1",
+    pid: 10,
+    debugPort: 9222,
+    ws: "ws://browser",
+    startedAt: 1_000,
+    sessionBaseVersion: 4,
+  });
+  state.queue.recordOpen({
+    accountId: "previous-account",
+    profileId: "profile1",
+    registrationId: "previous-registration",
+    expectedVersion: 4,
+  });
+  state.queue.updateOpen("profile1", "previous-account", "running", {
+    debugPort: 9222,
+    startedAt: 1_000,
+  });
+
+  await state.coordinator.secureAfterAuthentication();
+
+  expect(state.events).toEqual(["capture", "stop"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "previous-account")).toBeNull();
+  expect(state.queue.list("previous-account")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: true,
+    status: "pending",
+  }]);
+  expect(state.closeCalls()).toBe(0);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud sign-out drain remains reusable after the next sign-in", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);

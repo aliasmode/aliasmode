@@ -962,6 +962,7 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
       };
     },
   } as unknown as SupabaseAuthClient, () => 1_000);
+  let secures = 0;
   let resumes = 0;
   const currentLegal = { terms: "1", privacy: "1", acceptableUse: "1" };
   const cloudConnection = {
@@ -983,6 +984,7 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
     },
   } as unknown as CloudConnectionRuntime;
   const cloudBrowser = {
+    async secureAfterAuthentication() { secures++; },
     async resumeAfterAuthentication() { resumes++; },
   } as any;
   const pendingSync = new PendingSyncRuntime(
@@ -1011,6 +1013,7 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
     user: { id: "account1", email: "user@example.com" },
   });
   expect(cloudAuth.accessToken()).toBe("access-token");
+  expect(secures).toBe(1);
   expect(resumes).toBe(0);
 
   const authState = await handleUiRequest(

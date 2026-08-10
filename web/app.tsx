@@ -1061,9 +1061,9 @@ function App() {
                 <h1 id="onboarding-title">Review the Cloud terms</h1>
                 <p>Accept the current policies before synchronizing this workspace.</p>
                 <div className="auth-actions">
-                  <a href="https://aliasmode.com/terms" target="_blank" rel="noreferrer">Terms</a>
-                  <a href="https://aliasmode.com/privacy" target="_blank" rel="noreferrer">Privacy</a>
-                  <a href="https://aliasmode.com/acceptable-use" target="_blank" rel="noreferrer">Acceptable Use</a>
+                  <a href="https://aliasmode.com/terms/" target="_blank" rel="noreferrer">Terms</a>
+                  <a href="https://aliasmode.com/privacy/" target="_blank" rel="noreferrer">Privacy</a>
+                  <a href="https://aliasmode.com/acceptable-use/" target="_blank" rel="noreferrer">Acceptable Use</a>
                 </div>
                 {authErr && <div className="mode-error" role="alert">{authErr}</div>}
                 <button
@@ -1130,11 +1130,11 @@ function App() {
   return (
     <div
       className="app"
-      onDragOver={(e) => { if (isCloudMode) return; e.preventDefault(); if (!dragging) setDragging(true); }}
-      onDragLeave={(e) => { if (isCloudMode) return; e.preventDefault(); if (e.currentTarget === e.target) setDragging(false); }}
+      onDragOver={(e) => { e.preventDefault(); if (isCloudMode) return; if (!dragging) setDragging(true); }}
+      onDragLeave={(e) => { e.preventDefault(); if (isCloudMode) return; if (e.currentTarget === e.target) setDragging(false); }}
       onDrop={(e) => {
-        if (isCloudMode) return;
         e.preventDefault();
+        if (isCloudMode) return;
         setDragging(false);
         if (e.dataTransfer.files?.length) doUpload(e.dataTransfer.files);
       }}

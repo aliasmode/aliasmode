@@ -335,6 +335,8 @@ export async function handleUiRequest(
           const initialized = pending ?? options.pendingSync.initialize();
           if (legalAcceptanceIsCurrent(bootstrap.legal)) {
             await options.cloudBrowser?.resumeAfterAuthentication();
+          } else {
+            await options.cloudBrowser?.secureAfterAuthentication();
           }
           return Response.json({
             ok: true,
@@ -378,6 +380,8 @@ export async function handleUiRequest(
             (!queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
           ) {
             await options.cloudBrowser?.resumeAfterAuthentication();
+          } else {
+            await options.cloudBrowser?.secureAfterAuthentication();
           }
           return Response.json({
             ok: true,
