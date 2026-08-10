@@ -8,6 +8,9 @@ const require = createRequire(import.meta.url);
 const transportPath = fileURLToPath(
   new URL("./node_modules/playwright-core/lib/server/transport.js", import.meta.url),
 );
+const browserContextPath = fileURLToPath(
+  new URL("./node_modules/playwright-core/lib/server/browserContext.js", import.meta.url),
+);
 
 function transportStats() {
   return (globalThis as any)[transportStatsKey] as {
@@ -91,6 +94,10 @@ describe("Playwright CDP compatibility patch", () => {
       "./node_modules/playwright-core/lib/server/transport.js",
       import.meta.url,
     )).text();
+    const installedContext = await Bun.file(new URL(
+      "./node_modules/playwright-core/lib/server/browserContext.js",
+      import.meta.url,
+    )).text();
 
     for (const source of [patch, installed]) {
       expect(source).toContain("const perMessageDeflate = false");
@@ -99,7 +106,33 @@ describe("Playwright CDP compatibility patch", () => {
       expect(source).not.toContain("closeTimeout:");
     }
     expect(patch).toContain('const _rawWs = require("ws")');
+    for (const source of [patch, installedContext]) {
+      expect(source).toContain("if (!options.name && !options.domain && !options.path)");
+    }
     expect(installed.match(/(?:this|transport)\._ws\.close\(\)/g)).toHaveLength(1);
+  });
+
+  test("unfiltered cookie clearing skips the unnecessary cookie read", async () => {
+    const { BrowserContext } = require(browserContextPath);
+    const events: string[] = [];
+    const context = {
+      async cookies() {
+        events.push("read");
+        return [
+          { name: "keep", value: "1", domain: ".x.com", path: "/" },
+          { name: "remove", value: "2", domain: ".x.com", path: "/" },
+        ];
+      },
+      async doClearCookies() { events.push("clear"); },
+      async addCookies(cookies: any[]) { events.push(`add:${cookies.map((cookie) => cookie.name).join(",")}`); },
+    };
+
+    await BrowserContext.prototype.clearCookies.call(context, {});
+    expect(events).toEqual(["clear"]);
+
+    events.length = 0;
+    await BrowserContext.prototype.clearCookies.call(context, { name: "remove" });
+    expect(events).toEqual(["read", "clear", "add:keep"]);
   });
 
   test("graceful close clears the fallback without terminating", async () => {

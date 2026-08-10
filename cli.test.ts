@@ -28,7 +28,22 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
   await runCompiledSidecarSmoke("http://127.0.0.1:9222", {
     async writeSession(endpoint, bundle) {
       events.push(`write:${endpoint}`);
-      expect(JSON.parse(bundle)).toEqual({ cookies: [], origins: [] });
+      expect(JSON.parse(bundle)).toEqual({
+        cookies: [{
+          name: "aliasmode_smoke",
+          value: "live",
+          domain: ".x.com",
+          path: "/",
+          expires: -1,
+          httpOnly: false,
+          secure: true,
+          sameSite: "Lax",
+        }],
+        origins: [{
+          origin: "https://web.telegram.org",
+          localStorage: [{ name: "aliasmode_smoke", value: "live" }],
+        }],
+      });
     },
     async assertAlive(endpoint) {
       events.push(`alive:${endpoint}`);
@@ -38,10 +53,12 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
     },
     async readSession(endpoint) {
       events.push(`read:${endpoint}`);
-      return JSON.stringify({ cookies: [] });
+      return JSON.stringify({ cookies: [{ name: "aliasmode_smoke", value: "live" }] });
     },
   });
   expect(events).toEqual([
+    "write:http://127.0.0.1:9222",
+    "alive:http://127.0.0.1:9222",
     "write:http://127.0.0.1:9222",
     "alive:http://127.0.0.1:9222",
     "navigate:http://127.0.0.1:9222",

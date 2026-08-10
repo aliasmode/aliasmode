@@ -24,7 +24,6 @@ const SESSION_URLS = [
   "https://www.reddit.com",
   "https://reddit.com",
 ];
-const SESSION_ORIGINS = [...new Set(SESSION_URLS.map((url) => new URL(url).origin))];
 const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
@@ -168,15 +167,13 @@ export function isSessionCookie(cookie: { domain?: string }): boolean {
 
 /** Keep only well-shaped localStorage/indexedDB entries for a known origin; null if there's nothing usable. */
 export function normalizeOriginStorage(origin: string, storage: any): OriginStorage | null {
-  if (!SESSION_ORIGINS.includes(origin)) return null;
+  if (origin !== TELEGRAM_ORIGIN) return null;
   const localStorage = Array.isArray(storage?.localStorage)
     ? storage.localStorage
         .filter((e: any) => typeof e?.name === "string" && typeof e?.value === "string")
         .map((e: any) => ({ name: e.name, value: e.value }))
     : [];
-  const indexedDB = origin === TELEGRAM_ORIGIN
-    ? filterTelegramAuthIndexedDB(storage?.indexedDB)
-    : Array.isArray(storage?.indexedDB) ? storage.indexedDB : [];
+  const indexedDB = filterTelegramAuthIndexedDB(storage?.indexedDB);
   if (localStorage.length === 0 && indexedDB.length === 0) return null;
   return { origin, localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
 }
@@ -432,7 +429,7 @@ async function collectAttachedPageOrigins(context: any): Promise<AttachedPageSto
       continue;
     }
     if (origin === TELEGRAM_ORIGIN && !telegramClient) telegramClient = telegramClientForUrl(pageUrl);
-    if (!SESSION_ORIGINS.includes(origin) || seen.has(origin)) continue;
+    if (origin !== TELEGRAM_ORIGIN || seen.has(origin)) continue;
     seen.add(origin);
     let storage = await page.evaluate(localStorageExpr).catch(() => null);
 
@@ -747,7 +744,7 @@ async function storageScriptSource(): Promise<string> {
 export async function restoreOriginStorage(context: any, origins: OriginStorage[]): Promise<void> {
   // Restore ONLY origins carried by the bundle. Always use a throwaway page in production so seeding
   // never navigates or races the operator's real Telegram tab.
-  const targets = origins.filter((o) => SESSION_ORIGINS.includes(o.origin));
+  const targets = origins.filter((origin) => origin.origin === TELEGRAM_ORIGIN);
   if (targets.length === 0) return;
   const existing = context.pages();
   const closePage = typeof context.newPage === "function";
