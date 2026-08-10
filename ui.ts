@@ -200,6 +200,16 @@ function applyEdits(p: Profile, set: Record<string, unknown>): void {
   }
 }
 
+function legalAcceptanceIsCurrent(legal: {
+  current: { terms: string; privacy: string; acceptableUse: string };
+  accepted: { terms: string; privacy: string; acceptableUse: string } | null;
+}): boolean {
+  return !!legal.accepted &&
+    legal.accepted.terms === legal.current.terms &&
+    legal.accepted.privacy === legal.current.privacy &&
+    legal.accepted.acceptableUse === legal.current.acceptableUse;
+}
+
 export interface UiRuntimeOptions {
   appConfig?: AppConfigStore;
   paths?: StatePaths;
@@ -265,7 +275,16 @@ export async function handleUiRequest(
     if (!options.cloudAuth) {
       return Response.json({ ok: false, error: "AliasMode Cloud authentication is unavailable" }, { status: 503 });
     }
-    return Response.json({ ok: true, ...options.cloudAuth.state() });
+    const state = options.cloudAuth.state();
+    if (!state.authenticated || !options.cloudConnection?.accountId()) {
+      return Response.json({ ok: true, ...state });
+    }
+    try {
+      const status = await options.cloudConnection.client.status();
+      return Response.json({ ok: true, ...state, legal: status.legal });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
   }
 
   if (pathname.startsWith("/ui/api/cloud-auth/") && req.method === "POST") {
@@ -314,7 +333,9 @@ export async function handleUiRequest(
           const result = await options.cloudAuth.signIn(body.email, body.password);
           const bootstrap = await options.cloudConnection.bootstrap();
           const initialized = pending ?? options.pendingSync.initialize();
-          await options.cloudBrowser?.resumeAfterAuthentication();
+          if (legalAcceptanceIsCurrent(bootstrap.legal)) {
+            await options.cloudBrowser?.resumeAfterAuthentication();
+          }
           return Response.json({
             ok: true,
             authenticated: true,
@@ -352,7 +373,10 @@ export async function handleUiRequest(
           const status = await options.cloudConnection.client.status();
           options.cloudConnection.restoreAccount(status.account.id);
           options.cloudConnection.restoreDevice(status.device.id, body.deviceCredential);
-          if (!queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id)) {
+          if (
+            legalAcceptanceIsCurrent(status.legal) &&
+            (!queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
+          ) {
             await options.cloudBrowser?.resumeAfterAuthentication();
           }
           return Response.json({
@@ -370,6 +394,18 @@ export async function handleUiRequest(
           options.cloudConnection.clearDevice();
           throw error;
         }
+      }
+      if (pathname === "/ui/api/cloud-auth/accept-legal") {
+        if (!options.cloudConnection) {
+          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+        }
+        const status = await options.cloudConnection.client.status();
+        const accepted = await options.cloudConnection.client.acceptLegal({ versions: status.legal.current });
+        await options.cloudBrowser?.resumeAfterAuthentication();
+        return Response.json({
+          ok: true,
+          legal: { current: status.legal.current, accepted: accepted.accepted },
+        });
       }
       if (pathname === "/ui/api/cloud-auth/signout") {
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
@@ -397,7 +433,7 @@ export async function handleUiRequest(
   }
 
   const cloudLifecycleRoute =
-    (pathname === "/ui/api/profiles" && req.method === "GET") ||
+    (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache)$/.test(pathname));
   if (
     options.appConfig?.read().mode === "cloud" &&
@@ -457,6 +493,9 @@ export async function handleUiRequest(
       }
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
       if (profile.proxy) await attachTimezones([profile]).catch(() => {}); // best-effort tz
+      if (options.cloudBrowser) {
+        return Response.json({ ok: true, ...await options.cloudBrowser.create(profile) });
+      }
       store.upsertProfile(profile);
       return Response.json({ ok: true, id: profile.id });
     } catch (e) {

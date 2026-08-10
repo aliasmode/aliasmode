@@ -12,6 +12,7 @@ import {
   bundleTelegramClient,
 } from "./session.ts";
 import type { ProfileStore } from "./store.ts";
+import type { Profile } from "./types.ts";
 
 export interface CloudBrowserOpenResult {
   ok: boolean;
@@ -41,6 +42,7 @@ export interface CloudBrowserProfile {
 
 export interface CloudBrowserLifecycle {
   listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }>;
+  create(profile: Profile): Promise<{ id: string }>;
   open(profileId: string, launchArgs?: string[]): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<boolean>;
   resumeAfterAuthentication(): Promise<void>;
@@ -50,7 +52,7 @@ export interface CloudBrowserLifecycle {
 
 type CloudBrowserClient = Pick<
   CloudClient,
-  "listProfiles" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
+  "listProfiles" | "createProfile" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
 >;
 
 type CloudBrowserLauncher = Pick<
@@ -134,6 +136,17 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }),
       healthSources: [],
     };
+  }
+
+  async create(profile: Profile): Promise<{ id: string }> {
+    this.requireContext(false);
+    const created = await this.options.cloud.createProfile({
+      payload: encodePortableProfile(profile),
+    });
+    if (created.profile.id !== profile.id) {
+      throw new Error("Cloud returned a mismatched created profile");
+    }
+    return { id: profile.id };
   }
 
   async open(profileId: string, launchArgs: string[] = []): Promise<CloudBrowserOpenResult> {
