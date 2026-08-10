@@ -420,6 +420,7 @@ export interface CompiledSidecarSmokeDeps {
   readSession: (endpoint: string) => Promise<string>;
   navigate: (endpoint: string) => Promise<void>;
   assertAlive: (endpoint: string) => Promise<void>;
+  webSocketEndpoint: (endpoint: string) => Promise<string>;
 }
 
 async function assertCdpAlive(endpoint: string): Promise<void> {
@@ -432,6 +433,23 @@ async function assertCdpAlive(endpoint: string): Promise<void> {
   versionUrl.hash = "";
   const response = await fetch(versionUrl, { signal: AbortSignal.timeout(5_000) });
   if (!response.ok) throw new Error("compiled sidecar smoke lost the CDP endpoint");
+}
+
+async function currentCdpWebSocketEndpoint(endpoint: string): Promise<string> {
+  const versionUrl = new URL(endpoint);
+  if (versionUrl.protocol !== "http:" && versionUrl.protocol !== "https:") {
+    throw new Error("compiled sidecar smoke requires an HTTP CDP endpoint");
+  }
+  versionUrl.pathname = "/json/version";
+  versionUrl.search = "";
+  versionUrl.hash = "";
+  const response = await fetch(versionUrl, { signal: AbortSignal.timeout(5_000) });
+  if (!response.ok) throw new Error("compiled sidecar smoke could not resolve the CDP websocket");
+  const body = await response.json() as { webSocketDebuggerUrl?: unknown };
+  if (typeof body.webSocketDebuggerUrl !== "string" || !/^wss?:\/\//.test(body.webSocketDebuggerUrl)) {
+    throw new Error("compiled sidecar smoke received an invalid CDP websocket");
+  }
+  return body.webSocketDebuggerUrl;
 }
 
 async function navigateSmokePage(endpoint: string): Promise<void> {
@@ -453,6 +471,7 @@ export async function runCompiledSidecarSmoke(
     readSession: readSessionInSubprocess,
     navigate: navigateSmokePage,
     assertAlive: assertCdpAlive,
+    webSocketEndpoint: currentCdpWebSocketEndpoint,
   },
 ): Promise<void> {
   const smokeCookie = {
@@ -476,6 +495,10 @@ export async function runCompiledSidecarSmoke(
   await deps.assertAlive(endpoint);
   // The second authoritative write exercises cookie clearing against pre-existing browser state.
   await deps.writeSession(endpoint, smokeBundle);
+  await deps.assertAlive(endpoint);
+  // Cloud uses an identity-bound current websocket. Exercise that exact transport too.
+  const webSocketEndpoint = await deps.webSocketEndpoint(endpoint);
+  await deps.writeSession(webSocketEndpoint, smokeBundle);
   await deps.assertAlive(endpoint);
   await deps.navigate(endpoint);
   await deps.assertAlive(endpoint);

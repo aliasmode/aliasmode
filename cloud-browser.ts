@@ -68,8 +68,8 @@ export interface CloudBrowserOptions {
   queue: () => PendingSyncQueue | undefined;
   accountId: () => string | undefined;
   deviceId: () => string | undefined;
-  readSession: (ws: string) => Promise<string>;
-  writeSession: (ws: string, bundle: string) => Promise<void>;
+  readSession: (endpoint: string) => Promise<string>;
+  writeSession: (endpoint: string, bundle: string) => Promise<void>;
   heartbeatMs?: number;
   setIntervalFn?: (fn: () => void, ms: number) => unknown;
   clearIntervalFn?: (handle: unknown) => void;
@@ -259,7 +259,25 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
-      await this.options.writeSession(launched.ws, sessionBundle);
+      await this.options.launcher.verifyRunningIdentity(profileId);
+      const verifiedLaunch = this.options.store.getLaunch(profileId);
+      if (
+        !verifiedLaunch ||
+        verifiedLaunch.debugPort !== launch.debugPort ||
+        verifiedLaunch.startedAt !== launch.startedAt
+      ) {
+        throw new Error("Cloud browser identity changed before session restore");
+      }
+      await this.options.writeSession(verifiedLaunch.ws, sessionBundle);
+      await this.options.launcher.verifyRunningIdentity(profileId);
+      const restoredLaunch = this.options.store.getLaunch(profileId);
+      if (
+        !restoredLaunch ||
+        restoredLaunch.debugPort !== launch.debugPort ||
+        restoredLaunch.startedAt !== launch.startedAt
+      ) {
+        throw new Error("Cloud browser identity changed during session restore");
+      }
 
       stage = "version_commit";
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
@@ -356,7 +374,17 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     try {
       const profile = this.options.store.getProfile(profileId);
       if (!profile) throw new Error("Cloud profile cache is missing");
-      const sessionBundle = await this.options.readSession(launch.ws);
+      await this.options.launcher.verifyRunningIdentity(profileId);
+      const verifiedLaunch = this.options.store.getLaunch(profileId);
+      if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) {
+        throw new Error("Cloud browser identity changed before session capture");
+      }
+      const sessionBundle = await this.options.readSession(verifiedLaunch.ws);
+      await this.options.launcher.verifyRunningIdentity(profileId);
+      const capturedLaunch = this.options.store.getLaunch(profileId);
+      if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) {
+        throw new Error("Cloud browser identity changed during session capture");
+      }
       pendingId = queue.enqueue({
         accountId,
         profileId,
@@ -534,7 +562,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (!launch || !profile) return false;
     let pendingId: string;
     try {
-      const sessionBundle = await this.options.readSession(launch.ws);
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const verifiedLaunch = this.options.store.getLaunch(open.profileId);
+      if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) return false;
+      const sessionBundle = await this.options.readSession(verifiedLaunch.ws);
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const capturedLaunch = this.options.store.getLaunch(open.profileId);
+      if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) return false;
       pendingId = queue.enqueue({
         accountId: open.accountId,
         profileId: open.profileId,
