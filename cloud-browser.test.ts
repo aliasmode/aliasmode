@@ -42,8 +42,10 @@ function setup(options: {
   stopResult?: boolean;
   closeConflict?: boolean;
   closeTransportFailure?: boolean;
+  navigateFailure?: boolean;
 } = {}) {
   const events: string[] = [];
+  const logs: string[] = [];
   const navigatedUrls: string[][] = [];
   const store = new ProfileStore(":memory:");
   const queuePath = join(mkdtempSync(join(tmpdir(), "aliasmode-cloud-browser-")), "pending.sqlite");
@@ -117,6 +119,7 @@ function setup(options: {
     async active() { return true; },
     async navigate(_ws: string, urls: string[]) {
       events.push("navigate");
+      if (options.navigateFailure) throw new Error("navigation secret");
       navigatedUrls.push(urls);
       expect(queue.getOpen("profile1", "account1")?.phase).toBe("running");
       expect(store.getLaunch("profile1")?.sessionBaseVersion).toBe(4);
@@ -131,6 +134,9 @@ function setup(options: {
     accountId: () => "account1",
     deviceId: () => "device1",
     heartbeatMs: 0,
+    log(message) {
+      logs.push(message);
+    },
     async readSession() {
       events.push("capture");
       return JSON.stringify(payload().session);
@@ -144,6 +150,7 @@ function setup(options: {
   return {
     coordinator,
     events,
+    logs,
     navigatedUrls,
     store,
     queue,
@@ -178,6 +185,25 @@ test("Cloud browser restores the authoritative session before navigation", async
     debugPort: 9222,
     startedAt: 1000,
   });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser stays open when startup navigation fails", async () => {
+  const state = setup({ navigateFailure: true });
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(result).toMatchObject({
+    ok: true,
+    warning: "Profile opened, but startup navigation failed. Open the site manually.",
+  });
+  expect(state.events).toEqual(["cloud-open", "start", "restore", "navigate"]);
+  expect(state.logs).toEqual([
+    "profile1: Cloud startup navigation failed (transport_error, Error); continuing",
+  ]);
+  expect(JSON.stringify({ result, logs: state.logs })).not.toContain("navigation secret");
+  expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.abandonCalls()).toBe(0);
   state.queue.close();
   state.store.close();
 });
@@ -346,11 +372,18 @@ test("terminal Cloud heartbeat errors capture and stop the browser", async () =>
   state.store.close();
 });
 
-test("Cloud browser abandons an opened registration when restore fails after teardown", async () => {
+test("Cloud browser reports a safe restore stage and abandons after teardown", async () => {
   const state = setup();
-  (state.coordinator as any).options.writeSession = async () => { throw new Error("restore failed"); };
+  (state.coordinator as any).options.writeSession = async () => { throw new Error("secret restore detail"); };
   const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
-  expect(result).toMatchObject({ ok: false, error: "Cloud profile open failed (transport_error)" });
+  expect(result).toMatchObject({
+    ok: false,
+    error: "Cloud profile open failed at session_restore (transport_error)",
+  });
+  expect(state.logs).toEqual([
+    "profile1: Cloud open failed at session_restore (transport_error, Error)",
+  ]);
+  expect(JSON.stringify({ result, logs: state.logs })).not.toContain("secret restore detail");
   expect(state.abandonCalls()).toBe(1);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   expect(state.store.getLaunch("profile1")).toBeNull();
