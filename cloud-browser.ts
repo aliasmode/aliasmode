@@ -229,11 +229,24 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
       stage = "browser_launch";
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
-      const launched = await this.options.launcher.start(profileId, chromeArgs, {
+      const startOptions = {
         autoNavigate: false,
         resetStorage: bundleHasRestorableLogin(sessionBundle),
         sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
-      });
+      };
+      let launched: { ws: string; port: number };
+      try {
+        launched = await this.options.launcher.start(profileId, chromeArgs, startOptions);
+      } catch (error) {
+        // A failed start can retain exact ownership when an older CloakBrowser still holds the
+        // persistent Cloud profile directory. Stop only that recorded launch, require confirmed
+        // death, then retry once so Chromium cannot hand the new command line to the stale singleton.
+        if (!this.options.store.getLaunch(profileId)) throw error;
+        const stopped = await this.options.launcher.stop(profileId).catch(() => false);
+        if (!stopped) throw error;
+        this.log(`${profileId}: stopped retained browser launch ownership; retrying once`);
+        launched = await this.options.launcher.start(profileId, chromeArgs, startOptions);
+      }
       const launch = this.options.store.getLaunch(profileId);
       if (!launch) throw new Error("browser launch did not create durable lifecycle state");
 

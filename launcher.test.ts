@@ -3031,6 +3031,7 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   const f = fleet();
   const killedPids: number[] = [];
   const order: string[] = [];
+  let held = true;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
@@ -3047,10 +3048,11 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     // A browser from an earlier run still holds this profile's user-data dir.
-    findProfileDirHolderPids: async () => [4242],
+    findProfileDirHolderPids: async () => held ? [4242] : [],
     killPid: async (pid) => {
       order.push(`kill:${pid}`);
       killedPids.push(pid);
+      held = false;
       f.killPid(pid);
     },
     cdpReadyTimeoutMs: 1000,
@@ -3061,5 +3063,68 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   // command line to the old instance and exit, so nothing listens on the new port.
   expect(killedPids).toEqual([4242]);
   expect(order).toEqual(["kill:4242", "spawn"]);
+  store.close();
+});
+
+test("a fresh launch refuses to spawn while a leaked profile-dir holder survives", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  let spawned = false;
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true,
+    spawn: (bin, args) => {
+      spawned = true;
+      return f.spawn(bin, args);
+    },
+    fetch: f.fetchFn,
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [4242],
+    killPid: async () => {},
+    teardownPollMs: 1,
+    teardownTimeoutMs: 5,
+    cdpReadyTimeoutMs: 1000,
+  });
+
+  await expect(launcher.start("k1d0cd11")).rejects.toThrow("profile directory is still held");
+  expect(spawned).toBe(false);
+  expect(store.getLaunch("k1d0cd11")).toBeNull();
+  store.close();
+});
+
+test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  let spawned = false;
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true,
+    spawn: (bin, args) => {
+      spawned = true;
+      return f.spawn(bin, args);
+    },
+    fetch: f.fetchFn,
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => null,
+    cdpReadyTimeoutMs: 1000,
+  });
+
+  await expect(launcher.start("k1d0cd11")).rejects.toThrow("profile directory holder scan was inconclusive");
+  expect(spawned).toBe(false);
+  expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });

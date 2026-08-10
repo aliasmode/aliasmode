@@ -969,15 +969,21 @@ export class Launcher {
    * the dir, so a leaked browser from an earlier port never matches it.
    */
   private async reapForeignProfileDirHolders(profileId: string, userDataDir: string): Promise<void> {
-    let holders: number[] | null;
-    try {
-      holders = await this.findProfileDirHolderPidsFn(userDataDir);
-    } catch (err) {
-      this.log(`profile ${profileId}: profile-dir holder scan failed (${err instanceof Error ? err.message : err}); continuing`);
-      return;
-    }
-    // null = the scan itself was inconclusive. Never guess a kill from that.
-    if (!holders?.length) return;
+    const scan = async (): Promise<number[]> => {
+      let holders: number[] | null;
+      try {
+        holders = await this.findProfileDirHolderPidsFn(userDataDir);
+      } catch {
+        throw new Error(`profile ${profileId}: profile directory holder scan failed; launch aborted`);
+      }
+      if (holders === null) {
+        throw new Error(`profile ${profileId}: profile directory holder scan was inconclusive; launch aborted`);
+      }
+      return holders;
+    };
+
+    const holders = await scan();
+    if (holders.length === 0) return;
     this.log(
       `profile ${profileId}: ${holders.length} leaked process(es) still hold ${userDataDir} ` +
       `(pids ${holders.join(", ")}); reaping before launch so the new browser cannot hand off to them`,
@@ -988,6 +994,16 @@ export class Launcher {
       } catch (err) {
         this.log(`profile ${profileId}: could not reap leaked pid ${pid} (${err instanceof Error ? err.message : err})`);
       }
+    }
+
+    const deadline = Date.now() + this.teardownTimeoutMs;
+    while (true) {
+      const remaining = await scan();
+      if (remaining.length === 0) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`profile ${profileId}: profile directory is still held after cleanup; launch aborted`);
+      }
+      await Bun.sleep(this.teardownPollMs);
     }
   }
 
