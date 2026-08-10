@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import {
+  cloudRuntimeConfiguration,
   dispatchReadSessionWorker,
   drainRemoteShutdown,
   lifecycleAdmissionOptionsFromEnv,
+  OFFICIAL_CLOUD_ANON_KEY,
+  OFFICIAL_CLOUD_URL,
   RemoteShutdownTimeoutError,
 } from "./cli.ts";
 
@@ -27,6 +30,43 @@ test("CLI dispatches the session worker before normal command parsing", async ()
     JSON.stringify({ ok: true, bundle: "captured bundle" }),
     "exit:0",
   ]);
+});
+
+test("official Cloud configuration works without environment variables", () => {
+  expect(cloudRuntimeConfiguration("cloud", {})).toEqual({
+    apiUrl: OFFICIAL_CLOUD_URL,
+    authUrl: OFFICIAL_CLOUD_URL,
+    anonKey: OFFICIAL_CLOUD_ANON_KEY,
+  });
+});
+
+test("Cloud configuration preserves explicit staging overrides", () => {
+  expect(cloudRuntimeConfiguration("cloud", {
+    ALIASMODE_CLOUD_URL: "http://127.0.0.1:3000/",
+    ALIASMODE_SUPABASE_URL: "http://localhost:9999/",
+    ALIASMODE_SUPABASE_ANON_KEY: "staging-public-key",
+  })).toEqual({
+    apiUrl: "http://127.0.0.1:3000",
+    authUrl: "http://localhost:9999",
+    anonKey: "staging-public-key",
+  });
+});
+
+test("Local mode does not initialize or validate Cloud configuration", () => {
+  expect(cloudRuntimeConfiguration("local", {
+    ALIASMODE_CLOUD_URL: "not a URL",
+    ALIASMODE_SUPABASE_URL: "not a URL",
+    ALIASMODE_SUPABASE_ANON_KEY: "",
+  })).toBeNull();
+});
+
+test("Cloud mode rejects invalid explicit configuration", () => {
+  expect(() => cloudRuntimeConfiguration("cloud", {
+    ALIASMODE_CLOUD_URL: "http://cloud.example.com",
+  })).toThrow("AliasMode Cloud URL must use HTTPS");
+  expect(() => cloudRuntimeConfiguration("cloud", {
+    ALIASMODE_SUPABASE_ANON_KEY: "",
+  })).toThrow("ALIASMODE_SUPABASE_ANON_KEY must not be empty");
 });
 
 test("lifecycle admission env config is optional and parses positive integers", () => {
