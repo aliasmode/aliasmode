@@ -907,6 +907,51 @@ test("app mode API exposes unconfigured first launch and persists Local selectio
   s.close();
 });
 
+test("app mode API switches persisted Local mode to Cloud without touching Cloud runtimes", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("local");
+  let cloudRuntimeReads = 0;
+  const unavailableRuntime = new Proxy({}, {
+    get() {
+      cloudRuntimeReads++;
+      throw new Error("mode selection must not initialize Cloud");
+    },
+  });
+
+  const selected = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "cloud" }),
+    }),
+    {} as any,
+    s,
+    null,
+    {
+      appConfig,
+      defaultCloudUrl: "https://cloud.aliasmode.test",
+      cloudAuth: unavailableRuntime as any,
+      cloudConnection: unavailableRuntime as any,
+    },
+  );
+
+  expect(await selected!.json()).toEqual({
+    ok: true,
+    config: {
+      version: 1,
+      mode: "cloud",
+      cloudUrl: "https://cloud.aliasmode.test",
+      localAnalytics: false,
+    },
+    restartRequired: true,
+  });
+  expect(appConfig.read().mode).toBe("cloud");
+  expect(cloudRuntimeReads).toBe(0);
+  s.close();
+});
+
 test("app mode API uses the packaged Cloud endpoint", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));

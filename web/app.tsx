@@ -1192,6 +1192,15 @@ function App() {
           </div>}
         </div>
         {!isCloudMode && <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>}
+        <button
+          className="extbtn"
+          type="button"
+          disabled={modeBusy}
+          onClick={() => void chooseMode(isCloudMode ? "local" : "cloud")}
+        >
+          {modeBusy ? "Switching mode…" : `Switch to ${isCloudMode ? "Local" : "Cloud"}`}
+        </button>
+        {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
       </aside>
 
       <div className="main">

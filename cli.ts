@@ -55,6 +55,7 @@ import { hostname } from "node:os";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
+import { ALIASMODE_VERSION } from "./version.ts";
 import {
   DESKTOP_PROTOCOL,
   DesktopCredentialBridge,
@@ -482,7 +483,7 @@ async function main() {
           installationId: defaultOperatorName(dbPath),
           label: hostname(),
           platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux",
-          appVersion: process.env.ALIASMODE_APP_VERSION ?? "0.1.0-beta.1",
+          appVersion: process.env.ALIASMODE_APP_VERSION ?? ALIASMODE_VERSION,
         },
       })
     : undefined;
