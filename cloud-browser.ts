@@ -107,10 +107,6 @@ function safeErrorType(error: unknown): string {
   return error instanceof Error ? "Error" : "unknown";
 }
 
-function localCdpEndpoint(port: number): string {
-  return `http://127.0.0.1:${port}`;
-}
-
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private readonly transitions = new Map<string, Promise<void>>();
   private readonly opening = new Map<string, Promise<CloudBrowserOpenResult>>();
@@ -264,8 +260,24 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
       stage = "session_restore";
       await this.options.launcher.verifyRunningIdentity(profileId);
-      await this.options.writeSession(localCdpEndpoint(launched.port), sessionBundle);
+      const verifiedLaunch = this.options.store.getLaunch(profileId);
+      if (
+        !verifiedLaunch ||
+        verifiedLaunch.debugPort !== launch.debugPort ||
+        verifiedLaunch.startedAt !== launch.startedAt
+      ) {
+        throw new Error("Cloud browser identity changed before session restore");
+      }
+      await this.options.writeSession(verifiedLaunch.ws, sessionBundle);
       await this.options.launcher.verifyRunningIdentity(profileId);
+      const restoredLaunch = this.options.store.getLaunch(profileId);
+      if (
+        !restoredLaunch ||
+        restoredLaunch.debugPort !== launch.debugPort ||
+        restoredLaunch.startedAt !== launch.startedAt
+      ) {
+        throw new Error("Cloud browser identity changed during session restore");
+      }
 
       stage = "version_commit";
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
@@ -367,7 +379,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) {
         throw new Error("Cloud browser identity changed before session capture");
       }
-      const sessionBundle = await this.options.readSession(localCdpEndpoint(verifiedLaunch.debugPort));
+      const sessionBundle = await this.options.readSession(verifiedLaunch.ws);
       await this.options.launcher.verifyRunningIdentity(profileId);
       const capturedLaunch = this.options.store.getLaunch(profileId);
       if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) {
@@ -553,7 +565,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       await this.options.launcher.verifyRunningIdentity(open.profileId);
       const verifiedLaunch = this.options.store.getLaunch(open.profileId);
       if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) return false;
-      const sessionBundle = await this.options.readSession(localCdpEndpoint(verifiedLaunch.debugPort));
+      const sessionBundle = await this.options.readSession(verifiedLaunch.ws);
       await this.options.launcher.verifyRunningIdentity(open.profileId);
       const capturedLaunch = this.options.store.getLaunch(open.profileId);
       if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) return false;

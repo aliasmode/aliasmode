@@ -48,6 +48,10 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
     async assertAlive(endpoint) {
       events.push(`alive:${endpoint}`);
     },
+    async webSocketEndpoint(endpoint) {
+      events.push(`resolve:${endpoint}`);
+      return "ws://127.0.0.1:9222/devtools/browser/current";
+    },
     async navigate(endpoint) {
       events.push(`navigate:${endpoint}`);
     },
@@ -60,6 +64,9 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
     "write:http://127.0.0.1:9222",
     "alive:http://127.0.0.1:9222",
     "write:http://127.0.0.1:9222",
+    "alive:http://127.0.0.1:9222",
+    "resolve:http://127.0.0.1:9222",
+    "write:ws://127.0.0.1:9222/devtools/browser/current",
     "alive:http://127.0.0.1:9222",
     "navigate:http://127.0.0.1:9222",
     "alive:http://127.0.0.1:9222",

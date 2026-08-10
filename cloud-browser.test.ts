@@ -145,12 +145,12 @@ function setup(options: {
       logs.push(message);
     },
     async readSession(endpoint: string) {
-      expect(endpoint).toBe("http://127.0.0.1:9222");
+      expect(endpoint).toBe("ws://browser");
       events.push("capture");
       return JSON.stringify(payload().session);
     },
     async writeSession(endpoint: string) {
-      expect(endpoint).toBe("http://127.0.0.1:9222");
+      expect(endpoint).toBe("ws://browser");
       events.push("restore");
       expect(queue.getOpen("profile1", "account1")?.phase).toBe("restoring");
       expect(store.getLaunch("profile1")?.sessionBaseVersion).toBe(-1);
