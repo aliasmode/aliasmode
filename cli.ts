@@ -35,7 +35,7 @@ import {
   writeSession,
 } from "./session.ts";
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
-import { ensureStateDirectories, resolveStateRoot, statePaths } from "./paths.ts";
+import { ensureStateDirectories, profileDataPaths, resolveStateRoot, statePaths } from "./paths.ts";
 import { migrateLegacyState } from "./migration.ts";
 import {
   AppConfigStore,
@@ -320,7 +320,7 @@ function attachDesktopControl(
 function makeLauncher(store: ProfileStore, rest: string[], remoteMode = false, defaultDataRoot = "profiles"): Launcher {
   return new Launcher({
     store,
-    dataRoot: flag(rest, "data-root") ?? defaultDataRoot,
+    dataRoot: defaultDataRoot,
     headless: has(rest, "headless"),
     // Explicit canary-only escape hatch for constrained test hosts where a
     // full browser identity probe cannot complete. Never enable in production.
@@ -525,13 +525,19 @@ async function main() {
           : undefined,
       )
     : undefined;
-  const dbPath = flag(rest, "db") ?? paths.database;
+  const configuredDbPath = flag(rest, "db");
+  const configuredDataRoot = flag(rest, "data-root");
+  const identityDbPath = configuredDbPath ?? paths.database;
+  const cloudProfileCache = savedMode.mode === "cloud" && (cmd === "start" || cmd === "serve");
+  const activeProfilePaths = profileDataPaths(paths, cloudProfileCache, configuredDbPath, configuredDataRoot);
+  const dbPath = activeProfilePaths.database;
+  const profileDataRoot = activeProfilePaths.profiles;
   const cloudConnection = cloudAuth && cloudConfig
     ? new CloudConnectionRuntime({
         baseUrl: cloudConfig.apiUrl,
         accessToken: () => cloudAuth.accessTokenOrRefresh(),
         installation: {
-          installationId: defaultOperatorName(dbPath),
+          installationId: defaultOperatorName(identityDbPath),
           label: hostname(),
           platform: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux",
           appVersion: process.env.ALIASMODE_APP_VERSION ?? ALIASMODE_VERSION,
@@ -585,9 +591,9 @@ async function main() {
         // Each box has a stable, unique operator id (OPERATOR_NAME or an
         // auto-generated persisted id). With the shared hub secret the hub
         // attributes locks to this id; a per-operator token overrides it.
-        const owner = defaultOperatorName(dbPath);
+        const owner = defaultOperatorName(identityDbPath);
         console.log(`local instance "${owner}" (hub lock attribution: this box's operator id)`);
-        const launcher = makeLauncher(store, rest, true, paths.profiles);
+        const launcher = makeLauncher(store, rest, true, profileDataRoot);
         await launcher.reconcileOrphans();
         const coord = new RemoteCoordinator({
           hub: new HubClient(hubUrl, password, owner),
@@ -676,7 +682,7 @@ async function main() {
       // before imports. Otherwise a stale crash row makes the hardened importer
       // reject startup before it has a chance to prove the row dead.
       console.log("standalone mode (no HUB_URL) — local only, NOT connected to a hub");
-      const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", paths.profiles);
+      const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", profileDataRoot);
       await launcher.reconcileOrphans();
       if (savedMode.mode !== "cloud") await launcher.certifySurvivors();
       const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);
@@ -753,7 +759,7 @@ async function main() {
     }
     case "serve": {
       const store = new ProfileStore(dbPath);
-      const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", paths.profiles);
+      const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", profileDataRoot);
       await launcher.reconcileOrphans();
       if (savedMode.mode !== "cloud") await launcher.certifySurvivors();
       const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);

@@ -11,6 +11,7 @@ import { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { PendingSyncRuntime } from "./pending-sync.ts";
 import type { SupabaseAuthClient } from "./supabase-auth.ts";
+import { encodePortableProfile } from "./portable-profile.ts";
 
 const SAMPLE = `id=k1d0cd11
 name=sophia
@@ -907,6 +908,36 @@ test("app mode API exposes unconfigured first launch and persists Local selectio
   s.close();
 });
 
+test("app mode API keeps restart-required state across dashboard reloads", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  const options = { appConfig, runtimeMode: "local" as const, defaultCloudUrl: "https://cloud.aliasmode.test" };
+
+  const selected = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "cloud" }),
+    }),
+    {} as any,
+    s,
+    null,
+    options,
+  );
+  expect(await selected!.json()).toMatchObject({ restartRequired: true });
+
+  const reloaded = await handleUiRequest(
+    new Request("http://x/ui/api/app-mode"),
+    {} as any,
+    s,
+    null,
+    options,
+  );
+  expect(await reloaded!.json()).toMatchObject({ mode: "cloud", restartRequired: true });
+  s.close();
+});
+
 test("app mode API switches persisted Local mode to Cloud without touching Cloud runtimes", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
@@ -1373,5 +1404,102 @@ test("app mode API rejects cross-site simple requests", async () => {
   );
   expect(response!.status).toBe(415);
   expect(appConfig.read().mode).toBe("unconfigured");
+  s.close();
+});
+
+test("Cloud profile editor routes return no session data and forward expectedVersion", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-editor-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const localName = s.getProfile("k1d0cd11")!.name;
+  const payload = encodePortableProfile({
+    ...s.getProfile("k1d0cd11")!,
+    name: "Authoritative Cloud name",
+  });
+  let updateRequest: any;
+  const cloudConnection = {
+    client: {
+      async getProfile() {
+        return {
+          ok: true,
+          profile: {
+            id: "k1d0cd11",
+            name: "Authoritative Cloud name",
+            group: "va1",
+            platform: "",
+            tags: [],
+            version: 11,
+            trashedAt: null,
+            trashedBy: null,
+            updatedAt: 1,
+            activeOpens: [],
+          },
+          payload,
+          payloadDigest: "digest",
+        };
+      },
+      async updateProfile(_id: string, request: unknown) {
+        updateRequest = request;
+        return { ok: true, profile: {}, payloadDigest: "next" };
+      },
+    },
+  } as any;
+  const cloudBrowser = {} as any;
+
+  const getResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser, cloudConnection },
+  );
+  expect(getResponse!.status).toBe(200);
+  const getBody = await getResponse!.json();
+  expect(getBody.profile).toMatchObject({ name: "Authoritative Cloud name", expectedVersion: 11, cookieCount: 1 });
+  expect(JSON.stringify(getBody)).not.toContain("COOKIEVAL");
+  expect(JSON.stringify(getBody)).not.toContain('"session"');
+
+  const saveResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 11, set: { name: "Saved Cloud name" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser, cloudConnection },
+  );
+  expect(saveResponse!.status).toBe(200);
+  expect(updateRequest.expectedVersion).toBe(11);
+  expect(updateRequest.payload.profile.name).toBe("Saved Cloud name");
+  expect(updateRequest.payload.session).toEqual(payload.session);
+  expect(s.getProfile("k1d0cd11")!.name).toBe(localName);
+  s.close();
+});
+
+test("Cloud profile save rejects untrusted JSON before calling Cloud", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-editor-trust-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const cloudConnection = {
+    client: new Proxy({}, {
+      get() { throw new Error("Cloud must not be called"); },
+    }),
+  } as any;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({ expectedVersion: 11, set: { name: "attacker" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(response!.status).toBe(403);
   s.close();
 });

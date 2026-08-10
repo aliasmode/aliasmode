@@ -4,6 +4,10 @@ declare module "*.html" {
   export default content;
 }
 declare module "*.css";
+declare module "*.svg" {
+  const url: string;
+  export default url;
+}
 
 declare const ALIASMODE_COMPILED: boolean;
 

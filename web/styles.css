@@ -111,11 +111,7 @@ body {
   display: inline-flex; align-items: center; gap: 9px;
   font-weight: 700; font-size: 16px; color: #2b3852; letter-spacing: .2px; padding: 2px 4px;
 }
-.brand::before {
-  content: ""; width: 18px; height: 18px; border-radius: 6px;
-  background: linear-gradient(135deg, var(--accent), #6b8cf0);
-  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .35);
-}
+.brand img { width: 20px; height: 20px; display: block; }
 .brandrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .appversion {
   color: var(--muted); font: 10.5px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -269,6 +265,14 @@ td.act .btn.convert:hover { background: #854d0e; }
 }
 .extbtn:hover { background: #eef1f7; }
 .extbtn:disabled { opacity: .55; cursor: default; }
+.account-button {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px;
+  color: #475067; background: transparent; border: 0; border-radius: 8px;
+  cursor: pointer; font: inherit; font-weight: 600; text-align: left;
+}
+.account-button:hover { color: var(--ink); background: #eef1f7; }
+.account-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.account-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 
 /* Extensions manager list */
 .extlist { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow: auto; }
@@ -425,6 +429,24 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .modal-foot .primary:disabled { opacity: .5; cursor: default; }
 .modal-foot .link { background: none; border: none; color: var(--muted); cursor: pointer; }
 .modal-foot .link:hover { color: var(--ink); }
+.mode-confirm { max-width: 440px; }
+.mode-confirm .modal-body p { margin: 0; color: #475067; line-height: 1.6; }
+.settings-modal { max-width: 500px; }
+.settings-section { display: flex; flex-direction: column; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.settings-section:last-of-type { padding-bottom: 0; border-bottom: 0; }
+.settings-section h2 { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.2; text-transform: uppercase; letter-spacing: .6px; }
+.settings-section p, .settings-mode p { margin: 0; color: var(--muted); font-size: 12px; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.settings-row > span { color: var(--muted); }
+.settings-row > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.settings-mode { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; padding-top: 2px; }
+.settings-mode button, .mode-secondary {
+  padding: 7px 11px; color: #344054; background: #fff; border: 1px solid var(--line);
+  border-radius: 8px; cursor: pointer; font: inherit; font-weight: 600;
+}
+.settings-mode button { padding: 0; color: var(--accent); border: 0; border-radius: 0; font-size: 12px; font-weight: 500; }
+.settings-mode button:hover:not(:disabled) { text-decoration: underline; }
+.settings-mode button:disabled, .mode-secondary:disabled { opacity: .55; cursor: default; }
 
 /* First-launch Local/Cloud choice */
 .onboarding {
@@ -454,6 +476,7 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .mode-option:disabled { opacity: .6; cursor: wait; }
 .mode-primary { padding: 9px 16px; color: #fff; background: var(--accent); border: 1px solid var(--accent); border-radius: 9px; font-weight: 600; cursor: pointer; }
 .onboarding-card .mode-primary { margin-top: 16px; }
+.onboarding-card > .mode-secondary { display: block; margin-top: 10px; }
 .mode-error { margin-top: 12px; padding: 9px 11px; color: #9b1c1c; background: #fdecec; border: 1px solid #f6cfcf; border-radius: 8px; }
 .auth-form { max-width: 420px; display: flex; flex-direction: column; gap: 12px; }
 .auth-form label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 600; }

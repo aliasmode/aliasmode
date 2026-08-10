@@ -107,6 +107,7 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
 
 export function serveDashboard(opts: DashboardServerOptions) {
   const { launcher, store, port = 50400, hostname = "127.0.0.1" } = opts;
+  const runtimeMode = opts.appConfig?.read().mode;
   const log = opts.log ?? ((m) => console.log(`[aliasmode] ${m}`));
   const admission = opts.lifecycleAdmission ?? new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
   const lifecycle = { admission };
@@ -142,6 +143,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
           pendingSync: opts.pendingSync,
           cloudBrowser: opts.cloudBrowser,
           health: opts.health,
+          runtimeMode,
         });
         if (ui) return ui;
         if (opts.appConfig?.read().mode === "cloud" && !opts.remote) {

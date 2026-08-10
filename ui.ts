@@ -17,6 +17,10 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import {
+  CloudProfileEditor,
+  cloudProfileEditorErrorStatus,
+} from "./cloud-profile-editor.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import type { Profile } from "./types.ts";
@@ -219,6 +223,8 @@ export interface UiRuntimeOptions {
   pendingSync?: PendingSyncRuntime;
   cloudBrowser?: CloudBrowserLifecycle;
   health?: UiHealthMetadata | null;
+  /** Mode whose runtimes were wired when this process started. */
+  runtimeMode?: "unconfigured" | "local" | "cloud";
 }
 
 /**
@@ -245,7 +251,11 @@ export async function handleUiRequest(
   }
 
   if (pathname === "/ui/api/app-mode" && req.method === "GET") {
-    return Response.json(options.appConfig?.read() ?? { version: 1, mode: "local", localAnalytics: false });
+    const config = options.appConfig?.read() ?? { version: 1 as const, mode: "local" as const, localAnalytics: false };
+    return Response.json({
+      ...config,
+      ...(options.runtimeMode ? { restartRequired: config.mode !== options.runtimeMode } : {}),
+    });
   }
 
   if (pathname === "/ui/api/app-mode" && req.method === "POST") {
@@ -265,7 +275,11 @@ export async function handleUiRequest(
         );
       }
       const config = options.appConfig.setMode(body.mode, cloudUrl);
-      return Response.json({ ok: true, config, restartRequired: true });
+      return Response.json({
+        ok: true,
+        config,
+        restartRequired: options.runtimeMode ? config.mode !== options.runtimeMode : true,
+      });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
     }
@@ -439,11 +453,15 @@ export async function handleUiRequest(
   const cloudLifecycleRoute =
     (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache)$/.test(pathname));
+  const cloudEditorRoute =
+    (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
+    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
   if (
     options.appConfig?.read().mode === "cloud" &&
     options.cloudBrowser &&
     !remote &&
-    !cloudLifecycleRoute
+    !cloudLifecycleRoute &&
+    !cloudEditorRoute
   ) {
     return Response.json(
       { ok: false, error: "This Cloud profile operation is not available yet" },
@@ -794,9 +812,24 @@ export async function handleUiRequest(
   // Single-profile edit detail (WITH secrets) for the Edit modal.
   const single = pathname.match(/^\/ui\/api\/profiles\/([^/]+)$/);
   if (single && req.method === "GET") {
+    const id = decodeURIComponent(single[1]!);
+    if (options.cloudBrowser) {
+      if (!options.cloudConnection) {
+        return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+      }
+      try {
+        const editor = new CloudProfileEditor(options.cloudConnection.client, store);
+        return Response.json({ ok: true, profile: await editor.get(id) });
+      } catch (error) {
+        return Response.json(
+          { ok: false, error: msg(error) },
+          { status: cloudProfileEditorErrorStatus(error) },
+        );
+      }
+    }
     const p = remote
-      ? await remote.getProfile(decodeURIComponent(single[1]!)).catch(() => null)
-      : store.getProfile(decodeURIComponent(single[1]!));
+      ? await remote.getProfile(id).catch(() => null)
+      : store.getProfile(id);
     if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
     return Response.json({ ok: true, profile: profileEditView(p) });
   }
@@ -807,6 +840,20 @@ export async function handleUiRequest(
     try {
       const id = decodeURIComponent(upd[1]!);
       if (!isSafeProfileId(id)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+      if (options.cloudBrowser) {
+        const rejected = rejectUntrustedJsonMutation(req);
+        if (rejected) return rejected;
+        if (!options.cloudConnection) {
+          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+        }
+        const body = (await req.json()) as { expectedVersion?: unknown; set?: unknown };
+        const set = body.set && typeof body.set === "object" && !Array.isArray(body.set)
+          ? body.set as Record<string, unknown>
+          : {};
+        const editor = new CloudProfileEditor(options.cloudConnection.client, store);
+        await editor.save(id, body.expectedVersion as number, set);
+        return Response.json({ ok: true });
+      }
       const body = (await req.json()) as { set?: unknown };
       const set = body.set && typeof body.set === "object" ? (body.set as Record<string, unknown>) : {};
       // Remote: fetch the live profile from the hub, apply the edits, save it back. Local: the store.
@@ -823,7 +870,10 @@ export async function handleUiRequest(
       else store.upsertProfile(p);
       return Response.json({ ok: true });
     } catch (e) {
-      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+      return Response.json(
+        { ok: false, error: msg(e) },
+        { status: options.cloudBrowser ? cloudProfileEditorErrorStatus(e) : 500 },
+      );
     }
   }
 
