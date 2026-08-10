@@ -44,7 +44,10 @@ async fn check_for_release_inner(app: &AppHandle) -> Result<(), String> {
         .no_proxy()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(5))
-        .user_agent("AliasMode/0.1.0-beta.1 release-notifier")
+        .user_agent(format!(
+            "AliasMode/{} release-notifier",
+            env!("CARGO_PKG_VERSION")
+        ))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client

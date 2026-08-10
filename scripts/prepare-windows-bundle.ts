@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { installCloakBrowser } from "../browser-install.ts";
+import { ALIASMODE_VERSION } from "../version.ts";
 
 export interface PreparedBrowserMetadata {
   executable: string;
@@ -101,7 +102,7 @@ export async function prepareWindowsBundle(
     wrapperVersion: "0.4.11",
   };
   writeFileSync(join(generated, "browser.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-  writeFileSync(join(generated, "VERSION.txt"), "0.1.0-beta.1\n", "utf8");
+  writeFileSync(join(generated, "VERSION.txt"), `${ALIASMODE_VERSION}\n`, "utf8");
   return metadata;
 }
 

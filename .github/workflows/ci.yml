@@ -86,6 +86,11 @@ jobs:
           if ($installers.Count -ne 1) {
             throw "expected exactly one NSIS installer, found $($installers.Count)"
           }
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $versionMarker = "_$($bundleVersion)_"
+          if (-not $installers[0].Name.Contains($versionMarker)) {
+            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $($installers[0].Name)"
+          }
           $artifact = ".\artifacts\windows"
           New-Item -ItemType Directory -Force $artifact | Out-Null
           Copy-Item $installers[0].FullName $artifact
