@@ -42,6 +42,7 @@ function setup(options: {
   stopResult?: boolean;
   closeConflict?: boolean;
   closeTransportFailure?: boolean;
+  navigateFailure?: boolean;
 } = {}) {
   const events: string[] = [];
   const logs: string[] = [];
@@ -118,6 +119,7 @@ function setup(options: {
     async active() { return true; },
     async navigate(_ws: string, urls: string[]) {
       events.push("navigate");
+      if (options.navigateFailure) throw new Error("navigation secret");
       navigatedUrls.push(urls);
       expect(queue.getOpen("profile1", "account1")?.phase).toBe("running");
       expect(store.getLaunch("profile1")?.sessionBaseVersion).toBe(4);
@@ -183,6 +185,25 @@ test("Cloud browser restores the authoritative session before navigation", async
     debugPort: 9222,
     startedAt: 1000,
   });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser stays open when startup navigation fails", async () => {
+  const state = setup({ navigateFailure: true });
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(result).toMatchObject({
+    ok: true,
+    warning: "Profile opened, but startup navigation failed. Open the site manually.",
+  });
+  expect(state.events).toEqual(["cloud-open", "start", "restore", "navigate"]);
+  expect(state.logs).toEqual([
+    "profile1: Cloud startup navigation failed (transport_error, Error); continuing",
+  ]);
+  expect(JSON.stringify({ result, logs: state.logs })).not.toContain("navigation secret");
+  expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.abandonCalls()).toBe(0);
   state.queue.close();
   state.store.close();
 });

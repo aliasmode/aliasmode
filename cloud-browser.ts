@@ -262,15 +262,29 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       stage = "navigation";
       const home = platformHomeUrl(profile.platform, bundleTelegramClient(sessionBundle) ?? "a");
       const urls = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
-      if (urls.length > 0) await this.options.launcher.navigate(launched.ws, urls);
+      let navigationWarning: string | undefined;
+      if (urls.length > 0) {
+        try {
+          await this.options.launcher.navigate(launched.ws, urls);
+        } catch (error) {
+          this.log(
+            `${profileId}: Cloud startup navigation failed (${errorCode(error)}, ${safeErrorType(error)}); continuing`,
+          );
+          navigationWarning = "Profile opened, but startup navigation failed. Open the site manually.";
+        }
+      }
       this.startHeartbeat(profileId);
+      const warnings = [
+        opened.activeOpens.length > 0
+          ? `This profile is also open in ${opened.activeOpens.length} other session(s).`
+          : undefined,
+        navigationWarning,
+      ].filter((warning): warning is string => !!warning);
       return {
         ok: true,
         ws: launched.ws,
         port: launched.port,
-        ...(opened.activeOpens.length > 0
-          ? { warning: `This profile is also open in ${opened.activeOpens.length} other session(s).` }
-          : {}),
+        ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
       };
     } catch (error) {
       this.stopHeartbeat(profileId);
