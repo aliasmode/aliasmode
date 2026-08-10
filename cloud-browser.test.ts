@@ -43,6 +43,7 @@ function setup(options: {
   closeConflict?: boolean;
   closeTransportFailure?: boolean;
   navigateFailure?: boolean;
+  startRetainedFailure?: boolean;
 } = {}) {
   const events: string[] = [];
   const logs: string[] = [];
@@ -52,6 +53,7 @@ function setup(options: {
   const queue = new PendingSyncQueue(queuePath, new Uint8Array(32).fill(5));
   let closeCalls = 0;
   let abandonCalls = 0;
+  let startCalls = 0;
   const opened: OpenProfileResponse = {
     ok: true,
     registrationId: "registration1",
@@ -96,6 +98,7 @@ function setup(options: {
   };
   const launcher = {
     async start(profileId: string, args: string[], startOptions: any) {
+      startCalls++;
       events.push("start");
       expect(args).toEqual(["--window-size=1200,800"]);
       expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
@@ -108,6 +111,9 @@ function setup(options: {
         startedAt: 1000,
         sessionBaseVersion: startOptions.sessionBaseVersion,
       });
+      if (options.startRetainedFailure && startCalls === 1) {
+        throw new Error("stale browser retained");
+      }
       return { ws: "ws://browser", port: 9222 };
     },
     async stop(profileId: string) {
@@ -185,6 +191,19 @@ test("Cloud browser restores the authoritative session before navigation", async
     debugPort: 9222,
     startedAt: 1000,
   });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser stops retained launch ownership and retries once", async () => {
+  const state = setup({ startRetainedFailure: true });
+
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+
+  expect(result).toMatchObject({ ok: true, ws: "ws://browser", port: 9222 });
+  expect(state.events).toEqual(["cloud-open", "start", "stop", "start", "restore", "navigate"]);
+  expect(state.abandonCalls()).toBe(0);
+  expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
   state.queue.close();
   state.store.close();
 });
