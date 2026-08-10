@@ -44,6 +44,7 @@ function setup(options: {
   closeTransportFailure?: boolean;
 } = {}) {
   const events: string[] = [];
+  const logs: string[] = [];
   const navigatedUrls: string[][] = [];
   const store = new ProfileStore(":memory:");
   const queuePath = join(mkdtempSync(join(tmpdir(), "aliasmode-cloud-browser-")), "pending.sqlite");
@@ -131,6 +132,9 @@ function setup(options: {
     accountId: () => "account1",
     deviceId: () => "device1",
     heartbeatMs: 0,
+    log(message) {
+      logs.push(message);
+    },
     async readSession() {
       events.push("capture");
       return JSON.stringify(payload().session);
@@ -144,6 +148,7 @@ function setup(options: {
   return {
     coordinator,
     events,
+    logs,
     navigatedUrls,
     store,
     queue,
@@ -346,11 +351,18 @@ test("terminal Cloud heartbeat errors capture and stop the browser", async () =>
   state.store.close();
 });
 
-test("Cloud browser abandons an opened registration when restore fails after teardown", async () => {
+test("Cloud browser reports a safe restore stage and abandons after teardown", async () => {
   const state = setup();
-  (state.coordinator as any).options.writeSession = async () => { throw new Error("restore failed"); };
+  (state.coordinator as any).options.writeSession = async () => { throw new Error("secret restore detail"); };
   const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
-  expect(result).toMatchObject({ ok: false, error: "Cloud profile open failed (transport_error)" });
+  expect(result).toMatchObject({
+    ok: false,
+    error: "Cloud profile open failed at session_restore (transport_error)",
+  });
+  expect(state.logs).toEqual([
+    "profile1: Cloud open failed at session_restore (transport_error, Error)",
+  ]);
+  expect(JSON.stringify({ result, logs: state.logs })).not.toContain("secret restore detail");
   expect(state.abandonCalls()).toBe(1);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   expect(state.store.getLaunch("profile1")).toBeNull();

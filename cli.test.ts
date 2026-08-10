@@ -7,6 +7,7 @@ import {
   OFFICIAL_CLOUD_ANON_KEY,
   OFFICIAL_CLOUD_URL,
   RemoteShutdownTimeoutError,
+  runCompiledSidecarSmoke,
   selectedCloudUrl,
 } from "./cli.ts";
 
@@ -21,6 +22,34 @@ const localMode = {
   mode: "local" as const,
   localAnalytics: false,
 };
+
+test("compiled sidecar smoke restores before navigation and capture", async () => {
+  const events: string[] = [];
+  await runCompiledSidecarSmoke("http://127.0.0.1:9222", {
+    async writeSession(endpoint, bundle) {
+      events.push(`write:${endpoint}`);
+      expect(JSON.parse(bundle)).toEqual({ cookies: [], origins: [] });
+    },
+    async assertAlive(endpoint) {
+      events.push(`alive:${endpoint}`);
+    },
+    async navigate(endpoint) {
+      events.push(`navigate:${endpoint}`);
+    },
+    async readSession(endpoint) {
+      events.push(`read:${endpoint}`);
+      return JSON.stringify({ cookies: [] });
+    },
+  });
+  expect(events).toEqual([
+    "write:http://127.0.0.1:9222",
+    "alive:http://127.0.0.1:9222",
+    "navigate:http://127.0.0.1:9222",
+    "alive:http://127.0.0.1:9222",
+    "read:http://127.0.0.1:9222",
+    "alive:http://127.0.0.1:9222",
+  ]);
+});
 
 test("CLI dispatches the session worker before normal command parsing", async () => {
   const events: string[] = [];

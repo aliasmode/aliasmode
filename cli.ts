@@ -415,6 +415,57 @@ export async function dispatchReadSessionWorker(
   return true;
 }
 
+export interface CompiledSidecarSmokeDeps {
+  writeSession: (endpoint: string, bundle: string) => Promise<void>;
+  readSession: (endpoint: string) => Promise<string>;
+  navigate: (endpoint: string) => Promise<void>;
+  assertAlive: (endpoint: string) => Promise<void>;
+}
+
+async function assertCdpAlive(endpoint: string): Promise<void> {
+  const versionUrl = new URL(endpoint);
+  if (versionUrl.protocol !== "http:" && versionUrl.protocol !== "https:") {
+    throw new Error("compiled sidecar smoke requires an HTTP CDP endpoint");
+  }
+  versionUrl.pathname = "/json/version";
+  versionUrl.search = "";
+  versionUrl.hash = "";
+  const response = await fetch(versionUrl, { signal: AbortSignal.timeout(5_000) });
+  if (!response.ok) throw new Error("compiled sidecar smoke lost the CDP endpoint");
+}
+
+async function navigateSmokePage(endpoint: string): Promise<void> {
+  const { chromium } = await import("playwright-core");
+  const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
+  try {
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
+  } finally {
+    await browser.close();
+  }
+}
+
+export async function runCompiledSidecarSmoke(
+  endpoint: string,
+  deps: CompiledSidecarSmokeDeps = {
+    writeSession,
+    readSession: readSessionInSubprocess,
+    navigate: navigateSmokePage,
+    assertAlive: assertCdpAlive,
+  },
+): Promise<void> {
+  await deps.writeSession(endpoint, JSON.stringify({ cookies: [], origins: [] }));
+  await deps.assertAlive(endpoint);
+  await deps.navigate(endpoint);
+  await deps.assertAlive(endpoint);
+  const bundle = JSON.parse(await deps.readSession(endpoint));
+  if (!bundle || typeof bundle !== "object" || !Array.isArray(bundle.cookies)) {
+    throw new Error("compiled sidecar capture returned an invalid session bundle");
+  }
+  await deps.assertAlive(endpoint);
+}
+
 async function main() {
   // Playwright-over-CDP on Bun emits occasional stray websocket rejections
   // ("ws.WebSocket 'upgrade' event is not implemented in bun"). Left unhandled,
@@ -499,11 +550,8 @@ async function main() {
     case "__sidecar-smoke": {
       const endpoint = flag(rest, "cdp-endpoint");
       if (!endpoint) throw new Error("compiled sidecar smoke requires --cdp-endpoint");
-      const bundle = JSON.parse(await readSessionInSubprocess(endpoint));
-      if (!bundle || typeof bundle !== "object" || !Array.isArray(bundle.cookies)) {
-        throw new Error("compiled sidecar capture returned an invalid session bundle");
-      }
-      console.log("compiled sidecar captured a session over Playwright CDP");
+      await runCompiledSidecarSmoke(endpoint);
+      console.log("compiled sidecar restored, navigated, and captured a session over Playwright CDP");
       break;
     }
     case "install-browser": {

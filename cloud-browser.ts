@@ -89,6 +89,24 @@ function errorCode(error: unknown): string {
   return error instanceof CloudApiError ? error.code : "transport_error";
 }
 
+export type CloudOpenStage =
+  | "pending_sync"
+  | "cloud_registration"
+  | "lifecycle_opening"
+  | "payload_restore"
+  | "browser_launch"
+  | "lifecycle_restoring"
+  | "session_restore"
+  | "version_commit"
+  | "lifecycle_running"
+  | "navigation";
+
+function safeErrorType(error: unknown): string {
+  if (error instanceof CloudApiError) return "CloudApiError";
+  if (error instanceof TypeError) return "TypeError";
+  return error instanceof Error ? "Error" : "unknown";
+}
+
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private readonly transitions = new Map<string, Promise<void>>();
   private readonly opening = new Map<string, Promise<CloudBrowserOpenResult>>();
@@ -173,24 +191,29 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
     const { queue, accountId, deviceId } = context;
-    await retryPendingSync(queue, this.options.cloud, accountId);
-    if (queue.list(accountId).some((pending) =>
-      pending.profileId === profileId && pending.status !== "conflict"
-    )) {
-      return { ok: false, error: "Pending Cloud synchronization must finish before reopening" };
-    }
-    if (queue.getOpen(profileId, accountId)) {
-      return { ok: false, error: "Cloud profile recovery must finish before opening" };
-    }
-    if (this.options.store.getLaunch(profileId)) {
-      return { ok: false, error: "an unmanaged local browser is already recorded for this profile" };
-    }
-
+    let stage: CloudOpenStage = "pending_sync";
     let registrationRecorded = false;
     let registrationId: string | undefined;
+
     try {
+      await retryPendingSync(queue, this.options.cloud, accountId);
+      if (queue.list(accountId).some((pending) =>
+        pending.profileId === profileId && pending.status !== "conflict"
+      )) {
+        return { ok: false, error: "Pending Cloud synchronization must finish before reopening" };
+      }
+      if (queue.getOpen(profileId, accountId)) {
+        return { ok: false, error: "Cloud profile recovery must finish before opening" };
+      }
+      if (this.options.store.getLaunch(profileId)) {
+        return { ok: false, error: "an unmanaged local browser is already recorded for this profile" };
+      }
+
+      stage = "cloud_registration";
       const opened = await this.options.cloud.openProfile(profileId, { deviceId });
       registrationId = opened.registrationId;
+
+      stage = "lifecycle_opening";
       queue.recordOpen({
         accountId,
         profileId,
@@ -199,10 +222,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       });
       registrationRecorded = true;
 
+      stage = "payload_restore";
       const { profile, sessionBundle } = decodePortableProfile(opened.payload);
       if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
       this.options.store.upsertProfile(profile);
 
+      stage = "browser_launch";
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
       const launched = await this.options.launcher.start(profileId, chromeArgs, {
         autoNavigate: false,
@@ -211,6 +236,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       });
       const launch = this.options.store.getLaunch(profileId);
       if (!launch) throw new Error("browser launch did not create durable lifecycle state");
+
+      stage = "lifecycle_restoring";
       if (!queue.updateOpen(profileId, accountId, "restoring", {
         debugPort: launch.debugPort,
         startedAt: launch.startedAt,
@@ -218,8 +245,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         throw new Error("Cloud open lifecycle state disappeared during launch");
       }
 
+      stage = "session_restore";
       await this.options.writeSession(launched.ws, sessionBundle);
+
+      stage = "version_commit";
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
+
+      stage = "lifecycle_running";
       if (!queue.updateOpen(profileId, accountId, "running", {
         debugPort: launch.debugPort,
         startedAt: launch.startedAt,
@@ -227,6 +259,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         throw new Error("Cloud open lifecycle state disappeared after restore");
       }
 
+      stage = "navigation";
       const home = platformHomeUrl(profile.platform, bundleTelegramClient(sessionBundle) ?? "a");
       const urls = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
       if (urls.length > 0) await this.options.launcher.navigate(launched.ws, urls);
@@ -241,7 +274,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       };
     } catch (error) {
       this.stopHeartbeat(profileId);
-      const stopped = await this.options.launcher.stop(profileId).catch(() => false);
+      const code = errorCode(error);
+      this.log(`${profileId}: Cloud open failed at ${stage} (${code}, ${safeErrorType(error)})`);
+      const stopped = registrationId
+        ? await this.options.launcher.stop(profileId).catch(() => false)
+        : false;
       if (stopped && registrationId) {
         try {
           await this.options.cloud.abandon(registrationId);
@@ -259,7 +296,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       return {
         ok: false,
-        error: `Cloud profile open failed (${errorCode(error)})`,
+        error: `Cloud profile open failed at ${stage} (${code})`,
       };
     }
   }
