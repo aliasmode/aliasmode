@@ -75,10 +75,24 @@ export async function selectAppMode(mode: "local" | "cloud"): Promise<any> {
   return body;
 }
 
+export interface CloudLegalState {
+  current: { terms: string; privacy: string; acceptableUse: string };
+  accepted: ({ terms: string; privacy: string; acceptableUse: string; acceptedAt: number }) | null;
+}
+
 export interface CloudAuthState {
   authenticated: boolean;
   expiresAt?: number;
   user?: { id: string; email?: string };
+  legal?: CloudLegalState;
+}
+
+export function cloudWorkspaceReady(state: CloudAuthState | null): boolean {
+  const legal = state?.legal;
+  return state?.authenticated === true && !!legal?.accepted &&
+    legal.accepted.terms === legal.current.terms &&
+    legal.accepted.privacy === legal.current.privacy &&
+    legal.accepted.acceptableUse === legal.current.acceptableUse;
 }
 
 export async function fetchCloudAuth(): Promise<CloudAuthState> {
@@ -86,7 +100,12 @@ export async function fetchCloudAuth(): Promise<CloudAuthState> {
   const response = await fetch(path);
   const body = await apiJson(response, path);
   if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud authentication is unavailable");
-  return { authenticated: body.authenticated === true, expiresAt: body.expiresAt, user: body.user };
+  return {
+    authenticated: body.authenticated === true,
+    expiresAt: body.expiresAt,
+    user: body.user,
+    legal: body.legal,
+  };
 }
 
 async function cloudAuthAction(action: string, input: Record<string, string>): Promise<any> {
@@ -111,6 +130,7 @@ export const restoreCloudSession = (
   queueKey: string,
 ) => cloudAuthAction("restore", { refreshToken, deviceCredential, queueKey });
 export const signOutCloud = () => cloudAuthAction("signout", {});
+export const acceptCloudLegal = () => cloudAuthAction("accept-legal", {});
 
 export async function fetchHealth(): Promise<HealthResult> {
   const path = "/ui/api/health";

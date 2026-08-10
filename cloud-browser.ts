@@ -12,6 +12,7 @@ import {
   bundleTelegramClient,
 } from "./session.ts";
 import type { ProfileStore } from "./store.ts";
+import type { Profile } from "./types.ts";
 
 export interface CloudBrowserOpenResult {
   ok: boolean;
@@ -41,8 +42,10 @@ export interface CloudBrowserProfile {
 
 export interface CloudBrowserLifecycle {
   listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }>;
+  create(profile: Profile): Promise<{ id: string }>;
   open(profileId: string, launchArgs?: string[]): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<boolean>;
+  secureAfterAuthentication(): Promise<void>;
   resumeAfterAuthentication(): Promise<void>;
   retryPending(): Promise<void>;
   releaseAll(permanent?: boolean): Promise<boolean>;
@@ -50,7 +53,7 @@ export interface CloudBrowserLifecycle {
 
 type CloudBrowserClient = Pick<
   CloudClient,
-  "listProfiles" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
+  "listProfiles" | "createProfile" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
 >;
 
 type CloudBrowserLauncher = Pick<
@@ -134,6 +137,17 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }),
       healthSources: [],
     };
+  }
+
+  async create(profile: Profile): Promise<{ id: string }> {
+    this.requireContext(false);
+    const created = await this.options.cloud.createProfile({
+      payload: encodePortableProfile(profile),
+    });
+    if (created.profile.id !== profile.id) {
+      throw new Error("Cloud returned a mismatched created profile");
+    }
+    return { id: profile.id };
   }
 
   async open(profileId: string, launchArgs: string[] = []): Promise<CloudBrowserOpenResult> {
@@ -376,11 +390,54 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
   }
 
+  async secureAfterAuthentication(): Promise<void> {
+    this.draining = true;
+    try {
+      const { queue, accountId } = this.requireContext(false);
+      await this.secureForeignAccountBrowsers(queue, accountId);
+    } finally {
+      if (!this.shuttingDown) this.draining = false;
+    }
+  }
+
   async resumeAfterAuthentication(): Promise<void> {
     this.draining = true;
     try {
       const { queue, accountId } = this.requireContext(false);
+      await this.secureForeignAccountBrowsers(queue, accountId);
 
+      for (const open of queue.listOpens(accountId)) {
+        const launch = this.options.store.getLaunch(open.profileId);
+        if (launch && this.isExactRunningLaunch(open, launch)) {
+          try {
+            await this.options.launcher.verifyRunningIdentity(open.profileId);
+            if (await this.options.launcher.active(open.profileId)) {
+              this.startHeartbeat(open.profileId);
+              continue;
+            }
+          } catch {
+            // Capture the exact Cloud generation before any teardown attempt.
+          }
+          if (!await this.captureAndStopOpen(open, queue, true)) {
+            throw new Error("a Cloud browser survivor could not be captured safely");
+          }
+          continue;
+        }
+
+        const stopped = !launch || await this.options.launcher.stop(open.profileId).catch(() => false);
+        if (stopped) await this.finishStoppedOpen(open, queue);
+      }
+      await retryPendingSync(queue, this.options.cloud, accountId);
+      this.startPendingRetry();
+    } finally {
+      if (!this.shuttingDown) this.draining = false;
+    }
+  }
+
+  private async secureForeignAccountBrowsers(
+    queue: PendingSyncQueue,
+    accountId: string,
+  ): Promise<void> {
     for (const foreign of queue.listAllOpens().filter((open) => open.accountId !== accountId)) {
       const launch = this.options.store.getLaunch(foreign.profileId);
       if (!launch) continue;
@@ -391,33 +448,6 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       } else if (!await this.options.launcher.stop(foreign.profileId).catch(() => false)) {
         throw new Error("a browser from another Cloud account could not be stopped");
       }
-    }
-
-    for (const open of queue.listOpens(accountId)) {
-      const launch = this.options.store.getLaunch(open.profileId);
-      if (launch && this.isExactRunningLaunch(open, launch)) {
-        try {
-          await this.options.launcher.verifyRunningIdentity(open.profileId);
-          if (await this.options.launcher.active(open.profileId)) {
-            this.startHeartbeat(open.profileId);
-            continue;
-          }
-        } catch {
-          // Capture the exact Cloud generation before any teardown attempt.
-        }
-        if (!await this.captureAndStopOpen(open, queue, true)) {
-          throw new Error("a Cloud browser survivor could not be captured safely");
-        }
-        continue;
-      }
-
-      const stopped = !launch || await this.options.launcher.stop(open.profileId).catch(() => false);
-      if (stopped) await this.finishStoppedOpen(open, queue);
-    }
-      await retryPendingSync(queue, this.options.cloud, accountId);
-      this.startPendingRetry();
-    } finally {
-      if (!this.shuttingDown) this.draining = false;
     }
   }
 

@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  acceptCloudLegal,
+  cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
   fetchProfiles,
@@ -73,7 +75,12 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
     });
   }) as unknown as typeof fetch;
 
-  expect(await fetchCloudAuth()).toEqual({ authenticated: false, expiresAt: undefined, user: undefined });
+  expect(await fetchCloudAuth()).toEqual({
+    authenticated: false,
+    expiresAt: undefined,
+    user: undefined,
+    legal: undefined,
+  });
   expect(await signInCloud("user@example.com", "password", "queue-key")).toMatchObject({ authenticated: true });
   expect(requests[1]?.input).toBe("/ui/api/cloud-auth/signin");
   expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({
@@ -88,6 +95,24 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
     deviceCredential: "device-credential",
     queueKey: "queue-key",
   });
+  await acceptCloudLegal();
+  expect(requests[3]?.input).toBe("/ui/api/cloud-auth/accept-legal");
+});
+
+test("Cloud workspace becomes ready only after current legal acceptance", () => {
+  const current = { terms: "v2", privacy: "v2", acceptableUse: "v2" };
+  expect(cloudWorkspaceReady({ authenticated: true, legal: { current, accepted: null } })).toBe(false);
+  expect(cloudWorkspaceReady({
+    authenticated: true,
+    legal: {
+      current,
+      accepted: { terms: "v1", privacy: "v2", acceptableUse: "v2", acceptedAt: 1 },
+    },
+  })).toBe(false);
+  expect(cloudWorkspaceReady({
+    authenticated: true,
+    legal: { current, accepted: { ...current, acceptedAt: 1 } },
+  })).toBe(true);
 });
 
 test("app mode client sends Cloud selection with JSON", async () => {

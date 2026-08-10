@@ -6,6 +6,7 @@ import { CloudApiError } from "./cloud-client.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
 import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v1.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
+import { decodePortableProfile } from "./portable-profile.ts";
 import { ProfileStore } from "./store.ts";
 
 function payload(): PortableProfileV1 {
@@ -57,6 +58,15 @@ function setup(options: {
     activeOpens: [],
   };
   const cloud = {
+    async createProfile(request: { payload: PortableProfileV1 }) {
+      events.push("cloud-create");
+      expect(request.payload.profile.id).toBe("profile1");
+      return {
+        ok: true as const,
+        profile: { id: request.payload.profile.id },
+        payloadDigest: "digest",
+      };
+    },
     async openProfile() {
       events.push("cloud-open");
       return opened;
@@ -141,6 +151,16 @@ function setup(options: {
     abandonCalls: () => abandonCalls,
   };
 }
+
+test("Cloud browser creates a portable profile without a local-only fallback", async () => {
+  const state = setup();
+  const profile = decodePortableProfile(payload()).profile;
+  expect(await state.coordinator.create(profile)).toEqual({ id: "profile1" });
+  expect(state.events).toEqual(["cloud-create"]);
+  expect(state.store.getProfile("profile1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
 
 test("Cloud browser restores the authoritative session before navigation", async () => {
   const state = setup();
@@ -230,6 +250,43 @@ test("Cloud browser refuses reopen while an older close remains unsynchronized",
   });
   expect(state.events).toEqual(["cloud-close"]);
   expect(state.queue.list("account1")[0]).toMatchObject({ status: "retrying" });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud authentication secures a previous account browser before legal acceptance", async () => {
+  const state = setup();
+  state.store.upsertProfile(decodePortableProfile(payload()).profile);
+  state.store.recordLaunch({
+    profileId: "profile1",
+    pid: 10,
+    debugPort: 9222,
+    ws: "ws://browser",
+    startedAt: 1_000,
+    sessionBaseVersion: 4,
+  });
+  state.queue.recordOpen({
+    accountId: "previous-account",
+    profileId: "profile1",
+    registrationId: "previous-registration",
+    expectedVersion: 4,
+  });
+  state.queue.updateOpen("profile1", "previous-account", "running", {
+    debugPort: 9222,
+    startedAt: 1_000,
+  });
+
+  await state.coordinator.secureAfterAuthentication();
+
+  expect(state.events).toEqual(["capture", "stop"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "previous-account")).toBeNull();
+  expect(state.queue.list("previous-account")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: true,
+    status: "pending",
+  }]);
+  expect(state.closeCalls()).toBe(0);
   state.queue.close();
   state.store.close();
 });

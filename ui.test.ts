@@ -962,15 +962,31 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
       };
     },
   } as unknown as SupabaseAuthClient, () => 1_000);
+  let secures = 0;
+  let resumes = 0;
+  const currentLegal = { terms: "1", privacy: "1", acceptableUse: "1" };
   const cloudConnection = {
+    accountId() { return "account1"; },
     async bootstrap() {
       return {
         device: { id: "device1" },
         deviceCredential: "device-credential",
-        legal: { current: { terms: "1", privacy: "1", acceptableUse: "1" }, accepted: null },
+        legal: { current: currentLegal, accepted: null },
       };
     },
+    client: {
+      async status() {
+        return { legal: { current: currentLegal, accepted: null } };
+      },
+      async acceptLegal() {
+        return { ok: true, accepted: { ...currentLegal, acceptedAt: 1 } };
+      },
+    },
   } as unknown as CloudConnectionRuntime;
+  const cloudBrowser = {
+    async secureAfterAuthentication() { secures++; },
+    async resumeAfterAuthentication() { resumes++; },
+  } as any;
   const pendingSync = new PendingSyncRuntime(
     join(mkdtempSync(join(tmpdir(), "aliasmode-ui-pending-")), "pending.sqlite"),
   );
@@ -984,7 +1000,7 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
     {} as any,
     s,
     null,
-    { cloudAuth, cloudConnection, pendingSync },
+    { cloudAuth, cloudConnection, pendingSync, cloudBrowser },
   );
   expect(await response!.json()).toEqual({
     ok: true,
@@ -997,6 +1013,38 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
     user: { id: "account1", email: "user@example.com" },
   });
   expect(cloudAuth.accessToken()).toBe("access-token");
+  expect(secures).toBe(1);
+  expect(resumes).toBe(0);
+
+  const authState = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth"),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection },
+  );
+  expect(await authState!.json()).toMatchObject({
+    ok: true,
+    authenticated: true,
+    legal: { current: currentLegal, accepted: null },
+  });
+
+  const accepted = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth/accept-legal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection, pendingSync, cloudBrowser },
+  );
+  expect(await accepted!.json()).toEqual({
+    ok: true,
+    legal: { current: currentLegal, accepted: { ...currentLegal, acceptedAt: 1 } },
+  });
+  expect(resumes).toBe(1);
   pendingSync.close();
   s.close();
 });
@@ -1170,6 +1218,10 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
       calls.push("list");
       return { profiles: [{ id: "cloud1", name: "Cloud profile" }], healthSources: [] };
     },
+    async create(profile: { id: string; name: string }) {
+      calls.push(`create:${profile.name}`);
+      return { id: profile.id };
+    },
     async open(profileId: string) {
       calls.push(`open:${profileId}`);
       return { ok: true, port: 9222 };
@@ -1201,19 +1253,22 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
   expect(await opened!.json()).toEqual({ ok: true, port: 9222 });
   expect(calls).toEqual(["list", "open:cloud1"]);
 
-  const unsupported = await handleUiRequest(
+  const created = await handleUiRequest(
     new Request("http://x/ui/api/profiles", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "must-not-write-local" }),
+      body: JSON.stringify({ name: "New Cloud profile" }),
     }),
     {} as any,
     s,
     null,
     { appConfig, cloudBrowser },
   );
-  expect(unsupported!.status).toBe(501);
-  expect(s.getProfile("must-not-write-local")).toBeNull();
+  expect(created!.status).toBe(200);
+  const createdBody = await created!.json();
+  expect(createdBody).toMatchObject({ ok: true, id: expect.any(String) });
+  expect(calls).toEqual(["list", "open:cloud1", "create:New Cloud profile"]);
+  expect(s.getProfile(createdBody.id)).toBeNull();
   s.close();
 });
 

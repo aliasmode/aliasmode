@@ -11,6 +11,8 @@ import {
   type Extension,
   type AppModeConfig,
   type CloudAuthState,
+  acceptCloudLegal,
+  cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
   signInCloud,
@@ -410,6 +412,8 @@ function App() {
   const [bulkErr, setBulkErr] = useState<string | null>(null);
   const [bulkOver, setBulkOver] = useState(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
+  const isCloudMode = appMode?.mode === "cloud";
+  const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
 
   const load = async () => {
     try {
@@ -466,10 +470,28 @@ function App() {
           result.deviceCredential,
           typeof result.queueKey === "string" ? result.queueKey : undefined,
         );
-        setCloudAuth({ authenticated: true, expiresAt: result.expiresAt, user: result.user });
+        setCloudAuth({
+          authenticated: true,
+          expiresAt: result.expiresAt,
+          user: result.user,
+          legal: result.legal,
+        });
         setAuthPassword("");
         if (!persisted) setAuthNotice("Signed in for this run; desktop credential storage is unavailable.");
       }
+    } catch (error) {
+      setAuthErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const acceptCurrentLegal = async () => {
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      const result = await acceptCloudLegal();
+      setCloudAuth((state) => state ? { ...state, legal: result.legal } : state);
     } catch (error) {
       setAuthErr(error instanceof Error ? error.message : String(error));
     } finally {
@@ -506,7 +528,12 @@ function App() {
         );
         await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
         if (active) {
-          setCloudAuth({ authenticated: true, expiresAt: result.expiresAt, user: result.user });
+          setCloudAuth({
+            authenticated: true,
+            expiresAt: result.expiresAt,
+            user: result.user,
+            legal: result.legal,
+          });
           setAuthErr(null);
         }
       } catch (error) {
@@ -540,7 +567,12 @@ function App() {
           stored.queueKey,
         );
         await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
-        setCloudAuth({ authenticated: true, expiresAt: result.expiresAt, user: result.user });
+        setCloudAuth({
+          authenticated: true,
+          expiresAt: result.expiresAt,
+          user: result.user,
+          legal: result.legal,
+        });
       } catch (error) {
         setCloudAuth({ authenticated: false });
         setAuthErr(error instanceof Error ? error.message : String(error));
@@ -550,18 +582,20 @@ function App() {
   }, [appMode?.mode, restartRequired, cloudAuth?.authenticated, cloudAuth?.expiresAt]);
 
   useEffect(() => {
-    if (!appMode || appMode.mode !== "local" || restartRequired) return;
+    if (!appMode || !workspaceReady || restartRequired) return;
     load();
     fetchHealth().then((health) => setAppVersion(health.version)).catch(() => {});
-    fetchDiagnose().then(setDiag).catch(() => {});
-    fetchExtensions().then(setExtensions).catch(() => {});
-  }, [appMode?.mode, restartRequired]);
+    if (appMode.mode === "local") {
+      fetchDiagnose().then(setDiag).catch(() => {});
+      fetchExtensions().then(setExtensions).catch(() => {});
+    }
+  }, [appMode?.mode, restartRequired, workspaceReady]);
 
   useEffect(() => {
-    if (!appMode || appMode.mode !== "local" || restartRequired) return;
+    if (!appMode || !workspaceReady || restartRequired) return;
     const t = setInterval(load, REFRESH_MS);
     return () => clearInterval(t);
-  }, [appMode?.mode, restartRequired]);
+  }, [appMode?.mode, restartRequired, workspaceReady]);
 
   // Live 2FA code in the Edit modal: fetch the current TOTP, count it down
   // locally, and refetch when the window rolls over.
@@ -1010,7 +1044,7 @@ function App() {
     }
   };
 
-  if (!appMode || appMode.mode !== "local" || restartRequired) {
+  if (!appMode || !workspaceReady || restartRequired) {
     return (
       <main className="onboarding">
         <section className="onboarding-card" aria-labelledby="onboarding-title">
@@ -1024,10 +1058,22 @@ function App() {
           ) : appMode?.mode === "cloud" ? (
             cloudAuth?.authenticated ? (
               <>
-                <h1 id="onboarding-title">Cloud account connected</h1>
-                <p>{cloudAuth.user?.email ?? "Verified account"}</p>
-                <div className="mode-error" role="status">Cloud workspace synchronization is still initializing.</div>
-                {authNotice && <div className="auth-notice" role="status">{authNotice}</div>}
+                <h1 id="onboarding-title">Review the Cloud terms</h1>
+                <p>Accept the current policies before synchronizing this workspace.</p>
+                <div className="auth-actions">
+                  <a href="https://aliasmode.com/terms/" target="_blank" rel="noreferrer">Terms</a>
+                  <a href="https://aliasmode.com/privacy/" target="_blank" rel="noreferrer">Privacy</a>
+                  <a href="https://aliasmode.com/acceptable-use/" target="_blank" rel="noreferrer">Acceptable Use</a>
+                </div>
+                {authErr && <div className="mode-error" role="alert">{authErr}</div>}
+                <button
+                  className="mode-primary"
+                  type="button"
+                  disabled={authBusy || !cloudAuth.legal}
+                  onClick={() => void acceptCurrentLegal()}
+                >
+                  {authBusy ? "Working…" : cloudAuth.legal ? "Accept and continue" : "Checking workspace…"}
+                </button>
                 <button className="mode-primary" type="button" disabled={modeBusy} onClick={() => chooseMode("local")}>Use Local instead</button>
                 {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               </>
@@ -1084,21 +1130,22 @@ function App() {
   return (
     <div
       className="app"
-      onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
-      onDragLeave={(e) => { e.preventDefault(); if (e.currentTarget === e.target) setDragging(false); }}
+      onDragOver={(e) => { e.preventDefault(); if (isCloudMode) return; if (!dragging) setDragging(true); }}
+      onDragLeave={(e) => { e.preventDefault(); if (isCloudMode) return; if (e.currentTarget === e.target) setDragging(false); }}
       onDrop={(e) => {
         e.preventDefault();
+        if (isCloudMode) return;
         setDragging(false);
         if (e.dataTransfer.files?.length) doUpload(e.dataTransfer.files);
       }}
     >
-      {dragging && <div className="dropzone">Drop AdsPower <code>.txt</code> or <code>.csv</code> files to import</div>}
+      {!isCloudMode && dragging && <div className="dropzone">Drop AdsPower <code>.txt</code> or <code>.csv</code> files to import</div>}
 
       <aside className="sidebar">
         <div className="brandrow"><div className="brand">AliasMode</div>{appVersion && <span className="appversion">{appVersion}</span>}</div>
         <div className="newrow">
           <button className="newbtn" onClick={openCreate}>+ New Profile</button>
-          <button className="importbtn" title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>
+          {!isCloudMode && <button className="importbtn" title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>}
         </div>
         <div className={`folder${group === "all" ? " active" : ""}`} onClick={() => setGroup("all")}>
           <span>All profiles</span><span className="cnt">{profiles.length}</span>
@@ -1131,10 +1178,12 @@ function App() {
               ) : (
                 <>
                   <span className="fname">{g}</span>
-                  <span className="gactions">
-                    <button title="Rename group" onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>
-                    <button title="Delete group" onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>
-                  </span>
+                  {!isCloudMode && (
+                    <span className="gactions">
+                      <button title="Rename group" onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>
+                      <button title="Delete group" onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>
+                    </span>
+                  )}
                   <span className="cnt">{countFor(g)}</span>
                 </>
               )}
@@ -1142,7 +1191,7 @@ function App() {
           ))}
           </div>}
         </div>
-        <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>
+        {!isCloudMode && <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>}
       </aside>
 
       <div className="main">
@@ -1175,6 +1224,7 @@ function App() {
         <span className="count">{selected.size ? `${selected.size} selected` : "No selection"}</span>
         <button className="btn open sm" disabled={!selected.size} onClick={openSelected}>Open</button>
         <button className="btn close sm" disabled={!selected.size} onClick={closeSelected}>Close</button>
+        {!isCloudMode && <>
         {selectedMobileCount > 0 && <button className="abtn convert" onClick={convertSelectedMobile}>Convert mobile ({selectedMobileCount})</button>}
         <div className="exportwrap">
           <button className="abtn" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>Export ▾</button>
@@ -1225,6 +1275,7 @@ function App() {
         )}
         <span className="spacer" />
         <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>
+        </>}
       </div>
 
       <div className="tablewrap">
@@ -1256,7 +1307,7 @@ function App() {
                 <td className="mono" title={p.proxyError}>{p.proxyError ? "⚠ invalid — edit" : p.proxy ?? "—"}</td>
                 <td><HealthBadge profile={p} /></td>
                 <td className="act">
-                  {p.has2fa && (
+                  {!isCloudMode && p.has2fa && (
                     <button
                       className={`btn twofa${twoFaFlash?.id === p.id ? " flash" : ""}`}
                       title="Copy current 2FA code"
@@ -1265,10 +1316,10 @@ function App() {
                       {twoFaFlash?.id === p.id ? `✓ ${twoFaFlash.code}` : "2FA"}
                     </button>
                   )}
-                  <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>
+                  {!isCloudMode && <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>}
                   {p.running ? (
                     <>
-                      <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>⧉</button>
+                      {!isCloudMode && <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>⧉</button>}
                       <button className="btn close" disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>Close</button>
                     </>
                   ) : p.mobilePersona ? (
@@ -1292,7 +1343,9 @@ function App() {
               <tr>
                 <td colSpan={10} className="empty">
                   {profiles.length === 0
-                    ? "No profiles yet — drop an AdsPower export in the inbox and click Import."
+                    ? isCloudMode
+                      ? "No Cloud profiles yet — click New Profile to create one."
+                      : "No profiles yet — drop an AdsPower export in the inbox and click Import."
                     : "No profiles match the current filters."}
                 </td>
               </tr>
