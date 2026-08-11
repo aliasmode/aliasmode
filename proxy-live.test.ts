@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildNewProfile } from "./create.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
-import { Launcher } from "./launcher.ts";
+import { BrowserLaunchError, Launcher } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 import { readSession, writeSession } from "./session.ts";
@@ -19,6 +19,7 @@ const proxyPort = process.env.ALIASMODE_LIVE_PROXY_PORT?.trim() ?? "";
 const proxyUser = process.env.ALIASMODE_LIVE_PROXY_USER ?? "";
 const proxyPass = process.env.ALIASMODE_LIVE_PROXY_PASS ?? "";
 const expectedIp = process.env.ALIASMODE_LIVE_PROXY_IP?.trim() ?? "";
+const headless = process.env.ALIASMODE_LIVE_HEADFUL !== "1";
 const configured = Boolean(binary && binarySha256 && proxyHost && proxyPort && proxyUser && proxyPass && expectedIp);
 const liveTest = configured ? test : test.skip;
 const cloudLiveTest = configured ? test : test.skip;
@@ -52,7 +53,7 @@ async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
     binaryPath: binary,
     expectedBinarySha256: binarySha256,
     dataRoot: join(root, "profiles"),
-    headless: true,
+    headless,
     portRange: { start: 9700, end: 9799 },
     baseArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     labelWindow: async () => {},
@@ -91,15 +92,15 @@ async function expectWrongCredentialsToFail(type: "http" | "socks5"): Promise<vo
     binaryPath: binary,
     expectedBinarySha256: binarySha256,
     dataRoot: join(root, "profiles"),
-    headless: true,
+    headless,
     portRange: { start: 9700, end: 9799 },
     baseArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     labelWindow: async () => {},
     cdpReadyTimeoutMs: 45_000,
   });
   try {
-    await expect(launcher.start(profile.id, [], { autoNavigate: false })).rejects.toThrow(
-      "Proxy verification failed before account traffic",
+    await expect(launcher.start(profile.id, [], { autoNavigate: false })).rejects.toEqual(
+      new BrowserLaunchError("proxy_egress"),
     );
     expect(store.getLaunch(profile.id)).toBeNull();
   } finally {
@@ -124,7 +125,7 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     binaryPath: binary,
     expectedBinarySha256: binarySha256,
     dataRoot: join(root, "profiles"),
-    headless: true,
+    headless,
     portRange: type === "http" ? { start: 9700, end: 9799 } : { start: 9800, end: 9899 },
     baseArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     labelWindow: async () => {},

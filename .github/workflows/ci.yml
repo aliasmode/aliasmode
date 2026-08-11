@@ -108,9 +108,102 @@ jobs:
           $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
           $env:ALIASMODE_LIVE_BROWSER = $browserPath.Path
           $env:ALIASMODE_LIVE_BROWSER_SHA256 = $metadata.sha256
+          $env:ALIASMODE_LIVE_HEADFUL = "1"
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
       - run: bunx tauri build --bundles nsis
+      - name: Smoke-test installed desktop and headful Cloud proxies
+        shell: pwsh
+        env:
+          ALIASMODE_LIVE_PROXY_HOST: ${{ secrets.ALIASMODE_LIVE_PROXY_HOST }}
+          ALIASMODE_LIVE_PROXY_PORT: ${{ secrets.ALIASMODE_LIVE_PROXY_PORT }}
+          ALIASMODE_LIVE_PROXY_USER: ${{ secrets.ALIASMODE_LIVE_PROXY_USER }}
+          ALIASMODE_LIVE_PROXY_PASS: ${{ secrets.ALIASMODE_LIVE_PROXY_PASS }}
+          ALIASMODE_LIVE_PROXY_IP: ${{ secrets.ALIASMODE_LIVE_PROXY_IP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($installers.Count)"
+          }
+
+          $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed"
+          $install = Start-Process -Wait -PassThru $installers[0].FullName -ArgumentList @(
+            "/S",
+            "/D=$installRoot"
+          )
+          if ($install.ExitCode -ne 0) { throw "silent NSIS install exited with code $($install.ExitCode)" }
+
+          $appPath = Join-Path $installRoot "AliasMode.exe"
+          if (-not (Test-Path $appPath -PathType Leaf)) { throw "installed AliasMode executable is missing" }
+          $app = Start-Process -PassThru $appPath
+          $sidecarPid = $null
+          $shutdownFailure = $null
+          try {
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              $app.Refresh()
+              if ($app.HasExited) { throw "installed AliasMode exited before desktop readiness" }
+              $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
+                Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
+                Select-Object -First 1
+              if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
+              if ($sidecarPid -and $app.MainWindowHandle -ne 0) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $sidecarPid) { throw "installed desktop did not start its packaged sidecar" }
+            if ($app.MainWindowHandle -eq 0) { throw "installed desktop did not create its main window" }
+            Start-Sleep -Seconds 2
+            $app.Refresh()
+            if ($app.HasExited -or -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue)) {
+              throw "installed desktop did not remain ready"
+            }
+          } finally {
+            $app.Refresh()
+            if (-not $app.HasExited) {
+              if (-not $app.CloseMainWindow()) {
+                $shutdownFailure = "installed desktop rejected its main-window close request"
+              } elseif (-not $app.WaitForExit(15000)) {
+                $shutdownFailure = "installed desktop did not exit after its main window closed"
+              }
+              $app.Refresh()
+              if (-not $app.HasExited) {
+                Stop-Process -Id $app.Id -Force
+                $app.WaitForExit()
+              }
+            }
+          }
+          if ($sidecarPid) {
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              if (-not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue)) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) {
+              Stop-Process -Id $sidecarPid -Force
+              if (-not $shutdownFailure) { $shutdownFailure = "packaged sidecar survived desktop shutdown" }
+            }
+          }
+          if ($shutdownFailure) { throw $shutdownFailure }
+
+          if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
+            Write-Host "Installed headful Cloud proxy smoke skipped: no temporary test proxy configured"
+            exit 0
+          }
+          $sidecars = @(Get-ChildItem $installRoot -Recurse -File -Filter "aliasmode-sidecar*.exe")
+          if ($sidecars.Count -ne 1) { throw "expected exactly one installed sidecar, found $($sidecars.Count)" }
+          $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
+          $browserPath = Join-Path $installRoot (Join-Path "cloakbrowser" $metadata.executable)
+          if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
+          $env:CLOAKBROWSER_BINARY_PATH = $browserPath
+          $env:CLOAKBROWSER_BINARY_SHA256 = $metadata.sha256
+          $env:ALIASMODE_SESSION_LAUNCH = "0"
+          foreach ($proxyType in @("http", "socks5")) {
+            $stateRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed-cloud-$proxyType"
+            & $sidecars[0].FullName __cloud-launcher-smoke --proxy-type $proxyType --state-root $stateRoot
+            if ($LASTEXITCODE -ne 0) {
+              throw "installed headful Cloud proxy smoke exited with code $LASTEXITCODE"
+            }
+          }
       - name: Stage unsigned installer and checksum
         shell: pwsh
         run: |

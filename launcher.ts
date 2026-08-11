@@ -46,6 +46,21 @@ function needsProxyRelay(profile: Profile): boolean {
   );
 }
 
+export type BrowserLaunchFailure =
+  | "relay_setup"
+  | "process_spawn"
+  | "cdp_readiness"
+  | "proxy_egress";
+
+/** Closed, public-safe browser launch failure. Never attach a raw cause. */
+export class BrowserLaunchError extends Error {
+  override readonly name = "BrowserLaunchError";
+
+  constructor(readonly failure: BrowserLaunchFailure) {
+    super(`browser_launch/${failure} (failed)`);
+  }
+}
+
 export interface SpawnedProcess {
   pid: number;
   kill(): void;
@@ -900,9 +915,13 @@ export class Launcher {
     if (!profile.proxy || !this.verifyProxyFn) return;
     const proofKey = JSON.stringify([ws, profile.proxy, profile.timezone]);
     if (this.verifiedProxyWs.get(profile.id) === proofKey) return;
-    const verified = await this.verifyProxyFn(ws);
+    try {
+      await this.verifyProxyFn(ws);
+    } catch {
+      throw new BrowserLaunchError("proxy_egress");
+    }
     this.verifiedProxyWs.set(profile.id, proofKey);
-    this.log(`${profile.id}: verified ${profile.proxy.type} proxy egress ${verified.ip}`);
+    this.log(`${profile.id}: verified proxy egress`);
   }
 
   private identityCertificationKey(profileId: string): string | null {
@@ -1012,6 +1031,7 @@ export class Launcher {
     if (!this.store.getLaunch(profileId) && !this.procs.has(profileId)) throw error;
     this.clearIdentityCertification(profileId);
     const stopped = await this.doStop(profileId);
+    if (error instanceof BrowserLaunchError) throw error;
     if (stopped) {
       throw new Error(`${detail}; unsafe existing browser was stopped during ${stage} and process/CDP death was confirmed`);
     }
@@ -1258,14 +1278,28 @@ export class Launcher {
       // here (inside the try) so a later failure rolls it back too.
       if (needsProxyRelay(profile)) {
         const p = profile.proxy!;
-        const relay = await startProxyRelay({ type: p.type === "socks5" ? "socks5" : "http", host: p.host, port: Number(p.port), user: p.user, pass: p.pass }, { log: this.log });
+        let relay: ProxyRelay;
+        try {
+          relay = await startProxyRelay(
+            {
+              type: p.type === "socks5" ? "socks5" : "http",
+              host: p.host,
+              port: Number(p.port),
+              user: p.user,
+              pass: p.pass,
+            },
+            {},
+          );
+        } catch {
+          throw new BrowserLaunchError("relay_setup");
+        }
         // Defensive cleanup for a stale in-memory relay whose launch row was
         // removed before this fresh start. Never overwrite the only reference to
         // a listening server/socket set.
         this.closeRelay(profileId);
         this.relays.set(profileId, relay);
         relayPort = relay.port;
-        this.log(`proxy relay for ${profileId} on 127.0.0.1:${relayPort} → ${p.type}://${p.host}:${p.port}`);
+        this.log(`proxy relay ready for ${profileId}`);
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
       const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort);
@@ -1304,7 +1338,11 @@ export class Launcher {
       };
       this.store.recordLaunch(provisionalLaunch);
       spawnAttempted = true;
-      proc = this.spawnFn(spawnVerifiedBinary.path, args);
+      try {
+        proc = this.spawnFn(spawnVerifiedBinary.path, args);
+      } catch {
+        throw new BrowserLaunchError("process_spawn");
+      }
       this.procs.set(profileId, proc);
       this.store.recordLaunch({
         ...provisionalLaunch,
@@ -1968,16 +2006,21 @@ export class Launcher {
     if (!launch.relayPort) {
       throw new Error(`proxied survivor ${profile.id} predates the required relay; close it and reopen with the current manager`);
     }
-    const relay = await startProxyRelay(
-      {
-        type: profile.proxy!.type === "socks5" ? "socks5" : "http",
-        host: profile.proxy!.host,
-        port: Number(profile.proxy!.port),
-        user: profile.proxy!.user,
-        pass: profile.proxy!.pass,
-      },
-      { port: launch.relayPort, log: this.log },
-    );
+    let relay: ProxyRelay;
+    try {
+      relay = await startProxyRelay(
+        {
+          type: profile.proxy!.type === "socks5" ? "socks5" : "http",
+          host: profile.proxy!.host,
+          port: Number(profile.proxy!.port),
+          user: profile.proxy!.user,
+          pass: profile.proxy!.pass,
+        },
+        { port: launch.relayPort },
+      );
+    } catch {
+      throw new BrowserLaunchError("relay_setup");
+    }
     const current = this.store.getLaunch(profile.id);
     const sameGeneration = current?.debugPort === launch.debugPort
       && current.startedAt === launch.startedAt;
@@ -1987,7 +2030,7 @@ export class Launcher {
       return;
     }
     this.relays.set(profile.id, relay);
-    this.log(`reattached proxy relay for ${profile.id} on 127.0.0.1:${launch.relayPort}`);
+    this.log(`reattached proxy relay for ${profile.id}`);
   }
 
   /**
@@ -2745,7 +2788,6 @@ export class Launcher {
   private async waitForCdp(port: number, proc?: SpawnedProcess): Promise<string> {
     const deadline = Date.now() + this.cdpReadyTimeoutMs;
     const url = `http://127.0.0.1:${port}/json/version`;
-    let lastErr = "";
     // Latch a PROVEN spawn failure (see SpawnedProcess.spawnFailed). Held in an object
     // so the closure's write is visible to the loop below without narrowing games.
     const spawn: { failure: string | null } = { failure: null };
@@ -2761,20 +2803,18 @@ export class Launcher {
           const ws = data?.webSocketDebuggerUrl;
           if (typeof ws === "string" && ws.startsWith("ws")) return ws;
         }
-      } catch (err) {
-        lastErr = err instanceof Error ? err.message : String(err);
+      } catch {
+        // Keep polling until the bounded readiness deadline.
       }
       // Checked AFTER the probe so a healthy browser always wins over a stale or
       // pessimistic spawner diagnostic; only an unreachable CDP fails on it. This turns
-      // a mute 60s timeout into the actual reason on the very first poll.
+      // a mute timeout into an immediate safe launch category.
       if (spawn.failure) {
-        throw new Error(`browser process failed to start: ${spawn.failure}`);
+        throw new BrowserLaunchError("process_spawn");
       }
       await sleep(250);
     }
-    throw new Error(
-      `CDP endpoint on port ${port} not ready within ${this.cdpReadyTimeoutMs}ms${lastErr ? ` (${lastErr})` : ""}`,
-    );
+    throw new BrowserLaunchError("cdp_readiness");
   }
 }
 

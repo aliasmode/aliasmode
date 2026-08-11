@@ -4,7 +4,12 @@ import {
   type CloudDiagnosticEvent,
   type CloudDiagnosticType,
 } from "./cloud-diagnostics.ts";
-import { platformHomeUrl, splitLaunchUrls, type Launcher } from "./launcher.ts";
+import {
+  BrowserLaunchError,
+  platformHomeUrl,
+  splitLaunchUrls,
+  type Launcher,
+} from "./launcher.ts";
 import {
   type PendingClose,
   type PendingOpenSession,
@@ -95,6 +100,7 @@ const TERMINAL_HEARTBEAT_ERRORS = new Set([
 function errorCode(error: unknown): string {
   if (error instanceof CloudApiError) return error.code;
   if (error instanceof SessionRestoreError) return error.outcome;
+  if (error instanceof BrowserLaunchError) return "failed";
   return "transport_error";
 }
 
@@ -113,12 +119,17 @@ export type CloudOpenStage =
 function safeErrorType(error: unknown): string {
   if (error instanceof CloudApiError) return "CloudApiError";
   if (error instanceof SessionRestoreError) return "SessionRestoreError";
+  if (error instanceof BrowserLaunchError) return "BrowserLaunchError";
   if (error instanceof TypeError) return "TypeError";
   return error instanceof Error ? "Error" : "unknown";
 }
 
 function sessionRestoreDiagnostic(error: SessionRestoreError): CloudDiagnosticType {
   return `session_restore_${error.operation}_${error.outcome}` as CloudDiagnosticType;
+}
+
+function browserLaunchDiagnostic(error: BrowserLaunchError): CloudDiagnosticType {
+  return `browser_launch_${error.failure}_failed` as CloudDiagnosticType;
 }
 
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
@@ -348,6 +359,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       this.stopHeartbeat(profileId);
       if (error instanceof SessionRestoreError) {
         this.diagnosticEvents.record(sessionRestoreDiagnostic(error));
+      } else if (error instanceof BrowserLaunchError) {
+        this.diagnosticEvents.record(browserLaunchDiagnostic(error));
       } else if (stage === "session_restore") {
         this.diagnosticEvents.record("session_restore_unclassified_failed");
       }
@@ -355,7 +368,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const code = errorCode(error);
       const failureStage = stage === "session_restore" && error instanceof SessionRestoreError
         ? `${stage}/${error.operation}`
-        : stage;
+        : stage === "browser_launch" && error instanceof BrowserLaunchError
+          ? `${stage}/${error.failure}`
+          : stage;
       this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})`);
       const stopped = registrationId
         ? await this.options.launcher.stop(profileId).catch(() => false)

@@ -3,8 +3,10 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSyn
 import { join, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import net from "node:net";
 import { ProfileStore } from "./store.ts";
 import {
+  BrowserLaunchError,
   Launcher as ProductionLauncher,
   buildWindowLabel,
   collectLinuxProcessTree,
@@ -1023,6 +1025,70 @@ test("authenticated HTTP relay is verified before browser setup", async () => {
   store.close();
 });
 
+test("proxy relay failures do not expose upstream or target details through launcher logs", async () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  const secretHost = "secret-proxy-host.invalid";
+  const secretTarget = "secret-target.invalid:443";
+  const secretUser = "secret-relay-user";
+  const secretPass = "secret-relay-pass";
+  store.upsertProfile({
+    ...profile,
+    proxy: { type: "http", host: secretHost, port: "8080", user: secretUser, pass: secretPass },
+  });
+  const f = fleet();
+  const logs: string[] = [];
+  const spawnedArgs: string[][] = [];
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true,
+    spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
+    fetch: f.fetchFn,
+    verifyProxy: async () => {
+      const relayArg = spawnedArgs[0]?.find((arg) => arg.startsWith("--proxy-server=http://127.0.0.1:"));
+      const relayPort = Number(relayArg?.split(":").at(-1));
+      if (!Number.isInteger(relayPort)) throw new Error("relay port was not passed to the browser");
+      await new Promise<void>((resolve, reject) => {
+        const socket = net.connect({ host: "127.0.0.1", port: relayPort }, () => {
+          socket.write(`CONNECT ${secretTarget} HTTP/1.1\r\nHost: ${secretTarget}\r\n\r\n`);
+        });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          reject(new Error("relay failure did not close the client"));
+        }, 5_000);
+        const finish = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        socket.once("close", finish);
+        socket.once("error", finish);
+      });
+      return { ip: "203.0.113.9" };
+    },
+    ensureSearchProvider: async () => ({ status: "configured", engine: "DuckDuckGo" }),
+    ensureCookies: async () => ({ injected: false }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    killPid: async (pid) => f.killPid(pid),
+    browserClose: async () => false,
+    cdpReadyTimeoutMs: 1000,
+    log: (message) => logs.push(message),
+  });
+
+  await launcher.start("k1d0cd11");
+
+  const output = logs.join("\n");
+  for (const secret of [secretHost, secretTarget, secretUser, secretPass]) {
+    expect(output).not.toContain(secret);
+  }
+  await launcher.stop("k1d0cd11");
+  store.close();
+});
+
 test("failed authenticated HTTP verification aborts before setup and tears down the browser", async () => {
   const store = seeded();
   const f = fleet();
@@ -1039,7 +1105,9 @@ test("failed authenticated HTTP verification aborts before setup and tears down 
     },
   );
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("before account traffic");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("proxy_egress"),
+  );
   expect(events).toEqual(["verifyProxy"]);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
@@ -1080,7 +1148,9 @@ test("failed SOCKS5 verification aborts before account setup and tears down the 
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("before account traffic");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("proxy_egress"),
+  );
   expect(events).toEqual(["verifyProxy"]);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
@@ -1552,7 +1622,7 @@ test("start persists provisional ownership before spawn and CDP readiness", asyn
   store.close();
 });
 
-test("a spawner that throws after invocation leaves provisional ownership for later reconciliation", async () => {
+test("a spawner that throws after invocation retains ownership and returns a safe category", async () => {
   const store = seeded();
   makeDirect(store);
   let scans = 0;
@@ -1571,7 +1641,9 @@ test("a spawner that throws after invocation leaves provisional ownership for la
     findProfileDirHolderPids: async () => [],
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("spawner lost its child handle");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("process_spawn"),
+  );
   expect(store.getLaunch("k1d0cd11")).toMatchObject({
     pid: 0,
     binaryPath: "/fake/cloak",
@@ -1805,7 +1877,9 @@ test("failed start tree-kills only an exact owned process and never uses the raw
     cdpReadyTimeoutMs: 1,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("CDP endpoint");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("cdp_readiness"),
+  );
 
   expect(treeKilled).toEqual([8123]);
   expect(parentKilled).toEqual([]); // retained handle PID alone is never trusted
@@ -1832,7 +1906,9 @@ test("failed start retains launch ownership when its exact process scan is incon
     cdpReadyTimeoutMs: 1,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("CDP endpoint");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("cdp_readiness"),
+  );
   expect(store.getLaunch("k1d0cd11")).not.toBeNull();
   await expect(launcher.start("k1d0cd11")).rejects.toThrow("ownership scan is inconclusive");
   expect(spawns).toBe(1);
@@ -1858,7 +1934,9 @@ test("failed start retains launch ownership when an exact kill reports but the p
     cdpReadyTimeoutMs: 1,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("CDP endpoint");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("cdp_readiness"),
+  );
   expect(killed).toEqual([8123]);
   expect(store.getLaunch("k1d0cd11")).not.toBeNull();
   store.close();
@@ -2941,7 +3019,7 @@ test("buildArgs floors the window width so small-resolution profiles aren't an u
   store.close();
 });
 
-test("a spawner that proves the browser never started fails the launch immediately, with its reason", async () => {
+test("a spawner that proves the browser never started fails immediately with a safe category", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
@@ -2975,7 +3053,9 @@ test("a spawner that proves the browser never started fails the launch immediate
     cdpReadyTimeoutMs: 60_000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow(/No interactive user found/);
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("process_spawn"),
+  );
   expect(spawnedArgs.length).toBe(1);
   store.close();
 });

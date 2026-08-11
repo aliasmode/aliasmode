@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
 import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v1.ts";
+import { BrowserLaunchError } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { SessionRestoreError } from "./session.ts";
@@ -45,6 +46,7 @@ function setup(options: {
   closeTransportFailure?: boolean;
   navigateFailure?: boolean;
   startRetainedFailure?: boolean;
+  startError?: BrowserLaunchError;
   verifyWebSockets?: string[];
   proxy?: PortableProfileV1["profile"]["proxy"];
 } = {}) {
@@ -113,6 +115,7 @@ function setup(options: {
       expect(args).toEqual(["--window-size=1200,800"]);
       expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
+      if (options.startError) throw options.startError;
       store.recordLaunch({
         profileId,
         pid: 10,
@@ -508,6 +511,41 @@ test("terminal Cloud heartbeat errors capture and stop the browser", async () =>
   }]);
   state.queue.close();
   state.store.close();
+});
+
+test("Cloud browser reports fixed safe browser launch operations", async () => {
+  const operations = [
+    "relay_setup",
+    "process_spawn",
+    "cdp_readiness",
+    "proxy_egress",
+  ] as const;
+
+  for (const operation of operations) {
+    const state = setup({ startError: new BrowserLaunchError(operation) });
+    const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+
+    expect(result).toEqual({
+      ok: false,
+      error: `Cloud profile open failed at browser_launch/${operation} (failed)`,
+    });
+    expect(state.coordinator.diagnostics().map((event) => event.type).slice(-2)).toEqual([
+      `browser_launch_${operation}_failed`,
+      "open_failed",
+    ]);
+    const publicState = JSON.stringify({ result, logs: state.logs, diagnostics: state.coordinator.diagnostics() });
+    for (const secret of [
+      "credential-secret-value",
+      "session-secret-value",
+      "proxy-secret-value",
+      "https://secret.invalid",
+    ]) {
+      expect(publicState).not.toContain(secret);
+    }
+    expect(state.abandonCalls()).toBe(1);
+    state.queue.close();
+    state.store.close();
+  }
 });
 
 test("Cloud browser reports the exact safe session restore operation", async () => {
