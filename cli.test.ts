@@ -3,6 +3,7 @@ import {
   cloudRuntimeConfiguration,
   dispatchReadSessionWorker,
   drainRemoteShutdown,
+  exerciseCloudLauncherSmoke,
   lifecycleAdmissionOptionsFromEnv,
   OFFICIAL_CLOUD_ANON_KEY,
   OFFICIAL_CLOUD_URL,
@@ -72,6 +73,50 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
     "alive:http://127.0.0.1:9222",
     "read:http://127.0.0.1:9222",
     "alive:http://127.0.0.1:9222",
+  ]);
+});
+
+test("Cloud launcher smoke requires fresh and cached opens to stay alive and close cleanly", async () => {
+  const events: string[] = [];
+  let running = false;
+  let launch: object | null = null;
+  let opens = 0;
+  const coordinator = {
+    async open(profileId: string) {
+      opens++;
+      events.push(`open:${opens}:${profileId}`);
+      running = true;
+      launch = { profileId };
+      return { ok: true, ws: `ws://smoke/${opens}`, port: 9200 + opens };
+    },
+    async close(profileId: string) {
+      events.push(`close:${opens}:${profileId}`);
+      running = false;
+      launch = null;
+      return true;
+    },
+    async releaseAll() { return true; },
+  };
+  const launcher = {
+    async active(profileId: string) {
+      events.push(`active:${opens}:${profileId}:${running}`);
+      return running;
+    },
+    async stop() { return true; },
+  };
+  const store = { getLaunch: () => launch };
+
+  await exerciseCloudLauncherSmoke({ coordinator, launcher, store } as any, "profile-smoke");
+
+  expect(events).toEqual([
+    "open:1:profile-smoke",
+    "active:1:profile-smoke:true",
+    "close:1:profile-smoke",
+    "active:1:profile-smoke:false",
+    "open:2:profile-smoke",
+    "active:2:profile-smoke:true",
+    "close:2:profile-smoke",
+    "active:2:profile-smoke:false",
   ]);
 });
 

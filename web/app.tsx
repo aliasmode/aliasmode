@@ -12,10 +12,12 @@ import {
   type Extension,
   type AppModeConfig,
   type CloudAuthState,
+  type CloudDiagnosticEvent,
   acceptCloudLegal,
   cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
+  fetchCloudEvents,
   signInCloud,
   signUpCloud,
   restoreCloudSession,
@@ -161,6 +163,43 @@ function downloadText(name: string, text: string, type: string): void {
 }
 
 const REFRESH_MS = 3000;
+
+const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
+  open_started: "Cloud open started",
+  cloud_registered: "Cloud session registered",
+  browser_started: "CloakBrowser started",
+  session_restore_started: "Session restore started",
+  session_restore_completed: "Session restore completed",
+  session_restore_unclassified_failed: "Session restore failed before classification",
+  session_restore_invalid_bundle_failed: "Session data was invalid",
+  session_restore_invalid_bundle_timeout: "Session data validation timed out",
+  session_restore_connect_failed: "Browser connection failed",
+  session_restore_connect_timeout: "Browser connection timed out",
+  session_restore_context_failed: "Persistent browser context was unavailable",
+  session_restore_context_timeout: "Persistent browser context timed out",
+  session_restore_origin_storage_failed: "Telegram storage restore failed",
+  session_restore_origin_storage_timeout: "Telegram storage restore timed out",
+  session_restore_cookie_clear_failed: "Cookie clear failed",
+  session_restore_cookie_clear_timeout: "Cookie clear timed out",
+  session_restore_cookie_add_failed: "Cookie restore failed",
+  session_restore_cookie_add_timeout: "Cookie restore timed out",
+  session_restore_disconnect_failed: "Browser connection cleanup failed",
+  session_restore_disconnect_timeout: "Browser connection cleanup timed out",
+  open_running: "Cloud profile is running",
+  open_failed: "Cloud profile open failed",
+  close_started: "Cloud close started",
+  session_captured: "Session captured",
+  browser_stopped: "CloakBrowser stopped",
+  session_synced: "Session synchronized",
+  cloud_registration_released: "Cloud session registration released",
+  cleanup_retained: "Browser or recovery state was retained",
+  heartbeat_failed: "Cloud heartbeat failed",
+  access_ended: "Cloud access ended",
+};
+
+function cloudDiagnosticFailed(type: CloudDiagnosticEvent["type"]): boolean {
+  return type.includes("failed") || type.includes("timeout") || type === "cleanup_retained" || type === "access_ended";
+}
 
 function StatusDot({ running }: { running: boolean }) {
   return <span className={`dot ${running ? "on" : ""}`} title={running ? "running" : "stopped"} />;
@@ -388,6 +427,9 @@ function App() {
   const [modeErr, setModeErr] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
+  const [cloudEvents, setCloudEvents] = useState<CloudDiagnosticEvent[]>([]);
+  const [cloudEventsBusy, setCloudEventsBusy] = useState(false);
+  const [cloudEventsErr, setCloudEventsErr] = useState<string | null>(null);
   const [pendingMode, setPendingMode] = useState<"local" | "cloud" | null>(null);
   const [cloudAuth, setCloudAuth] = useState<CloudAuthState | null>(null);
   const [authView, setAuthView] = useState<"signin" | "signup">("signin");
@@ -473,6 +515,29 @@ function App() {
     } finally {
       setLoaded(true);
     }
+  };
+
+  const loadCloudEvents = async () => {
+    if (!isCloudMode) {
+      setCloudEvents([]);
+      setCloudEventsErr(null);
+      return;
+    }
+    setCloudEventsBusy(true);
+    setCloudEventsErr(null);
+    try {
+      setCloudEvents((await fetchCloudEvents()).slice().reverse());
+    } catch {
+      setCloudEventsErr("Recent diagnostics could not be loaded.");
+    } finally {
+      setCloudEventsBusy(false);
+    }
+  };
+
+  const openAccountSettings = () => {
+    setModeErr(null);
+    setShowAccount(true);
+    void loadCloudEvents();
   };
 
   const chooseMode = async (mode: "local" | "cloud"): Promise<boolean> => {
@@ -1283,7 +1348,7 @@ function App() {
           type="button"
           aria-label="Open Account and Settings"
           title="Account & Settings"
-          onClick={() => { setModeErr(null); setShowAccount(true); }}
+          onClick={openAccountSettings}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="12" cy="8" r="3.5" />
@@ -1488,6 +1553,31 @@ function App() {
                 <h2>Workspace</h2>
                 <p>{isCloudMode ? "Your Cloud workspace and member controls will live here." : "Local mode has no Cloud workspace."}</p>
               </section>
+              {isCloudMode && (
+                <section className="settings-section diagnostics-section">
+                  <div className="diagnostics-head">
+                    <h2>Recent diagnostics</h2>
+                    <button type="button" disabled={cloudEventsBusy} onClick={() => void loadCloudEvents()}>
+                      {cloudEventsBusy ? "Loading…" : "Refresh"}
+                    </button>
+                  </div>
+                  {cloudEventsErr && <div className="diagnostics-error" role="alert">{cloudEventsErr}</div>}
+                  {!cloudEventsErr && cloudEvents.length === 0 && (
+                    <p>{cloudEventsBusy ? "Loading recent Cloud events…" : "No Cloud lifecycle events in this run."}</p>
+                  )}
+                  {cloudEvents.length > 0 && (
+                    <div className="diagnostics-list" role="log" aria-label="Recent Cloud diagnostics">
+                      {cloudEvents.map((event, index) => (
+                        <div className={`diagnostics-row${cloudDiagnosticFailed(event.type) ? " failed" : ""}`} key={`${event.timestamp}-${index}`}>
+                          <time dateTime={new Date(event.timestamp).toISOString()}>{new Date(event.timestamp).toLocaleTimeString()}</time>
+                          <span>{CLOUD_DIAGNOSTIC_LABELS[event.type]}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <p>Diagnostics contain fixed lifecycle labels only. They exclude profile data and credentials.</p>
+                </section>
+              )}
               <section className="settings-mode">
                 <button type="button" disabled={modeBusy} onClick={() => requestModeSwitch(isCloudMode ? "local" : "cloud")}>
                   Switch to {isCloudMode ? "Local" : "Cloud"}

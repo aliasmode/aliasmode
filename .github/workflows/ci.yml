@@ -75,7 +75,20 @@ jobs:
               Pop-Location
             }
           } finally {
-            if (-not $browser.HasExited) { Stop-Process -Id $browser.Id -Force }
+            if (-not $browser.HasExited) {
+              Stop-Process -Id $browser.Id -Force
+              Wait-Process -Id $browser.Id -ErrorAction SilentlyContinue
+            }
+          }
+          $env:CLOAKBROWSER_BINARY_PATH = $browserPath.Path
+          $env:CLOAKBROWSER_BINARY_SHA256 = $metadata.sha256
+          $env:ALIASMODE_SESSION_LAUNCH = "0"
+          Push-Location $smoke
+          try {
+            & ".\aliasmode-sidecar.exe" __cloud-launcher-smoke --headless --state-root "$smoke\cloud-state"
+            if ($LASTEXITCODE -ne 0) { throw "Cloud launcher smoke exited with code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
           }
       - run: bunx tauri build --bundles nsis
       - name: Stage unsigned installer and checksum

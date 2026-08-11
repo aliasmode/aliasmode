@@ -15,8 +15,10 @@ import {
   readSessionWorkerCommand,
   restoreOriginStorage,
   runReadSessionWorker,
+  SessionRestoreError,
   TELEGRAM_AUTH_INDEXEDDB_RULES,
   telegramAuthSignature,
+  writeSession,
   writeSessionToBrowser,
 } from "./session.ts";
 
@@ -37,6 +39,21 @@ test("playwrightTransportAttribution reads the shared transport counters", () =>
 
 function textStream(value: string): ReadableStream<Uint8Array> {
   return new Response(value).body as ReadableStream<Uint8Array>;
+}
+
+async function expectRestoreError(
+  promise: Promise<unknown>,
+  operation: SessionRestoreError["operation"],
+  outcome: SessionRestoreError["outcome"],
+): Promise<SessionRestoreError> {
+  const error = await promise.then(
+    () => null,
+    (failure) => failure,
+  );
+  expect(error).toBeInstanceOf(SessionRestoreError);
+  expect(error).toMatchObject({ operation, outcome });
+  expect((error as Error).message).toBe(`session_restore/${operation} (${outcome})`);
+  return error as SessionRestoreError;
 }
 
 test("read-session result envelopes preserve exact bundle text", () => {
@@ -231,10 +248,10 @@ test("writeSessionToBrowser bounds a hung origin restore and disconnects", async
     origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "value" }] }],
   });
 
-  await expect(writeSessionToBrowser(browser, bundle, {
+  await expectRestoreError(writeSessionToBrowser(browser, bundle, {
     writeTimeoutMs: 5,
     disconnectTimeoutMs: 5,
-  })).rejects.toThrow("session restore exceeded 5ms");
+  }), "origin_storage", "timeout");
   expect(closes).toBe(1);
 });
 
@@ -279,21 +296,21 @@ test("writeSessionToBrowser bounds hung cookie clear and injection", async () =>
     contexts: () => [{ pages: () => [], clearCookies: () => new Promise(() => {}), async addCookies() {} }],
     async close() {},
   };
-  await expect(writeSessionToBrowser(clearBrowser, normalizeBundle({ cookies: [] }), {
+  await expectRestoreError(writeSessionToBrowser(clearBrowser, normalizeBundle({ cookies: [] }), {
     writeTimeoutMs: 5,
     disconnectTimeoutMs: 5,
-  })).rejects.toThrow("session restore exceeded 5ms");
+  }), "cookie_clear", "timeout");
 
   const addBrowser = {
     contexts: () => [{ pages: () => [], async clearCookies() {}, addCookies: () => new Promise(() => {}) }],
     async close() {},
   };
-  await expect(writeSessionToBrowser(addBrowser, normalizeBundle({
+  await expectRestoreError(writeSessionToBrowser(addBrowser, normalizeBundle({
     cookies: [{ name: "auth_token", value: "v", domain: ".x.com", path: "/" }],
   }), {
     writeTimeoutMs: 5,
     disconnectTimeoutMs: 5,
-  })).rejects.toThrow("session restore exceeded 5ms");
+  }), "cookie_add", "timeout");
 });
 
 test("a timed-out cookie write drains after disconnect and cannot continue into injection", async () => {
@@ -309,12 +326,12 @@ test("a timed-out cookie write drains after disconnect and cannot continue into 
     async close() { finishClear(); },
   };
 
-  await expect(writeSessionToBrowser(browser, normalizeBundle({
+  await expectRestoreError(writeSessionToBrowser(browser, normalizeBundle({
     cookies: [{ name: "auth_token", value: "v", domain: ".x.com", path: "/" }],
   }), {
     writeTimeoutMs: 5,
     disconnectTimeoutMs: 20,
-  })).rejects.toThrow("session restore exceeded 5ms");
+  }), "cookie_clear", "timeout");
   expect(added).toBe(false);
 });
 
@@ -324,19 +341,145 @@ test("writeSessionToBrowser bounds disconnect and preserves a primary restore fa
     contexts: () => [context],
     close: () => new Promise(() => {}),
   };
-  await expect(writeSessionToBrowser(hungDisconnect, normalizeBundle({ cookies: [] }), {
+  await expectRestoreError(writeSessionToBrowser(hungDisconnect, normalizeBundle({ cookies: [] }), {
     writeTimeoutMs: 20,
     disconnectTimeoutMs: 5,
-  })).rejects.toThrow("session disconnect exceeded 5ms");
+  }), "disconnect", "timeout");
 
   const restoreAndDisconnectFail = {
-    contexts: () => [{ pages: () => [], async clearCookies() { throw new Error("cookie restore failed"); }, async addCookies() {} }],
+    contexts: () => [{ pages: () => [], async clearCookies() { throw new Error("cookie restore failed secret"); }, async addCookies() {} }],
     close: () => new Promise(() => {}),
   };
-  await expect(writeSessionToBrowser(restoreAndDisconnectFail, normalizeBundle({ cookies: [] }), {
-    writeTimeoutMs: 20,
-    disconnectTimeoutMs: 5,
-  })).rejects.toThrow("cookie restore failed");
+  const error = await expectRestoreError(writeSessionToBrowser(
+    restoreAndDisconnectFail,
+    normalizeBundle({ cookies: [] }),
+    { writeTimeoutMs: 20, disconnectTimeoutMs: 5 },
+  ), "cookie_clear", "failed");
+  expect(error.message).not.toContain("secret");
+});
+
+test("writeSession waits for the persistent context without creating an incognito context", async () => {
+  let attempts = 0;
+  let closes = 0;
+  let newContexts = 0;
+  let cleared = false;
+  const context = {
+    pages: () => [],
+    async clearCookies() { cleared = true; },
+    async addCookies() {},
+  };
+
+  await writeSession("ws://verified-browser", JSON.stringify({ cookies: [] }), {
+    connectTimeoutMs: 100,
+    contextRetryMs: 1,
+    sleep: async () => {},
+    async connect(endpoint) {
+      expect(endpoint).toBe("ws://verified-browser");
+      attempts++;
+      if (attempts === 1) throw new Error("transient connect secret");
+      if (attempts === 2) {
+        return {
+          contexts: () => [],
+          async newContext() { newContexts++; },
+          async close() { closes++; },
+        };
+      }
+      return {
+        contexts: () => [context],
+        async newContext() { newContexts++; },
+        async close() { closes++; },
+      };
+    },
+  });
+
+  expect(attempts).toBe(3);
+  expect(newContexts).toBe(0);
+  expect(closes).toBe(2);
+  expect(cleared).toBe(true);
+});
+
+test("writeSession reports fixed connect and context readiness timeouts", async () => {
+  const connectError = await expectRestoreError(writeSession(
+    "ws://verified-browser",
+    JSON.stringify({ cookies: [] }),
+    {
+      connectTimeoutMs: 5,
+      contextRetryMs: 1,
+      async connect() { throw new Error("connect credential secret"); },
+    },
+  ), "connect", "timeout");
+  expect(connectError.message).not.toContain("credential");
+
+  let closes = 0;
+  const contextError = await expectRestoreError(writeSession(
+    "ws://verified-browser",
+    JSON.stringify({ cookies: [] }),
+    {
+      connectTimeoutMs: 5,
+      contextRetryMs: 1,
+      async connect() {
+        return {
+          contexts: () => [],
+          async newContext() { throw new Error("must not create"); },
+          async close() { closes++; },
+        };
+      },
+    },
+  ), "context", "timeout");
+  expect(contextError.message).not.toContain("must not create");
+  expect(closes).toBeGreaterThan(0);
+});
+
+test("session restore operation errors never expose raw failure text", async () => {
+  const invalid = await expectRestoreError(
+    writeSession("ws://verified-browser", "secret invalid payload"),
+    "invalid_bundle",
+    "failed",
+  );
+  expect(invalid.message).not.toContain("payload");
+
+  const contextBrowser = {
+    contexts: () => [],
+    async newContext() { throw new Error("must not create secret"); },
+    async close() {},
+  };
+  await expectRestoreError(
+    writeSessionToBrowser(contextBrowser, normalizeBundle({ cookies: [] })),
+    "context",
+    "failed",
+  );
+
+  const originPage = {
+    url: () => "about:blank",
+    async goto() { throw new Error("origin secret"); },
+    async evaluate() {},
+  };
+  const originBrowser = {
+    contexts: () => [{ pages: () => [originPage], async clearCookies() {}, async addCookies() {} }],
+    async close() {},
+  };
+  await expectRestoreError(writeSessionToBrowser(originBrowser, normalizeBundle({
+    cookies: [],
+    origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "secret" }] }],
+  })), "origin_storage", "failed");
+
+  const clearBrowser = {
+    contexts: () => [{ pages: () => [], async clearCookies() { throw new Error("cookie clear secret"); }, async addCookies() {} }],
+    async close() {},
+  };
+  await expectRestoreError(
+    writeSessionToBrowser(clearBrowser, normalizeBundle({ cookies: [] })),
+    "cookie_clear",
+    "failed",
+  );
+
+  const addBrowser = {
+    contexts: () => [{ pages: () => [], async clearCookies() {}, async addCookies() { throw new Error("cookie add secret"); } }],
+    async close() {},
+  };
+  await expectRestoreError(writeSessionToBrowser(addBrowser, normalizeBundle({
+    cookies: [{ name: "auth_token", value: "secret", domain: ".x.com", path: "/" }],
+  })), "cookie_add", "failed");
 });
 
 test("bundleHasRestorableLogin: true only when injecting the bundle can put a login back", () => {

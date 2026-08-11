@@ -1,5 +1,12 @@
 /** Typed client for the dashboard's /ui/api/* endpoints. */
 
+import {
+  CLOUD_DIAGNOSTIC_TYPES,
+  type CloudDiagnosticEvent,
+} from "../cloud-diagnostics.ts";
+
+export type { CloudDiagnosticEvent } from "../cloud-diagnostics.ts";
+
 export type HealthStatus = "suspended" | "alive" | "no_data";
 
 export interface UiProfile {
@@ -74,6 +81,31 @@ export async function selectAppMode(mode: "local" | "cloud"): Promise<any> {
   const body = await apiJson(response, path);
   if (!response.ok || body.ok !== true) throw new Error(body.error || "Could not save AliasMode mode");
   return body;
+}
+
+export async function fetchCloudEvents(): Promise<CloudDiagnosticEvent[]> {
+  const path = "/ui/api/cloud-events";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (!response.ok || !Array.isArray(body.events)) {
+    throw new Error("Cloud diagnostics are unavailable");
+  }
+  const knownTypes = new Set<string>(CLOUD_DIAGNOSTIC_TYPES);
+  return body.events.map((event: unknown) => {
+    if (!event || typeof event !== "object") throw new Error("Cloud diagnostics returned invalid data");
+    const keys = Object.keys(event as object).sort();
+    const timestamp = (event as any).timestamp;
+    const type = (event as any).type;
+    if (
+      keys.join(",") !== "timestamp,type" ||
+      !Number.isFinite(timestamp) ||
+      !Number.isFinite(new Date(timestamp).getTime()) ||
+      !knownTypes.has(type)
+    ) {
+      throw new Error("Cloud diagnostics returned invalid data");
+    }
+    return { timestamp, type } as CloudDiagnosticEvent;
+  });
 }
 
 export interface CloudLegalState {

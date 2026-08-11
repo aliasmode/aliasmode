@@ -112,6 +112,7 @@ test("pending sync retry accepts first valid closes and preserves conflicts", as
     expectedVersion: 2,
     payload: payload(),
   });
+  await Bun.sleep(2);
   const conflictId = state.queue.enqueue({
     accountId: "account1",
     profileId: "profile2",

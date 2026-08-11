@@ -17,6 +17,7 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
 import {
   CloudProfileEditor,
   cloudProfileEditorErrorStatus,
@@ -256,6 +257,13 @@ export async function handleUiRequest(
       ...config,
       ...(options.runtimeMode ? { restartRequired: config.mode !== options.runtimeMode } : {}),
     });
+  }
+
+  if (pathname === "/ui/api/cloud-events" && req.method === "GET") {
+    return Response.json(
+      { events: normalizeCloudDiagnostics(options.cloudBrowser?.diagnostics?.() ?? []) },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   }
 
   if (pathname === "/ui/api/app-mode" && req.method === "POST") {

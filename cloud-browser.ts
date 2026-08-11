@@ -1,4 +1,9 @@
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
+import {
+  CloudDiagnostics,
+  type CloudDiagnosticEvent,
+  type CloudDiagnosticType,
+} from "./cloud-diagnostics.ts";
 import { platformHomeUrl, splitLaunchUrls, type Launcher } from "./launcher.ts";
 import {
   type PendingClose,
@@ -10,6 +15,7 @@ import { decodePortableProfile, encodePortableProfile } from "./portable-profile
 import {
   bundleHasRestorableLogin,
   bundleTelegramClient,
+  SessionRestoreError,
 } from "./session.ts";
 import type { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
@@ -49,6 +55,7 @@ export interface CloudBrowserLifecycle {
   resumeAfterAuthentication(): Promise<void>;
   retryPending(): Promise<void>;
   releaseAll(permanent?: boolean): Promise<boolean>;
+  diagnostics?(): readonly CloudDiagnosticEvent[];
 }
 
 type CloudBrowserClient = Pick<
@@ -86,7 +93,9 @@ const TERMINAL_HEARTBEAT_ERRORS = new Set([
 ]);
 
 function errorCode(error: unknown): string {
-  return error instanceof CloudApiError ? error.code : "transport_error";
+  if (error instanceof CloudApiError) return error.code;
+  if (error instanceof SessionRestoreError) return error.outcome;
+  return "transport_error";
 }
 
 export type CloudOpenStage =
@@ -103,8 +112,13 @@ export type CloudOpenStage =
 
 function safeErrorType(error: unknown): string {
   if (error instanceof CloudApiError) return "CloudApiError";
+  if (error instanceof SessionRestoreError) return "SessionRestoreError";
   if (error instanceof TypeError) return "TypeError";
   return error instanceof Error ? "Error" : "unknown";
+}
+
+function sessionRestoreDiagnostic(error: SessionRestoreError): CloudDiagnosticType {
+  return `session_restore_${error.operation}_${error.outcome}` as CloudDiagnosticType;
 }
 
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
@@ -117,12 +131,17 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private pendingRetryInFlight: Promise<void> | null = null;
   private readonly heartbeatMs: number;
   private readonly log: (message: string) => void;
+  private readonly diagnosticEvents = new CloudDiagnostics();
   private shuttingDown = false;
   private draining = false;
 
   constructor(private readonly options: CloudBrowserOptions) {
     this.heartbeatMs = Math.max(0, options.heartbeatMs ?? 60_000);
     this.log = options.log ?? (() => {});
+  }
+
+  diagnostics(): readonly CloudDiagnosticEvent[] {
+    return this.diagnosticEvents.snapshot();
   }
 
   async listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }> {
@@ -184,10 +203,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   private async doOpen(profileId: string, launchArgs: string[]): Promise<CloudBrowserOpenResult> {
+    this.diagnosticEvents.record("open_started");
     let context: { queue: PendingSyncQueue; accountId: string; deviceId: string };
     try {
       context = this.requireContext(true);
     } catch (error) {
+      this.diagnosticEvents.record("open_failed");
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
     const { queue, accountId, deviceId } = context;
@@ -212,6 +233,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       stage = "cloud_registration";
       const opened = await this.options.cloud.openProfile(profileId, { deviceId });
       registrationId = opened.registrationId;
+      this.diagnosticEvents.record("cloud_registered");
 
       stage = "lifecycle_opening";
       queue.recordOpen({
@@ -247,6 +269,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         this.log(`${profileId}: stopped retained browser launch ownership; retrying once`);
         launched = await this.options.launcher.start(profileId, chromeArgs, startOptions);
       }
+      this.diagnosticEvents.record("browser_started");
       const launch = this.options.store.getLaunch(profileId);
       if (!launch) throw new Error("browser launch did not create durable lifecycle state");
 
@@ -259,6 +282,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
+      this.diagnosticEvents.record("session_restore_started");
       await this.options.launcher.verifyRunningIdentity(profileId);
       const verifiedLaunch = this.options.store.getLaunch(profileId);
       if (
@@ -274,18 +298,20 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (
         !restoredLaunch ||
         restoredLaunch.debugPort !== launch.debugPort ||
-        restoredLaunch.startedAt !== launch.startedAt
+        restoredLaunch.startedAt !== launch.startedAt ||
+        restoredLaunch.ws !== verifiedLaunch.ws
       ) {
         throw new Error("Cloud browser identity changed during session restore");
       }
+      this.diagnosticEvents.record("session_restore_completed");
 
       stage = "version_commit";
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
 
       stage = "lifecycle_running";
       if (!queue.updateOpen(profileId, accountId, "running", {
-        debugPort: launch.debugPort,
-        startedAt: launch.startedAt,
+        debugPort: restoredLaunch.debugPort,
+        startedAt: restoredLaunch.startedAt,
       })) {
         throw new Error("Cloud open lifecycle state disappeared after restore");
       }
@@ -296,7 +322,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       let navigationWarning: string | undefined;
       if (urls.length > 0) {
         try {
-          await this.options.launcher.navigate(launched.ws, urls);
+          await this.options.launcher.navigate(restoredLaunch.ws, urls);
         } catch (error) {
           this.log(
             `${profileId}: Cloud startup navigation failed (${errorCode(error)}, ${safeErrorType(error)}); continuing`,
@@ -304,6 +330,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           navigationWarning = "Profile opened, but startup navigation failed. Open the site manually.";
         }
       }
+      this.diagnosticEvents.record("open_running");
       this.startHeartbeat(profileId);
       const warnings = [
         opened.activeOpens.length > 0
@@ -313,17 +340,27 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       ].filter((warning): warning is string => !!warning);
       return {
         ok: true,
-        ws: launched.ws,
-        port: launched.port,
+        ws: restoredLaunch.ws,
+        port: restoredLaunch.debugPort,
         ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
       };
     } catch (error) {
       this.stopHeartbeat(profileId);
+      if (error instanceof SessionRestoreError) {
+        this.diagnosticEvents.record(sessionRestoreDiagnostic(error));
+      } else if (stage === "session_restore") {
+        this.diagnosticEvents.record("session_restore_unclassified_failed");
+      }
+      this.diagnosticEvents.record("open_failed");
       const code = errorCode(error);
-      this.log(`${profileId}: Cloud open failed at ${stage} (${code}, ${safeErrorType(error)})`);
+      const failureStage = stage === "session_restore" && error instanceof SessionRestoreError
+        ? `${stage}/${error.operation}`
+        : stage;
+      this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})`);
       const stopped = registrationId
         ? await this.options.launcher.stop(profileId).catch(() => false)
         : false;
+      if (!stopped && registrationId) this.diagnosticEvents.record("cleanup_retained");
       if (stopped && registrationId) {
         try {
           await this.options.cloud.abandon(registrationId);
@@ -335,13 +372,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
             abandonError.code === "profile_not_found"
           ) {
             queue.removeOpen(profileId, accountId);
+          } else {
+            this.diagnosticEvents.record("cleanup_retained");
           }
           // Other failures retain durable metadata for authenticated recovery.
         }
       }
       return {
         ok: false,
-        error: `Cloud profile open failed at ${stage} (${code})`,
+        error: `Cloud profile open failed at ${failureStage} (${code})`,
       };
     }
   }
@@ -359,16 +398,32 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   private async doClose(profileId: string): Promise<boolean> {
+    this.diagnosticEvents.record("close_started");
     const { queue, accountId } = this.requireContext(false);
     const open = queue.getOpen(profileId, accountId);
     const launch = this.options.store.getLaunch(profileId);
     if (!open) {
-      if (launch) throw new Error("Cloud open lifecycle state is missing; browser left open");
+      if (launch) {
+        this.diagnosticEvents.record("cleanup_retained");
+        throw new Error("Cloud open lifecycle state is missing; browser left open");
+      }
       return true;
     }
 
     await this.stopHeartbeat(profileId);
-    if (!launch) return this.finishStoppedOpen(open, queue);
+    if (!launch) {
+      const hadCapture = this.pendingCapturesForOpen(open, queue).length > 0;
+      const finished = await this.finishStoppedOpen(open, queue);
+      const retained = this.pendingCapturesForOpen(open, queue).length > 0;
+      this.diagnosticEvents.record(
+        !finished || retained
+          ? "cleanup_retained"
+          : hadCapture
+            ? "session_synced"
+            : "cloud_registration_released",
+      );
+      return finished;
+    }
 
     let pendingId: string;
     try {
@@ -393,28 +448,39 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         payload: encodePortableProfile(profile, sessionBundle),
         readyToSubmit: false,
       });
+      this.diagnosticEvents.record("session_captured");
     } catch (error) {
+      this.diagnosticEvents.record("cleanup_retained");
       this.startHeartbeat(profileId);
       throw new Error(`Cloud session capture failed (${errorCode(error)}); browser left open`);
     }
 
     const stopped = await this.options.launcher.stop(profileId).catch(() => false);
     if (!stopped) {
+      this.diagnosticEvents.record("cleanup_retained");
       this.startHeartbeat(profileId);
       return false;
     }
+    this.diagnosticEvents.record("browser_stopped");
 
     queue.markReady(pendingId, accountId);
     queue.removeOpen(profileId, accountId);
     await retryPendingSync(queue, this.options.cloud, accountId);
+    this.diagnosticEvents.record(
+      queue.get(pendingId, accountId) ? "cleanup_retained" : "session_synced",
+    );
     return true;
   }
 
-  private async finishStoppedOpen(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
-    const captures = queue.list(open.accountId)
+  private pendingCapturesForOpen(open: PendingOpenSession, queue: PendingSyncQueue): PendingClose[] {
+    return queue.list(open.accountId)
       .filter((item) => item.profileId === open.profileId)
       .map((item) => queue.get(item.id, open.accountId))
       .filter((item): item is PendingClose => !!item && item.registrationId === open.registrationId);
+  }
+
+  private async finishStoppedOpen(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
+    const captures = this.pendingCapturesForOpen(open, queue);
     if (captures.length > 0) {
       for (const capture of captures) {
         if (!capture.readyToSubmit && capture.status !== "conflict") {
@@ -471,6 +537,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       await this.options.cloud.heartbeat(open.registrationId);
     } catch (error) {
       if (error instanceof CloudApiError && TERMINAL_HEARTBEAT_ERRORS.has(error.code)) {
+        this.diagnosticEvents.record("access_ended");
         this.stopHeartbeat(profileId);
         const secured = await this.captureAndStopOpen(open, context.queue, true);
         this.log(secured
@@ -478,6 +545,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           : `${profileId}: Cloud access ended (${error.code}); capture failed and browser was retained`);
         return;
       }
+      this.diagnosticEvents.record("heartbeat_failed");
       this.log(`${profileId}: Cloud heartbeat failed (${errorCode(error)})`);
     }
   }

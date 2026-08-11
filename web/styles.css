@@ -439,6 +439,16 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .settings-row > span { color: var(--muted); }
 .settings-row > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.diagnostics-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.diagnostics-head button { padding: 0; color: var(--accent); background: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; }
+.diagnostics-head button:hover:not(:disabled) { text-decoration: underline; }
+.diagnostics-head button:disabled { opacity: .55; cursor: default; }
+.diagnostics-list { max-height: 190px; overflow-y: auto; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; }
+.diagnostics-row { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 9px; padding: 7px 9px; color: #344054; background: #fff; font-size: 12px; }
+.diagnostics-row + .diagnostics-row { border-top: 1px solid var(--line); }
+.diagnostics-row.failed { color: #9b1c1c; background: #fff7f7; }
+.diagnostics-row time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.diagnostics-error { color: #9b1c1c; font-size: 12px; }
 .settings-mode { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; padding-top: 2px; }
 .settings-mode button, .mode-secondary {
   padding: 7px 11px; color: #344054; background: #fff; border: 1px solid var(--line);
