@@ -23,7 +23,7 @@ fn boxed(error: impl Into<String>) -> Box<dyn Error> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(PendingFocus::default())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -58,6 +58,7 @@ pub fn run() {
 
             let origin = format!("http://127.0.0.1:{port}");
             app.manage(CredentialOrigin(origin.clone()));
+            app.manage(sidecar.clone());
             if let Err(error) = app.add_capability(
                 CapabilityBuilder::new(format!("loopback-{port}"))
                     .local(false)
@@ -99,6 +100,12 @@ pub fn run() {
             tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("AliasMode desktop failed");
+
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let _ = app.state::<sidecar::SidecarSupervisor>().kill_owned();
+        }
+    });
 }
