@@ -8,6 +8,10 @@ export const DEFAULT_EGRESS_ENDPOINTS = [
   "https://api.ipify.org?format=json",
 ] as const;
 
+// Playwright force-terminates a stalled CDP transport after five seconds.
+// The mandatory proxy probe must wait beyond that boundary before handoff.
+const PROXY_PROBE_CLEANUP_TIMEOUT_MS = 6_000;
+
 export interface EgressInfo {
   ip: string;
   country?: string;
@@ -122,7 +126,12 @@ export async function verifyBrowserProxy(
     const egress = await withCdpPage(
       ws,
       (page) => fetchPageEgress(page, { ...opts, endpoints }),
-      { timeoutMs: opts.timeoutMs ?? 15_000, temporaryPage: true },
+      {
+        timeoutMs: opts.timeoutMs ?? 15_000,
+        cleanupTimeoutMs: PROXY_PROBE_CLEANUP_TIMEOUT_MS,
+        temporaryPage: true,
+        requireConfirmedCleanup: true,
+      },
     );
     if (!egress) {
       throw new Error("no egress endpoint was reachable");

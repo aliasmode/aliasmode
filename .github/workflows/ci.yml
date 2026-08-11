@@ -90,6 +90,26 @@ jobs:
           } finally {
             Pop-Location
           }
+      - name: Smoke-test authenticated Cloud proxies
+        shell: pwsh
+        env:
+          ALIASMODE_LIVE_PROXY_HOST: ${{ secrets.ALIASMODE_LIVE_PROXY_HOST }}
+          ALIASMODE_LIVE_PROXY_PORT: ${{ secrets.ALIASMODE_LIVE_PROXY_PORT }}
+          ALIASMODE_LIVE_PROXY_USER: ${{ secrets.ALIASMODE_LIVE_PROXY_USER }}
+          ALIASMODE_LIVE_PROXY_PASS: ${{ secrets.ALIASMODE_LIVE_PROXY_PASS }}
+          ALIASMODE_LIVE_PROXY_IP: ${{ secrets.ALIASMODE_LIVE_PROXY_IP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
+            Write-Host "Authenticated Cloud proxy smoke skipped: no temporary test proxy configured"
+            exit 0
+          }
+          $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
+          $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
+          $env:ALIASMODE_LIVE_BROWSER = $browserPath.Path
+          $env:ALIASMODE_LIVE_BROWSER_SHA256 = $metadata.sha256
+          bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
+          if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
       - run: bunx tauri build --bundles nsis
       - name: Stage unsigned installer and checksum
         shell: pwsh

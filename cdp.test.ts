@@ -65,3 +65,38 @@ test("CDP probe preserves its original error when detach stalls", async () => {
   await expect(within(probe)).rejects.toBe(original);
   expect(fake.closeCalls()).toEqual({ page: 1, browser: 1 });
 });
+
+test("mandatory CDP probe rejects an unconfirmed detach", async () => {
+  const fake = stalledBrowser();
+  const probe = withCdpPage(
+    "ws://test",
+    async () => "verified",
+    {
+      temporaryPage: true,
+      cleanupTimeoutMs: 5,
+      requireConfirmedCleanup: true,
+      connect: async () => fake.browser,
+    },
+  );
+
+  await expect(within(probe)).rejects.toThrow("CDP probe cleanup was not confirmed");
+  expect(fake.closeCalls()).toEqual({ page: 1, browser: 1 });
+});
+
+test("mandatory CDP probe preserves its operation error over cleanup failure", async () => {
+  const fake = stalledBrowser();
+  const original = new Error("proxy verification failed");
+  const probe = withCdpPage(
+    "ws://test",
+    async () => { throw original; },
+    {
+      temporaryPage: true,
+      cleanupTimeoutMs: 5,
+      requireConfirmedCleanup: true,
+      connect: async () => fake.browser,
+    },
+  );
+
+  await expect(within(probe)).rejects.toBe(original);
+  expect(fake.closeCalls()).toEqual({ page: 1, browser: 1 });
+});

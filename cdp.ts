@@ -9,6 +9,8 @@ export interface CdpPageOptions {
   cleanupTimeoutMs?: number;
   /** Create and later close an isolated temporary page instead of reusing tab 0. */
   temporaryPage?: boolean;
+  /** Fail a successful probe unless temporary-page cleanup and CDP detach both finish. */
+  requireConfirmedCleanup?: boolean;
   /** Injectable connector for deterministic cleanup tests. */
   connect?: (ws: string, options: { timeout: number }) => Promise<any>;
 }
@@ -31,28 +33,40 @@ export async function withCdpPage<T>(
     browser = await chromium.connectOverCDP(ws, { timeout });
   }
   let temporaryPage: any | undefined;
+  let result!: T;
+  let operationFailed = false;
+  let operationError: unknown;
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     const page = opts.temporaryPage
       ? (temporaryPage = await context.newPage())
       : context.pages()[0] ?? (temporaryPage = await context.newPage());
-    return await run(page);
-  } finally {
-    const cleanupTimeoutMs = opts.cleanupTimeoutMs ?? 5_000;
-    await closeWithin(temporaryPage ? () => temporaryPage.close() : undefined, cleanupTimeoutMs);
-    // connectOverCDP clients detach here; the managed browser remains alive.
-    await closeWithin(() => browser.close(), cleanupTimeoutMs);
+    result = await run(page);
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   }
+
+  const cleanupTimeoutMs = opts.cleanupTimeoutMs ?? 5_000;
+  const pageClosed = await closeWithin(temporaryPage ? () => temporaryPage.close() : undefined, cleanupTimeoutMs);
+  // connectOverCDP clients detach here; the managed browser remains alive.
+  const browserClosed = await closeWithin(() => browser.close(), cleanupTimeoutMs);
+
+  if (operationFailed) throw operationError;
+  if (opts.requireConfirmedCleanup && (!pageClosed || !browserClosed)) {
+    throw new Error("CDP probe cleanup was not confirmed");
+  }
+  return result;
 }
 
-async function closeWithin(close: (() => unknown) | undefined, timeoutMs: number): Promise<void> {
-  if (!close) return;
+async function closeWithin(close: (() => unknown) | undefined, timeoutMs: number): Promise<boolean> {
+  if (!close) return true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      Promise.resolve().then(close).catch(() => {}),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, Math.max(1, timeoutMs));
+    return await Promise.race([
+      Promise.resolve().then(close).then(() => true, () => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), Math.max(1, timeoutMs));
       }),
     ]);
   } finally {
