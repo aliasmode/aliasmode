@@ -25,6 +25,14 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain(">Stay Local</button>");
 });
 
+test("Account settings exposes fixed Cloud diagnostics without raw server messages", () => {
+  expect(app).toContain("fetchCloudEvents");
+  expect(app).toContain("Recent diagnostics");
+  expect(app).toContain("CLOUD_DIAGNOSTIC_LABELS[event.type]");
+  expect(app).toContain("They exclude profile data and credentials");
+  expect(styles).toContain(".diagnostics-list");
+});
+
 test("dashboard lists the supported profile platforms", () => {
   for (const platform of [
     "x.com",

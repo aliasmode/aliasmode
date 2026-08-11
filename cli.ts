@@ -35,7 +35,7 @@ import {
   writeSession,
 } from "./session.ts";
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
-import { ensureStateDirectories, profileDataPaths, resolveStateRoot, statePaths } from "./paths.ts";
+import { ensureStateDirectories, profileDataPaths, resolveStateRoot, statePaths, type StatePaths } from "./paths.ts";
 import { migrateLegacyState } from "./migration.ts";
 import {
   AppConfigStore,
@@ -46,7 +46,9 @@ import {
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
-import { PendingSyncRuntime } from "./pending-sync.ts";
+import { PendingSyncQueue, PendingSyncRuntime } from "./pending-sync.ts";
+import { encodePortableProfile } from "./portable-profile.ts";
+import type { Profile } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
 import { statSync, mkdirSync, writeFileSync } from "node:fs";
@@ -512,6 +514,113 @@ export async function runCompiledSidecarSmoke(
   await deps.assertAlive(endpoint);
 }
 
+export interface CloudLauncherSmokeRuntime {
+  coordinator: Pick<CloudBrowserCoordinator, "open" | "close" | "releaseAll">;
+  launcher: Pick<Launcher, "active" | "stop">;
+  store: Pick<ProfileStore, "getLaunch">;
+}
+
+export async function exerciseCloudLauncherSmoke(
+  runtime: CloudLauncherSmokeRuntime,
+  profileId = "aliasmode-cloud-smoke",
+): Promise<void> {
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const opened = await runtime.coordinator.open(profileId);
+    if (!opened.ok) throw new Error(opened.error ?? "Cloud launcher smoke could not open the profile");
+    if (!await runtime.launcher.active(profileId)) {
+      throw new Error("Cloud launcher smoke browser was not alive after restore");
+    }
+    if (!runtime.store.getLaunch(profileId)) {
+      throw new Error("Cloud launcher smoke lost durable launch ownership");
+    }
+    if (!await runtime.coordinator.close(profileId)) {
+      throw new Error("Cloud launcher smoke could not close the profile safely");
+    }
+    if (await runtime.launcher.active(profileId)) {
+      throw new Error("Cloud launcher smoke browser survived confirmed close");
+    }
+    if (runtime.store.getLaunch(profileId)) {
+      throw new Error("Cloud launcher smoke retained a launch after confirmed close");
+    }
+  }
+}
+
+async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
+  const profileId = "aliasmode-cloud-smoke";
+  const store = new ProfileStore(paths.cloudDatabase);
+  const queue = new PendingSyncQueue(paths.pendingSync, new Uint8Array(32).fill(1));
+  const launcher = makeLauncher(store, rest, true, paths.cloudProfiles);
+  const profile: Profile = {
+    id: profileId,
+    accId: "",
+    name: "Cloud launcher smoke",
+    group: "",
+    platform: "",
+    username: "",
+    password: "",
+    email: "",
+    emailPassword: "",
+    twofa: "",
+    proxy: null,
+    extensions: [],
+    tags: [],
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
+    timezone: "UTC",
+    screenWidth: 1280,
+    screenHeight: 720,
+    fingerprintSeed: 1,
+    cookies: [],
+    seeded: false,
+  };
+  let payload = encodePortableProfile(profile, JSON.stringify({ cookies: [] }));
+  let version = 1;
+  let registration = 0;
+  const cloud = {
+    async listProfiles() { throw new Error("Cloud launcher smoke must not list remote profiles"); },
+    async createProfile() { throw new Error("Cloud launcher smoke must not create remote profiles"); },
+    async openProfile() {
+      registration++;
+      return {
+        ok: true as const,
+        registrationId: `smoke-registration-${registration}`,
+        baseVersion: version,
+        payload,
+        activeOpens: [],
+      };
+    },
+    async heartbeat() {
+      return { ok: true as const, revoked: false as const, activeOpens: [] };
+    },
+    async closeOpen(_registrationId: string, request: { expectedVersion: number; payload: typeof payload }) {
+      if (request.expectedVersion !== version) throw new Error("Cloud launcher smoke received a stale close");
+      payload = request.payload;
+      version++;
+      return { ok: true as const, status: "accepted" as const, version };
+    },
+    async abandon() { return { ok: true as const, status: "abandoned" as const }; },
+  };
+  const coordinator = new CloudBrowserCoordinator({
+    cloud: cloud as any,
+    launcher,
+    store,
+    queue: () => queue,
+    accountId: () => "smoke-account",
+    deviceId: () => "smoke-device",
+    readSession: readSessionInSubprocess,
+    writeSession,
+    heartbeatMs: 0,
+  });
+
+  try {
+    await exerciseCloudLauncherSmoke({ coordinator, launcher, store }, profileId);
+  } finally {
+    await coordinator.releaseAll(true).catch(() => false);
+    await launcher.stop(profileId).catch(() => false);
+    queue.close();
+    store.close();
+  }
+}
+
 async function main() {
   // Playwright-over-CDP on Bun emits occasional stray websocket rejections
   // ("ws.WebSocket 'upgrade' event is not implemented in bun"). Left unhandled,
@@ -552,6 +661,11 @@ async function main() {
     }
   }
   ensureStateDirectories(paths);
+  if (cmd === "__cloud-launcher-smoke") {
+    await runCloudLauncherSmoke(paths, rest);
+    console.log("compiled sidecar opened, restored, captured, and closed a fresh and cached Cloud profile");
+    return;
+  }
   const appConfig = new AppConfigStore(paths.config);
   const savedMode = appConfig.read();
   const defaultCloudUrl = selectedCloudUrl(savedMode);

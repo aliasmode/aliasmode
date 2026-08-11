@@ -28,6 +28,8 @@ const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostnam
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
 const SESSION_WRITE_TIMEOUT_MS = 90_000;
+const SESSION_CONNECT_TIMEOUT_MS = 30_000;
+const SESSION_CONTEXT_RETRY_MS = 100;
 const SESSION_DISCONNECT_TIMEOUT_MS = 5_000;
 const SESSION_SUBPROCESS_TIMEOUT_MS = 85_000;
 export const READ_SESSION_WORKER_ARG = "--read-session-worker";
@@ -86,6 +88,28 @@ export interface NormalizedSessionBundle {
   telegramClient?: TelegramWebClient;
   /** False for a legacy cookie-only bundle — distinct from a modern bundle with an empty origins list. */
   hasOrigins: boolean;
+}
+
+export type SessionRestoreOperation =
+  | "invalid_bundle"
+  | "connect"
+  | "context"
+  | "origin_storage"
+  | "cookie_clear"
+  | "cookie_add"
+  | "disconnect";
+
+export type SessionRestoreOutcome = "failed" | "timeout";
+
+export class SessionRestoreError extends Error {
+  override readonly name = "SessionRestoreError";
+
+  constructor(
+    readonly operation: SessionRestoreOperation,
+    readonly outcome: SessionRestoreOutcome,
+  ) {
+    super(`session_restore/${operation} (${outcome})`);
+  }
 }
 
 export interface TelegramAuthIndexedDBPresenceRule {
@@ -540,13 +564,18 @@ export async function collectSessionFromContext(ctx: any): Promise<SessionBundle
   };
 }
 
+class DeadlineExceededError extends Error {}
+
 async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), Math.max(1, timeoutMs));
+        timer = setTimeout(
+          () => reject(new DeadlineExceededError(`${label} exceeded ${timeoutMs}ms`)),
+          Math.max(1, timeoutMs),
+        );
       }),
     ]);
   } finally {
@@ -849,38 +878,59 @@ export async function writeSessionToBrowser(
   const writeTimeoutMs = options.writeTimeoutMs ?? SESSION_WRITE_TIMEOUT_MS;
   const disconnectTimeoutMs = options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS;
   let cancelled = false;
+  let activeOperation: SessionRestoreOperation = "context";
   const ensureCurrent = () => {
-    if (cancelled) throw new Error("session restore was cancelled");
+    if (cancelled) throw new SessionRestoreError(activeOperation, "failed");
+  };
+  const runOperation = async <T>(operation: SessionRestoreOperation, task: () => Promise<T> | T): Promise<T> => {
+    activeOperation = operation;
+    try {
+      return await task();
+    } catch (error) {
+      if (error instanceof SessionRestoreError) throw error;
+      throw new SessionRestoreError(operation, "failed");
+    }
   };
   const write = (async () => {
-    const ctx = browser.contexts()[0] ?? (await browser.newContext());
+    const ctx = await runOperation("context", () => {
+      const context = browser.contexts()[0];
+      if (!context) throw new Error("persistent context unavailable");
+      return context;
+    });
     ensureCurrent();
     // Seed durable origin auth first. If it fails, cookies and navigation are left untouched and the
     // remote coordinator keeps this open from being presented as a successful session handoff.
-    if (parsed.hasOrigins) await restoreOriginStorage(ctx, parsed.origins);
+    if (parsed.hasOrigins) {
+      await runOperation("origin_storage", () => restoreOriginStorage(ctx, parsed.origins));
+    }
     ensureCurrent();
     // Always clear first so stale local cookies can't shadow the hub's
     // authoritative state — including when that state is intentionally empty.
-    await ctx.clearCookies();
+    await runOperation("cookie_clear", () => ctx.clearCookies());
     ensureCurrent();
     // Strip the Android device-identity cookies (see LINKEDIN_DEVICE_COOKIES) but keep everything else,
     // crucially li_at and JSESSIONID (CSRF). No-op for non-LinkedIn platforms.
     const inject = parsed.cookies.filter((c) => !LINKEDIN_DEVICE_COOKIES.has(c.name));
-    if (inject.length > 0) await ctx.addCookies(inject as any);
+    if (inject.length > 0) {
+      await runOperation("cookie_add", () => ctx.addCookies(inject as any));
+    }
   })();
 
   let writeFailed = false;
-  let writeError: unknown;
+  let writeError: SessionRestoreError | undefined;
   try {
     await withDeadline(write, writeTimeoutMs, "session restore");
   } catch (error) {
     writeFailed = true;
-    writeError = error;
+    writeError = error instanceof DeadlineExceededError
+      ? new SessionRestoreError(activeOperation, "timeout")
+      : error instanceof SessionRestoreError
+        ? error
+        : new SessionRestoreError(activeOperation, "failed");
     cancelled = true;
   }
 
-  let disconnectFailed = false;
-  let disconnectError: unknown;
+  let disconnectError: SessionRestoreError | undefined;
   try {
     const disconnect = Promise.resolve().then(() => browser.close());
     const cleanup = writeFailed
@@ -890,24 +940,99 @@ export async function writeSessionToBrowser(
       : disconnect;
     await withDeadline(cleanup, disconnectTimeoutMs, "session disconnect");
   } catch (error) {
-    disconnectFailed = true;
-    disconnectError = error;
+    disconnectError = new SessionRestoreError(
+      "disconnect",
+      error instanceof DeadlineExceededError ? "timeout" : "failed",
+    );
   }
 
-  if (writeFailed) throw writeError;
-  if (disconnectFailed) throw disconnectError;
+  if (writeError) throw writeError;
+  if (disconnectError) throw disconnectError;
 }
 
-export async function writeSession(ws: string, bundle: string): Promise<void> {
+export interface WriteSessionOptions {
+  connectTimeoutMs?: number;
+  contextRetryMs?: number;
+  writeTimeoutMs?: number;
+  disconnectTimeoutMs?: number;
+  connect?: (endpoint: string, timeoutMs: number) => Promise<any>;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+async function connectPersistentSessionBrowser(
+  endpoint: string,
+  options: WriteSessionOptions,
+): Promise<any> {
+  const connectTimeoutMs = Math.max(1, options.connectTimeoutMs ?? SESSION_CONNECT_TIMEOUT_MS);
+  const contextRetryMs = Math.max(1, options.contextRetryMs ?? SESSION_CONTEXT_RETRY_MS);
+  const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const connect = options.connect ?? (async (ws: string, timeoutMs: number) => {
+    const { chromium } = await import("playwright-core");
+    return chromium.connectOverCDP(ws, { timeout: timeoutMs });
+  });
+  const deadline = Date.now() + connectTimeoutMs;
+  let waitingFor: SessionRestoreOperation = "connect";
+
+  while (true) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new SessionRestoreError(waitingFor, "timeout");
+
+    let browser: any;
+    try {
+      browser = await connect(endpoint, remainingMs);
+    } catch {
+      waitingFor = "connect";
+      const retryInMs = Math.min(contextRetryMs, deadline - Date.now());
+      if (retryInMs <= 0) throw new SessionRestoreError("connect", "timeout");
+      await sleep(retryInMs);
+      continue;
+    }
+
+    let persistentContext: any;
+    try {
+      persistentContext = browser.contexts()[0];
+    } catch {
+      persistentContext = undefined;
+    }
+    if (persistentContext) return browser;
+
+    waitingFor = "context";
+    try {
+      const disconnectMs = Math.min(
+        options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS,
+        Math.max(1, deadline - Date.now()),
+      );
+      await withDeadline(
+        Promise.resolve().then(() => browser.close()),
+        disconnectMs,
+        "session disconnect",
+      );
+    } catch (error) {
+      throw new SessionRestoreError(
+        "disconnect",
+        error instanceof DeadlineExceededError ? "timeout" : "failed",
+      );
+    }
+
+    const retryInMs = Math.min(contextRetryMs, deadline - Date.now());
+    if (retryInMs <= 0) throw new SessionRestoreError("context", "timeout");
+    await sleep(retryInMs);
+  }
+}
+
+export async function writeSession(
+  ws: string,
+  bundle: string,
+  options: WriteSessionOptions = {},
+): Promise<void> {
   let parsed: NormalizedSessionBundle;
   try {
     parsed = normalizeBundle(JSON.parse(bundle));
-  } catch (error) {
-    throw new Error(`invalid session bundle: ${error instanceof Error ? error.message : String(error)}`);
+  } catch {
+    throw new SessionRestoreError("invalid_bundle", "failed");
   }
-  const { chromium } = await import("playwright-core");
-  const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
-  await writeSessionToBrowser(browser, parsed);
+  const browser = await connectPersistentSessionBrowser(ws, options);
+  await writeSessionToBrowser(browser, parsed, options);
 }
 
 if (import.meta.main && Bun.argv[2] === READ_SESSION_WORKER_ARG) {

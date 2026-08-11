@@ -4,6 +4,7 @@ import {
   cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
+  fetchCloudEvents,
   fetchProfiles,
   openProfile,
   restoreCloudSession,
@@ -61,6 +62,31 @@ test("app mode client reads first-launch state", async () => {
     localAnalytics: false,
   })) as unknown as typeof fetch;
   expect(await fetchAppMode()).toEqual({ version: 1, mode: "unconfigured", localAnalytics: false });
+});
+
+test("Cloud diagnostics client accepts only the fixed event schema", async () => {
+  let requested: RequestInfo | URL | undefined;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requested = input;
+    return Response.json({
+      events: [{ timestamp: 123, type: "session_restore_context_timeout" }],
+    });
+  }) as unknown as typeof fetch;
+
+  expect(await fetchCloudEvents()).toEqual([
+    { timestamp: 123, type: "session_restore_context_timeout" },
+  ]);
+  expect(requested).toBe("/ui/api/cloud-events");
+
+  globalThis.fetch = (async () => Response.json({
+    events: [{ timestamp: 123, type: "open_failed", message: "raw server secret" }],
+  })) as unknown as typeof fetch;
+  await expect(fetchCloudEvents()).rejects.toThrow("invalid data");
+
+  globalThis.fetch = (async () => Response.json({
+    events: [{ timestamp: 123, type: "unknown" }],
+  })) as unknown as typeof fetch;
+  await expect(fetchCloudEvents()).rejects.toThrow("invalid data");
 });
 
 test("Cloud auth client reads status and sends credentials as JSON", async () => {

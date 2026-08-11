@@ -1283,6 +1283,41 @@ test("Cloud auth API restores rotated credentials with the stored queue key", as
   s.close();
 });
 
+test("Cloud diagnostics route returns only sanitized current-process events", async () => {
+  const s = store();
+  const cloudBrowser = {
+    diagnostics() {
+      return [{
+        timestamp: 123,
+        type: "session_restore_context_timeout",
+        profileId: "profile-secret",
+        error: "raw browser secret",
+      }];
+    },
+  } as any;
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-events"),
+    {} as any,
+    s,
+    null,
+    { cloudBrowser },
+  );
+
+  expect(response!.headers.get("cache-control")).toBe("no-store");
+  expect(await response!.json()).toEqual({
+    events: [{ timestamp: 123, type: "session_restore_context_timeout" }],
+  });
+
+  const empty = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-events"),
+    {} as any,
+    s,
+  );
+  expect(await empty!.json()).toEqual({ events: [] });
+  s.close();
+});
+
 test("Cloud profile routes use the Cloud browser coordinator without local fallback", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-browser-"));
