@@ -327,7 +327,7 @@ test("a restart with a different launch mode stops the stale persona instead of 
     browserClose: async () => false,
   });
 
-  await expect(launcherB.start("k1d0cd11")).rejects.toThrow("persona or launch mode differs");
+  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });
@@ -345,7 +345,7 @@ test("a restart retires a proxied survivor launched with the old WebRTC persona 
   });
 
   const launcherB = newLauncher(store, f, []);
-  await expect(launcherB.start("k1d0cd11")).rejects.toThrow("persona or launch mode differs");
+  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });
@@ -783,7 +783,7 @@ test("start reports a live-but-CDP-unresponsive browser as retryable failure wit
 
   // Memory pressure wedges the debug endpoint without ending Chromium.
   f.aliveByPort.set(first.port, false);
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("stop and retry");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
 
   expect(args.length).toBe(1); // never opened a second persistent user-data dir
   expect(store.getLaunch("k1d0cd11")?.debugPort).toBe(first.port);
@@ -1229,9 +1229,9 @@ test("host policy still blocks mobile and unrecognized personas before spawn", a
   // coherently emulate a mobile persona, and an imported UA must name a
   // recognized desktop platform.
   store.upsertProfile({ ...base, proxy: null, ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/146.0 Mobile Safari/537.36" });
-  await expect(make("win32", "x64").start("k1d0cd11")).rejects.toThrow("unsupported mobile persona");
+  await expect(make("win32", "x64").start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   store.upsertProfile({ ...base, proxy: null, ua: "not-a-real-user-agent" });
-  await expect(make("darwin", "arm64").start("k1d0cd11")).rejects.toThrow("no recognized desktop platform");
+  await expect(make("darwin", "arm64").start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawned).toEqual([]);
   store.close();
 });
@@ -1250,7 +1250,7 @@ test("a custom spawner does not implicitly disable host policy", async () => {
     hostArch: "x64",
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("unsupported mobile persona");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawns).toBe(0);
   store.close();
 });
@@ -1339,7 +1339,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     hostArch: "x64",
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
-  await expect(noPin.start("k1d0cd11")).rejects.toThrow("kernel hash is not configured");
+  await expect(noPin.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
 
   const mismatch = new ProductionLauncher({
     store,
@@ -1349,7 +1349,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     hostArch: "x64",
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
-  await expect(mismatch.start("k1d0cd11")).rejects.toThrow("kernel hash mismatch");
+  await expect(mismatch.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawns).toBe(1);
   store.close();
   rmSync(root, { recursive: true, force: true });
@@ -1369,7 +1369,7 @@ test("authenticated HTTPS is rejected before spawn", async () => {
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("authenticated HTTPS proxies are not supported");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawns).toBe(0);
   store.close();
 });
@@ -1388,7 +1388,7 @@ test("a quarantined legacy proxy is visible but cannot launch direct", async () 
   });
 
   expect(store.getProfile("k1d0cd11")!.proxyError).toContain("unsupported proxy type");
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("quarantined legacy proxy");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawned).toBe(false);
   store.close();
 });
@@ -1910,7 +1910,7 @@ test("failed start retains launch ownership when its exact process scan is incon
     new BrowserLaunchError("cdp_readiness"),
   );
   expect(store.getLaunch("k1d0cd11")).not.toBeNull();
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("ownership scan is inconclusive");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawns).toBe(1);
   store.close();
 });
@@ -2753,6 +2753,82 @@ test("start() repairs a corrupt Preferences but leaves a valid one (and the sess
   store.close();
 });
 
+test("start() repairs an array-root Preferences before persisting proxied WebRTC policy", async () => {
+  const store = seeded();
+  const f = fleet();
+  const dataRoot = join(tmpdir(), `cloak-array-prefs-${process.pid}`);
+  const defaultDir = join(dataRoot, "k1d0cd11", "Default");
+  const preferences = join(defaultDir, "Preferences");
+  mkdirSync(defaultDir, { recursive: true });
+  writeFileSync(preferences, "[]");
+
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot,
+    portProbe: () => true,
+    spawn: f.spawn,
+    fetch: f.fetchFn,
+    ensureCookies: async () => ({ injected: false }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    killPid: async () => {},
+    browserClose: async () => false,
+    cdpReadyTimeoutMs: 1000,
+  });
+
+  await launcher.start("k1d0cd11");
+
+  const repaired = JSON.parse(readFileSync(preferences, "utf8"));
+  expect(Array.isArray(repaired)).toBe(false);
+  expect(repaired.webrtc.ip_handling_policy).toBe("disable_non_proxied_udp");
+
+  rmSync(dataRoot, { recursive: true, force: true });
+  store.close();
+});
+
+test("start() maps an unknown preparation failure to a fixed safe category", async () => {
+  const store = seeded();
+  const f = fleet();
+  const logs: string[] = [];
+  const rawFailure = "sentinel raw operating-system failure";
+  const dataRoot = join(tmpdir(), `sentinel-private-profile-path-${process.pid}`);
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot,
+    portProbe: () => true,
+    spawn: f.spawn,
+    fetch: f.fetchFn,
+    findProfileDirHolderPids: async () => {
+      throw new Error(rawFailure);
+    },
+    ensureCookies: async () => ({ injected: false }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    killPid: async () => {},
+    browserClose: async () => false,
+    cdpReadyTimeoutMs: 1000,
+    log: (message) => logs.push(message),
+  });
+
+  let failure: unknown;
+  try {
+    await launcher.start("k1d0cd11");
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toEqual(new BrowserLaunchError("preflight"));
+  const publicOutput = `${failure}\n${logs.join("\n")}`;
+  for (const secret of [rawFailure, dataRoot, "k1d0cd11"]) {
+    expect(publicOutput).not.toContain(secret);
+  }
+
+  rmSync(dataRoot, { recursive: true, force: true });
+  store.close();
+});
+
 test("start() clears an unclean-exit's stale Singleton lock and resets the Crashed exit marker", async () => {
   const store = seeded(); // id=k1d0cd11
   const f = fleet();
@@ -3173,7 +3249,7 @@ test("a fresh launch refuses to spawn while a leaked profile-dir holder survives
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("profile directory is still held");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
@@ -3203,7 +3279,7 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toThrow("profile directory holder scan was inconclusive");
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
