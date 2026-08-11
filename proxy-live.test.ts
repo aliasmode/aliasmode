@@ -23,6 +23,14 @@ const configured = Boolean(binary && binarySha256 && proxyHost && proxyPort && p
 const liveTest = configured ? test : test.skip;
 const cloudLiveTest = configured ? test : test.skip;
 
+function removeTestRoot(root: string): void {
+  try {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (error) {
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+  }
+}
+
 async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
   ip: string;
   launcher: Launcher;
@@ -57,7 +65,7 @@ async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
   } catch (error) {
     await launcher.stop(profile.id).catch(() => {});
     store.close();
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTestRoot(root);
     throw error;
   }
 }
@@ -97,7 +105,7 @@ async function expectWrongCredentialsToFail(type: "http" | "socks5"): Promise<vo
   } finally {
     await launcher.stop(profile.id).catch(() => {});
     store.close();
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTestRoot(root);
   }
 }
 
@@ -175,7 +183,7 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     await launcher.stop(profile.id).catch(() => false);
     queue.close();
     store.close();
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    removeTestRoot(root);
   }
 }
 
