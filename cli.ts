@@ -21,7 +21,7 @@
 
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
 import { ProfileStore } from "./store.ts";
-import { Launcher } from "./launcher.ts";
+import { Launcher, type ProxyVerifier } from "./launcher.ts";
 import { serveDashboard } from "./web.ts";
 import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
@@ -57,6 +57,8 @@ import { hostname } from "node:os";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
+import { verifyBrowserProxy } from "./egress.ts";
+import { canonicalIp } from "./ip.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
 import {
   DESKTOP_PROTOCOL,
@@ -319,7 +321,13 @@ function attachDesktopControl(
   process.stdout.write(`${JSON.stringify(desktopReadyRecord(health.instance, port))}\n`);
 }
 
-function makeLauncher(store: ProfileStore, rest: string[], remoteMode = false, defaultDataRoot = "profiles"): Launcher {
+function makeLauncher(
+  store: ProfileStore,
+  rest: string[],
+  remoteMode = false,
+  defaultDataRoot = "profiles",
+  verifyProxy?: ProxyVerifier,
+): Launcher {
   return new Launcher({
     store,
     dataRoot: defaultDataRoot,
@@ -338,6 +346,7 @@ function makeLauncher(store: ProfileStore, rest: string[], remoteMode = false, d
       ...(has(rest, "no-sandbox") ? ["--no-sandbox"] : []),
     ],
     ensureSearchProvider: ensureDuckDuckGoDefault,
+    ...(verifyProxy ? { verifyProxy } : {}),
     // In remote mode the coordinator injects the roamed session over CDP, so the launcher's own
     // bootstrap cookie injection is turned off — and because the login is re-injected from the hub,
     // it's safe to reset a crash-corrupted profile's volatile storage on launch (auto-heals the
@@ -545,11 +554,52 @@ export async function exerciseCloudLauncherSmoke(
   }
 }
 
+type CloudLauncherSmokeProxy = {
+  profileProxy: NonNullable<Profile["proxy"]>;
+  verifyProxy: ProxyVerifier;
+};
+
+function cloudLauncherSmokeProxy(
+  rest: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): CloudLauncherSmokeProxy | null {
+  const type = flag(rest, "proxy-type");
+  if (!type) return null;
+  if (type !== "http" && type !== "socks5") {
+    throw new Error("Cloud launcher smoke proxy type must be http or socks5");
+  }
+  const host = env.ALIASMODE_LIVE_PROXY_HOST?.trim() ?? "";
+  const port = env.ALIASMODE_LIVE_PROXY_PORT?.trim() ?? "";
+  const user = env.ALIASMODE_LIVE_PROXY_USER ?? "";
+  const pass = env.ALIASMODE_LIVE_PROXY_PASS ?? "";
+  const expectedIp = canonicalIp(env.ALIASMODE_LIVE_PROXY_IP?.trim() ?? "");
+  if (!host || !port || !user || !pass || !expectedIp) {
+    throw new Error("Cloud launcher smoke proxy environment is incomplete");
+  }
+  return {
+    profileProxy: { type, host, port, user, pass },
+    verifyProxy: async (ws) => {
+      const egress = await verifyBrowserProxy(ws);
+      if (canonicalIp(egress.ip) !== expectedIp) {
+        throw new Error("Cloud launcher smoke proxy egress did not match");
+      }
+      return egress;
+    },
+  };
+}
+
 async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
   const profileId = "aliasmode-cloud-smoke";
   const store = new ProfileStore(paths.cloudDatabase);
   const queue = new PendingSyncQueue(paths.pendingSync, new Uint8Array(32).fill(1));
-  const launcher = makeLauncher(store, rest, true, paths.cloudProfiles);
+  const smokeProxy = cloudLauncherSmokeProxy(rest);
+  const launcher = makeLauncher(
+    store,
+    rest,
+    true,
+    paths.cloudProfiles,
+    smokeProxy?.verifyProxy,
+  );
   const profile: Profile = {
     id: profileId,
     accId: "",
@@ -561,7 +611,7 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     email: "",
     emailPassword: "",
     twofa: "",
-    proxy: null,
+    proxy: smokeProxy?.profileProxy ?? null,
     extensions: [],
     tags: [],
     ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
