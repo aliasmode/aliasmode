@@ -57,7 +57,7 @@ async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
   } catch (error) {
     await launcher.stop(profile.id).catch(() => {});
     store.close();
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     throw error;
   }
 }
@@ -97,7 +97,7 @@ async function expectWrongCredentialsToFail(type: "http" | "socks5"): Promise<vo
   } finally {
     await launcher.stop(profile.id).catch(() => {});
     store.close();
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
@@ -175,7 +175,7 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     await launcher.stop(profile.id).catch(() => false);
     queue.close();
     store.close();
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
