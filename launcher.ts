@@ -47,6 +47,7 @@ function needsProxyRelay(profile: Profile): boolean {
 }
 
 export type BrowserLaunchFailure =
+  | "preflight"
   | "relay_setup"
   | "process_spawn"
   | "cdp_readiness"
@@ -1068,6 +1069,10 @@ export class Launcher {
           await stopping;
         }
         return await this.doStart(profileId, launchArgs, opts);
+      })
+      .catch((error) => {
+        if (error instanceof BrowserLaunchError) throw error;
+        throw new BrowserLaunchError("preflight");
       })
       .finally(() => {
         if (this.startsInFlight.get(profileId) === promise) {
@@ -2522,7 +2527,7 @@ export class Launcher {
 
   /**
    * Delete a profile's Preferences / Secure Preferences ONLY when they're
-   * corrupt (zero-length or unparseable JSON), so Chromium regenerates defaults
+   * corrupt (zero-length, unparseable JSON, or a non-object root), so Chromium regenerates defaults
    * instead of showing the blocking "Your preferences can not be read" dialog.
    *
    * Session-safe by construction: it never touches the cookie jar
@@ -2543,7 +2548,10 @@ export class Launcher {
         let valid = false;
         try {
           const parsed = JSON.parse(raw);
-          valid = raw.trim().length > 0 && typeof parsed === "object" && parsed !== null;
+          valid = raw.trim().length > 0
+            && typeof parsed === "object"
+            && parsed !== null
+            && !Array.isArray(parsed);
         } catch {
           valid = false;
         }

@@ -168,6 +168,7 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   open_started: "Cloud open started",
   cloud_registered: "Cloud session registered",
   browser_started: "CloakBrowser started",
+  browser_launch_preflight_failed: "Browser profile preparation failed",
   browser_launch_relay_setup_failed: "Proxy relay setup failed",
   browser_launch_process_spawn_failed: "CloakBrowser process could not start",
   browser_launch_cdp_readiness_failed: "CloakBrowser debugging connection was not ready",

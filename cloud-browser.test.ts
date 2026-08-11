@@ -515,6 +515,7 @@ test("terminal Cloud heartbeat errors capture and stop the browser", async () =>
 
 test("Cloud browser reports fixed safe browser launch operations", async () => {
   const operations = [
+    "preflight",
     "relay_setup",
     "process_spawn",
     "cdp_readiness",

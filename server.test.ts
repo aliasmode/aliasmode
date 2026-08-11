@@ -479,7 +479,7 @@ test("CDP-dead/live-process start returns AdsPower failure so stop+retry recover
 
   const failed = await (await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store)).json();
   expect(failed.code).toBe(-1);
-  expect(failed.msg).toContain("stop and retry");
+  expect(failed.msg).toBe("browser_launch/preflight (failed)");
   expect(h.spawnedArgs.length).toBe(1); // no duplicate profile process
   expect(h.store.getLaunch("k1d0cd11")?.debugPort).toBe(Number(first.data.debug_port));
 

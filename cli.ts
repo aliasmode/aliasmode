@@ -593,6 +593,12 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
   const store = new ProfileStore(paths.cloudDatabase);
   const queue = new PendingSyncQueue(paths.pendingSync, new Uint8Array(32).fill(1));
   const smokeProxy = cloudLauncherSmokeProxy(rest);
+  // Exercise the persisted proxy-only preparation path that clean CI profiles previously missed.
+  if (smokeProxy) {
+    const defaultProfileDir = resolve(paths.cloudProfiles, profileId, "Default");
+    mkdirSync(defaultProfileDir, { recursive: true });
+    writeFileSync(resolve(defaultProfileDir, "Preferences"), "[]");
+  }
   const launcher = makeLauncher(
     store,
     rest,

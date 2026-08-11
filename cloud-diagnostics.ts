@@ -2,6 +2,7 @@ export const CLOUD_DIAGNOSTIC_TYPES = [
   "open_started",
   "cloud_registered",
   "browser_started",
+  "browser_launch_preflight_failed",
   "browser_launch_relay_setup_failed",
   "browser_launch_process_spawn_failed",
   "browser_launch_cdp_readiness_failed",
