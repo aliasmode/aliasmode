@@ -46,6 +46,7 @@ function setup(options: {
   navigateFailure?: boolean;
   startRetainedFailure?: boolean;
   verifyWebSockets?: string[];
+  proxy?: PortableProfileV1["profile"]["proxy"];
 } = {}) {
   const events: string[] = [];
   const logs: string[] = [];
@@ -58,12 +59,15 @@ function setup(options: {
   let closeCalls = 0;
   let abandonCalls = 0;
   let startCalls = 0;
+  let startedProxy: unknown;
   let verifyCalls = 0;
+  const openedPayload = payload();
+  openedPayload.profile.proxy = options.proxy ?? null;
   const opened: OpenProfileResponse = {
     ok: true,
     registrationId: "registration1",
     baseVersion: 4,
-    payload: payload(),
+    payload: openedPayload,
     activeOpens: [],
   };
   const cloud = {
@@ -105,6 +109,7 @@ function setup(options: {
     async start(profileId: string, args: string[], startOptions: any) {
       startCalls++;
       events.push("start");
+      startedProxy = store.getProfile(profileId)?.proxy;
       expect(args).toEqual(["--window-size=1200,800"]);
       expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
@@ -179,6 +184,7 @@ function setup(options: {
     queue,
     closeCalls: () => closeCalls,
     abandonCalls: () => abandonCalls,
+    startedProxy: () => startedProxy,
     verifyCalls: () => verifyCalls,
   };
 }
@@ -189,6 +195,25 @@ test("Cloud browser creates a portable profile without a local-only fallback", a
   expect(await state.coordinator.create(profile)).toEqual({ id: "profile1" });
   expect(state.events).toEqual(["cloud-create"]);
   expect(state.store.getProfile("profile1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser passes the authenticated proxy to Launcher without exposing it", async () => {
+  const proxy = {
+    type: "socks5" as const,
+    host: "proxy-secret-host.invalid",
+    port: "1080",
+    user: "proxy-secret-user",
+    pass: "proxy-secret-pass",
+  };
+  const state = setup({ proxy });
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.startedProxy()).toEqual(proxy);
+  const publicState = JSON.stringify({ logs: state.logs, diagnostics: state.coordinator.diagnostics() });
+  for (const secret of [proxy.host, proxy.user, proxy.pass]) expect(publicState).not.toContain(secret);
+
   state.queue.close();
   state.store.close();
 });
