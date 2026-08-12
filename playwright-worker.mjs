@@ -27,10 +27,20 @@ async function readStdin() {
   return value;
 }
 
-function typed(code) {
+function typed(code, details) {
   const error = new Error(ERROR_MESSAGES[code] || ERROR_MESSAGES.operation_failed);
   error.code = code;
+  if (details) error.details = details;
   return error;
+}
+
+function sessionError(operation, outcome = "failed") {
+  return typed(outcome === "timeout" ? "timeout" : "operation_failed", { operation, outcome });
+}
+
+async function sessionStep(operation, run) {
+  try { return await run(); }
+  catch (error) { if (error?.details) throw error; throw sessionError(operation); }
 }
 
 async function closeWithin(close, timeoutMs = 5_000) {
@@ -44,19 +54,46 @@ async function closeWithin(close, timeoutMs = 5_000) {
   } finally { if (timer) clearTimeout(timer); }
 }
 
-async function withBrowser(chromium, endpoint, timeout, run) {
+async function withBrowser(chromium, endpoint, timeout, operation, run) {
+  const deadline = Date.now() + timeout;
   let browser;
+  let context;
+  let waitingFor = "connect";
+  while (!context) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw operation === "session-restore"
+      ? sessionError(waitingFor, "timeout")
+      : typed("timeout");
+    try {
+      browser = await chromium.connectOverCDP(endpoint, { timeout: remaining });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+      continue;
+    }
+    context = browser.contexts()[0];
+    if (!context) {
+      waitingFor = "context";
+      const detached = await closeWithin(() => browser.close(), Math.min(5_000, Math.max(1, deadline - Date.now())));
+      if (!detached) throw operation === "session-restore"
+        ? sessionError("disconnect", "timeout")
+        : typed("timeout");
+      browser = undefined;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+    }
+  }
+
   let operationError;
   let result;
   try {
-    browser = await chromium.connectOverCDP(endpoint, { timeout });
-    result = await run(browser);
+    result = await run(browser, context);
   } catch (error) {
     operationError = error;
   }
-  const detached = !browser || await closeWithin(() => browser.close());
+  const detached = await closeWithin(() => browser.close());
   if (operationError) throw operationError;
-  if (!detached) throw typed("timeout");
+  if (!detached) throw operation === "session-restore"
+    ? sessionError("disconnect", "timeout")
+    : typed("timeout");
   return result;
 }
 
@@ -152,8 +189,9 @@ async function passcodeDatabasePresent(page) {
 
 async function storageScriptSource() {
   const module = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "lib", "generated", "storageScriptSource.js")).href);
-  if (typeof module.default?.source !== "string") throw typed("runtime_unavailable");
-  return module.default.source;
+  const source = typeof module.source === "string" ? module.source : module.default?.source;
+  if (typeof source !== "string") throw typed("runtime_unavailable");
+  return source;
 }
 async function collectPasscodeStorage(page) {
   const source = await storageScriptSource();
@@ -211,10 +249,9 @@ async function captureSession(browser) {
   return JSON.stringify({ cookies: (state.cookies || []).filter(sessionCookie), origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
 }
 
-async function restoreSession(browser, payload) {
+async function restoreSession(browser, context, payload) {
   let bundle;
-  try { bundle = JSON.parse(payload.bundle); } catch { throw typed("invalid_request"); }
-  const context = contextOf(browser);
+  try { bundle = JSON.parse(payload.bundle); } catch { throw sessionError("invalid_bundle"); }
   const origins = Array.isArray(bundle.origins) ? bundle.origins.filter((item) => item?.origin === TELEGRAM_ORIGIN).map((target) => ({
     origin: TELEGRAM_ORIGIN,
     localStorage: (Array.isArray(target.localStorage) ? target.localStorage : []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string"),
@@ -223,11 +260,12 @@ async function restoreSession(browser, payload) {
   const cookies = Array.isArray(bundle.cookies) ? bundle.cookies : [];
   if (!cookies.length && !origins.length && !(payload.urls || []).length) return null;
   const storageSource = origins.some((target) => target.indexedDB.length)
-    ? await storageScriptSource()
+    ? await sessionStep("origin_storage", storageScriptSource)
     : undefined;
   for (const target of origins) {
-    const existing = context.pages();
-    for (const page of existing) {
+    await sessionStep("origin_storage", async () => {
+      const existing = context.pages();
+      for (const page of existing) {
       try { if (new URL(page.url()).origin === TELEGRAM_ORIGIN) await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }); } catch {}
     }
     const page = await context.newPage();
@@ -262,18 +300,21 @@ async function restoreSession(browser, payload) {
           throw error;
         }
       }, { entries: target.localStorage, databases: target.indexedDB, source: storageSource });
-    } finally {
-      await context.unroute(restoreUrl, handler).catch(() => {});
-      await page.close();
-    }
+      } finally {
+        await context.unroute(restoreUrl, handler).catch(() => {});
+        await page.close();
+      }
+    });
   }
-  await context.clearCookies();
+  await sessionStep("cookie_clear", () => context.clearCookies());
   const inject = cookies.filter((cookie) => !LINKEDIN_DEVICE_COOKIES.has(cookie.name));
-  if (inject.length) await context.addCookies(inject);
-  for (let i = 0; i < (payload.urls || []).length; i++) {
-    const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
-    await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
-  }
+  if (inject.length) await sessionStep("cookie_add", () => context.addCookies(inject));
+  await sessionStep("navigation", async () => {
+    for (let i = 0; i < (payload.urls || []).length; i++) {
+      const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
+      await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
+    }
+  });
   return null;
 }
 
@@ -330,10 +371,9 @@ async function operate(chromium, operation, payload) {
   const endpoint = payload.endpoint;
   if (typeof endpoint !== "string" || !/^https?:\/\/|^wss?:\/\//.test(endpoint)) throw typed("invalid_request");
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
-  return withBrowser(chromium, endpoint, timeout, async (browser) => {
-    const context = browser.contexts()[0] || await browser.newContext();
+  return withBrowser(chromium, endpoint, timeout, operation, async (browser, context) => {
     if (operation === "session-capture") return captureSession(browser);
-    if (operation === "session-restore") return restoreSession(browser, payload);
+    if (operation === "session-restore") return restoreSession(browser, context, payload);
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
     if (operation === "search-provider") return searchProvider(context);
     if (operation === "navigate") {

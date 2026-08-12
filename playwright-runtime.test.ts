@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   playwrightWorkerCommand,
   runPlaywrightWorker,
@@ -80,6 +81,14 @@ test("worker rejects abrupt exit and malformed responses without affecting the p
   expect(1 + 1).toBe(2);
 });
 
+test("installed Playwright storage source uses the supported direct export shape", async () => {
+  const module = await import(pathToFileURL(join(import.meta.dir, "node_modules", "playwright-core", "lib", "generated", "storageScriptSource.js")).href);
+  expect(typeof module.source).toBe("string");
+  const commonJs = { exports: {} as Record<string, unknown> };
+  Function("module", "exports", module.source)(commonJs, commonJs.exports);
+  expect(typeof commonJs.exports.StorageScript).toBe("function");
+});
+
 test("installed worker loads its packaged ESM dependency", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-layout-"));
   try {
@@ -91,11 +100,67 @@ test("installed worker loads its packaged ESM dependency", async () => {
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), "export const chromium = {};\n");
     await chmod(join(root, "node", "node.exe"), 0o755);
 
-    const error = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    const error = await runPlaywrightWorker("page", { endpoint: "ws://browser", connectTimeoutMs: 10 }, {
+      runtimeRoot: root,
+      timeoutMs: 1_000,
+    }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ code: "timeout" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("worker retries until the persistent context appears without creating an incognito context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-delayed-context-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let connects = 0;
+      const page = { evaluate: async () => "delayed-context" };
+      const context = { pages: () => [page] };
+      export const chromium = { async connectOverCDP() {
+        connects++;
+        return {
+          contexts: () => connects === 1 ? [] : [context],
+          async newContext() { throw new Error("must not create incognito context"); },
+          async close() {},
+        };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    expect(await runPlaywrightWorker<string>("page", { endpoint: "ws://browser", kind: "user-agent", connectTimeoutMs: 2_000 }, {
       runtimeRoot: root,
       timeoutMs: 5_000,
-    }).then(() => null, (failure) => failure);
-    expect(error).toMatchObject({ code: "operation_failed" });
+    })).toBe("delayed-context");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("worker restore failures preserve operation and outcome details", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-error-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const context = { pages: () => [], async clearCookies() { throw new Error("secret"); } };
+      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const error = await runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser", bundle: JSON.stringify({ cookies: [{ name: "a" }], origins: [] }), urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ code: "operation_failed", details: { operation: "cookie_clear", outcome: "failed" } });
+    expect(error.message).not.toContain("secret");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
