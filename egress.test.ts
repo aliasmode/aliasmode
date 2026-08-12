@@ -62,3 +62,20 @@ test("relay proxy verification fails closed when every endpoint fails", async ()
     fetchThroughRelay: async () => { throw new Error("refused"); },
   })).rejects.toThrow("proxy verification failed before account traffic");
 });
+
+test("relay proxy verification reports fixed safe reason codes", async () => {
+  const err = await verifyRelayEgress(4321, {
+    endpoints: ["https://one.test/ip", "https://two.test/ip"],
+    fetchThroughRelay: async () => { throw new Error("secret-host.invalid:443 details"); },
+  }).then(() => { throw new Error("must reject"); }, (e: unknown) => e as Error);
+  expect(err.message).toBe("proxy verification failed before account traffic [relay_unknown_error,relay_unknown_error]");
+  expect(err.message).not.toContain("secret-host.invalid");
+});
+
+test("relay proxy verification preserves fixed reason codes", async () => {
+  const err = await verifyRelayEgress(4321, {
+    endpoints: ["https://one.test/ip"],
+    fetchThroughRelay: async () => { throw new Error("relay_connect_refused"); },
+  }).then(() => { throw new Error("must reject"); }, (e: unknown) => e as Error);
+  expect(err.message).toContain("[relay_connect_refused]");
+});

@@ -927,7 +927,11 @@ export class Launcher {
     if (!this.verifyProxyFn) return;
     try {
       await this.verifyProxyFn(relayPort);
-    } catch {
+    } catch (error) {
+      // Reason codes are fixed safe strings (no hosts/ports/credentials).
+      const message = error instanceof Error ? error.message : "";
+      const reasons = message.match(/\[([a-z_,]+)\]/)?.[1] ?? "relay_unknown_error";
+      this.log(`${profile.id}: proxy relay precheck failed (${reasons})`);
       throw new BrowserLaunchError("proxy_egress");
     }
     this.log(`${profile.id}: verified proxy egress through the local relay`);

@@ -112,16 +112,19 @@ export async function verifyRelayEgress(
   }
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const fetcher = opts.fetchThroughRelay ?? fetchRelayEgress;
-  let lastError: unknown;
+  // Fixed failure reason codes (safe to log/display: no hosts, ports, or credentials).
+  const reasons: string[] = [];
   for (const endpoint of endpoints) {
     try {
       const info = await fetcher(relayPort, endpoint, timeoutMs);
       if (info) return info;
+      reasons.push("relay_egress_unparseable");
     } catch (error) {
-      lastError = error;
+      const message = error instanceof Error ? error.message : "";
+      reasons.push(/^[a-z_]+$/.test(message) ? message : "relay_unknown_error");
     }
   }
-  throw new Error("proxy verification failed before account traffic", { cause: lastError });
+  throw new Error(`proxy verification failed before account traffic [${reasons.join(",") || "relay_unknown_error"}]`);
 }
 
 /** One HTTPS GET through the loopback relay: CONNECT via the relay, then TLS to the origin. */
@@ -134,36 +137,37 @@ async function fetchRelayEgress(relayPort: number, endpoint: string, timeoutMs: 
   try {
     socket.setNoDelay(true);
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("relay connection timed out")), remaining(deadline));
+      const timer = setTimeout(() => reject(new Error("relay_connection_timeout")), remaining(deadline));
       socket.once("connect", () => { clearTimeout(timer); resolve(); });
-      socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      // Socket errors can embed host/port — normalize to a fixed safe code.
+      socket.once("error", () => { clearTimeout(timer); reject(new Error("relay_connection_refused")); });
     });
     const established = await new Promise<Buffer>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("relay CONNECT timed out")), remaining(deadline));
+      const timer = setTimeout(() => reject(new Error("relay_connect_timeout")), remaining(deadline));
       let buf = Buffer.alloc(0);
       const onData = (chunk: Buffer) => {
         buf = Buffer.concat([buf, chunk]);
         const end = buf.indexOf("\r\n\r\n");
         if (end === -1) {
-          if (buf.length > 16 * 1024) { clearTimeout(timer); reject(new Error("relay CONNECT response too large")); }
+          if (buf.length > 16 * 1024) { clearTimeout(timer); reject(new Error("relay_connect_oversize")); }
           return;
         }
         clearTimeout(timer);
         socket.removeListener("data", onData);
         const status = buf.subarray(0, end).toString("latin1").split("\r\n")[0] ?? "";
-        if (!/\s2\d\d\s/.test(status)) { reject(new Error("relay CONNECT refused")); return; }
+        if (!/\s2\d\d\s/.test(status)) { reject(new Error("relay_connect_refused")); return; }
         resolve(buf.subarray(end + 4));
       };
       socket.on("data", onData);
-      socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      socket.once("error", () => { clearTimeout(timer); reject(new Error("relay_socket_error")); });
       socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
     });
     // Any bytes the upstream already pushed inside the tunnel (rare for a fresh
     // CONNECT) must seed the TLS socket — but TLS handshakes start client-side,
     // so a well-behaved relay/upstream has sent nothing yet.
-    if (established.length) throw new Error("unexpected bytes before TLS handshake");
+    if (established.length) throw new Error("relay_unexpected_tunnel_bytes");
     const body = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("relay HTTPS request timed out")), remaining(deadline));
+      const timer = setTimeout(() => reject(new Error("relay_https_timeout")), remaining(deadline));
       // The response is only an IP echo used for a liveness/egress check; the
       // authoritative proxy-auth proof is the relay's own upstream handshake.
       // Skip origin cert validation so private/self-signed egress endpoints work.
@@ -175,14 +179,14 @@ async function fetchRelayEgress(relayPort: number, endpoint: string, timeoutMs: 
         );
       });
       tlsSocket.on("data", (chunk: Buffer) => { buf = Buffer.concat([buf, chunk]); });
-      tlsSocket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      tlsSocket.once("error", () => { clearTimeout(timer); reject(new Error("relay_tls_error")); });
       tlsSocket.once("close", () => {
         clearTimeout(timer);
         const text = buf.toString("latin1");
         const headEnd = text.indexOf("\r\n\r\n");
-        if (headEnd === -1) { reject(new Error("relay HTTPS response was incomplete")); return; }
+        if (headEnd === -1) { reject(new Error("relay_https_incomplete")); return; }
         const status = text.slice(0, headEnd).split("\r\n")[0] ?? "";
-        if (!/\s2\d\d\s/.test(status)) { reject(new Error("egress endpoint did not answer 2xx")); return; }
+        if (!/\s2\d\d\s/.test(status)) { reject(new Error("relay_egress_not_ok")); return; }
         let body = text.slice(headEnd + 4);
         if (/^transfer-encoding:\s*chunked/im.test(text.slice(0, headEnd))) body = decodeChunked(body);
         resolve(body);

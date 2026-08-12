@@ -52,8 +52,8 @@ import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
-import { statSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { appendFileSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault } from "./search-provider.ts";
@@ -695,6 +695,32 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
   }
 }
 
+const MAX_LOG_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Mirror console output to <root>/logs/aliasmode-<date>.log (rotates at 2 MB). Best-effort. */
+function installFileLogging(root: string): void {
+  try {
+    const dir = join(root, "logs");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `aliasmode-${new Date().toISOString().slice(0, 10)}.log`);
+    appendFileSync(file, `${new Date().toISOString()} sidecar start v${ALIASMODE_VERSION} pid=${process.pid}\n`);
+    const write = (stream: NodeJS.WriteStream, args: unknown[]) => {
+      try {
+        const line = new Date().toISOString() + " " + args.map((a) => (typeof a === "string" ? a : String(a))).join(" ") + "\n";
+        if (statSync(file).size > MAX_LOG_FILE_BYTES) renameSync(file, file.replace(/\.log$/, ".1.log"));
+        appendFileSync(file, line);
+      } catch {
+        try { appendFileSync(file, new Date().toISOString() + " " + args.join(" ") + "\n"); } catch {}
+      }
+      stream.write(args.map((a) => (typeof a === "string" ? a : String(a))).join(" ") + "\n");
+    };
+    console.log = (...args: unknown[]) => write(process.stdout, args);
+    console.error = (...args: unknown[]) => write(process.stderr, args);
+  } catch {
+    // Logging must never break startup.
+  }
+}
+
 async function main() {
   // Playwright-over-CDP on Bun emits occasional stray websocket rejections
   // ("ws.WebSocket 'upgrade' event is not implemented in bun"). Left unhandled,
@@ -720,6 +746,10 @@ async function main() {
   const [cmd, ...rest] = argv;
   const paths = statePaths(resolveStateRoot(rest));
   const desktop = has(rest, "desktop-stdio");
+  // The desktop sidecar's stdout/stderr are discarded by the Tauri shell, which
+  // made device-only failures undebuggable. Mirror every log line to a rotating
+  // file under <state-root>/logs/ so a failed open can be diagnosed for real.
+  installFileLogging(paths.root);
   if (desktop && cmd !== "start") throw new Error("--desktop-stdio is supported only by the start command");
   const desktopHealth = desktop
     ? desktopHealthMetadata(process.env, flag(rest, "desktop-root"))
