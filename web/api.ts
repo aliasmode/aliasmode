@@ -165,6 +165,14 @@ export const restoreCloudSession = (
 export const signOutCloud = () => cloudAuthAction("signout", {});
 export const acceptCloudLegal = () => cloudAuthAction("accept-legal", {});
 
+export async function fetchLogs(): Promise<{ file: string; content: string }> {
+  const path = "/ui/api/logs";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (body.ok !== true) throw new Error(body.error || "logs are unavailable");
+  return { file: String(body.file), content: String(body.content ?? "") };
+}
+
 export async function fetchHealth(): Promise<HealthResult> {
   const path = "/ui/api/health";
   const response = await fetch(path);

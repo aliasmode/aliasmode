@@ -24,6 +24,7 @@ import {
   selectAppMode,
   fetchProfiles,
   fetchHealth,
+  fetchLogs,
   fetchDiagnose,
   openProfile,
   closeProfile,
@@ -449,6 +450,8 @@ function App() {
   const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
   const [logDir, setLogDir] = useState<string | undefined>(undefined);
+  const [logView, setLogView] = useState<{ file: string; content: string } | null>(null);
+  const [logErr, setLogErr] = useState<string | null>(null);
   const [diag, setDiag] = useState<DiagnoseReport | null>(null);
   const [showDiag, setShowDiag] = useState(false);
   const [q, setQ] = useState("");
@@ -1584,6 +1587,16 @@ function App() {
                     </div>
                   )}
                   <p>Diagnostics contain fixed lifecycle labels only. They exclude profile data and credentials.</p>
+                  <button type="button" className="btn" onClick={() => {
+                    setLogErr(null);
+                    fetchLogs().then(setLogView).catch((e) => setLogErr(e instanceof Error ? e.message : String(e)));
+                  }}>View detailed logs</button>
+                  {logErr && <p className="hint">Logs: {logErr}</p>}
+                  {logView && (
+                    <pre className="hint" style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap", textAlign: "left" }}>
+                      {logView.file + "\n" + logView.content}
+                    </pre>
+                  )}
                   {logDir && <p className="hint">Detailed log file: {logDir}</p>}
                 </section>
               )}
