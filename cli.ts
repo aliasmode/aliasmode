@@ -809,12 +809,12 @@ async function main() {
     // ONLY the known Bun+Playwright ws-upgrade noise is non-fatal. Anything
     // else (a DB failure, an unhandled launcher path) is a real bug — surface it
     // loudly and exit rather than masking it as "(non-fatal)" and continuing in
-    // a possibly-corrupt state. The service supervisor restarts us.
+    // a possibly-corrupt state. The desktop enters a static degraded state.
     if (msg.includes("not implemented in bun") || msg.includes("WebSocket 'upgrade'")) {
-      console.error(`[aliasmode] (non-fatal) Bun ws-upgrade noise: ${msg}`);
+      console.error("[aliasmode] (non-fatal) Bun ws-upgrade noise");
       return;
     }
-    console.error(`[aliasmode] FATAL unhandled rejection: ${msg}`);
+    console.error("[aliasmode] FATAL unhandled rejection");
     process.exit(1);
   });
 
@@ -1199,8 +1199,8 @@ async function main() {
 
 // Only run the CLI when executed directly (`bun cli.ts …`), not when imported (e.g. by tests).
 if (import.meta.main) {
-  main().catch((err) => {
-    console.error(err instanceof Error ? err.message : err);
+  main().catch(() => {
+    console.error("[aliasmode] FATAL command failure");
     process.exit(1);
   });
 }
