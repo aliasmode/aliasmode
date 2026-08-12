@@ -44,6 +44,7 @@ async function compileSidecar(cwd: string, output: string): Promise<void> {
     "--compile",
     "--target=bun-windows-x64",
     "--define=ALIASMODE_COMPILED=true",
+    "--external=playwright-core",
     "--external=chromium-bidi",
     "--external=electron",
     "cli.ts",
@@ -68,10 +69,12 @@ export async function prepareWindowsBundle(
   const resources = join(tauri, "resources");
   const staging = join(tauri, "target", "desktop-staging");
   const resourceRoot = join(resources, "cloakbrowser");
+  const playwrightRoot = join(resources, "playwright");
   const sidecar = join(binaries, "aliasmode-sidecar-x86_64-pc-windows-msvc.exe");
 
   rmSync(staging, { recursive: true, force: true });
   rmSync(resourceRoot, { recursive: true, force: true });
+  rmSync(playwrightRoot, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   mkdirSync(generated, { recursive: true });
   mkdirSync(binaries, { recursive: true });
@@ -79,6 +82,12 @@ export async function prepareWindowsBundle(
 
   await (options.compileSidecar ?? ((output) => compileSidecar(cwd, output)))(sidecar);
   if (!statSync(sidecar).isFile()) throw new Error("sidecar compiler did not create the expected Windows executable");
+
+  for (const dependency of ["playwright-core", "ws"]) {
+    const source = join(cwd, "node_modules", dependency);
+    if (!statSync(source).isDirectory()) throw new Error(`desktop dependency is missing: ${dependency}`);
+    cpSync(source, join(playwrightRoot, "node_modules", dependency), { recursive: true });
+  }
 
   const installed = await (options.installBrowser ?? ((dir) => installCloakBrowser({ cwd: dir, cacheDir: dir })))(staging);
   const stagingReal = realpathSync(staging);

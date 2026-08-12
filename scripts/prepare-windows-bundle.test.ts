@@ -10,6 +10,11 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 function workspace(): string {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-windows-bundle-"));
   mkdirSync(join(cwd, "src-tauri"), { recursive: true });
+  for (const dependency of ["playwright-core", "ws"]) {
+    const root = join(cwd, "node_modules", dependency);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: dependency }));
+  }
   return cwd;
 }
 
@@ -38,6 +43,8 @@ test("Windows bundle preparation packages the official runtime and records its h
       wrapperVersion: "0.4.11",
     });
     expect(readFileSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chrome.dll"), "utf8")).toBe("dll");
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8"))).toEqual({ name: "playwright-core" });
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8"))).toEqual({ name: "ws" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "generated", "browser.json"), "utf8"))).toEqual(metadata);
     expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.19\n");
   } finally {

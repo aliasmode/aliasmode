@@ -4,6 +4,8 @@
  * testable without pulling Playwright into unit tests.
  */
 
+import { loadPlaywright } from "./playwright-runtime.ts";
+
 export interface CdpPageOptions {
   timeoutMs?: number;
   cleanupTimeoutMs?: number;
@@ -34,7 +36,7 @@ export async function withCdpPage<T>(
   if (opts.connect) {
     browser = await opts.connect(ws, { timeout });
   } else {
-    const { chromium } = await import("playwright-core");
+    const { chromium } = await loadPlaywright();
     browser = await chromium.connectOverCDP(ws, { timeout });
   }
   let temporaryPage: any | undefined;

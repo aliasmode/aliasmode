@@ -48,6 +48,7 @@ jobs:
           Copy-Item ".\src-tauri\binaries\aliasmode-sidecar-x86_64-pc-windows-msvc.exe" "$smoke\aliasmode-sidecar.exe"
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
           $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = (Resolve-Path ".\src-tauri\resources\playwright").Path
           $browser = Start-Process -PassThru $browserPath -ArgumentList @(
             "--headless=new",
             "--disable-gpu",
@@ -139,6 +140,18 @@ jobs:
 
           $appPath = Join-Path $installRoot "AliasMode.exe"
           if (-not (Test-Path $appPath -PathType Leaf)) { throw "installed AliasMode executable is missing" }
+          $sidecars = @(Get-ChildItem $installRoot -Recurse -File -Filter "aliasmode-sidecar*.exe")
+          if ($sidecars.Count -ne 1) { throw "expected exactly one installed sidecar, found $($sidecars.Count)" }
+          $sidecarBytes = [IO.File]::ReadAllBytes($sidecars[0].FullName)
+          $sidecarText = [Text.Encoding]::UTF8.GetString($sidecarBytes) + [Text.Encoding]::Unicode.GetString($sidecarBytes)
+          foreach ($sourcePath in @($env:GITHUB_WORKSPACE, $env:GITHUB_WORKSPACE.Replace("\", "/"))) {
+            if ($sidecarText.IndexOf($sourcePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+              throw "installed sidecar embeds its source checkout path"
+            }
+          }
+          Remove-Item ".\node_modules" -Recurse -Force
+          if (Test-Path ".\node_modules") { throw "checkout node_modules remained available to installed acceptance" }
+
           $app = Start-Process -PassThru $appPath
           $sidecarPid = $null
           $shutdownFailure = $null
@@ -187,11 +200,17 @@ jobs:
           }
           if ($shutdownFailure) { throw $shutdownFailure }
 
-          $sidecars = @(Get-ChildItem $installRoot -Recurse -File -Filter "aliasmode-sidecar*.exe")
-          if ($sidecars.Count -ne 1) { throw "expected exactly one installed sidecar, found $($sidecars.Count)" }
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
           $browserPath = Join-Path $installRoot (Join-Path "cloakbrowser" $metadata.executable)
           if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
+          $playwrightRuntime = Join-Path $installRoot "playwright"
+          if (-not (Test-Path (Join-Path $playwrightRuntime "node_modules\playwright-core\package.json") -PathType Leaf)) {
+            throw "installed Playwright runtime is missing"
+          }
+          if (-not (Test-Path (Join-Path $playwrightRuntime "node_modules\ws\package.json") -PathType Leaf)) {
+            throw "installed Playwright WebSocket runtime is missing"
+          }
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = $playwrightRuntime
           $env:CLOAKBROWSER_BINARY_PATH = $browserPath
           $env:CLOAKBROWSER_BINARY_SHA256 = $metadata.sha256
           $env:ALIASMODE_SESSION_LAUNCH = "0"

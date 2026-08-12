@@ -284,6 +284,7 @@ pub async fn launch_and_verify(
     app: &AppHandle,
     data_dir: &Path,
     browser: &BrowserRuntime,
+    playwright_runtime: &Path,
     nonce: &str,
 ) -> Result<(SidecarSupervisor, u16), String> {
     let command = app
@@ -294,6 +295,7 @@ pub async fn launch_and_verify(
         .current_dir(data_dir)
         .env("ALIASMODE_DESKTOP_NONCE", nonce)
         .env("ALIASMODE_DESKTOP_VERSION", VERSION)
+        .env("ALIASMODE_PLAYWRIGHT_RUNTIME", playwright_runtime)
         .env("CLOAKBROWSER_BINARY_PATH", &browser.executable)
         .env("CLOAKBROWSER_BINARY_SHA256", &browser.sha256)
         .env("CLOAKBROWSER_DOWNLOAD_URL", "")
