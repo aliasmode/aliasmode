@@ -49,10 +49,30 @@ pub fn run() {
 
             let resource_dir = app.path().resource_dir()?;
             let browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
+            let playwright_runtime =
+                resource_dir
+                    .join("playwright")
+                    .canonicalize()
+                    .map_err(|error| {
+                        boxed(format!(
+                            "packaged Playwright runtime is unavailable: {error}"
+                        ))
+                    })?;
+            let playwright_manifest = playwright_runtime
+                .join("node_modules")
+                .join("playwright-core")
+                .join("package.json");
+            if !playwright_manifest.is_file() {
+                return Err(boxed("packaged Playwright runtime is incomplete"));
+            }
             let nonce = hex::encode(random::<[u8; 32]>());
             let handle = app.handle().clone();
             let (sidecar, port) = tauri::async_runtime::block_on(sidecar::launch_and_verify(
-                &handle, &data_dir, &browser, &nonce,
+                &handle,
+                &data_dir,
+                &browser,
+                &playwright_runtime,
+                &nonce,
             ))
             .map_err(boxed)?;
 

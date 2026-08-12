@@ -22,6 +22,11 @@
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
 import { ProfileStore } from "./store.ts";
 import { Launcher } from "./launcher.ts";
+import {
+  defaultPlaywrightRuntimeRoot,
+  loadPlaywright,
+  verifyPlaywrightRuntime,
+} from "./playwright-runtime.ts";
 import { serveDashboard } from "./web.ts";
 import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
@@ -464,7 +469,7 @@ async function currentCdpWebSocketEndpoint(endpoint: string): Promise<string> {
 }
 
 async function navigateSmokePage(endpoint: string): Promise<void> {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
@@ -814,6 +819,11 @@ async function main() {
   });
 
   const argv = process.argv.slice(2);
+  if (typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true) {
+    const runtime = process.env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim() || defaultPlaywrightRuntimeRoot();
+    process.env.ALIASMODE_PLAYWRIGHT_RUNTIME = runtime;
+    await verifyPlaywrightRuntime(runtime);
+  }
   if (await dispatchReadSessionWorker(argv)) return;
 
   const [cmd, ...rest] = argv;

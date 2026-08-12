@@ -18,7 +18,8 @@
     "icon": ["icons/icon.ico"],
     "externalBin": ["binaries/aliasmode-sidecar"],
     "resources": {
-      "resources/cloakbrowser/": "cloakbrowser/"
+      "resources/cloakbrowser/": "cloakbrowser/",
+      "resources/playwright/": "playwright/"
     },
     "windows": {
       "nsis": {

@@ -7,8 +7,8 @@
  * cookies alone can never roam a Telegram session, so origin storage roams too.
  */
 
-import { source as playwrightStorageScriptSource } from "./node_modules/playwright-core/lib/generated/storageScriptSource.js";
 import type { CookieRecord } from "./types.ts";
+import { loadPlaywright, loadPlaywrightStorageScript } from "./playwright-runtime.ts";
 
 const SESSION_URLS = [
   "https://x.com",
@@ -615,7 +615,7 @@ export async function readSessionFromBrowser(
 
 /** Read the running browser's current supported-platform cookies + origin storage into a bundle. */
 export async function readSession(ws: string): Promise<string> {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
   return readSessionFromBrowser(browser);
 }
@@ -739,7 +739,7 @@ export async function runReadSessionWorker(
  * blocked raw-CDP read. Returns the raw Playwright cookie records (httpOnly included).
  */
 export async function harvestCookies(ws: string, urls: string[]): Promise<CookieRecord[]> {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
   try {
     const ctx = browser.contexts()[0] ?? (await browser.newContext());
@@ -750,7 +750,7 @@ export async function harvestCookies(ws: string, urls: string[]): Promise<Cookie
 }
 
 async function storageScriptSource(): Promise<string> {
-  return playwrightStorageScriptSource;
+  return loadPlaywrightStorageScript();
 }
 
 /**
@@ -983,7 +983,7 @@ async function connectPersistentSessionBrowser(
   const contextRetryMs = Math.max(1, options.contextRetryMs ?? SESSION_CONTEXT_RETRY_MS);
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
   const connect = options.connect ?? (async (ws: string, timeoutMs: number) => {
-    const { chromium } = await import("playwright-core");
+    const { chromium } = await loadPlaywright();
     return chromium.connectOverCDP(ws, { timeout: timeoutMs });
   });
   const deadline = Date.now() + connectTimeoutMs;

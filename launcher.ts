@@ -33,6 +33,7 @@ import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderSetupResult } from "./search-provider.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { SessionRestoreError } from "./session.ts";
+import { loadPlaywright } from "./playwright-runtime.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
 // onAuthRequired (whose service worker can't answer reliably during a page-load burst), the browser
@@ -3480,7 +3481,7 @@ function profileCardUrl(profileId: string): string {
  * automation's own tab (tab 0) is never disturbed. Best-effort — never fails a launch.
  */
 async function openProfileCardTab(ws: string, url: string): Promise<void> {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 10_000 });
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
@@ -3533,7 +3534,7 @@ function writeIdentityBookmark(userDataDir: string, name: string, url: string): 
 }
 
 const defaultNavigate: LaunchNavigator = async (ws, urls) => {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
@@ -3585,7 +3586,7 @@ function buildLabelScript(label: string): string {
  * Short connect timeout so a launch is never held up on labeling.
  */
 const defaultLabelWindow: WindowLabeler = async (ws, label) => {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 10_000 });
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
@@ -3610,7 +3611,7 @@ const defaultLabelWindow: WindowLabeler = async (ws, label) => {
 const defaultEnsureCookies: CookieEnsurer = async (ws, cookies) => {
   const target = cookieBootstrapTarget(cookies);
   if (!target) return { injected: false };
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());

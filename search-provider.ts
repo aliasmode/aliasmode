@@ -1,4 +1,5 @@
 import type { BrowserContext } from "playwright-core";
+import { loadPlaywright } from "./playwright-runtime.ts";
 
 export type SearchProviderSetupResult = {
   status: "already-default" | "configured" | "kept-existing";
@@ -41,7 +42,7 @@ export function existingSearchProvider(
 export async function ensureDuckDuckGoDefault(
   ws: string,
 ): Promise<SearchProviderSetupResult> {
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await loadPlaywright();
   const browser = await chromium.connectOverCDP(ws, { timeout: 10_000 });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
