@@ -86,7 +86,9 @@ test("installed Playwright storage source uses the supported direct export shape
   expect(typeof module.source).toBe("string");
   const commonJs = { exports: {} as Record<string, unknown> };
   Function("module", "exports", module.source)(commonJs, commonJs.exports);
-  expect(typeof commonJs.exports.StorageScript).toBe("function");
+  const StorageScript = commonJs.exports.StorageScript as (() => new (isFirefox: boolean) => unknown);
+  expect(typeof StorageScript).toBe("function");
+  expect(() => new (StorageScript())(false)).not.toThrow();
 });
 
 test("installed worker loads its packaged ESM dependency", async () => {

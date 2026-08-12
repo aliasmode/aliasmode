@@ -198,7 +198,7 @@ async function collectPasscodeStorage(page) {
   return page.evaluate(async ({ rules, source }) => {
     const module = { exports: {} };
     Function("module", "exports", source)(module, module.exports);
-    const script = new module.exports.StorageScript(false);
+    const script = new (module.exports.StorageScript())(false);
     const ruleFor = (name) => rules.find((rule) => rule.databaseName ? name === rule.databaseName : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
     const localStorage = Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) }));
     const indexedDB = [];
@@ -279,7 +279,7 @@ async function restoreSession(browser, context, payload) {
         if (databases.length) {
           const module = { exports: {} };
           Function("module", "exports", source)(module, module.exports);
-          const script = new module.exports.StorageScript(false);
+          const script = new (module.exports.StorageScript())(false);
           for (const database of databases) {
             await new Promise((resolve, reject) => {
               const request = globalThis.indexedDB.deleteDatabase(database.name);
