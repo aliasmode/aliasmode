@@ -51,7 +51,7 @@ export interface DiagnoseReport {
   analysis: { verdicts: string[] };
 }
 
-export interface HealthResult { ok: boolean; version: string; root: string; }
+export interface HealthResult { ok: boolean; version: string; root: string; logDir?: string; }
 
 export interface AppModeConfig {
   version: 1;
@@ -165,12 +165,20 @@ export const restoreCloudSession = (
 export const signOutCloud = () => cloudAuthAction("signout", {});
 export const acceptCloudLegal = () => cloudAuthAction("accept-legal", {});
 
+export async function fetchLogs(): Promise<{ file: string; content: string }> {
+  const path = "/ui/api/logs";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (body.ok !== true) throw new Error(body.error || "logs are unavailable");
+  return { file: String(body.file), content: String(body.content ?? "") };
+}
+
 export async function fetchHealth(): Promise<HealthResult> {
   const path = "/ui/api/health";
   const response = await fetch(path);
   const body = await apiJson(response, path);
   if (body.ok !== true) throw new Error(body.error || "AliasMode health check failed");
-  return { ok: true, version: String(body.version ?? "unknown"), root: String(body.root ?? "") };
+  return { ok: true, version: String(body.version ?? "unknown"), root: String(body.root ?? ""), ...(typeof body.logDir === "string" ? { logDir: body.logDir } : {}) };
 }
 
 /** Never leak an HTML fallback into a raw JSON.parse SyntaxError. A dashboard

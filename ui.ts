@@ -35,6 +35,7 @@ import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
 import { join, resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
 
 /** Readiness metadata supplied by the desktop parent process. */
 export interface UiHealthMetadata {
@@ -246,9 +247,23 @@ export async function handleUiRequest(
   // profile roster it does not touch CDP, the process scanner, SQLite rows, or
   // the remote hub, so an upstream outage cannot masquerade as a failed update.
   if (pathname === "/ui/api/health" && req.method === "GET") {
+    const logDir = options.paths ? join(options.paths.root, "logs") : undefined;
     return Response.json(options.health
-      ? { ok: true, ...options.health }
-      : { ok: true, version: await appVersion(), root: APPLICATION_ROOT });
+      ? { ok: true, ...options.health, ...(logDir ? { logDir } : {}) }
+      : { ok: true, version: await appVersion(), root: APPLICATION_ROOT, ...(logDir ? { logDir } : {}) });
+  }
+
+  if (pathname === "/ui/api/logs" && req.method === "GET") {
+    if (!options.paths) return Response.json({ ok: false, error: "logs are unavailable" }, { status: 503 });
+    try {
+      const dir = join(options.paths.root, "logs");
+      const name = readdirSync(dir).filter((f) => /^aliasmode-\d{4}-\d{2}-\d{2}\.log$/.test(f)).sort().pop();
+      if (!name) return Response.json({ ok: false, error: "no log file yet" });
+      const content = readFileSync(join(dir, name), "utf8");
+      return Response.json({ ok: true, file: name, content: content.slice(-64 * 1024) });
+    } catch {
+      return Response.json({ ok: false, error: "log file could not be read" });
+    }
   }
 
   if (pathname === "/ui/api/app-mode" && req.method === "GET") {

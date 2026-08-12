@@ -1642,7 +1642,7 @@ test("reclaimSurvivors stops and releases when identity verification fails", asy
   const coord = new RemoteCoordinator({
     hub,
     launcher: {
-      async start() { throw new Error("Proxy verification failed before account traffic"); },
+      async start() { throw new Error("Browser identity certification failed"); },
       async stop(id: string) { store.clearLaunch(id); return true; },
       async active() { return true; },
       async navigate() {},
@@ -1659,7 +1659,7 @@ test("reclaimSurvivors stops and releases when identity verification fails", asy
   expect(sessionReads).toBe(0);
   expect(hub.locks.has("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect(logs.some((message) => message.includes("Proxy verification failed"))).toBe(true);
+  expect(logs.some((message) => message.includes("identity certification failed"))).toBe(true);
   store.close();
 });
 

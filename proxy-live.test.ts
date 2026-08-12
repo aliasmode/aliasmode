@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildNewProfile } from "./create.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
-import { BrowserLaunchError, Launcher } from "./launcher.ts";
+import { Launcher } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
-import { readSession, writeSession } from "./session.ts";
-import { verifyBrowserProxy } from "./egress.ts";
+import { applySessionToEndpoint, readSession } from "./session.ts";
+import { diagnoseOverCDP } from "./diagnose.ts";
 import { ProfileStore } from "./store.ts";
 import type { ProxyType } from "./types.ts";
 
@@ -20,6 +20,7 @@ const proxyUser = process.env.ALIASMODE_LIVE_PROXY_USER ?? "";
 const proxyPass = process.env.ALIASMODE_LIVE_PROXY_PASS ?? "";
 const expectedIp = process.env.ALIASMODE_LIVE_PROXY_IP?.trim() ?? "";
 const headless = process.env.ALIASMODE_LIVE_HEADFUL !== "1";
+const proxyStartupUrl = process.env.ALIASMODE_EGRESS_ENDPOINTS?.split(",")[0]?.trim() || "https://api.ipify.org?format=json";
 const configured = Boolean(binary && binarySha256 && proxyHost && proxyPort && proxyUser && proxyPass && expectedIp);
 const liveTest = configured ? test : test.skip;
 const cloudLiveTest = configured ? test : test.skip;
@@ -61,8 +62,11 @@ async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
   });
   try {
     const launched = await launcher.start(profile.id, [], { autoNavigate: false });
-    const verified = await verifyBrowserProxy(launched.ws);
-    return { ip: verified.ip, launcher, store, profileId: profile.id, root };
+    const relayPort = store.getLaunch(profile.id)?.relayPort;
+    expect(relayPort).toBeNumber();
+    const report = await diagnoseOverCDP(launched.ws, profile, { collectLogin: false });
+    if (!report.egress) throw new Error("browser egress diagnostics did not return an IP");
+    return { ip: report.egress.ip, launcher, store, profileId: profile.id, root };
   } catch (error) {
     await launcher.stop(profile.id).catch(() => {});
     store.close();
@@ -99,10 +103,9 @@ async function expectWrongCredentialsToFail(type: "http" | "socks5"): Promise<vo
     cdpReadyTimeoutMs: 45_000,
   });
   try {
-    await expect(launcher.start(profile.id, [], { autoNavigate: false })).rejects.toEqual(
-      new BrowserLaunchError("proxy_egress"),
-    );
-    expect(store.getLaunch(profile.id)).toBeNull();
+    const launched = await launcher.start(profile.id, [], { autoNavigate: false });
+    await expect(diagnoseOverCDP(launched.ws, profile, { timeoutMs: 10_000, collectLogin: false }))
+      .resolves.toMatchObject({ egress: null });
   } finally {
     await launcher.stop(profile.id).catch(() => {});
     store.close();
@@ -177,18 +180,19 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     accountId: () => "live-account",
     deviceId: () => "live-device",
     readSession,
-    writeSession,
+    applySession: applySessionToEndpoint,
     heartbeatMs: 0,
   });
 
   try {
     for (let cycle = 0; cycle < 3; cycle++) {
-      const opened = await coordinator.open(profile.id);
+      const opened = await coordinator.open(profile.id, [proxyStartupUrl]);
       expect(opened.ok).toBe(true);
       if (!opened.ok || !opened.ws) throw new Error(opened.error ?? "live Cloud proxy smoke could not open");
       expect(store.getProfile(profile.id)?.proxy).toEqual(profile.proxy);
       expect(store.getLaunch(profile.id)?.relayPort).toBeNumber();
-      expect((await verifyBrowserProxy(opened.ws)).ip).toBe(expectedIp);
+      const report = await diagnoseOverCDP(opened.ws, profile, { collectLogin: false });
+      expect(report.egress?.ip).toBe(expectedIp);
       expect(await launcher.active(profile.id)).toBe(true);
       expect(await coordinator.close(profile.id)).toBe(true);
       expect(await launcher.active(profile.id)).toBe(false);
@@ -229,10 +233,10 @@ liveTest("real AliasMode launch authenticates and browses through HTTP", async (
   }
 }, 120_000);
 
-liveTest("wrong SOCKS5 credentials fail before AliasMode records a launch", async () => {
+liveTest("wrong SOCKS5 credentials block browser egress", async () => {
   await expectWrongCredentialsToFail("socks5");
 }, 120_000);
 
-liveTest("wrong HTTP credentials fail before AliasMode records a launch", async () => {
+liveTest("wrong HTTP credentials block browser egress", async () => {
   await expectWrongCredentialsToFail("http");
 }, 120_000);

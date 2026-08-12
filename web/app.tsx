@@ -24,6 +24,7 @@ import {
   selectAppMode,
   fetchProfiles,
   fetchHealth,
+  fetchLogs,
   fetchDiagnose,
   openProfile,
   closeProfile,
@@ -172,7 +173,6 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   browser_launch_relay_setup_failed: "Proxy relay setup failed",
   browser_launch_process_spawn_failed: "CloakBrowser process could not start",
   browser_launch_cdp_readiness_failed: "CloakBrowser debugging connection was not ready",
-  browser_launch_proxy_egress_failed: "Proxy connection verification failed",
   session_restore_started: "Session restore started",
   session_restore_completed: "Session restore completed",
   session_restore_unclassified_failed: "Session restore failed before classification",
@@ -188,6 +188,8 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   session_restore_cookie_clear_timeout: "Cookie clear timed out",
   session_restore_cookie_add_failed: "Cookie restore failed",
   session_restore_cookie_add_timeout: "Cookie restore timed out",
+  session_restore_navigation_failed: "Startup navigation failed",
+  session_restore_navigation_timeout: "Startup navigation timed out",
   session_restore_disconnect_failed: "Browser connection cleanup failed",
   session_restore_disconnect_timeout: "Browser connection cleanup timed out",
   open_running: "Cloud profile is running",
@@ -446,6 +448,9 @@ function App() {
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
   const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
+  const [logDir, setLogDir] = useState<string | undefined>(undefined);
+  const [logView, setLogView] = useState<{ file: string; content: string } | null>(null);
+  const [logErr, setLogErr] = useState<string | null>(null);
   const [diag, setDiag] = useState<DiagnoseReport | null>(null);
   const [showDiag, setShowDiag] = useState(false);
   const [q, setQ] = useState("");
@@ -719,7 +724,7 @@ function App() {
   useEffect(() => {
     if (!appMode || !workspaceReady || restartRequired) return;
     load();
-    fetchHealth().then((health) => setAppVersion(health.version)).catch(() => {});
+    fetchHealth().then((health) => { setAppVersion(health.version); setLogDir(health.logDir); }).catch(() => {});
     if (appMode.mode === "local") {
       fetchDiagnose().then(setDiag).catch(() => {});
       fetchExtensions().then(setExtensions).catch(() => {});
@@ -1349,6 +1354,16 @@ function App() {
         </div>
         {!isCloudMode && <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>}
         <button
+          className="extbtn"
+          type="button"
+          title="View detailed logs"
+          onClick={() => {
+            setLogErr(null);
+            setLogView(null);
+            fetchLogs().then(setLogView).catch((e) => setLogErr(e instanceof Error ? e.message : String(e)));
+          }}
+        >📄 Logs</button>
+        <button
           className="account-button"
           type="button"
           aria-label="Open Account and Settings"
@@ -1581,6 +1596,17 @@ function App() {
                     </div>
                   )}
                   <p>Diagnostics contain fixed lifecycle labels only. They exclude profile data and credentials.</p>
+                  <button type="button" className="btn" onClick={() => {
+                    setLogErr(null);
+                    fetchLogs().then(setLogView).catch((e) => setLogErr(e instanceof Error ? e.message : String(e)));
+                  }}>View detailed logs</button>
+                  {logErr && <p className="hint">Logs: {logErr}</p>}
+                  {logView && (
+                    <pre className="hint" style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap", textAlign: "left" }}>
+                      {logView.file + "\n" + logView.content}
+                    </pre>
+                  )}
+                  {logDir && <p className="hint">Detailed log file: {logDir}</p>}
                 </section>
               )}
               <section className="settings-mode">
@@ -1592,6 +1618,23 @@ function App() {
               {modeErr && <div className="modal-err" role="alert">{modeErr}</div>}
             </div>
             <div className="modal-foot"><button className="link" type="button" onClick={() => setShowAccount(false)}>Close</button></div>
+          </div>
+        </div>
+      )}
+
+      {(logView || logErr) && (
+        <div className="modal-backdrop" onClick={() => { setLogView(null); setLogErr(null); }}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">Detailed logs</div>
+            <div className="modal-body">
+              {logErr && <p className="hint">{logErr}</p>}
+              {logView && (
+                <pre className="hint" style={{ maxHeight: 360, overflow: "auto", whiteSpace: "pre-wrap", textAlign: "left", userSelect: "text" }}>
+                  {logView.file + "\n" + logView.content}
+                </pre>
+              )}
+            </div>
+            <div className="modal-foot"><button className="link" type="button" onClick={() => { setLogView(null); setLogErr(null); }}>Close</button></div>
           </div>
         </div>
       )}

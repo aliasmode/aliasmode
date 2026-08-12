@@ -1,16 +1,11 @@
-/** Shared browser/direct egress lookup and validation. */
+/** Shared direct/browser diagnostic egress lookup and validation. */
 
-import { withCdpPage } from "./cdp.ts";
 import { canonicalIp } from "./ip.ts";
 
 export const DEFAULT_EGRESS_ENDPOINTS = [
   "https://ipinfo.io/json",
   "https://api.ipify.org?format=json",
 ] as const;
-
-// Playwright force-terminates a stalled CDP transport after five seconds.
-// The mandatory proxy probe must wait beyond that boundary before handoff.
-const PROXY_PROBE_CLEANUP_TIMEOUT_MS = 6_000;
 
 export interface EgressInfo {
   ip: string;
@@ -23,11 +18,7 @@ export interface EgressInfo {
 export interface EgressLookupOptions {
   endpoints?: readonly string[];
   timeoutMs?: number;
-  /** Injectable CDP connector for deterministic lease-order tests. */
-  connect?: (ws: string, options: { timeout: number }) => Promise<any>;
 }
-
-export type VerifiedBrowserAction = (browser: any, egress: EgressInfo) => Promise<void>;
 
 /**
  * Resolve the lookup list. Operators whose proxy pools block the defaults may
@@ -78,23 +69,6 @@ export function parseEgressResponse(body: string): EgressInfo | null {
   return ip ? { ip } : null;
 }
 
-/** Fetch egress through an already-connected Playwright page. */
-export async function fetchPageEgress(page: any, opts: EgressLookupOptions = {}): Promise<EgressInfo | null> {
-  const endpoints = opts.endpoints ? [...opts.endpoints] : resolveEgressEndpoints();
-  const timeoutMs = opts.timeoutMs ?? 15_000;
-  for (const endpoint of endpoints) {
-    try {
-      const response = await page.goto(endpoint, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-      if (!response?.ok()) continue;
-      const info = parseEgressResponse(await page.locator("body").innerText({ timeout: Math.min(timeoutMs, 5_000) }));
-      if (info) return info;
-    } catch {
-      // Try the next independent endpoint.
-    }
-  }
-  return null;
-}
-
 /** Fetch this machine's direct egress using the same endpoints/parser. */
 export async function fetchDirectEgress(
   opts: EgressLookupOptions = {},
@@ -113,52 +87,4 @@ export async function fetchDirectEgress(
     }
   }
   return null;
-}
-
-/** Prove that the configured browser proxy can reach public HTTPS before account traffic. */
-export async function verifyBrowserProxy(
-  ws: string,
-  opts: EgressLookupOptions = {},
-  afterVerified?: VerifiedBrowserAction,
-): Promise<EgressInfo> {
-  const endpoints = opts.endpoints ? [...opts.endpoints] : resolveEgressEndpoints();
-  for (const endpoint of endpoints) {
-    if (new URL(endpoint).protocol !== "https:") {
-      throw new Error(`proxy verification endpoint must use HTTPS: ${endpoint}`);
-    }
-  }
-  let actionFailed = false;
-  let actionError: unknown;
-  try {
-    const egress = await withCdpPage(
-      ws,
-      async (page, browser, lease) => {
-        const result = await fetchPageEgress(page, { ...opts, endpoints });
-        if (!result) throw new Error("no egress endpoint was reachable");
-        await lease.closeTemporaryPage();
-        if (afterVerified) {
-          try {
-            await afterVerified(browser, result);
-          } catch (error) {
-            actionFailed = true;
-            actionError = error;
-            throw error;
-          }
-        }
-        return result;
-      },
-      {
-        timeoutMs: opts.timeoutMs ?? 15_000,
-        cleanupTimeoutMs: PROXY_PROBE_CLEANUP_TIMEOUT_MS,
-        temporaryPage: true,
-        requireConfirmedCleanup: true,
-        connect: opts.connect,
-      },
-    );
-    return egress;
-  } catch (error) {
-    if (actionFailed) throw actionError;
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Proxy verification failed before account traffic: ${message}`, { cause: error });
-  }
 }

@@ -3,7 +3,6 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSyn
 import { join, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import net from "node:net";
 import { ProfileStore } from "./store.ts";
 import {
   BrowserLaunchError,
@@ -29,20 +28,17 @@ import {
   type SpawnFn,
   type FetchFn,
   type SearchProviderEnsurer,
-  type ProxyVerifier,
   type HostProcessSnapshot,
 } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { SessionRestoreError } from "./session.ts";
 
-/** Unit tests use fake CDP websockets; production verification is covered by injected verifier tests and proxy-live.test.ts. */
+/** Unit tests use fake executables, hosts, and CDP fleets. */
 class Launcher extends ProductionLauncher {
   constructor(opts: ConstructorParameters<typeof ProductionLauncher>[0]) {
     super({
-      // These tests use a fake executable, host and CDP fleet. Production
-      // policy is exercised explicitly in dedicated gate tests below.
+      // Production policy is exercised explicitly in dedicated gate tests below.
       unsafeDisableIdentityGates: true,
-      verifyProxy: async () => ({ ip: "203.0.113.9" }),
       ...opts,
     });
   }
@@ -115,7 +111,6 @@ function newLauncher(
   spawnedArgs: string[][],
   killedPids?: number[],
   ensureSearchProvider?: SearchProviderEnsurer,
-  verifyProxy?: ProxyVerifier | false,
 ) {
   return new Launcher({
     store,
@@ -128,7 +123,6 @@ function newLauncher(
     },
     fetch: f.fetchFn,
     ensureSearchProvider,
-    ...(verifyProxy !== undefined ? { verifyProxy } : {}),
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     // Unit tests must never invoke the real OS-wide process scan (seconds per launch,
@@ -351,7 +345,7 @@ test("a restart retires a proxied survivor launched with the old WebRTC persona 
   store.close();
 });
 
-test("after a restart, a surviving SOCKS5 browser is verified once before reuse", async () => {
+test("after a restart, a surviving SOCKS5 browser rebinds its relay before reuse", async () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   store.upsertProfile({
@@ -359,24 +353,15 @@ test("after a restart, a surviving SOCKS5 browser is verified once before reuse"
     proxy: { type: "socks5", host: "proxy.example", port: "1080", user: "u", pass: "p" },
   });
   const f = fleet();
-  let firstRunChecks = 0;
-  const launcherA = newLauncher(store, f, [], undefined, undefined, async () => {
-    firstRunChecks++;
-    return { ip: "203.0.113.9" };
-  });
+  const launcherA = newLauncher(store, f, []);
   await launcherA.start("k1d0cd11");
   (launcherA as any).closeRelay("k1d0cd11");
 
-  let restartedChecks = 0;
-  const launcherB = newLauncher(store, f, [], undefined, undefined, async () => {
-    restartedChecks++;
-    return { ip: "203.0.113.9" };
-  });
+  const launcherB = newLauncher(store, f, []);
   await launcherB.start("k1d0cd11");
   await launcherB.start("k1d0cd11");
 
-  expect(firstRunChecks).toBe(1);
-  expect(restartedChecks).toBe(1);
+  expect(store.getLaunch("k1d0cd11")?.relayPort).toBeNumber();
   await launcherB.stop("k1d0cd11");
   store.close();
 });
@@ -393,16 +378,11 @@ test("certifiedActive verifies a survivor once and stops it when the stored time
   const priorLauncher = newLauncher(store, f, []);
   await priorLauncher.start("k1d0cd11");
   (priorLauncher as any).closeRelay("k1d0cd11");
-  let verifications = 0;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
     spawn: () => { throw new Error("must not spawn"); },
     fetch: f.fetchFn,
-    verifyProxy: async () => {
-      verifications++;
-      return { ip: "203.0.113.9" };
-    },
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     browserClose: async () => false,
@@ -411,7 +391,6 @@ test("certifiedActive verifies a survivor once and stops it when the stored time
 
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
-  expect(verifications).toBe(1);
 
   const edited = store.getProfile("k1d0cd11")!;
   store.upsertProfile({ ...edited, timezone: "Europe/London" });
@@ -959,7 +938,7 @@ test("buildArgs rejects identity, proxy, storage, extension, mode, and WebRTC ov
   store.close();
 });
 
-test("authenticated SOCKS5 uses the compatibility relay and is verified before browser setup", async () => {
+test("authenticated SOCKS5 uses the compatibility relay before browser setup", async () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   store.upsertProfile({
@@ -969,10 +948,6 @@ test("authenticated SOCKS5 uses the compatibility relay and is verified before b
   const f = fleet();
   const spawnedArgs: string[][] = [];
   const events: string[] = [];
-  const verifyProxy: ProxyVerifier = async () => {
-    events.push("verifyProxy");
-    return { ip: "203.0.113.9" };
-  };
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
@@ -980,7 +955,6 @@ test("authenticated SOCKS5 uses the compatibility relay and is verified before b
     portProbe: () => true,
     spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
     fetch: f.fetchFn,
-    verifyProxy,
     ensureSearchProvider: async () => {
       events.push("ensureSearchProvider");
       return { status: "configured", engine: "DuckDuckGo" };
@@ -999,12 +973,12 @@ test("authenticated SOCKS5 uses the compatibility relay and is verified before b
 
   expect(spawnedArgs[0]!.some((arg) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(arg))).toBe(true);
   expect(spawnedArgs[0]!.some((arg) => arg.includes("u:p%40ss"))).toBe(false);
-  expect(events).toEqual(["verifyProxy", "ensureSearchProvider"]);
+  expect(events).toEqual(["ensureSearchProvider"]);
   await launcher.stop("k1d0cd11");
   store.close();
 });
 
-test("authenticated HTTP relay is verified before browser setup", async () => {
+test("authenticated HTTP uses the compatibility relay before browser setup", async () => {
   const store = seeded();
   const f = fleet();
   const events: string[] = [];
@@ -1015,13 +989,12 @@ test("authenticated HTTP relay is verified before browser setup", async () => {
     spawnedArgs,
     undefined,
     async () => { events.push("ensureSearchProvider"); return { status: "configured", engine: "DuckDuckGo" }; },
-    async () => { events.push("verifyProxy"); return { ip: "203.0.113.9" }; },
   );
 
   await launcher.start("k1d0cd11");
 
   expect(spawnedArgs[0]!.some((arg) => /^--proxy-server=http:\/\/127\.0\.0\.1:/.test(arg))).toBe(true);
-  expect(events).toEqual(["verifyProxy", "ensureSearchProvider"]);
+  expect(events).toEqual(["ensureSearchProvider"]);
   await launcher.stop("k1d0cd11");
   store.close();
 });
@@ -1030,7 +1003,6 @@ test("proxy relay failures do not expose upstream or target details through laun
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   const secretHost = "secret-proxy-host.invalid";
-  const secretTarget = "secret-target.invalid:443";
   const secretUser = "secret-relay-user";
   const secretPass = "secret-relay-pass";
   store.upsertProfile({
@@ -1047,27 +1019,6 @@ test("proxy relay failures do not expose upstream or target details through laun
     portProbe: () => true,
     spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
     fetch: f.fetchFn,
-    verifyProxy: async () => {
-      const relayArg = spawnedArgs[0]?.find((arg) => arg.startsWith("--proxy-server=http://127.0.0.1:"));
-      const relayPort = Number(relayArg?.split(":").at(-1));
-      if (!Number.isInteger(relayPort)) throw new Error("relay port was not passed to the browser");
-      await new Promise<void>((resolve, reject) => {
-        const socket = net.connect({ host: "127.0.0.1", port: relayPort }, () => {
-          socket.write(`CONNECT ${secretTarget} HTTP/1.1\r\nHost: ${secretTarget}\r\n\r\n`);
-        });
-        const timer = setTimeout(() => {
-          socket.destroy();
-          reject(new Error("relay failure did not close the client"));
-        }, 5_000);
-        const finish = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        socket.once("close", finish);
-        socket.once("error", finish);
-      });
-      return { ip: "203.0.113.9" };
-    },
     ensureSearchProvider: async () => ({ status: "configured", engine: "DuckDuckGo" }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
@@ -1083,237 +1034,14 @@ test("proxy relay failures do not expose upstream or target details through laun
   await launcher.start("k1d0cd11");
 
   const output = logs.join("\n");
-  for (const secret of [secretHost, secretTarget, secretUser, secretPass]) {
+  for (const secret of [secretHost, secretUser, secretPass]) {
     expect(output).not.toContain(secret);
   }
   await launcher.stop("k1d0cd11");
   store.close();
 });
 
-test("failed authenticated HTTP verification aborts before setup and tears down the browser", async () => {
-  const store = seeded();
-  const f = fleet();
-  const events: string[] = [];
-  const launcher = newLauncher(
-    store,
-    f,
-    [],
-    undefined,
-    async () => { events.push("ensureSearchProvider"); return { status: "configured", engine: "DuckDuckGo" }; },
-    async () => {
-      events.push("verifyProxy");
-      throw new Error("Proxy verification failed before account traffic: upstream rejected credentials");
-    },
-  );
-
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
-    new BrowserLaunchError("proxy_egress"),
-  );
-  expect(events).toEqual(["verifyProxy"]);
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
-  store.close();
-});
-
-test("failed SOCKS5 verification aborts before account setup and tears down the browser", async () => {
-  const store = seeded();
-  const profile = store.getProfile("k1d0cd11")!;
-  store.upsertProfile({
-    ...profile,
-    proxy: { type: "socks5", host: "proxy.example", port: "1080", user: "u", pass: "wrong" },
-  });
-  const f = fleet();
-  const events: string[] = [];
-  const launcher = new Launcher({
-    store,
-    binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
-    portProbe: () => true,
-    spawn: f.spawn,
-    fetch: f.fetchFn,
-    verifyProxy: async () => {
-      events.push("verifyProxy");
-      throw new Error("SOCKS proxy verification failed before account traffic");
-    },
-    ensureSearchProvider: async () => {
-      events.push("ensureSearchProvider");
-      return { status: "configured", engine: "DuckDuckGo" };
-    },
-    ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
-    navigate: async () => { events.push("navigate"); },
-    labelWindow: async () => { events.push("labelWindow"); },
-    isPidAlive: f.isPidAlive,
-    findOwnedBrowserPids: f.findOwnedBrowserPids,
-    killPid: async (pid) => f.killPid(pid),
-    browserClose: async () => false,
-    cdpReadyTimeoutMs: 1000,
-  });
-
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
-    new BrowserLaunchError("proxy_egress"),
-  );
-  expect(events).toEqual(["verifyProxy"]);
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
-  store.close();
-});
-
-test("proxied launch restores inside the verified CDP lease before later browser setup", async () => {
-  const store = seeded();
-  const f = fleet();
-  const events: string[] = [];
-  const verifiedBrowser = { id: "verified-browser" };
-  const launcher = newLauncher(
-    store,
-    f,
-    [],
-    undefined,
-    async () => {
-      events.push("search");
-      return { status: "configured", engine: "DuckDuckGo" };
-    },
-    async (_ws, afterVerified) => {
-      events.push("egress");
-      await afterVerified?.(verifiedBrowser, { ip: "203.0.113.9" });
-      events.push("detach");
-      return { ip: "203.0.113.9" };
-    },
-  );
-
-  const result = await launcher.start("k1d0cd11", [], {
-    restoreSession: async (browser) => {
-      expect(browser).toBe(verifiedBrowser);
-      events.push("restore");
-      return true;
-    },
-  });
-
-  expect(result.sessionRestored).toBe(true);
-  expect(events).toEqual(["egress", "restore", "detach", "search"]);
-  await launcher.stop("k1d0cd11");
-  store.close();
-});
-
-test("proxied restore failure rolls back before later browser setup", async () => {
-  const store = seeded();
-  const f = fleet();
-  const events: string[] = [];
-  const restoreError = new SessionRestoreError("cookie_clear", "failed");
-  const launcher = newLauncher(
-    store,
-    f,
-    [],
-    undefined,
-    async () => {
-      events.push("search");
-      return { status: "configured", engine: "DuckDuckGo" };
-    },
-    async (_ws, afterVerified) => {
-      events.push("egress");
-      await afterVerified?.({}, { ip: "203.0.113.9" });
-      events.push("detach");
-      return { ip: "203.0.113.9" };
-    },
-  );
-
-  await expect(launcher.start("k1d0cd11", [], {
-    restoreSession: async () => {
-      events.push("restore");
-      throw restoreError;
-    },
-  })).rejects.toBe(restoreError);
-
-  expect(events).toEqual(["egress", "restore"]);
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
-  store.close();
-});
-
-test("proxied launch waits for session work even when verifier does not", async () => {
-  const store = seeded();
-  const f = fleet();
-  const events: string[] = [];
-  const restoreError = new SessionRestoreError("cookie_add", "failed");
-  let markRestoreStarted!: () => void;
-  const restoreStarted = new Promise<void>((resolve) => { markRestoreStarted = resolve; });
-  let releaseRestore!: () => void;
-  const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
-  const launcher = newLauncher(
-    store,
-    f,
-    [],
-    undefined,
-    async () => {
-      events.push("search");
-      return { status: "configured", engine: "DuckDuckGo" };
-    },
-    async (_ws, afterVerified) => {
-      events.push("egress");
-      void afterVerified?.({}, { ip: "203.0.113.9" });
-      events.push("verifier-return");
-      return { ip: "203.0.113.9" };
-    },
-  );
-
-  const starting = launcher.start("k1d0cd11", [], {
-    restoreSession: async () => {
-      events.push("restore");
-      markRestoreStarted();
-      await restoreGate;
-      throw restoreError;
-    },
-  });
-  let settled = false;
-  void starting.then(
-    () => { settled = true; },
-    () => { settled = true; },
-  );
-
-  await restoreStarted;
-  try {
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    expect(events).toEqual(["egress", "restore", "verifier-return"]);
-    expect(store.getLaunch("k1d0cd11")).not.toBeNull();
-    expect([...f.aliveByPid.values()].some(Boolean)).toBe(true);
-  } finally {
-    releaseRestore();
-  }
-
-  await expect(starting).rejects.toBe(restoreError);
-  expect(events).toEqual(["egress", "restore", "verifier-return"]);
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
-  store.close();
-}, 15_000);
-
-test("proxied launch fails closed when its verifier ignores requested session work", async () => {
-  const store = seeded();
-  const f = fleet();
-  let restoreCalled = false;
-  const launcher = newLauncher(
-    store,
-    f,
-    [],
-    undefined,
-    undefined,
-    async () => ({ ip: "203.0.113.9" }),
-  );
-
-  await expect(launcher.start("k1d0cd11", [], {
-    restoreSession: async () => {
-      restoreCalled = true;
-      return true;
-    },
-  })).rejects.toEqual(new BrowserLaunchError("proxy_egress"));
-
-  expect(restoreCalled).toBe(false);
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect([...f.aliveByPid.values()].some(Boolean)).toBe(false);
-  store.close();
-});
-
-test("proxied launch preserves stored timezone and verifies egress before session or navigation", async () => {
+test("proxied launch preserves stored timezone and routes through the relay", async () => {
   const store = seeded();
   const original = store.getProfile("k1d0cd11")!;
   store.upsertProfile({
@@ -1334,10 +1062,6 @@ test("proxied launch preserves stored timezone and verifies egress before sessio
     portProbe: () => true,
     spawn: (binary, args) => { events.push("spawn"); spawnedArgs.push(args); return f.spawn(binary, args); },
     fetch: f.fetchFn,
-    verifyProxy: async () => {
-      events.push("verify");
-      return { ip: "203.0.113.9" };
-    },
     ensureSearchProvider: async () => {
       events.push("search");
       return { status: "configured", engine: "DuckDuckGo" };
@@ -1353,7 +1077,7 @@ test("proxied launch preserves stored timezone and verifies egress before sessio
   });
 
   await launcher.start("k1d0cd11", ["https://x.com/home"]);
-  expect(events).toEqual(["spawn", "verify", "search", "cookies", "navigate"]);
+  expect(events).toEqual(["spawn", "search", "cookies", "navigate"]);
   expect(spawnedArgs[0]!.some((arg) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(arg))).toBe(true);
   expect(spawnedArgs[0]!.some((arg) => arg.includes("u:p%40ss"))).toBe(false);
   expect(spawnedArgs[0]!.some((arg) => arg.startsWith("--fingerprint-webrtc-ip="))).toBe(false);

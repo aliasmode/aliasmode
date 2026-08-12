@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import {
-  applySessionToBrowser,
+  applySessionToEndpoint,
   bundleHasRestorableLogin,
   bundleLoggedInPlatforms,
   bundleTelegramClient,
@@ -256,7 +256,7 @@ test("writeSessionToBrowser bounds a hung origin restore and disconnects", async
   expect(closes).toBe(1);
 });
 
-test("applySessionToBrowser restores without detaching its borrowed CDP lease", async () => {
+test("writeSessionToBrowser restores without detaching its borrowed CDP lease", async () => {
   let closes = 0;
   let cleared = false;
   let injected: any[] = [];
@@ -269,9 +269,9 @@ test("applySessionToBrowser restores without detaching its borrowed CDP lease", 
     async close() { closes++; },
   };
 
-  await applySessionToBrowser(browser, JSON.stringify({
+  await writeSessionToBrowser(browser, normalizeBundle({
     cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }],
-  }));
+  }), { disconnect: false });
 
   expect(cleared).toBe(true);
   expect(injected.map((cookie) => cookie.name)).toEqual(["auth_token"]);
@@ -295,9 +295,9 @@ test("timed-out borrowed session work cannot continue after its owner detaches",
     },
   };
 
-  await expectRestoreError(applySessionToBrowser(browser, JSON.stringify({
+  await expectRestoreError(writeSessionToBrowser(browser, normalizeBundle({
     cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }],
-  }), { writeTimeoutMs: 5 }), "cookie_clear", "timeout");
+  }), { writeTimeoutMs: 5, disconnect: false }), "cookie_clear", "timeout");
   expect(closes).toBe(0);
 
   await browser.close();
@@ -419,7 +419,9 @@ test("writeSession waits for the persistent context without creating an incognit
     async addCookies() {},
   };
 
-  await writeSession("ws://verified-browser", JSON.stringify({ cookies: [] }), {
+  await writeSession("ws://verified-browser", JSON.stringify({
+    cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }],
+  }), {
     connectTimeoutMs: 100,
     contextRetryMs: 1,
     sleep: async () => {},
@@ -451,7 +453,7 @@ test("writeSession waits for the persistent context without creating an incognit
 test("writeSession reports fixed connect and context readiness timeouts", async () => {
   const connectError = await expectRestoreError(writeSession(
     "ws://verified-browser",
-    JSON.stringify({ cookies: [] }),
+    JSON.stringify({ cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }] }),
     {
       connectTimeoutMs: 5,
       contextRetryMs: 1,
@@ -463,7 +465,7 @@ test("writeSession reports fixed connect and context readiness timeouts", async 
   let closes = 0;
   const contextError = await expectRestoreError(writeSession(
     "ws://verified-browser",
-    JSON.stringify({ cookies: [] }),
+    JSON.stringify({ cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }] }),
     {
       connectTimeoutMs: 5,
       contextRetryMs: 1,
@@ -1010,4 +1012,55 @@ test("legacy tweb passcode presence triggers capture even while localStorage aut
 
   expect(evaluations).toBe(3);
   expect(bundle.origins?.[0]?.indexedDB).toEqual([legacyDb]);
+});
+
+test("writeSession skips the browser attach entirely for an empty bundle", async () => {
+  let connects = 0;
+  await writeSession("ws://verified-browser", JSON.stringify({ cookies: [], origins: [] }), {
+    async connect() { connects++; throw new Error("must not connect for an empty bundle"); },
+  });
+  expect(connects).toBe(0);
+});
+
+test("applySessionToEndpoint restores and navigates over one attach, then detaches once", async () => {
+  const events: string[] = [];
+  const context = {
+    pages: () => [{
+      async goto(url: string) { events.push(`goto:${url}`); },
+    }],
+    async newPage() { events.push("newPage"); return { async goto(url: string) { events.push(`goto:${url}`); } }; },
+    async clearCookies() { events.push("clear"); },
+    async addCookies() { events.push("add"); },
+  };
+  await applySessionToEndpoint(
+    "ws://verified-browser",
+    JSON.stringify({ cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }] }),
+    ["https://x.com/home"],
+    {
+      sleep: async () => {},
+      async connect() {
+        events.push("connect");
+        return {
+          contexts: () => [context],
+          async close() { events.push("close"); },
+        };
+      },
+    },
+  );
+  expect(events).toEqual(["connect", "clear", "add", "goto:https://x.com/home", "close"]);
+});
+
+test("applySessionToEndpoint with an empty bundle navigates without cookie work", async () => {
+  const events: string[] = [];
+  const context = {
+    pages: () => [{ async goto(url: string) { events.push(`goto:${url}`); } }],
+  };
+  await applySessionToEndpoint("ws://verified-browser", JSON.stringify({ cookies: [], origins: [] }), ["https://x.com/home"], {
+    sleep: async () => {},
+    async connect() {
+      events.push("connect");
+      return { contexts: () => [context], async close() { events.push("close"); } };
+    },
+  });
+  expect(events).toEqual(["connect", "goto:https://x.com/home", "close"]);
 });

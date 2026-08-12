@@ -18,7 +18,7 @@
  */
 
 import type { Profile } from "./types.ts";
-import { fetchDirectEgress, fetchPageEgress, type EgressInfo } from "./egress.ts";
+import { fetchDirectEgress, parseEgressResponse, resolveEgressEndpoints, type EgressInfo } from "./egress.ts";
 import { withCdpPage } from "./cdp.ts";
 
 // Preserve diagnose.ts's existing public type surface while sharing the parser.
@@ -352,6 +352,21 @@ async function webrtcProbe(): Promise<string[]> {
 // CDP collection shell (untested; mirrors launcher's default-impl pattern).
 // ---------------------------------------------------------------------------
 
+/** Egress via the diagnostic page itself (interactive tooling only; the launch path never does this). */
+async function diagnosePageEgress(page: any, timeoutMs: number): Promise<EgressInfo | null> {
+  for (const endpoint of resolveEgressEndpoints()) {
+    try {
+      const response = await page.goto(endpoint, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      if (!response?.ok()) continue;
+      const info = parseEgressResponse(await page.locator("body").innerText({ timeout: Math.min(timeoutMs, 5_000) }));
+      if (info) return info;
+    } catch {
+      // next endpoint
+    }
+  }
+  return null;
+}
+
 export interface DiagnoseProfileOptions {
   timeoutMs?: number;
   collectLogin?: boolean;
@@ -368,7 +383,7 @@ export async function diagnoseOverCDP(
     await page.goto("https://example.com", { waitUntil: "domcontentloaded", timeout: timeoutMs }).catch(() => {});
     const fingerprint = await page.evaluate(fingerprintProbe).catch((e: unknown) => ({ errors: { probe: String(e) } }) as FingerprintSample);
     const webrtcIps = await page.evaluate(webrtcProbe).catch(() => [] as string[]);
-    const egress = await fetchPageEgress(page, { timeoutMs });
+    const egress = await diagnosePageEgress(page, timeoutMs);
 
     let login: LoginInfo | null = null;
     if (opts.collectLogin !== false) {
