@@ -47,10 +47,36 @@ test("dashboard lists the supported profile platforms", () => {
   }
 });
 
-test("Cloud rows expose Edit only while closed and unlocked", () => {
-  expect(app).toContain("(!isCloudMode || (!p.running && !p.lockedBy))");
+test("Cloud rows expose Edit and Convert device only with effective Edit permission", () => {
+  expect(app).toContain('(p.permission === "edit" && !p.running && !p.lockedBy)');
+  expect(app).toContain('(!isCloudMode || p.permission === "edit") ? <button className="btn convert"');
   expect(app).toContain("setEditExpectedVersion(p.expectedVersion ?? null)");
   expect(app).toContain("isCloudMode ? editExpectedVersion ?? undefined : undefined");
   expect(app).toContain("!isCloudMode && editTotp");
   expect(app).toContain("!isCloudMode && editMobile");
+});
+
+test("Cloud profile pickers use only editable folders", () => {
+  expect(app).toContain('<GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />');
+  expect(app).toContain('<GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />');
+  expect(app).toContain('group !== "all" && (!isCloudMode || editableGroups.includes(group))');
+  expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />');
+});
+
+test("Cloud workspace loading does not depend on Account Settings", () => {
+  expect(app).toContain("if (!isCloudMode || !workspaceReady || restartRequired) return;\n    void loadTeam();");
+  expect(app).not.toContain("void loadCloudEvents();\n    void loadTeam();");
+  expect(app).toContain("await Promise.all([load(), loadTeam()]);");
+});
+
+test("Admin invitations are read-only for Admin viewers", () => {
+  expect(app).toContain('cloudAuth?.workspace?.role === "owner" || invite.role === "member"');
+  expect(app).toContain("Resend");
+  expect(app).toContain("Revoke");
+});
+
+test("Cloud restores workspace access and hides unsupported Delete actions", () => {
+  expect(app).toContain("workspace: result.workspace");
+  expect(app).toContain('{!isCloudMode && <button title="Delete group"');
+  expect(app).toContain('{!isCloudMode && <button className="abtn danger"');
 });

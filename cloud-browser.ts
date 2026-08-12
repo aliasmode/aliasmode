@@ -49,6 +49,8 @@ export interface CloudBrowserProfile {
   debugPort?: number;
   startedAt?: number;
   lockedBy: string | null;
+  permission: "view" | "edit";
+  version: number;
 }
 
 export interface CloudBrowserLifecycle {
@@ -186,6 +188,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
             lockedBy: profile.activeOpens.length > 0
               ? `${profile.activeOpens.length} other session(s)`
               : null,
+            permission: profile.permission,
+            version: profile.version,
           };
         }),
       healthSources: [],
@@ -574,6 +578,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     try {
       await this.options.cloud.heartbeat(open.registrationId);
     } catch (error) {
+      if (error instanceof CloudApiError && error.code === "folder_access_denied") {
+        this.diagnosticEvents.record("access_ended");
+        this.stopHeartbeat(profileId);
+        const stopped = await this.options.launcher.stop(profileId).catch(() => false);
+        if (stopped) context.queue.removeOpen(profileId, context.accountId);
+        this.log(stopped
+          ? `${profileId}: Cloud access ended (${error.code}); browser stopped`
+          : `${profileId}: Cloud access ended (${error.code}); browser was retained`);
+        return;
+      }
       if (error instanceof CloudApiError && TERMINAL_HEARTBEAT_ERRORS.has(error.code)) {
         this.diagnosticEvents.record("access_ended");
         this.stopHeartbeat(profileId);

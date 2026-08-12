@@ -318,7 +318,7 @@ export async function handleUiRequest(
     }
     try {
       const status = await options.cloudConnection.client.status();
-      return Response.json({ ok: true, ...state, legal: status.legal });
+      return Response.json({ ok: true, ...state, workspace: status.workspace, legal: status.legal });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
     }
@@ -338,6 +338,7 @@ export async function handleUiRequest(
         deviceId?: unknown;
         deviceCredential?: unknown;
         queueKey?: unknown;
+        code?: unknown;
       };
       if (pathname === "/ui/api/cloud-auth/signup") {
         if (typeof body.email !== "string" || typeof body.password !== "string") {
@@ -349,6 +350,13 @@ export async function handleUiRequest(
           verificationRequired: result.verificationRequired,
           user: { id: result.user.id, email: result.user.email },
         });
+      }
+      if (pathname === "/ui/api/cloud-auth/resend-signup") {
+        if (typeof body.email !== "string" || !body.email) {
+          return Response.json({ ok: false, error: "email is required" }, { status: 400 });
+        }
+        await options.cloudAuth.resendSignUpConfirmation(body.email);
+        return Response.json({ ok: true });
       }
       if (pathname === "/ui/api/cloud-auth/signin") {
         if (typeof body.email !== "string" || typeof body.password !== "string") {
@@ -384,6 +392,7 @@ export async function handleUiRequest(
             ...(initialized.createdKey ? { queueKey: initialized.createdKey } : {}),
             expiresAt: result.expiresAt,
             legal: bootstrap.legal,
+            workspace: bootstrap.workspace,
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
@@ -427,6 +436,7 @@ export async function handleUiRequest(
             deviceId: status.device.id,
             expiresAt: result.expiresAt,
             legal: status.legal,
+            workspace: status.workspace,
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
@@ -435,6 +445,12 @@ export async function handleUiRequest(
           options.cloudConnection.clearDevice();
           throw error;
         }
+      }
+      if (pathname === "/ui/api/cloud-auth/accept-invitation") {
+        if (!options.cloudConnection || typeof body.code !== "string" || !body.code.trim()) {
+          return Response.json({ ok: false, error: "invitation code is required" }, { status: 400 });
+        }
+        return Response.json(await options.cloudConnection.client.acceptInvitation(body.code.trim()));
       }
       if (pathname === "/ui/api/cloud-auth/accept-legal") {
         if (!options.cloudConnection) {
@@ -466,6 +482,37 @@ export async function handleUiRequest(
     }
   }
 
+  if (pathname === "/ui/api/cloud-workspace" && (req.method === "GET" || req.method === "POST")) {
+    if (!options.cloudConnection) return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+    try {
+      const cloud = options.cloudConnection.client;
+      if (req.method === "GET") {
+        const [status, folders, members] = await Promise.all([
+          cloud.status(), cloud.listFolders(), cloud.listMembers(),
+        ]);
+        const invitations = status.workspace.role === "member"
+          ? { invitations: [] }
+          : await cloud.listInvitations();
+        return Response.json({ ok: true, folders: folders.folders, members: members.members, invitations: invitations.invitations });
+      }
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+      const body = await req.json() as Record<string, unknown>;
+      const action = String(body.action ?? "");
+      if (action === "invite") return Response.json(await cloud.createInvitation(String(body.email ?? ""), body.role === "admin" ? "admin" : "member"));
+      if (action === "create-folder") return Response.json(await cloud.createFolder(String(body.name ?? "")));
+      if (action === "resend") return Response.json(await cloud.resendInvitation(String(body.id ?? "")));
+      if (action === "revoke") return Response.json(await cloud.revokeInvitation(String(body.id ?? "")));
+      if (action === "role") return Response.json(await cloud.changeMemberRole(String(body.accountId ?? ""), body.role === "admin" ? "admin" : "member"));
+      if (action === "remove-member") return Response.json(await cloud.removeMember(String(body.accountId ?? "")));
+      if (action === "grant") return Response.json(await cloud.setFolderGrant(String(body.folderName ?? ""), String(body.accountId ?? ""), body.permission === "edit" ? "edit" : "view"));
+      if (action === "remove-grant") return Response.json(await cloud.removeFolderGrant(String(body.folderName ?? ""), String(body.accountId ?? "")));
+      return Response.json({ ok: false, error: "unknown Cloud workspace action" }, { status: 400 });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+  }
+
   if (options.appConfig?.read().mode === "cloud" && !remote && !options.cloudBrowser) {
     return Response.json(
       { ok: false, error: "AliasMode Cloud authentication is required" },
@@ -475,6 +522,9 @@ export async function handleUiRequest(
 
   const cloudLifecycleRoute =
     (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
+    (pathname === "/ui/api/profiles/move" && req.method === "POST") ||
+    (pathname === "/ui/api/profiles/delete" && req.method === "POST") ||
+    (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache)$/.test(pathname));
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
@@ -554,6 +604,15 @@ export async function handleUiRequest(
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
       const group = typeof body.group === "string" ? body.group.trim() : "";
       if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
+      if (options.cloudBrowser) {
+        const summaries = (await options.cloudConnection!.client.listProfiles()).profiles;
+        for (const id of ids) {
+          const profile = summaries.find((item) => item.id === id);
+          if (!profile) return Response.json({ ok: false, error: `profile ${id} was not found` }, { status: 404 });
+          await options.cloudConnection!.client.moveProfile(id, { destination: group, expectedVersion: profile.version });
+        }
+        return Response.json({ ok: true, moved: ids.length, group });
+      }
       const moved = remote ? await remote.move(ids, group) : store.setGroup(ids, group);
       return Response.json({ ok: true, moved, group });
     } catch (e) {
@@ -566,6 +625,15 @@ export async function handleUiRequest(
       const body = (await req.json()) as { ids?: unknown };
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
       if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
+      if (options.cloudBrowser) {
+        const summaries = (await options.cloudConnection!.client.listProfiles()).profiles;
+        for (const id of ids) {
+          const profile = summaries.find((item) => item.id === id);
+          if (!profile) continue;
+          await options.cloudConnection!.client.trashProfile(id, { expectedVersion: profile.version });
+        }
+        return Response.json({ ok: true, deleted: ids.length, locked: [] });
+      }
       if (remote) {
         const r = await remote.deleteProfiles(ids);
         return Response.json({ ok: true, ...r });
@@ -717,6 +785,10 @@ export async function handleUiRequest(
       const body = (await req.json()) as { from?: unknown; to?: unknown };
       const from = String(body.from ?? "").trim(), to = String(body.to ?? "").trim();
       if (!from || !to) return Response.json({ ok: false, error: "from and to group names required" }, { status: 400 });
+      if (options.cloudBrowser) {
+        const renamed = await options.cloudConnection!.client.renameFolder(from, to);
+        return Response.json({ ok: true, moved: 0, folder: renamed.folder });
+      }
       return Response.json({ ok: true, moved: store.renameGroup(from, to) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });

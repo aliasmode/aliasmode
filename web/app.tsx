@@ -13,14 +13,19 @@ import {
   type AppModeConfig,
   type CloudAuthState,
   type CloudDiagnosticEvent,
+  type CloudTeamState,
+  acceptCloudInvitation,
   acceptCloudLegal,
   cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
   fetchCloudEvents,
+  fetchCloudTeam,
+  cloudWorkspaceAction,
   signInCloud,
   signUpCloud,
   restoreCloudSession,
+  resendCloudSignUp,
   selectAppMode,
   fetchProfiles,
   fetchHealth,
@@ -265,7 +270,7 @@ function PlatformPill({ platform }: { platform: string }) {
  * plus "➕ New group…", which flips to an inline text field so you can create a
  * group on the fly. Consistent with the other modal selects (no native datalist).
  */
-function GroupPicker({ value, onChange, groups }: { value: string; onChange: (v: string) => void; groups: string[] }) {
+function GroupPicker({ value, onChange, groups, allowCreate = true }: { value: string; onChange: (v: string) => void; groups: string[]; allowCreate?: boolean }) {
   const [creating, setCreating] = useState(false);
   if (creating) {
     return (
@@ -285,7 +290,7 @@ function GroupPicker({ value, onChange, groups }: { value: string; onChange: (v:
     >
       <option value="">(ungrouped)</option>
       {groups.map((g) => <option key={g} value={g}>{g}</option>)}
-      <option value="__new__">➕ New group…</option>
+      {allowCreate && <option value="__new__">➕ New group…</option>}
     </select>
   );
 }
@@ -445,6 +450,13 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authErr, setAuthErr] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [confirmationEmail, setConfirmationEmail] = useState("");
+  const [invitationCode, setInvitationCode] = useState("");
+  const [team, setTeam] = useState<CloudTeamState | null>(null);
+  const [teamEmail, setTeamEmail] = useState("");
+  const [teamRole, setTeamRole] = useState<"admin" | "member">("member");
+  const [teamBusy, setTeamBusy] = useState(false);
+  const [teamErr, setTeamErr] = useState<string | null>(null);
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
   const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
@@ -513,6 +525,8 @@ function App() {
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const isCloudMode = appMode?.mode === "cloud";
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
+  const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
+    profiles.some((profile) => profile.permission === "edit") || team?.folders.some((folder) => folder.permission === "edit") === true;
 
   const load = async () => {
     try {
@@ -542,6 +556,22 @@ function App() {
     } finally {
       setCloudEventsBusy(false);
     }
+  };
+
+  const loadTeam = async () => {
+    if (!isCloudMode) return;
+    setTeamBusy(true);
+    setTeamErr(null);
+    try { setTeam(await fetchCloudTeam()); }
+    catch (error) { setTeamErr(error instanceof Error ? error.message : String(error)); }
+    finally { setTeamBusy(false); }
+  };
+
+  const runTeamAction = async (action: string, input: Record<string, string>) => {
+    setTeamBusy(true);
+    setTeamErr(null);
+    try { await cloudWorkspaceAction(action, input); await loadTeam(); }
+    catch (error) { setTeamErr(error instanceof Error ? error.message : String(error)); setTeamBusy(false); }
   };
 
   const openAccountSettings = () => {
@@ -589,6 +619,7 @@ function App() {
         setAuthNotice(result.verificationRequired
           ? "Check your email, verify the account, then sign in."
           : "Account created. You can sign in now.");
+        setConfirmationEmail(result.verificationRequired ? authEmail : "");
         setAuthView("signin");
       } else {
         const stored = await readDesktopCloudCredentials();
@@ -611,11 +642,41 @@ function App() {
           authenticated: true,
           expiresAt: result.expiresAt,
           user: result.user,
+          workspace: result.workspace,
           legal: result.legal,
         });
         setAuthPassword("");
         if (!persisted) setAuthNotice("Signed in for this run; desktop credential storage is unavailable.");
       }
+    } catch (error) {
+      setAuthErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const resendConfirmation = async () => {
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      await resendCloudSignUp(confirmationEmail);
+      setAuthNotice("Confirmation email sent again.");
+    } catch (error) {
+      setAuthErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const acceptInvitation = async () => {
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      await acceptCloudInvitation(invitationCode);
+      setInvitationCode("");
+      setAuthNotice("Invitation accepted.");
+      setCloudAuth(await fetchCloudAuth());
+      await Promise.all([load(), loadTeam()]);
     } catch (error) {
       setAuthErr(error instanceof Error ? error.message : String(error));
     } finally {
@@ -672,6 +733,7 @@ function App() {
             authenticated: true,
             expiresAt: result.expiresAt,
             user: result.user,
+            workspace: result.workspace,
             legal: result.legal,
           });
           setAuthErr(null);
@@ -711,6 +773,7 @@ function App() {
           authenticated: true,
           expiresAt: result.expiresAt,
           user: result.user,
+          workspace: result.workspace,
           legal: result.legal,
         });
       } catch (error) {
@@ -720,6 +783,11 @@ function App() {
     }, delay);
     return () => window.clearTimeout(timer);
   }, [appMode?.mode, restartRequired, cloudAuth?.authenticated, cloudAuth?.expiresAt]);
+
+  useEffect(() => {
+    if (!isCloudMode || !workspaceReady || restartRequired) return;
+    void loadTeam();
+  }, [isCloudMode, restartRequired, workspaceReady]);
 
   useEffect(() => {
     if (!appMode || !workspaceReady || restartRequired) return;
@@ -777,6 +845,11 @@ function App() {
   const runningCount = profiles.filter((p) => p.running).length;
   const selectedMobileCount = profiles.filter((p) => selected.has(p.id) && p.mobilePersona).length;
   const existingGroups = groups.slice(1); // drop the "all" pseudo-group
+  const editableGroups = isCloudMode
+    ? (team?.folders.filter((folder) => folder.permission === "edit" && !folder.archivedAt).map((folder) => folder.name) ??
+      existingGroups.filter((name) => profiles.some((profile) => profile.group === name && profile.permission === "edit")))
+    : existingGroups;
+  const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission !== "view");
   const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
 
   const toggle = (id: string) =>
@@ -801,6 +874,7 @@ function App() {
     if (ids.length === 0 || !group) return;
     setActionErr(null);
     try {
+      if (isCloudMode && newMode) await cloudWorkspaceAction("create-folder", { name: group });
       const r = await moveProfiles(ids, group);
       if (r.ok === false) {
         setActionErr(r.error || "move failed");
@@ -906,7 +980,7 @@ function App() {
   // Open prefilled with the folder you're browsing; close always resets so a
   // cancelled draft never leaks into the next open.
   const openCreate = () => {
-    setForm({ ...BLANK_FORM, group: group !== "all" ? group : "" });
+    setForm({ ...BLANK_FORM, group: group !== "all" && (!isCloudMode || editableGroups.includes(group)) ? group : "" });
     setProxyPaste("");
     setProxyPasteOk(null);
     setCreateErr(null);
@@ -1234,6 +1308,11 @@ function App() {
                   <label>Password<input type="password" autoComplete={authView === "signin" ? "current-password" : "new-password"} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} /></label>
                   {authErr && <div className="mode-error" role="alert">{authErr}</div>}
                   {authNotice && <div className="auth-notice" role="status">{authNotice}</div>}
+                  {confirmationEmail && (
+                    <button type="button" className="mode-secondary" disabled={authBusy} onClick={() => void resendConfirmation()}>
+                      Resend confirmation
+                    </button>
+                  )}
                   <button className="mode-primary" type="submit" disabled={authBusy}>{authBusy ? "Working…" : authView === "signin" ? "Sign in" : "Create account"}</button>
                 </form>
                 <div className="auth-actions">
@@ -1305,7 +1384,7 @@ function App() {
           {appVersion && <span className="appversion">{appVersion}</span>}
         </div>
         <div className="newrow">
-          <button className="newbtn" onClick={openCreate}>+ New Profile</button>
+          <button className="newbtn" disabled={!canEditCloud} onClick={openCreate}>+ New Profile</button>
           {!isCloudMode && <button className="importbtn" title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>}
         </div>
         <div className={`folder${group === "all" ? " active" : ""}`} onClick={() => setGroup("all")}>
@@ -1314,12 +1393,12 @@ function App() {
         <div className="sidesection">
           <button className="sidehead" onClick={() => setGroupsOpen((o) => !o)}>
             <span className={`chev${groupsOpen ? " open" : ""}`}>▸</span>
-            <span>Groups</span>
+            <span>{isCloudMode ? "Folders" : "Groups"}</span>
             <span className="grow" />
             <span className="cnt">{existingGroups.length}</span>
           </button>
           {groupsOpen && <div className="folders">
-          {existingGroups.length === 0 && <div className="folders-empty">No groups yet</div>}
+          {existingGroups.length === 0 && <div className="folders-empty">No {isCloudMode ? "folders" : "groups"} yet</div>}
           {existingGroups.map((g) => (
             <div
               key={g}
@@ -1339,10 +1418,10 @@ function App() {
               ) : (
                 <>
                   <span className="fname">{g}</span>
-                  {!isCloudMode && (
+                  {(!isCloudMode || profiles.some((profile) => profile.group === g && profile.permission === "edit")) && (
                     <span className="gactions">
                       <button title="Rename group" onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>
-                      <button title="Delete group" onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>
+                      {!isCloudMode && <button title="Delete group" onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>}
                     </span>
                   )}
                   <span className="cnt">{countFor(g)}</span>
@@ -1409,6 +1488,7 @@ function App() {
         <span className="count">{selected.size ? `${selected.size} selected` : "No selection"}</span>
         <button className="btn open sm" disabled={!selected.size} onClick={openSelected}>Open</button>
         <button className="btn close sm" disabled={!selected.size} onClick={closeSelected}>Close</button>
+        {(!isCloudMode || selectedEditable) && <>
         {!isCloudMode && <>
         {selectedMobileCount > 0 && <button className="abtn convert" onClick={convertSelectedMobile}>Convert mobile ({selectedMobileCount})</button>}
         <div className="exportwrap">
@@ -1421,6 +1501,7 @@ function App() {
           )}
         </div>
         <button className="abtn" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">Edit from file</button>
+        </>}
         <span className="vsep" />
         <span className="movelbl">Move to</span>
         {newMode ? (
@@ -1432,7 +1513,7 @@ function App() {
             onChange={(e) => (e.target.value === "__new__" ? setNewMode(true) : setMoveTarget(e.target.value))}
           >
             <option value="">choose group…</option>
-            {existingGroups.map((g) => (
+            {editableGroups.map((g) => (
               <option key={g} value={g}>{g}</option>
             ))}
             <option value="__new__">+ new group…</option>
@@ -1444,7 +1525,7 @@ function App() {
         <button className="primary" disabled={!selected.size || (newMode ? !newGroup.trim() : !moveTarget)} onClick={moveSelected}>
           Move
         </button>
-        {extensions.length > 0 && (
+        {!isCloudMode && extensions.length > 0 && (
           <>
             <span className="vsep" />
             <div className="extctl">
@@ -1459,7 +1540,7 @@ function App() {
           </>
         )}
         <span className="spacer" />
-        <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>
+        {!isCloudMode && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}
         </>}
       </div>
 
@@ -1501,7 +1582,7 @@ function App() {
                       {twoFaFlash?.id === p.id ? `✓ ${twoFaFlash.code}` : "2FA"}
                     </button>
                   )}
-                  {(!isCloudMode || (!p.running && !p.lockedBy)) && <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>}
+                  {(!isCloudMode || (p.permission === "edit" && !p.running && !p.lockedBy)) && <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>}
                   {p.running ? (
                     <>
                       {!isCloudMode && <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>⧉</button>}
@@ -1511,7 +1592,7 @@ function App() {
                     p.lockedBy ? (
                       <span className="lockedby" title={`in use by ${p.lockedBy}; close it there before conversion`}>🔒 {p.lockedBy} · mobile persona</span>
                     ) : (
-                      <button className="btn convert" disabled={busy[p.id]} title="Convert this unsupported mobile persona to a coherent desktop device" onClick={() => openEdit(p.id)}>Convert device</button>
+                      (!isCloudMode || p.permission === "edit") ? <button className="btn convert" disabled={busy[p.id]} title="Convert this unsupported mobile persona to a coherent desktop device" onClick={() => openEdit(p.id)}>Convert device</button> : null
                     )
                   ) : p.lockedBy ? (
                     <span className="lockedby" title={`session writer: ${p.lockedBy}; this browser will not save its session back`}>
@@ -1570,8 +1651,62 @@ function App() {
                 <div className="settings-row"><span>App version</span><strong className="mono">{appVersion || "—"}</strong></div>
               </section>
               <section className="settings-section">
-                <h2>Workspace</h2>
-                <p>{isCloudMode ? "Your Cloud workspace and member controls will live here." : "Local mode has no Cloud workspace."}</p>
+                <h2>{isCloudMode ? "Team" : "Workspace"}</h2>
+                {isCloudMode ? (
+                  <>
+                    <div className="settings-row"><span>Workspace</span><strong>{cloudAuth?.workspace?.name ?? "Cloud workspace"}</strong></div>
+                    <div className="settings-row"><span>Role</span><strong>{cloudAuth?.workspace?.role ?? "member"}</strong></div>
+                    {teamBusy && !team && <p className="hint">Loading team…</p>}
+                    {team?.folders.map((folder) => (
+                      <div className="settings-row" key={folder.name}>
+                        <span>{folder.name}</span><strong>{folder.permission}</strong>
+                      </div>
+                    ))}
+                    {team?.members.map((member) => (
+                      <div className="team-member" key={member.accountId}>
+                        <div className="settings-row">
+                          <span>{member.email}<small> · {member.grants.map((grant) => `${grant.folderName}: ${grant.permission}`).join(", ") || "no grants"}</small></span>
+                          {member.role === "owner" || cloudAuth?.workspace?.role !== "owner" ? <strong>{member.role}</strong> : (
+                            <select value={member.role} disabled={teamBusy} onChange={(event) => void runTeamAction("role", { accountId: member.accountId, role: event.target.value })}>
+                              <option value="member">member</option><option value="admin">admin</option>
+                            </select>
+                          )}
+                        </div>
+                        {member.role === "member" && (cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin") && (
+                          <div className="team-grants">
+                            {team.folders.filter((folder) => !folder.archivedAt).map((folder) => {
+                              const permission = member.grants.find((grant) => grant.folderName === folder.name)?.permission ?? "";
+                              return <label key={folder.name}>{folder.name}<select value={permission} disabled={teamBusy} onChange={(event) => void runTeamAction(event.target.value ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission: event.target.value })}><option value="">None</option><option value="view">View</option><option value="edit">Edit</option></select></label>;
+                            })}
+                            <button type="button" disabled={teamBusy} onClick={() => void runTeamAction("remove-member", { accountId: member.accountId })}>Remove</button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {(cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin") && (
+                      <form className="team-code" onSubmit={(event) => { event.preventDefault(); void runTeamAction("invite", { email: teamEmail, role: teamRole }); setTeamEmail(""); }}>
+                        <input type="email" aria-label="Invite email" placeholder="Invite by email" value={teamEmail} onChange={(event) => setTeamEmail(event.target.value)} />
+                        {cloudAuth?.workspace?.role === "owner" && <select aria-label="Invitation role" value={teamRole} onChange={(event) => setTeamRole(event.target.value as "admin" | "member")}><option value="member">Member</option><option value="admin">Admin</option></select>}
+                        <button type="submit" disabled={teamBusy || !teamEmail.trim()}>Invite</button>
+                      </form>
+                    )}
+                    {team?.invitations.filter((invite) => !invite.acceptedAt && !invite.revokedAt).map((invite) => (
+                      <div className="settings-row" key={invite.id}>
+                        <span>{invite.email}<small> · pending {invite.role}</small></span>
+                        {(cloudAuth?.workspace?.role === "owner" || invite.role === "member") && (
+                          <span><button type="button" disabled={teamBusy} onClick={() => void runTeamAction("resend", { id: invite.id })}>Resend</button> <button type="button" disabled={teamBusy} onClick={() => void runTeamAction("revoke", { id: invite.id })}>Revoke</button></span>
+                        )}
+                      </div>
+                    ))}
+                    <form className="team-code" onSubmit={(event) => { event.preventDefault(); void acceptInvitation(); }}>
+                      <input aria-label="Invitation code" placeholder="Paste invitation code" value={invitationCode} onChange={(event) => setInvitationCode(event.target.value)} />
+                      <button type="submit" disabled={authBusy || !invitationCode.trim()}>Accept</button>
+                    </form>
+                    {teamErr && <p className="modal-err" role="alert">{teamErr}</p>}
+                    {authNotice && <p className="hint" role="status">{authNotice}</p>}
+                    {authErr && <p className="modal-err" role="alert">{authErr}</p>}
+                  </>
+                ) : <p>Local mode has no Cloud workspace.</p>}
               </section>
               {isCloudMode && (
                 <section className="settings-section diagnostics-section">
@@ -1661,7 +1796,7 @@ function App() {
               </label>
               <label className="fld">
                 <span>Folder</span>
-                <GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={existingGroups} />
+                <GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />
               </label>
               <label className="fld">
                 <span>Platform</span>
@@ -1755,7 +1890,7 @@ function App() {
               </label>
               <label className="fld">
                 <span>Folder</span>
-                <GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={existingGroups} />
+                <GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />
               </label>
               <label className="fld">
                 <span>Platform</span>

@@ -2,6 +2,7 @@ import { normalizeSecureServiceUrl } from "./app-config.ts";
 import {
   CLOUD_API_BASE_PATH,
   type AbandonOpenResponse,
+  type AcceptInvitationRequest,
   type AcceptLegalRequest,
   type AcceptLegalResponse,
   type BootstrapRequest,
@@ -11,11 +12,22 @@ import {
   type CloseOpenResponse,
   type CloudError,
   type CloudErrorCode,
+  type CloudFolder,
+  type CloudMember,
   type CloudStatusResponse,
+  type CloudWorkspace,
+  type FolderPermission,
+  type CreateInvitationResponse,
   type CreateProfileRequest,
   type CreateProfileResponse,
   type GetProfileResponse,
+  type SetFolderGrantResponse,
+  type ListFoldersResponse,
+  type ListInvitationsResponse,
+  type ListMembersResponse,
   type ListProfilesResponse,
+  type ResendInvitationResponse,
+  type MoveProfileRequest,
   type OpenHeartbeatResponse,
   type OpenProfileRequest,
   type OpenProfileResponse,
@@ -138,6 +150,77 @@ export class CloudClient {
     return this.call("/account/legal", { method: "POST", body: JSON.stringify(request) });
   }
 
+  listFolders(): Promise<ListFoldersResponse> {
+    return this.call("/workspace/folders");
+  }
+
+  createFolder(name: string): Promise<{ ok: true; folder: CloudFolder }> {
+    return this.call("/workspace/folders", { method: "POST", body: JSON.stringify({ name }) });
+  }
+
+  renameFolder(name: string, nextName: string): Promise<{ ok: true; folder: CloudFolder }> {
+    return this.call(`/workspace/folders/${encodeURIComponent(name)}`, {
+      method: "PATCH", body: JSON.stringify({ name: nextName }),
+    });
+  }
+
+  archiveFolder(name: string): Promise<{ ok: true; folder: CloudFolder }> {
+    return this.call(`/workspace/folders/${encodeURIComponent(name)}/archive`, {
+      method: "POST", body: "{}",
+    });
+  }
+
+  deleteFolder(name: string): Promise<{ ok: true }> {
+    return this.call(`/workspace/folders/${encodeURIComponent(name)}`, { method: "DELETE" });
+  }
+
+  setFolderGrant(name: string, accountId: string, permission: FolderPermission): Promise<SetFolderGrantResponse> {
+    return this.call(`/workspace/folders/${encodeURIComponent(name)}/grants/${encodeURIComponent(accountId)}`, {
+      method: "PUT", body: JSON.stringify({ permission }),
+    });
+  }
+
+  removeFolderGrant(name: string, accountId: string): Promise<{ ok: true }> {
+    return this.call(`/workspace/folders/${encodeURIComponent(name)}/grants/${encodeURIComponent(accountId)}`, { method: "DELETE" });
+  }
+
+  listMembers(): Promise<ListMembersResponse> {
+    return this.call("/workspace/members");
+  }
+
+  changeMemberRole(accountId: string, role: "admin" | "member"): Promise<{ ok: true; member: CloudMember }> {
+    return this.call(`/workspace/members/${encodeURIComponent(accountId)}`, {
+      method: "PATCH", body: JSON.stringify({ role }),
+    });
+  }
+
+  removeMember(accountId: string): Promise<{ ok: true }> {
+    return this.call(`/workspace/members/${encodeURIComponent(accountId)}`, { method: "DELETE" });
+  }
+
+  listInvitations(): Promise<ListInvitationsResponse> {
+    return this.call("/workspace/invitations");
+  }
+
+  createInvitation(email: string, role: "admin" | "member"): Promise<CreateInvitationResponse> {
+    return this.call("/workspace/invitations", {
+      method: "POST", body: JSON.stringify({ email, role }),
+    });
+  }
+
+  resendInvitation(id: string): Promise<ResendInvitationResponse> {
+    return this.call(`/workspace/invitations/${encodeURIComponent(id)}/resend`, { method: "POST", body: "{}" });
+  }
+
+  revokeInvitation(id: string): Promise<{ ok: true }> {
+    return this.call(`/workspace/invitations/${encodeURIComponent(id)}/revoke`, { method: "POST", body: "{}" });
+  }
+
+  acceptInvitation(code: string): Promise<{ ok: true; workspace: CloudWorkspace }> {
+    const request: AcceptInvitationRequest = { code };
+    return this.call("/invitations/accept", { method: "POST", body: JSON.stringify(request) });
+  }
+
   listProfiles(): Promise<ListProfilesResponse> {
     return this.call("/profiles");
   }
@@ -149,6 +232,13 @@ export class CloudClient {
   updateProfile(profileId: string, request: UpdateProfileRequest): Promise<UpdateProfileResponse> {
     return this.call(`/profiles/${encodeURIComponent(profileId)}`, {
       method: "PATCH",
+      body: JSON.stringify(request),
+    });
+  }
+
+  moveProfile(profileId: string, request: MoveProfileRequest): Promise<UpdateProfileResponse> {
+    return this.call(`/profiles/${encodeURIComponent(profileId)}/move`, {
+      method: "POST",
       body: JSON.stringify(request),
     });
   }

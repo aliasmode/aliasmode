@@ -30,6 +30,8 @@ export interface UiProfile {
   startedAt?: number;
   /** Remote (hub) mode only: who currently has it open elsewhere, if anyone. */
   lockedBy?: string | null;
+  permission?: "view" | "edit";
+  version?: number;
   hasSession?: boolean;
   healthStatus?: HealthStatus;
   healthObservedAt?: number | null;
@@ -117,6 +119,7 @@ export interface CloudAuthState {
   authenticated: boolean;
   expiresAt?: number;
   user?: { id: string; email?: string };
+  workspace?: { id: string; name: string; ownerAccountId: string; role: "owner" | "admin" | "member" };
   legal?: CloudLegalState;
 }
 
@@ -137,6 +140,7 @@ export async function fetchCloudAuth(): Promise<CloudAuthState> {
     authenticated: body.authenticated === true,
     expiresAt: body.expiresAt,
     user: body.user,
+    workspace: body.workspace,
     legal: body.legal,
   };
 }
@@ -155,6 +159,7 @@ async function cloudAuthAction(action: string, input: Record<string, string>): P
 
 export const signUpCloud = (email: string, password: string) =>
   cloudAuthAction("signup", { email, password });
+export const resendCloudSignUp = (email: string) => cloudAuthAction("resend-signup", { email });
 export const signInCloud = (email: string, password: string, queueKey?: string) =>
   cloudAuthAction("signin", { email, password, ...(queueKey ? { queueKey } : {}) });
 export const restoreCloudSession = (
@@ -164,6 +169,38 @@ export const restoreCloudSession = (
 ) => cloudAuthAction("restore", { refreshToken, deviceCredential, queueKey });
 export const signOutCloud = () => cloudAuthAction("signout", {});
 export const acceptCloudLegal = () => cloudAuthAction("accept-legal", {});
+export const acceptCloudInvitation = (code: string) => cloudAuthAction("accept-invitation", { code });
+
+export interface CloudTeamState {
+  folders: Array<{ name: string; archivedAt: number | null; permission: "view" | "edit" }>;
+  members: Array<{
+    accountId: string; email: string; role: "owner" | "admin" | "member"; joinedAt: number;
+    grants: Array<{ folderName: string; accountId: string; permission: "view" | "edit" }>;
+  }>;
+  invitations: Array<{
+    id: string; email: string; role: "admin" | "member"; expiresAt: number;
+    acceptedAt: number | null; revokedAt: number | null; createdAt: number;
+  }>;
+}
+
+export async function fetchCloudTeam(): Promise<CloudTeamState> {
+  const path = "/ui/api/cloud-workspace";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud team is unavailable");
+  return { folders: body.folders, members: body.members, invitations: body.invitations };
+}
+
+export async function cloudWorkspaceAction(action: string, input: Record<string, string>): Promise<any> {
+  const path = "/ui/api/cloud-workspace";
+  const response = await fetch(path, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...input }),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud workspace action failed");
+  return body;
+}
 
 export async function fetchLogs(): Promise<{ file: string; content: string }> {
   const path = "/ui/api/logs";

@@ -37,6 +37,7 @@ export interface SupabaseAuthClientOptions {
 }
 
 const DEFAULT_AUTH_TIMEOUT_MS = 30_000;
+const EMAIL_CONFIRMATION_REDIRECT = "https://aliasmode.com/auth/email-confirmation";
 
 export class SupabaseAuthClient {
   private readonly baseUrl: string;
@@ -52,13 +53,20 @@ export class SupabaseAuthClient {
   }
 
   async signUp(email: string, password: string): Promise<SignUpResult> {
-    const body = await this.call("/signup", {
+    const body = await this.call(`/signup?redirect_to=${encodeURIComponent(EMAIL_CONFIRMATION_REDIRECT)}`, {
       method: "POST",
       body: JSON.stringify({ email, password }),
     });
     const user = body.user ?? body;
     if (!user?.id) throw new Error("AliasMode Auth signup response is missing a user");
     return { user, verificationRequired: !user.email_confirmed_at };
+  }
+
+  async resendSignUpConfirmation(email: string): Promise<void> {
+    await this.call(`/resend?redirect_to=${encodeURIComponent(EMAIL_CONFIRMATION_REDIRECT)}`, {
+      method: "POST",
+      body: JSON.stringify({ type: "signup", email }),
+    });
   }
 
   async signIn(email: string, password: string): Promise<SupabaseAuthSession> {

@@ -1,7 +1,8 @@
 export const CLOUD_API_VERSION = 1 as const;
 export const CLOUD_API_BASE_PATH = "/v1" as const;
 
-export type WorkspaceRole = "owner" | "member";
+export type WorkspaceRole = "owner" | "admin" | "member";
+export type FolderPermission = "view" | "edit";
 export type OpenSessionStatus = "open" | "accepted" | "stale" | "abandoned";
 export type PendingSyncStatus = "pending" | "retrying" | "conflict";
 
@@ -12,6 +13,8 @@ export type CloudErrorCode =
   | "device_revoked"
   | "membership_revoked"
   | "workspace_conflict"
+  | "folder_access_denied"
+  | "invitation_invalid"
   | "profile_not_found"
   | "profile_trashed"
   | "profile_open"
@@ -52,11 +55,34 @@ export interface CloudWorkspace {
   role: WorkspaceRole;
 }
 
+export interface CloudFolder {
+  name: string;
+  archivedAt: number | null;
+  permission: FolderPermission;
+}
+
+export interface CloudFolderGrant {
+  folderName: string;
+  accountId: string;
+  permission: FolderPermission;
+}
+
+export interface CloudInvitation {
+  id: string;
+  email: string;
+  role: "admin" | "member";
+  expiresAt: number;
+  acceptedAt: number | null;
+  revokedAt: number | null;
+  createdAt: number;
+}
+
 export interface CloudMember {
   accountId: string;
   email: string;
   role: WorkspaceRole;
   joinedAt: number;
+  grants: CloudFolderGrant[];
 }
 
 export interface CloudDevice {
@@ -139,6 +165,7 @@ export interface CloudProfileSummary {
   trashedBy: string | null;
   updatedAt: number;
   activeOpens: CloudOpenWarning[];
+  permission: FolderPermission;
 }
 
 export interface CloudOpenWarning {
@@ -186,6 +213,70 @@ export interface AcceptLegalResponse {
 
 export interface AddMemberRequest {
   email: string;
+}
+
+export interface ListMembersResponse {
+  ok: true;
+  members: CloudMember[];
+}
+
+export interface UpdateMemberRoleRequest {
+  role: "admin" | "member";
+}
+
+export interface RemoveMemberRequest {}
+
+export interface ListFoldersResponse {
+  ok: true;
+  folders: CloudFolder[];
+}
+
+export interface CreateFolderRequest {
+  name: string;
+}
+
+export interface RenameFolderRequest {
+  name: string;
+}
+
+export interface ArchiveFolderRequest {}
+
+export interface SetFolderGrantRequest {
+  permission: FolderPermission;
+}
+
+export interface SetFolderGrantResponse {
+  ok: true;
+  grant: CloudFolderGrant;
+}
+
+export interface MoveProfileRequest {
+  expectedVersion: number;
+  destination: string;
+}
+
+export interface CreateInvitationRequest {
+  email: string;
+  role: "admin" | "member";
+}
+
+export interface CreateInvitationResponse {
+  ok: true;
+  invitation: CloudInvitation;
+}
+
+export interface ListInvitationsResponse {
+  ok: true;
+  invitations: CloudInvitation[];
+}
+
+export interface ResendInvitationResponse {
+  ok: true;
+  invitation: CloudInvitation;
+}
+
+export interface AcceptInvitationRequest {
+  code: string;
 }
 
 export interface ListProfilesResponse {
