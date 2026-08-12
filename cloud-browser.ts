@@ -231,6 +231,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     let stage: CloudOpenStage = "pending_sync";
     let registrationRecorded = false;
     let registrationId: string | undefined;
+    // Stage timing into the persistent log file: fixed stage names + ms only.
+    const openStartedAt = Date.now();
+    let lastStageAt = openStartedAt;
+    let lastLoggedStage: string = stage;
+    const logStage = (next: string) => {
+      const now = Date.now();
+      this.log(`${profileId}: open ${lastLoggedStage} -> ${next} (${now - lastStageAt}ms, total ${now - openStartedAt}ms)`);
+      lastStageAt = now;
+      lastLoggedStage = next;
+    };
 
     try {
       await retryPendingSync(queue, this.options.cloud, accountId);
@@ -247,11 +257,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "cloud_registration";
+      logStage("cloud_registration");
       const opened = await this.options.cloud.openProfile(profileId, { deviceId });
       registrationId = opened.registrationId;
       this.diagnosticEvents.record("cloud_registered");
 
       stage = "lifecycle_opening";
+      logStage("lifecycle_opening");
       queue.recordOpen({
         accountId,
         profileId,
@@ -261,11 +273,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       registrationRecorded = true;
 
       stage = "payload_restore";
+      logStage("payload_restore");
       const { profile, sessionBundle } = decodePortableProfile(opened.payload);
       if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
       this.options.store.upsertProfile(profile);
 
       stage = "browser_launch";
+      logStage("browser_launch");
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
       const startBrowser = async () => {
         return await this.options.launcher.start(profileId, chromeArgs, {
@@ -299,6 +313,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (!launch) throw new Error("browser launch did not create durable lifecycle state");
 
       stage = "lifecycle_restoring";
+      logStage("lifecycle_restoring");
       if (!queue.updateOpen(profileId, accountId, "restoring", {
         debugPort: launch.debugPort,
         startedAt: launch.startedAt,
@@ -307,6 +322,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
+      logStage("session_restore");
       this.diagnosticEvents.record("session_restore_started");
       await this.options.launcher.verifyRunningIdentity(profileId);
       const verifiedLaunch = this.options.store.getLaunch(profileId);
@@ -335,9 +351,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       this.diagnosticEvents.record("session_restore_completed");
 
       stage = "version_commit";
+      logStage("version_commit");
       this.options.store.updateLaunchSessionBaseVersion(profileId, opened.baseVersion);
 
       stage = "lifecycle_running";
+      logStage("lifecycle_running");
       if (!queue.updateOpen(profileId, accountId, "running", {
         debugPort: restoredLaunch.debugPort,
         startedAt: restoredLaunch.startedAt,
@@ -369,6 +387,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         this.diagnosticEvents.record("session_restore_unclassified_failed");
       }
       this.diagnosticEvents.record("open_failed");
+      this.log(`${profileId}: open FAILED at ${lastLoggedStage} after ${Date.now() - openStartedAt}ms`);
       const code = errorCode(error);
       const failureStage = error instanceof SessionRestoreError
         ? `session_restore/${error.operation}`

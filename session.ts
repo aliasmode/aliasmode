@@ -971,6 +971,8 @@ export interface WriteSessionOptions {
   disconnectTimeoutMs?: number;
   connect?: (endpoint: string, timeoutMs: number) => Promise<any>;
   sleep?: (ms: number) => Promise<void>;
+  /** Fixed-label step logging (no endpoints, cookies, or payload values). */
+  log?: (message: string) => void;
 }
 
 async function connectPersistentSessionBrowser(
@@ -1062,10 +1064,16 @@ export async function applySessionToEndpoint(
   urls: readonly string[],
   options: WriteSessionOptions = {},
 ): Promise<void> {
+  const log = options.log ?? (() => {});
+  const startedAt = Date.now();
   const parsed = parseSessionBundle(bundle);
+  const empty = isSessionBundleEmpty(parsed);
+  log(`session attach: connecting (empty bundle: ${empty}, ${urls.length} startup page(s))`);
   const browser = await connectPersistentSessionBrowser(ws, options);
-  if (!isSessionBundleEmpty(parsed)) {
+  log(`session attach: connected with persistent context after ${Date.now() - startedAt}ms`);
+  if (!empty) {
     await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
+    log(`session attach: restored ${parsed.cookies.length} cookie(s), ${parsed.origins.length} origin(s) after ${Date.now() - startedAt}ms`);
   }
   let navigationError: unknown;
   try {
@@ -1074,6 +1082,7 @@ export async function applySessionToEndpoint(
     for (let i = 0; i < urls.length; i++) {
       const page = i === 0 ? context.pages()[0] ?? (await context.newPage()) : await context.newPage();
       await page.goto(urls[i]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      log(`session attach: startup page ${i + 1}/${urls.length} loaded after ${Date.now() - startedAt}ms`);
     }
   } catch (error) {
     navigationError = error;
@@ -1082,7 +1091,9 @@ export async function applySessionToEndpoint(
   try {
     // connectOverCDP close() detaches; the managed browser keeps running.
     await withDeadline(Promise.resolve().then(() => browser.close()), disconnectTimeoutMs, "session detach");
+    log(`session attach: detached after ${Date.now() - startedAt}ms`);
   } catch (error) {
+    log(`session attach: detach ${error instanceof DeadlineExceededError ? "timed out" : "failed"} after ${Date.now() - startedAt}ms`);
     throw new SessionRestoreError(
       "disconnect",
       error instanceof DeadlineExceededError ? "timeout" : "failed",

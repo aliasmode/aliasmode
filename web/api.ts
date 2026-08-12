@@ -51,7 +51,7 @@ export interface DiagnoseReport {
   analysis: { verdicts: string[] };
 }
 
-export interface HealthResult { ok: boolean; version: string; root: string; }
+export interface HealthResult { ok: boolean; version: string; root: string; logDir?: string; }
 
 export interface AppModeConfig {
   version: 1;
@@ -170,7 +170,7 @@ export async function fetchHealth(): Promise<HealthResult> {
   const response = await fetch(path);
   const body = await apiJson(response, path);
   if (body.ok !== true) throw new Error(body.error || "AliasMode health check failed");
-  return { ok: true, version: String(body.version ?? "unknown"), root: String(body.root ?? "") };
+  return { ok: true, version: String(body.version ?? "unknown"), root: String(body.root ?? ""), ...(typeof body.logDir === "string" ? { logDir: body.logDir } : {}) };
 }
 
 /** Never leak an HTML fallback into a raw JSON.parse SyntaxError. A dashboard

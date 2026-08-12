@@ -246,9 +246,10 @@ export async function handleUiRequest(
   // profile roster it does not touch CDP, the process scanner, SQLite rows, or
   // the remote hub, so an upstream outage cannot masquerade as a failed update.
   if (pathname === "/ui/api/health" && req.method === "GET") {
+    const logDir = options.paths ? join(options.paths.root, "logs") : undefined;
     return Response.json(options.health
-      ? { ok: true, ...options.health }
-      : { ok: true, version: await appVersion(), root: APPLICATION_ROOT });
+      ? { ok: true, ...options.health, ...(logDir ? { logDir } : {}) }
+      : { ok: true, version: await appVersion(), root: APPLICATION_ROOT, ...(logDir ? { logDir } : {}) });
   }
 
   if (pathname === "/ui/api/app-mode" && req.method === "GET") {

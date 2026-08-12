@@ -371,7 +371,8 @@ function makeCloudBrowser(
     accountId: () => connection.accountId(),
     deviceId: () => connection.deviceId(),
     readSession: readSessionInSubprocess,
-    applySession: applySessionToEndpoint,
+    applySession: (endpoint, bundle, urls) =>
+      applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
   });
 }
 
@@ -681,7 +682,8 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     accountId: () => "smoke-account",
     deviceId: () => "smoke-device",
     readSession: readSessionInSubprocess,
-    applySession: applySessionToEndpoint,
+    applySession: (endpoint, bundle, urls) =>
+      applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
     heartbeatMs: 0,
   });
 

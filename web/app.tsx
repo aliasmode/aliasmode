@@ -448,6 +448,7 @@ function App() {
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
   const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
+  const [logDir, setLogDir] = useState<string | undefined>(undefined);
   const [diag, setDiag] = useState<DiagnoseReport | null>(null);
   const [showDiag, setShowDiag] = useState(false);
   const [q, setQ] = useState("");
@@ -721,7 +722,7 @@ function App() {
   useEffect(() => {
     if (!appMode || !workspaceReady || restartRequired) return;
     load();
-    fetchHealth().then((health) => setAppVersion(health.version)).catch(() => {});
+    fetchHealth().then((health) => { setAppVersion(health.version); setLogDir(health.logDir); }).catch(() => {});
     if (appMode.mode === "local") {
       fetchDiagnose().then(setDiag).catch(() => {});
       fetchExtensions().then(setExtensions).catch(() => {});
@@ -1583,6 +1584,7 @@ function App() {
                     </div>
                   )}
                   <p>Diagnostics contain fixed lifecycle labels only. They exclude profile data and credentials.</p>
+                  {logDir && <p className="hint">Detailed log file: {logDir}</p>}
                 </section>
               )}
               <section className="settings-mode">

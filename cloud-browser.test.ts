@@ -581,7 +581,7 @@ test("Cloud browser reports the exact safe session restore operation", async () 
     ok: false,
     error: "Cloud profile open failed at session_restore/cookie_clear (failed)",
   });
-  expect(state.logs).toEqual([
+  expect(state.logs.filter((l) => l.includes("Cloud open failed"))).toEqual([
     "profile1: Cloud open failed at session_restore/cookie_clear (failed, SessionRestoreError)",
   ]);
   expect(state.coordinator.diagnostics().map((event) => event.type).slice(-2)).toEqual([
@@ -614,7 +614,7 @@ test("Cloud browser reports a safe restore stage and abandons after teardown", a
     ok: false,
     error: "Cloud profile open failed at session_restore (transport_error)",
   });
-  expect(state.logs).toEqual([
+  expect(state.logs.filter((l) => l.includes("Cloud open failed"))).toEqual([
     "profile1: Cloud open failed at session_restore (transport_error, Error)",
   ]);
   expect(JSON.stringify({ result, logs: state.logs })).not.toContain("secret restore detail");
