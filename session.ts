@@ -1071,12 +1071,12 @@ export async function applySessionToEndpoint(
   log(`session attach: connecting (empty bundle: ${empty}, ${urls.length} startup page(s))`);
   const browser = await connectPersistentSessionBrowser(ws, options);
   log(`session attach: connected with persistent context after ${Date.now() - startedAt}ms`);
-  if (!empty) {
-    await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
-    log(`session attach: restored ${parsed.cookies.length} cookie(s), ${parsed.origins.length} origin(s) after ${Date.now() - startedAt}ms`);
-  }
-  let navigationError: unknown;
+  let operationError: unknown;
   try {
+    if (!empty) {
+      await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
+      log(`session attach: restored ${parsed.cookies.length} cookie(s), ${parsed.origins.length} origin(s) after ${Date.now() - startedAt}ms`);
+    }
     const context = browser.contexts()[0];
     if (!context) throw new Error("persistent context unavailable");
     for (let i = 0; i < urls.length; i++) {
@@ -1085,7 +1085,7 @@ export async function applySessionToEndpoint(
       log(`session attach: startup page ${i + 1}/${urls.length} loaded after ${Date.now() - startedAt}ms`);
     }
   } catch (error) {
-    navigationError = error;
+    operationError = error;
   }
   const disconnectTimeoutMs = Math.max(1, options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS);
   try {
@@ -1099,9 +1099,9 @@ export async function applySessionToEndpoint(
       error instanceof DeadlineExceededError ? "timeout" : "failed",
     );
   }
-  if (navigationError) {
-    throw navigationError instanceof SessionRestoreError
-      ? navigationError
+  if (operationError) {
+    throw operationError instanceof SessionRestoreError
+      ? operationError
       : new SessionRestoreError("navigation", "failed");
   }
 }

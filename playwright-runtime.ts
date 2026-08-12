@@ -23,15 +23,22 @@ export function playwrightFromModule(module: any): PlaywrightRuntime {
   return loaded;
 }
 
+export async function loadPlaywrightFromRoot(root: string): Promise<PlaywrightRuntime> {
+  const specifier = pathToFileURL(join(
+    root,
+    "node_modules",
+    "playwright-core",
+    "index.mjs",
+  )).href;
+  return playwrightFromModule(await import(specifier));
+}
+
 export async function loadPlaywright(): Promise<PlaywrightRuntime> {
   if (!runtime) {
     runtime = (async () => {
       const root = runtimeRoot();
-      const specifier = root
-        ? pathToFileURL(join(root, "node_modules", "playwright-core", "index.js")).href
-        : "playwright-core";
-      const loaded = await import(specifier);
-      return playwrightFromModule(loaded);
+      if (root) return loadPlaywrightFromRoot(root);
+      return playwrightFromModule(await import("playwright-core"));
     })();
   }
   return runtime;
@@ -54,14 +61,20 @@ export async function loadPlaywrightStorageScript(): Promise<string> {
 }
 
 export async function verifyPlaywrightRuntime(root: string): Promise<void> {
+  const packageRoot = join(root, "node_modules", "playwright-core");
   const playwright = JSON.parse(await readFile(
-    join(root, "node_modules", "playwright-core", "package.json"),
+    join(packageRoot, "package.json"),
     "utf8",
   ));
   const ws = JSON.parse(await readFile(join(root, "node_modules", "ws", "package.json"), "utf8"));
   if (playwright?.name !== "playwright-core" || playwright?.version !== "1.58.2"
       || ws?.name !== "ws" || ws?.version !== "8.21.0") {
     throw new Error("packaged Playwright runtime has unexpected dependencies");
+  }
+  try {
+    await readFile(join(packageRoot, "index.mjs"));
+  } catch {
+    throw new Error("packaged Playwright runtime is incomplete");
   }
 }
 

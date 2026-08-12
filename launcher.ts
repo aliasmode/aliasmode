@@ -1299,6 +1299,7 @@ export class Launcher {
       // the durable reservation and synchronous spawn so an atomic package/update
       // replacement cannot inherit the approval measured at launch start.
       const spawnVerifiedBinary = await this.verifyConfiguredBinary(true);
+      this.log(`${profileId}: launch stage binary verified`);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "final browser binary verification");
       if (
         spawnVerifiedBinary.path !== launchBinaryPath
@@ -1331,6 +1332,7 @@ export class Launcher {
         throw new BrowserLaunchError("process_spawn");
       }
       this.procs.set(profileId, proc);
+      this.log(`${profileId}: launch stage browser spawned`);
       this.store.recordLaunch({
         ...provisionalLaunch,
         pid: proc.pid,
@@ -1339,6 +1341,7 @@ export class Launcher {
       });
 
       const ws = await this.waitForCdp(port, proc);
+      this.log(`${profileId}: launch stage CDP ready`);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser startup");
 
       // Fresh ungoogled Chromium profiles can default to "No Search", which

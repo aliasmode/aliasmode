@@ -10,7 +10,8 @@ use std::{
     },
     time::Duration,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
@@ -280,6 +281,35 @@ fn command_args(data_dir: &Path) -> Vec<OsString> {
     ]
 }
 
+fn present_unexpected_exit(app: &AppHandle, code: Option<i32>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let fallback = if cfg!(windows) {
+            "http://tauri.localhost/"
+        } else {
+            "tauri://localhost/"
+        };
+        if let Ok(url) = fallback.parse() {
+            let _ = window.navigate(url);
+        }
+        let _ = window.set_title("AliasMode service stopped");
+    }
+    let detail = code
+        .map(|value| format!(" (exit code {value})"))
+        .unwrap_or_default();
+    app.dialog()
+        .message(format!(
+            "AliasMode's local service stopped unexpectedly{detail}. Restart AliasMode before opening another browser. Browser cleanup could not be confirmed."
+        ))
+        .title("AliasMode service stopped")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(|_| {});
+}
+
+fn should_present_unexpected_exit(shutting_down: bool) -> bool {
+    !shutting_down
+}
+
 pub async fn launch_and_verify(
     app: &AppHandle,
     data_dir: &Path,
@@ -316,11 +346,8 @@ pub async fn launch_and_verify(
                         return Ok(port);
                     }
                 }
-                Some(CommandEvent::Stderr(line)) => {
-                    eprintln!(
-                        "AliasMode sidecar startup: {}",
-                        String::from_utf8_lossy(&line)
-                    );
+                Some(CommandEvent::Stderr(_)) => {
+                    eprintln!("AliasMode sidecar startup emitted stderr");
                 }
                 Some(CommandEvent::Error(_)) => {
                     return Err("sidecar output channel failed during startup".to_owned())
@@ -421,16 +448,23 @@ pub async fn launch_and_verify(
                     }
                     line.zeroize();
                 }
-                CommandEvent::Stderr(line) => {
-                    eprintln!("AliasMode sidecar: {}", String::from_utf8_lossy(&line));
+                CommandEvent::Stderr(_) => {
+                    eprintln!("AliasMode sidecar emitted stderr");
                 }
                 CommandEvent::Error(_) => {
                     status.send_replace(ChildStatus::ShutdownFailed);
                 }
                 CommandEvent::Terminated(exit) => {
                     status.send_replace(ChildStatus::Exited(exit.code));
-                    if !shutting_down.load(Ordering::Acquire) {
-                        app.exit(1);
+                    if let Ok(mut child) = control.0.child.lock() {
+                        child.take();
+                    }
+                    if should_present_unexpected_exit(shutting_down.load(Ordering::Acquire)) {
+                        eprintln!(
+                            "AliasMode sidecar exited unexpectedly (code {:?})",
+                            exit.code
+                        );
+                        present_unexpected_exit(&app, exit.code);
                     }
                     break;
                 }
@@ -445,8 +479,8 @@ pub async fn launch_and_verify(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_credential_delete, parse_credential_set, parse_ready_line, verify_health_record,
-        HealthRecord, PROTOCOL, VERSION,
+        parse_credential_delete, parse_credential_set, parse_ready_line,
+        should_present_unexpected_exit, verify_health_record, HealthRecord, PROTOCOL, VERSION,
     };
     use std::path::Path;
 
@@ -511,6 +545,12 @@ mod tests {
             "key": "queue_encryption_key",
         });
         assert!(parse_credential_delete(delete_queue.to_string().as_bytes(), NONCE).is_none());
+    }
+
+    #[test]
+    fn presents_only_unexpected_sidecar_exits() {
+        assert!(should_present_unexpected_exit(false));
+        assert!(!should_present_unexpected_exit(true));
     }
 
     #[test]

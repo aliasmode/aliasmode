@@ -131,7 +131,7 @@ jobs:
             throw "expected exactly one NSIS installer, found $($installers.Count)"
           }
 
-          $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed"
+          $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode installed"
           $install = Start-Process -Wait -PassThru $installers[0].FullName -ArgumentList @(
             "/S",
             "/D=$installRoot"
@@ -199,6 +199,45 @@ jobs:
             }
           }
           if ($shutdownFailure) { throw $shutdownFailure }
+
+          $degradedApp = Start-Process -PassThru $appPath
+          $degradedSidecarPid = $null
+          try {
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              $degradedApp.Refresh()
+              if ($degradedApp.HasExited) { throw "degraded desktop exited before readiness" }
+              $degradedSidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($degradedApp.Id)" |
+                Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
+                Select-Object -First 1
+              if ($degradedSidecar) { $degradedSidecarPid = [int]$degradedSidecar.ProcessId }
+              if ($degradedSidecarPid -and $degradedApp.MainWindowHandle -ne 0) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $degradedSidecarPid) { throw "degraded desktop did not start its sidecar" }
+            Stop-Process -Id $degradedSidecarPid -Force
+            $fallbackReady = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              $degradedApp.Refresh()
+              if ($degradedApp.HasExited) { break }
+              if ($degradedApp.MainWindowTitle -eq "AliasMode service stopped") {
+                $fallbackReady = $true
+                break
+              }
+              Start-Sleep -Milliseconds 250
+            }
+            if ($degradedApp.HasExited -or $degradedApp.MainWindowHandle -eq 0) {
+              throw "installed desktop exited after unexpected sidecar termination"
+            }
+            if (-not $fallbackReady) {
+              throw "installed desktop did not present its sidecar failure state"
+            }
+          } finally {
+            $degradedApp.Refresh()
+            if (-not $degradedApp.HasExited) {
+              Stop-Process -Id $degradedApp.Id -Force
+              $degradedApp.WaitForExit()
+            }
+          }
 
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
           $browserPath = Join-Path $installRoot (Join-Path "cloakbrowser" $metadata.executable)

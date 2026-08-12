@@ -1050,6 +1050,61 @@ test("applySessionToEndpoint restores and navigates over one attach, then detach
   expect(events).toEqual(["connect", "clear", "add", "goto:https://x.com/home", "close"]);
 });
 
+test("applySessionToEndpoint detaches after restore fails", async () => {
+  const events: string[] = [];
+  const context = {
+    pages: () => [],
+    async clearCookies() {
+      events.push("clear");
+      throw new Error("restore failed");
+    },
+  };
+
+  await expect(applySessionToEndpoint(
+    "ws://verified-browser",
+    JSON.stringify({ cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }] }),
+    [],
+    {
+      async connect() {
+        events.push("connect");
+        return {
+          contexts: () => [context],
+          async close() { events.push("close"); },
+        };
+      },
+    },
+  )).rejects.toMatchObject({ operation: "cookie_clear", outcome: "failed" });
+  expect(events).toEqual(["connect", "clear", "close"]);
+});
+
+test("applySessionToEndpoint detaches after restore times out", async () => {
+  const events: string[] = [];
+  const context = {
+    pages: () => [],
+    async clearCookies() {
+      events.push("clear");
+      await new Promise(() => {});
+    },
+  };
+
+  await expect(applySessionToEndpoint(
+    "ws://verified-browser",
+    JSON.stringify({ cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }] }),
+    [],
+    {
+      writeTimeoutMs: 5,
+      async connect() {
+        events.push("connect");
+        return {
+          contexts: () => [context],
+          async close() { events.push("close"); },
+        };
+      },
+    },
+  )).rejects.toMatchObject({ operation: "cookie_clear", outcome: "timeout" });
+  expect(events).toEqual(["connect", "clear", "close"]);
+});
+
 test("applySessionToEndpoint with an empty bundle navigates without cookie work", async () => {
   const events: string[] = [];
   const context = {

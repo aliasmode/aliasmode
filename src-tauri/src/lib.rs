@@ -99,9 +99,12 @@ pub fn run() {
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(960.0, 640.0)
                 .on_navigation(move |url| {
-                    url.scheme() == "http"
+                    (url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")
-                        && url.port() == Some(allowed_port)
+                        && url.port() == Some(allowed_port))
+                        || ((url.scheme() == "https" || url.scheme() == "http")
+                            && url.host_str() == Some("tauri.localhost"))
+                        || (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
                 })
                 .on_new_window(|_, _| NewWindowResponse::Deny)
                 .build()
