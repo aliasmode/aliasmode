@@ -131,7 +131,19 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     labelWindow: async () => {},
     cdpReadyTimeoutMs: 45_000,
   });
-  let payload = encodePortableProfile(profile, JSON.stringify({ cookies: [] }));
+  let payload = encodePortableProfile(profile, JSON.stringify({
+    cookies: [{
+      name: "auth_token",
+      value: "aliasmode-live-smoke",
+      domain: ".x.com",
+      path: "/",
+      expires: -1,
+      httpOnly: false,
+      secure: true,
+      sameSite: "Lax",
+    }],
+    origins: [],
+  }));
   let version = 1;
   let registration = 0;
   const cloud = {
@@ -148,6 +160,9 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     async heartbeat() { return { ok: true as const, revoked: false as const, activeOpens: [] }; },
     async closeOpen(_registrationId: string, request: { expectedVersion: number; payload: typeof payload }) {
       if (request.expectedVersion !== version) throw new Error("live Cloud proxy smoke received a stale close");
+      expect(request.payload.session.cookies.some((cookie) =>
+        cookie.name === "auth_token" && cookie.value === "aliasmode-live-smoke"
+      )).toBe(true);
       payload = request.payload;
       version++;
       return { ok: true as const, status: "accepted" as const, version };
@@ -167,7 +182,7 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
   });
 
   try {
-    for (let cycle = 0; cycle < 2; cycle++) {
+    for (let cycle = 0; cycle < 3; cycle++) {
       const opened = await coordinator.open(profile.id);
       expect(opened.ok).toBe(true);
       if (!opened.ok || !opened.ws) throw new Error(opened.error ?? "live Cloud proxy smoke could not open");

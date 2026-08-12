@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aliasmode-desktop"
-version = "0.1.0-beta.10"
+version = "0.1.0-beta.11"
 dependencies = [
  "hex",
  "rand",

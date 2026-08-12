@@ -533,7 +533,7 @@ export async function exerciseCloudLauncherSmoke(
   runtime: CloudLauncherSmokeRuntime,
   profileId = "aliasmode-cloud-smoke",
 ): Promise<void> {
-  for (let cycle = 0; cycle < 2; cycle++) {
+  for (let cycle = 0; cycle < 3; cycle++) {
     const opened = await runtime.coordinator.open(profileId);
     if (!opened.ok) throw new Error(opened.error ?? "Cloud launcher smoke could not open the profile");
     if (!await runtime.launcher.active(profileId)) {
@@ -578,13 +578,12 @@ function cloudLauncherSmokeProxy(
   }
   return {
     profileProxy: { type, host, port, user, pass },
-    verifyProxy: async (ws) => {
-      const egress = await verifyBrowserProxy(ws);
+    verifyProxy: async (ws, afterVerified) => verifyBrowserProxy(ws, {}, async (browser, egress) => {
       if (canonicalIp(egress.ip) !== expectedIp) {
         throw new Error("Cloud launcher smoke proxy egress did not match");
       }
-      return egress;
-    },
+      await afterVerified?.(browser, egress);
+    }),
   };
 }
 
@@ -628,7 +627,19 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     cookies: [],
     seeded: false,
   };
-  let payload = encodePortableProfile(profile, JSON.stringify({ cookies: [] }));
+  let payload = encodePortableProfile(profile, JSON.stringify({
+    cookies: [{
+      name: "auth_token",
+      value: "aliasmode-smoke",
+      domain: ".x.com",
+      path: "/",
+      expires: -1,
+      httpOnly: false,
+      secure: true,
+      sameSite: "Lax",
+    }],
+    origins: [],
+  }));
   let version = 1;
   let registration = 0;
   const cloud = {
@@ -649,6 +660,11 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     },
     async closeOpen(_registrationId: string, request: { expectedVersion: number; payload: typeof payload }) {
       if (request.expectedVersion !== version) throw new Error("Cloud launcher smoke received a stale close");
+      if (!request.payload.session.cookies.some((cookie) =>
+        cookie.name === "auth_token" && cookie.value === "aliasmode-smoke"
+      )) {
+        throw new Error("Cloud launcher smoke did not capture the restored session");
+      }
       payload = request.payload;
       version++;
       return { ok: true as const, status: "accepted" as const, version };
@@ -719,7 +735,7 @@ async function main() {
   ensureStateDirectories(paths);
   if (cmd === "__cloud-launcher-smoke") {
     await runCloudLauncherSmoke(paths, rest);
-    console.log("compiled sidecar opened, restored, captured, and closed a fresh and cached Cloud profile");
+    console.log("compiled sidecar opened, restored, captured, and closed a fresh and repeated cached Cloud profile");
     return;
   }
   const appConfig = new AppConfigStore(paths.config);

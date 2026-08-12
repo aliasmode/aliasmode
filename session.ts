@@ -873,7 +873,7 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
 export async function writeSessionToBrowser(
   browser: any,
   parsed: NormalizedSessionBundle,
-  options: { writeTimeoutMs?: number; disconnectTimeoutMs?: number } = {},
+  options: { writeTimeoutMs?: number; disconnectTimeoutMs?: number; disconnect?: boolean } = {},
 ): Promise<void> {
   const writeTimeoutMs = options.writeTimeoutMs ?? SESSION_WRITE_TIMEOUT_MS;
   const disconnectTimeoutMs = options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS;
@@ -930,6 +930,11 @@ export async function writeSessionToBrowser(
     cancelled = true;
   }
 
+  if (options.disconnect === false) {
+    if (writeError) throw writeError;
+    return;
+  }
+
   let disconnectError: SessionRestoreError | undefined;
   try {
     const disconnect = Promise.resolve().then(() => browser.close());
@@ -948,6 +953,26 @@ export async function writeSessionToBrowser(
 
   if (writeError) throw writeError;
   if (disconnectError) throw disconnectError;
+}
+
+function parseSessionBundle(bundle: string): NormalizedSessionBundle {
+  try {
+    return normalizeBundle(JSON.parse(bundle));
+  } catch {
+    throw new SessionRestoreError("invalid_bundle", "failed");
+  }
+}
+
+/** Apply an authoritative bundle through a borrowed CDP browser without detaching it. */
+export async function applySessionToBrowser(
+  browser: any,
+  bundle: string,
+  options: { writeTimeoutMs?: number } = {},
+): Promise<void> {
+  await writeSessionToBrowser(browser, parseSessionBundle(bundle), {
+    writeTimeoutMs: options.writeTimeoutMs,
+    disconnect: false,
+  });
 }
 
 export interface WriteSessionOptions {
@@ -1025,12 +1050,7 @@ export async function writeSession(
   bundle: string,
   options: WriteSessionOptions = {},
 ): Promise<void> {
-  let parsed: NormalizedSessionBundle;
-  try {
-    parsed = normalizeBundle(JSON.parse(bundle));
-  } catch {
-    throw new SessionRestoreError("invalid_bundle", "failed");
-  }
+  const parsed = parseSessionBundle(bundle);
   const browser = await connectPersistentSessionBrowser(ws, options);
   await writeSessionToBrowser(browser, parsed, options);
 }
