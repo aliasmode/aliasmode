@@ -11,7 +11,7 @@ test("release version stays aligned across the desktop bundle", () => {
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
 
-  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.17");
+  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.18");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
   expect(tauriConfig.version).toBe(ALIASMODE_VERSION);
   expect(cargoVersion).toBe(ALIASMODE_VERSION);

@@ -1355,6 +1355,16 @@ function App() {
         </div>
         {!isCloudMode && <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>}
         <button
+          className="extbtn"
+          type="button"
+          title="View detailed logs"
+          onClick={() => {
+            setLogErr(null);
+            setLogView(null);
+            fetchLogs().then(setLogView).catch((e) => setLogErr(e instanceof Error ? e.message : String(e)));
+          }}
+        >📄 Logs</button>
+        <button
           className="account-button"
           type="button"
           aria-label="Open Account and Settings"
