@@ -22,6 +22,7 @@ export class PlaywrightWorkerError extends Error {
   constructor(
     readonly code: "invalid_request" | "invalid_response" | "operation_failed" | "timeout" | "runtime_unavailable",
     message: string,
+    readonly details?: { operation?: string; outcome?: string },
   ) {
     super(message);
   }
@@ -36,7 +37,11 @@ interface WorkerResponse<T> {
 interface WorkerErrorResponse {
   version: 1;
   ok: false;
-  error: { code: PlaywrightWorkerError["code"]; message: string };
+  error: {
+    code: PlaywrightWorkerError["code"];
+    message: string;
+    details?: { operation?: string; outcome?: string };
+  };
 }
 
 interface WorkerProcess {
@@ -136,7 +141,11 @@ export async function runPlaywrightWorker<T>(
   if (!response.ok) {
     const code = response.error?.code;
     const valid = ["invalid_request", "invalid_response", "operation_failed", "timeout", "runtime_unavailable"].includes(code);
-    throw new PlaywrightWorkerError(valid ? code : "operation_failed", response.error?.message || "Playwright operation failed");
+    throw new PlaywrightWorkerError(
+      valid ? code : "operation_failed",
+      response.error?.message || "Playwright operation failed",
+      response.error?.details,
+    );
   }
   if (exit.status === "rejected" || exit.value !== 0) {
     throw new PlaywrightWorkerError("operation_failed", "Playwright worker exited unexpectedly");

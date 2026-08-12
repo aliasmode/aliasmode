@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const VERSION = 1;
 const MAX_BYTES = 16 * 1024 * 1024;
@@ -47,12 +46,18 @@ async function closeWithin(close, timeoutMs = 5_000) {
 
 async function withBrowser(chromium, endpoint, timeout, run) {
   let browser;
+  let operationError;
+  let result;
   try {
     browser = await chromium.connectOverCDP(endpoint, { timeout });
-    return await run(browser);
-  } finally {
-    if (browser) await closeWithin(() => browser.close());
+    result = await run(browser);
+  } catch (error) {
+    operationError = error;
   }
+  const detached = !browser || await closeWithin(() => browser.close());
+  if (operationError) throw operationError;
+  if (!detached) throw typed("timeout");
+  return result;
 }
 
 function contextOf(browser) {
@@ -69,16 +74,118 @@ const SESSION_URLS = [
 const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const LINKEDIN_DEVICE_COOKIES = new Set(["bcookie", "bscookie", "li_rm"]);
+const TELEGRAM_AUTH_INDEXEDDB_RULES = [
+  { databaseName: "tt-passcode", stores: ["store"], presence: [{ stores: ["store"], allKeys: ["sessionEncrypted", "globalEncrypted"] }] },
+  { databaseName: "tweb-common", stores: ["session", "localStorage__encrypted"], presence: [{ stores: ["localStorage__encrypted"], allKeys: ["data"] }] },
+  { databasePattern: "^tweb(?:-account-\\d+)?$", stores: ["session", "session__encrypted"], presence: [{ stores: ["session", "session__encrypted"], anyKeyPattern: "^dc[1-5]_auth_key$", caseInsensitive: true }] },
+];
 
 function sessionCookie(cookie) {
   const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
   return SESSION_HOSTS.some((host) => domain === host || domain.endsWith(`.${host}`));
 }
 
+function telegramRule(name) {
+  return TELEGRAM_AUTH_INDEXEDDB_RULES.find((rule) => rule.databaseName
+    ? name === rule.databaseName
+    : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
+}
+
+function filterTelegramIndexedDB(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((database) => {
+    if (typeof database?.name !== "string" || typeof database.version !== "number" || database.version <= 0 || !Array.isArray(database.stores)) return [];
+    const rule = telegramRule(database.name);
+    if (!rule) return [];
+    const allowed = new Set(rule.stores);
+    const stores = database.stores.filter((store) => typeof store?.name === "string" && allowed.has(store.name));
+    return stores.length ? [{ ...database, stores }] : [];
+  });
+}
+
+function localStorageHasTelegramAuth(entries) {
+  return (Array.isArray(entries) ? entries : []).some((entry) => {
+    if (typeof entry?.name !== "string" || typeof entry.value !== "string") return false;
+    if (/^dc[1-5]_auth_key$/i.test(entry.name)) return entry.value.length > 0;
+    if (!/^account[1-9]\d*$/i.test(entry.name)) return false;
+    try {
+      const account = JSON.parse(entry.value);
+      if (!account || typeof account !== "object" || Array.isArray(account)) return false;
+      const dcId = Number(account.dcId ?? account.dcID);
+      if (Number.isInteger(dcId) && dcId >= 1 && dcId <= 5 && typeof account[`dc${dcId}_auth_key`] === "string" && account[`dc${dcId}_auth_key`]) return true;
+      return Object.entries(account).some(([name, value]) => /^dc[1-5]_auth_key$/i.test(name) && typeof value === "string" && value.length > 0);
+    } catch { return false; }
+  });
+}
+
+async function passcodeDatabasePresent(page) {
+  return page.evaluate(async (rules) => {
+    const ruleFor = (name) => rules.find((rule) => rule.databaseName ? name === rule.databaseName : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
+    const resultOf = (request) => new Promise((resolve) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(undefined);
+    });
+    for (const meta of await indexedDB.databases()) {
+      const rule = meta?.name && ruleFor(meta.name);
+      if (!rule) continue;
+      const db = await resultOf(indexedDB.open(meta.name));
+      if (!db) continue;
+      try {
+        for (const presence of rule.presence) for (const storeName of presence.stores) {
+          if (!db.objectStoreNames.contains(storeName)) continue;
+          const store = db.transaction(storeName, "readonly").objectStore(storeName);
+          if (presence.allKeys) {
+            const values = await Promise.all(presence.allKeys.map((key) => resultOf(store.get(key))));
+            if (values.every((value) => value !== undefined && value !== null)) return true;
+          }
+          if (presence.anyKeyPattern) {
+            const keys = await resultOf(store.getAllKeys());
+            const matcher = new RegExp(presence.anyKeyPattern, presence.caseInsensitive ? "i" : "");
+            if (Array.isArray(keys) && keys.some((key) => matcher.test(String(key)))) return true;
+          }
+        }
+      } finally { db.close(); }
+    }
+    return false;
+  }, TELEGRAM_AUTH_INDEXEDDB_RULES);
+}
+
+async function storageScriptSource() {
+  const module = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "lib", "generated", "storageScriptSource.js")).href);
+  if (typeof module.default?.source !== "string") throw typed("runtime_unavailable");
+  return module.default.source;
+}
+async function collectPasscodeStorage(page) {
+  const source = await storageScriptSource();
+  return page.evaluate(async ({ rules, source }) => {
+    const module = { exports: {} };
+    Function("module", "exports", source)(module, module.exports);
+    const script = new module.exports.StorageScript(false);
+    const ruleFor = (name) => rules.find((rule) => rule.databaseName ? name === rule.databaseName : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
+    const localStorage = Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) }));
+    const indexedDB = [];
+    for (const meta of await globalThis.indexedDB.databases()) {
+      const rule = meta?.name && ruleFor(meta.name);
+      if (!rule) continue;
+      const db = await script._collectDB(meta);
+      const allowed = new Set(rule.stores);
+      db.stores = db.stores.filter((store) => allowed.has(store.name));
+      if (db.stores.length) indexedDB.push(db);
+    }
+    return { localStorage, indexedDB };
+  }, { rules: TELEGRAM_AUTH_INDEXEDDB_RULES, source });
+}
+
 async function captureSession(browser) {
   const context = contextOf(browser);
-  const state = await context.storageState({ indexedDB: true });
-  const origins = (state.origins || []).filter((item) => item.origin === TELEGRAM_ORIGIN);
+  const state = await context.storageState();
+  const byOrigin = new Map();
+  for (const origin of state.origins || []) {
+    if (origin.origin !== TELEGRAM_ORIGIN) continue;
+    const localStorage = (Array.isArray(origin.localStorage) ? origin.localStorage : []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string");
+    const indexedDB = filterTelegramIndexedDB(origin.indexedDB);
+    if (localStorage.length || indexedDB.length) byOrigin.set(TELEGRAM_ORIGIN, { origin: TELEGRAM_ORIGIN, localStorage, ...(indexedDB.length ? { indexedDB } : {}) });
+  }
   let telegramClient;
   for (const page of context.pages()) {
     try {
@@ -86,22 +193,38 @@ async function captureSession(browser) {
       if (url.origin !== TELEGRAM_ORIGIN) continue;
       if (url.pathname === "/a" || url.pathname.startsWith("/a/")) telegramClient = "a";
       if (url.pathname === "/k" || url.pathname.startsWith("/k/")) telegramClient = "k";
-      const localStorage = await page.evaluate(() => Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })));
-      const index = origins.findIndex((item) => item.origin === TELEGRAM_ORIGIN);
-      const next = { origin: TELEGRAM_ORIGIN, localStorage, ...(index >= 0 && origins[index].indexedDB ? { indexedDB: origins[index].indexedDB } : {}) };
-      if (index >= 0) origins[index] = next; else origins.push(next);
+      let storage = await page.evaluate(() => ({ localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })) }));
+      let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
+      if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page).catch(() => false);
+      if (capturePasscode) storage = await collectPasscodeStorage(page).catch(() => storage);
+      const localStorage = (storage.localStorage || []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string");
+      const indexedDB = filterTelegramIndexedDB(storage.indexedDB);
+      const previous = byOrigin.get(TELEGRAM_ORIGIN);
+      if (localStorage.length || indexedDB.length || previous?.indexedDB) byOrigin.set(TELEGRAM_ORIGIN, {
+        origin: TELEGRAM_ORIGIN,
+        localStorage,
+        ...(indexedDB.length ? { indexedDB } : previous?.indexedDB ? { indexedDB: previous.indexedDB } : {}),
+      });
       break;
     } catch {}
   }
-  return JSON.stringify({ cookies: state.cookies.filter(sessionCookie), origins, ...(telegramClient ? { telegramClient } : {}) });
+  return JSON.stringify({ cookies: (state.cookies || []).filter(sessionCookie), origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
 }
 
 async function restoreSession(browser, payload) {
   let bundle;
   try { bundle = JSON.parse(payload.bundle); } catch { throw typed("invalid_request"); }
   const context = contextOf(browser);
-  const origins = Array.isArray(bundle.origins) ? bundle.origins.filter((item) => item?.origin === TELEGRAM_ORIGIN) : [];
-  const storageScriptSource = await readFile(join(ROOT, "node_modules", "playwright-core", "lib", "generated", "storageScriptSource.js"), "utf8");
+  const origins = Array.isArray(bundle.origins) ? bundle.origins.filter((item) => item?.origin === TELEGRAM_ORIGIN).map((target) => ({
+    origin: TELEGRAM_ORIGIN,
+    localStorage: (Array.isArray(target.localStorage) ? target.localStorage : []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string"),
+    indexedDB: filterTelegramIndexedDB(target.indexedDB),
+  })).filter((target) => target.localStorage.length || target.indexedDB.length) : [];
+  const cookies = Array.isArray(bundle.cookies) ? bundle.cookies : [];
+  if (!cookies.length && !origins.length && !(payload.urls || []).length) return null;
+  const storageSource = origins.some((target) => target.indexedDB.length)
+    ? await storageScriptSource()
+    : undefined;
   for (const target of origins) {
     const existing = context.pages();
     for (const page of existing) {
@@ -113,32 +236,40 @@ async function restoreSession(browser, payload) {
     try {
       await context.route(restoreUrl, handler);
       await page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
-      await page.evaluate(async ({ localStorage: entries, indexedDB: databases, storageScriptSource: source }) => {
-        if (Array.isArray(databases) && databases.length) {
+      if (new URL(page.url()).origin !== TELEGRAM_ORIGIN) throw new Error("wrong restore origin");
+      await page.evaluate(async ({ entries, databases, source }) => {
+        if (databases.length) {
           const module = { exports: {} };
-          Function("module", source)(module);
-          const script = new module.exports.StorageScript()(false);
+          Function("module", "exports", source)(module, module.exports);
+          const script = new module.exports.StorageScript(false);
           for (const database of databases) {
             await new Promise((resolve, reject) => {
               const request = globalThis.indexedDB.deleteDatabase(database.name);
               request.onsuccess = resolve;
-              request.onerror = () => reject(request.error);
-              request.onblocked = () => reject(new Error("blocked"));
+              request.onerror = () => reject(request.error || new Error("delete failed"));
+              request.onblocked = () => reject(new Error("delete blocked"));
             });
             await script._restoreDB(database);
           }
         }
-        globalThis.localStorage.clear();
-        for (const entry of Array.isArray(entries) ? entries : []) globalThis.localStorage.setItem(entry.name, entry.value);
-      }, { ...target, storageScriptSource });
+        const backup = Object.keys(localStorage).map((name) => ({ name, value: localStorage.getItem(name) }));
+        try {
+          localStorage.clear();
+          for (const entry of entries) localStorage.setItem(entry.name, entry.value);
+          for (const entry of entries) if (localStorage.getItem(entry.name) !== entry.value) throw new Error("localStorage verification failed");
+        } catch (error) {
+          try { localStorage.clear(); for (const entry of backup) localStorage.setItem(entry.name, entry.value); } catch {}
+          throw error;
+        }
+      }, { entries: target.localStorage, databases: target.indexedDB, source: storageSource });
     } finally {
       await context.unroute(restoreUrl, handler).catch(() => {});
-      await page.close().catch(() => {});
+      await page.close();
     }
   }
   await context.clearCookies();
-  const cookies = (Array.isArray(bundle.cookies) ? bundle.cookies : []).filter((cookie) => !LINKEDIN_DEVICE_COOKIES.has(cookie.name));
-  if (cookies.length) await context.addCookies(cookies);
+  const inject = cookies.filter((cookie) => !LINKEDIN_DEVICE_COOKIES.has(cookie.name));
+  if (inject.length) await context.addCookies(inject);
   for (let i = 0; i < (payload.urls || []).length; i++) {
     const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
     await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -178,8 +309,8 @@ async function searchProvider(context) {
         input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
       }
       let save;
-      for (let i = 0; i < 30; i++) { await wait(100); save = deep(dialog, "#actionButton")[0]; if (save && !save.disabled) break; }
-      if (!save || save.disabled) throw new Error("settings rejected");
+      for (let i = 0; i < 30; i++) { await wait(100); save = deep(dialog, "#actionButton")[0]; if (save && !save.disabled && !save.hasAttribute("disabled")) break; }
+      if (!save || save.disabled || save.hasAttribute("disabled")) throw new Error("settings rejected");
       save.click();
       let duck;
       for (let i = 0; i < 20 && !duck; i++) { await wait(100); duck = (await engines()).find((engine) => identity(engine).includes("duckduckgo")); }
@@ -187,6 +318,7 @@ async function searchProvider(context) {
       const usesModelIndex = typeof duck.modelIndex === "number";
       const ref = usesModelIndex ? duck.modelIndex : duck.id;
       if (duck.canBeActivated) { globalThis.chrome.send("setIsActiveSearchEngine", [ref, true]); await wait(100); }
+      if (!duck.canBeDefault) throw new Error("default unavailable");
       globalThis.chrome.send("setDefaultSearchEngine", [ref, usesModelIndex ? 0 : 1, null]);
       for (let i = 0; i < 20; i++) { await wait(100); const saved = (await engines()).find((engine) => identity(engine).includes("duckduckgo")); if (saved?.default) return { status: "configured", engine: saved.displayName || saved.name || "DuckDuckGo" }; }
       throw new Error("not persisted");
@@ -199,7 +331,7 @@ async function operate(chromium, operation, payload) {
   if (typeof endpoint !== "string" || !/^https?:\/\/|^wss?:\/\//.test(endpoint)) throw typed("invalid_request");
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
   return withBrowser(chromium, endpoint, timeout, async (browser) => {
-    const context = contextOf(browser);
+    const context = browser.contexts()[0] || await browser.newContext();
     if (operation === "session-capture") return captureSession(browser);
     if (operation === "session-restore") return restoreSession(browser, payload);
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
@@ -282,13 +414,13 @@ let exitCode = 0;
 try {
   const request = await readStdin();
   let runtime;
-  try { runtime = await import(join(ROOT, "node_modules", "playwright-core", "index.mjs")); } catch { throw typed("runtime_unavailable"); }
+  try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
   const result = await operate(runtime.chromium || runtime.default?.chromium, request.operation, request.payload);
   response = { version: VERSION, ok: true, result };
 } catch (error) {
   exitCode = 1;
   const code = error?.code && ERROR_MESSAGES[error.code] ? error.code : "operation_failed";
-  response = { version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code] } };
+  response = { version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code], ...(error?.details ? { details: error.details } : {}) } };
 }
 const output = JSON.stringify(response);
 if (Buffer.byteLength(output) > MAX_BYTES) {

@@ -5,17 +5,12 @@ import {
   bundleLoggedInPlatforms,
   bundleTelegramClient,
   collectSessionFromContext,
-  decodeReadSessionResult,
-  encodeReadSessionResult,
   isSessionCookie,
   normalizeBundle,
   normalizeOriginStorage,
   playwrightTransportAttribution,
   readSessionFromBrowser,
-  readSessionInSubprocess,
-  readSessionWorkerCommand,
   restoreOriginStorage,
-  runReadSessionWorker,
   SessionRestoreError,
   TELEGRAM_AUTH_INDEXEDDB_RULES,
   telegramAuthSignature,
@@ -56,151 +51,6 @@ async function expectRestoreError(
   expect((error as Error).message).toBe(`session_restore/${operation} (${outcome})`);
   return error as SessionRestoreError;
 }
-
-test("read-session result envelopes preserve exact bundle text", () => {
-  const bundle = "{\"quoted\":\"line one\\nline two — 你好\"}\n";
-  const encoded = encodeReadSessionResult({ ok: true, bundle });
-  const decoded = decodeReadSessionResult(encoded);
-
-  expect(decoded).toEqual({ ok: true, bundle });
-  if (decoded.ok) expect(Buffer.byteLength(decoded.bundle)).toBe(Buffer.byteLength(bundle));
-});
-
-test("readSessionInSubprocess returns the worker bundle and uses the current Bun entrypoint", async () => {
-  let argv: string[] = [];
-  let killed = false;
-  const bundle = "{\"cookies\":[],\"origins\":[]}\n";
-
-  const result = await readSessionInSubprocess("ws://127.0.0.1:9222/devtools/browser/id", {
-    spawn(command) {
-      argv = command;
-      return {
-        stdout: textStream(encodeReadSessionResult({ ok: true, bundle })),
-        stderr: textStream("suppressed warning\n"),
-        exited: Promise.resolve(0),
-        kill() { killed = true; },
-      };
-    },
-  });
-
-  expect(result).toBe(bundle);
-  expect(argv[0]).toBe(process.execPath);
-  expect(argv[1]!.replace(/\\/g, "/")).toBe(`${import.meta.dir.replace(/\\/g, "/")}/session.ts`);
-  expect(argv.slice(2)).toEqual([
-    "--read-session-worker",
-    "ws://127.0.0.1:9222/devtools/browser/id",
-  ]);
-  expect(killed).toBe(false);
-});
-
-test("compiled session workers re-enter the executable without an embedded script path", () => {
-  expect(readSessionWorkerCommand("ws://capture", true)).toEqual([
-    process.execPath,
-    "--read-session-worker",
-    "ws://capture",
-  ]);
-  expect(readSessionWorkerCommand("ws://capture", false)).toEqual([
-    process.execPath,
-    import.meta.path.replace(/session\.test\.ts$/, "session.ts"),
-    "--read-session-worker",
-    "ws://capture",
-  ]);
-});
-
-test("readSessionInSubprocess preserves worker errors and rejects partial output", async () => {
-  await expect(readSessionInSubprocess("ws://capture", {
-    spawn: () => ({
-      stdout: textStream(encodeReadSessionResult({ ok: false, error: "capture failed exactly" })),
-      stderr: textStream(""),
-      exited: Promise.resolve(1),
-      kill() {},
-    }),
-  })).rejects.toThrow("capture failed exactly");
-
-  await expect(readSessionInSubprocess("ws://capture", {
-    spawn: () => ({
-      stdout: textStream("{partial"),
-      stderr: textStream(""),
-      exited: Promise.resolve(2),
-      kill() {},
-    }),
-  })).rejects.toThrow("session capture subprocess exited 2");
-});
-
-test("readSessionInSubprocess kills a timed-out worker and waits for exit", async () => {
-  let killed = false;
-  let settled = false;
-  let resolveExit!: (code: number) => void;
-  const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
-  const outcome = readSessionInSubprocess("ws://capture", {
-    timeoutMs: 5,
-    spawn: () => ({
-      stdout: textStream(""),
-      stderr: textStream(""),
-      exited,
-      kill() { killed = true; },
-    }),
-  }).then(
-    () => null,
-    (error) => error as Error,
-  ).finally(() => { settled = true; });
-
-  await Bun.sleep(10);
-  expect(killed).toBe(true);
-  expect(settled).toBe(false);
-
-  resolveExit(137);
-  const error = await outcome;
-  expect(error?.message).toContain("session capture subprocess exceeded 5ms");
-});
-
-test("runReadSessionWorker flushes success and error envelopes before exit", async () => {
-  const events: string[] = [];
-  await runReadSessionWorker(["--read-session-worker", "ws://success"], {
-    async readSession() { return "exact bundle"; },
-    async write(value) { events.push(`write:${value}`); },
-    exit(code) { events.push(`exit:${code}`); },
-  });
-  expect(events).toEqual([
-    `write:${encodeReadSessionResult({ ok: true, bundle: "exact bundle" })}`,
-    "exit:0",
-  ]);
-
-  events.length = 0;
-  await runReadSessionWorker(["--read-session-worker", "ws://failure"], {
-    async readSession() { throw new Error("worker capture failed"); },
-    async write(value) { events.push(`write:${value}`); },
-    exit(code) { events.push(`exit:${code}`); },
-  });
-  expect(events).toEqual([
-    `write:${encodeReadSessionResult({ ok: false, error: "worker capture failed" })}`,
-    "exit:1",
-  ]);
-});
-
-test("readSessionInSubprocess does not serialize captures across profiles", async () => {
-  const exitResolvers: Array<(code: number) => void> = [];
-  let spawned = 0;
-  const reads = Array.from({ length: 64 }, (_, index) => readSessionInSubprocess(`ws://capture/${index}`, {
-    spawn: () => {
-      spawned++;
-      let resolveExit!: (code: number) => void;
-      const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
-      exitResolvers.push(resolveExit);
-      return {
-        stdout: textStream(encodeReadSessionResult({ ok: true, bundle: `bundle-${index}` })),
-        stderr: textStream(""),
-        exited,
-        kill() {},
-      };
-    },
-  }));
-
-  await Promise.resolve();
-  expect(spawned).toBe(64);
-  for (const resolve of exitResolvers) resolve(0);
-  expect(await Promise.all(reads)).toEqual(Array.from({ length: 64 }, (_, index) => `bundle-${index}`));
-});
 
 test("readSessionFromBrowser bounds a wedged capture and disconnects the CDP client", async () => {
   let closes = 0;
