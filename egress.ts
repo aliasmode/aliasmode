@@ -132,9 +132,10 @@ export async function verifyBrowserProxy(
   try {
     const egress = await withCdpPage(
       ws,
-      async (page, browser) => {
+      async (page, browser, lease) => {
         const result = await fetchPageEgress(page, { ...opts, endpoints });
         if (!result) throw new Error("no egress endpoint was reachable");
+        await lease.closeTemporaryPage();
         if (afterVerified) {
           try {
             await afterVerified(browser, result);

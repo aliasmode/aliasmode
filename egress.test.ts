@@ -41,8 +41,35 @@ test("browser proxy verification applies session work before its only CDP detach
     },
     async close() { events.push("page-close"); },
   };
+  const targetSession = {
+    async send() { return { targetInfo: { targetId: "proof-target" } }; },
+    async detach() {},
+  };
+  let targetPresent = true;
+  const browserSession = {
+    on() {},
+    off() {},
+    async send(method: string) {
+      if (method === "Target.setDiscoverTargets") return {};
+      if (method === "Target.getTargets") {
+        return { targetInfos: targetPresent ? [{ targetId: "proof-target" }] : [] };
+      }
+      if (method === "Target.closeTarget") {
+        events.push("proof-target-close");
+        targetPresent = false;
+        return { success: true };
+      }
+      throw new Error("unexpected CDP command");
+    },
+    async detach() { events.push("raw-session-detach"); },
+  };
   const browser = {
-    contexts: () => [{ pages: () => [], newPage: async () => page }],
+    contexts: () => [{
+      pages: () => [],
+      newPage: async () => page,
+      newCDPSession: async () => targetSession,
+    }],
+    newBrowserCDPSession: async () => browserSession,
     async close() { events.push("browser-close"); },
   };
 
@@ -63,7 +90,14 @@ test("browser proxy verification applies session work before its only CDP detach
   );
 
   expect(result.ip).toBe("203.0.113.9");
-  expect(events).toEqual(["connect", "proof", "session-apply", "page-close", "browser-close"]);
+  expect(events).toEqual([
+    "connect",
+    "proof",
+    "proof-target-close",
+    "raw-session-detach",
+    "session-apply",
+    "browser-close",
+  ]);
 });
 
 test("browser proxy verification preserves session work errors after proof", async () => {
@@ -73,8 +107,34 @@ test("browser proxy verification preserves session work errors after proof", asy
     locator() { return { innerText: async () => "203.0.113.9" }; },
     async close() {},
   };
+  const targetSession = {
+    async send() { return { targetInfo: { targetId: "proof-target" } }; },
+    async detach() {},
+  };
+  let targetPresent = true;
+  const browserSession = {
+    on() {},
+    off() {},
+    async send(method: string) {
+      if (method === "Target.setDiscoverTargets") return {};
+      if (method === "Target.getTargets") {
+        return { targetInfos: targetPresent ? [{ targetId: "proof-target" }] : [] };
+      }
+      if (method === "Target.closeTarget") {
+        targetPresent = false;
+        return { success: true };
+      }
+      throw new Error("unexpected CDP command");
+    },
+    async detach() {},
+  };
   const browser = {
-    contexts: () => [{ pages: () => [], newPage: async () => page }],
+    contexts: () => [{
+      pages: () => [],
+      newPage: async () => page,
+      newCDPSession: async () => targetSession,
+    }],
+    newBrowserCDPSession: async () => browserSession,
     async close() {},
   };
 
@@ -92,8 +152,34 @@ test("browser proxy verification never applies session work before proof", async
     locator() { return { innerText: async () => "" }; },
     async close() {},
   };
+  const targetSession = {
+    async send() { return { targetInfo: { targetId: "proof-target" } }; },
+    async detach() {},
+  };
+  let targetPresent = true;
+  const browserSession = {
+    on() {},
+    off() {},
+    async send(method: string) {
+      if (method === "Target.setDiscoverTargets") return {};
+      if (method === "Target.getTargets") {
+        return { targetInfos: targetPresent ? [{ targetId: "proof-target" }] : [] };
+      }
+      if (method === "Target.closeTarget") {
+        targetPresent = false;
+        return { success: true };
+      }
+      throw new Error("unexpected CDP command");
+    },
+    async detach() {},
+  };
   const browser = {
-    contexts: () => [{ pages: () => [], newPage: async () => page }],
+    contexts: () => [{
+      pages: () => [],
+      newPage: async () => page,
+      newCDPSession: async () => targetSession,
+    }],
+    newBrowserCDPSession: async () => browserSession,
     async close() {},
   };
 
