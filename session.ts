@@ -858,7 +858,7 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
     }
     if (!closePage) await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }).catch(() => {});
   } finally {
-    if (closePage) await page.close().catch(() => {});
+    if (closePage) await page.close();
   }
 }
 

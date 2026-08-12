@@ -786,6 +786,23 @@ test("restoreOriginStorage propagates a storage failure instead of reporting a p
   }])).rejects.toThrow("quota denied");
 });
 
+test("restoreOriginStorage rejects an unclosed throwaway page", async () => {
+  const page = {
+    async goto() {},
+    async evaluate() {},
+    async close() { throw new Error("page close failed"); },
+  };
+  const ctx = {
+    pages: () => [],
+    async newPage() { return page; },
+  };
+
+  await expect(restoreOriginStorage(ctx, [{
+    origin: "https://web.telegram.org",
+    localStorage: [{ name: "dc2_auth_key", value: "live" }],
+  }])).rejects.toThrow("page close failed");
+});
+
 test("collectSessionFromContext includes storage from pages loaded before CDP attach", async () => {
   const ctx = {
     async storageState(opts?: any) {
