@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseEgressResponse, resolveEgressEndpoints, verifyBrowserProxy } from "./egress.ts";
+import { parseEgressResponse, resolveEgressEndpoints, verifyRelayEgress } from "./egress.ts";
 
 test("parseEgressResponse accepts JSON and plain IPv4/IPv6 responses", () => {
   expect(parseEgressResponse('{"ip":"203.0.113.4","country":"US"}')).toEqual({ ip: "203.0.113.4", country: "US" });
@@ -22,171 +22,43 @@ test("egress endpoints support an operator override and reject invalid schemes",
   expect(() => resolveEgressEndpoints("file:///tmp/ip")).toThrow("must use http or https");
 });
 
-test("browser proxy verification refuses plaintext endpoints before CDP", async () => {
-  await expect(verifyBrowserProxy(
-    "ws://127.0.0.1:1/devtools/browser/never-contact",
+test("relay proxy verification refuses plaintext endpoints before connecting", async () => {
+  await expect(verifyRelayEgress(
+    1, // never contacted: endpoint validation happens first
     { endpoints: ["http://example.test/ip"] },
   )).rejects.toThrow("must use HTTPS");
 });
 
-test("browser proxy verification applies session work before its only CDP detach", async () => {
-  const events: string[] = [];
-  const page = {
-    async goto() {
-      events.push("proof");
-      return { ok: () => true };
+test("relay proxy verification returns the egress IP from the tunnel", async () => {
+  const calls: Array<[number, string]> = [];
+  const info = await verifyRelayEgress(4321, {
+    endpoints: ["https://example.test/ip"],
+    fetchThroughRelay: async (relayPort, endpoint) => {
+      calls.push([relayPort, endpoint]);
+      return { ip: "203.0.113.9" };
     },
-    locator() {
-      return { innerText: async () => "203.0.113.9" };
-    },
-    async close() { events.push("page-close"); },
-  };
-  const targetSession = {
-    async send() { return { targetInfo: { targetId: "proof-target" } }; },
-    async detach() {},
-  };
-  let targetPresent = true;
-  const browserSession = {
-    on() {},
-    off() {},
-    async send(method: string) {
-      if (method === "Target.setDiscoverTargets") return {};
-      if (method === "Target.getTargets") {
-        return { targetInfos: targetPresent ? [{ targetId: "proof-target" }] : [] };
-      }
-      if (method === "Target.closeTarget") {
-        events.push("proof-target-close");
-        targetPresent = false;
-        return { success: true };
-      }
-      throw new Error("unexpected CDP command");
-    },
-    async detach() { events.push("raw-session-detach"); },
-  };
-  const browser = {
-    contexts: () => [{
-      pages: () => [],
-      newPage: async () => page,
-      newCDPSession: async () => targetSession,
-    }],
-    newBrowserCDPSession: async () => browserSession,
-    async close() { events.push("browser-close"); },
-  };
-
-  const result = await verifyBrowserProxy(
-    "ws://test",
-    {
-      endpoints: ["https://example.test/ip"],
-      connect: async () => {
-        events.push("connect");
-        return browser;
-      },
-    },
-    async (attachedBrowser, egress) => {
-      expect(attachedBrowser).toBe(browser);
-      expect(egress.ip).toBe("203.0.113.9");
-      events.push("session-apply");
-    },
-  );
-
-  expect(result.ip).toBe("203.0.113.9");
-  expect(events).toEqual([
-    "connect",
-    "proof",
-    "proof-target-close",
-    "raw-session-detach",
-    "session-apply",
-    "browser-close",
-  ]);
+  });
+  expect(info.ip).toBe("203.0.113.9");
+  expect(calls).toEqual([[4321, "https://example.test/ip"]]);
 });
 
-test("browser proxy verification preserves session work errors after proof", async () => {
-  const original = new Error("session apply failed");
-  const page = {
-    async goto() { return { ok: () => true }; },
-    locator() { return { innerText: async () => "203.0.113.9" }; },
-    async close() {},
-  };
-  const targetSession = {
-    async send() { return { targetInfo: { targetId: "proof-target" } }; },
-    async detach() {},
-  };
-  let targetPresent = true;
-  const browserSession = {
-    on() {},
-    off() {},
-    async send(method: string) {
-      if (method === "Target.setDiscoverTargets") return {};
-      if (method === "Target.getTargets") {
-        return { targetInfos: targetPresent ? [{ targetId: "proof-target" }] : [] };
-      }
-      if (method === "Target.closeTarget") {
-        targetPresent = false;
-        return { success: true };
-      }
-      throw new Error("unexpected CDP command");
+test("relay proxy verification tries the next endpoint after a failure", async () => {
+  const seen: string[] = [];
+  const info = await verifyRelayEgress(4321, {
+    endpoints: ["https://one.test/ip", "https://two.test/ip"],
+    fetchThroughRelay: async (_port, endpoint) => {
+      seen.push(endpoint);
+      if (endpoint.includes("one")) throw new Error("refused");
+      return { ip: "198.51.100.7" };
     },
-    async detach() {},
-  };
-  const browser = {
-    contexts: () => [{
-      pages: () => [],
-      newPage: async () => page,
-      newCDPSession: async () => targetSession,
-    }],
-    newBrowserCDPSession: async () => browserSession,
-    async close() {},
-  };
-
-  await expect(verifyBrowserProxy(
-    "ws://test",
-    { endpoints: ["https://example.test/ip"], connect: async () => browser },
-    async () => { throw original; },
-  )).rejects.toBe(original);
+  });
+  expect(info.ip).toBe("198.51.100.7");
+  expect(seen).toEqual(["https://one.test/ip", "https://two.test/ip"]);
 });
 
-test("browser proxy verification never applies session work before proof", async () => {
-  let actionCalled = false;
-  const page = {
-    async goto() { return { ok: () => false }; },
-    locator() { return { innerText: async () => "" }; },
-    async close() {},
-  };
-  const targetSession = {
-    async send() { return { targetInfo: { targetId: "proof-target" } }; },
-    async detach() {},
-  };
-  let targetPresent = true;
-  const browserSession = {
-    on() {},
-    off() {},
-    async send(method: string) {
-      if (method === "Target.setDiscoverTargets") return {};
-      if (method === "Target.getTargets") {
-        return { targetInfos: targetPresent ? [{ targetId: "proof-target" }] : [] };
-      }
-      if (method === "Target.closeTarget") {
-        targetPresent = false;
-        return { success: true };
-      }
-      throw new Error("unexpected CDP command");
-    },
-    async detach() {},
-  };
-  const browser = {
-    contexts: () => [{
-      pages: () => [],
-      newPage: async () => page,
-      newCDPSession: async () => targetSession,
-    }],
-    newBrowserCDPSession: async () => browserSession,
-    async close() {},
-  };
-
-  await expect(verifyBrowserProxy(
-    "ws://test",
-    { endpoints: ["https://example.test/ip"], connect: async () => browser },
-    async () => { actionCalled = true; },
-  )).rejects.toThrow("Proxy verification failed before account traffic");
-  expect(actionCalled).toBe(false);
+test("relay proxy verification fails closed when every endpoint fails", async () => {
+  await expect(verifyRelayEgress(4321, {
+    endpoints: ["https://one.test/ip", "https://two.test/ip"],
+    fetchThroughRelay: async () => { throw new Error("refused"); },
+  })).rejects.toThrow("proxy verification failed before account traffic");
 });

@@ -18,7 +18,6 @@ import {
 } from "./pending-sync.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import {
-  applySessionToBrowser,
   bundleHasRestorableLogin,
   bundleTelegramClient,
   SessionRestoreError,
@@ -71,7 +70,7 @@ type CloudBrowserClient = Pick<
 
 type CloudBrowserLauncher = Pick<
   Launcher,
-  "start" | "stop" | "active" | "navigate" | "verifyRunningIdentity"
+  "start" | "stop" | "active" | "verifyRunningIdentity"
 >;
 
 export interface CloudBrowserOptions {
@@ -82,7 +81,8 @@ export interface CloudBrowserOptions {
   accountId: () => string | undefined;
   deviceId: () => string | undefined;
   readSession: (endpoint: string) => Promise<string>;
-  writeSession: (endpoint: string, bundle: string) => Promise<void>;
+  /** Restore the bundle and open startup pages over ONE CDP attach, then detach. */
+  applySession: (endpoint: string, bundle: string, urls: readonly string[]) => Promise<void>;
   heartbeatMs?: number;
   setIntervalFn?: (fn: () => void, ms: number) => unknown;
   clearIntervalFn?: (handle: unknown) => void;
@@ -268,38 +268,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       stage = "browser_launch";
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
       const startBrowser = async () => {
-        let inlineRestoreStarted = false;
-        let inlineRestoreCompleted = false;
-        const restoreSession = profile.proxy
-          ? (browser: any): Promise<boolean> => {
-              inlineRestoreStarted = true;
-              this.diagnosticEvents.record("session_restore_started");
-              const operation = applySessionToBrowser(browser, sessionBundle).then(
-                () => {
-                  inlineRestoreCompleted = true;
-                  return true;
-                },
-                (error) => {
-                  throw error instanceof SessionRestoreError
-                    ? error
-                    : new SessionRestoreError("context", "failed");
-                },
-              );
-              void operation.catch(() => {});
-              return operation;
-            }
-          : undefined;
-        const launched = await this.options.launcher.start(profileId, chromeArgs, {
+        return await this.options.launcher.start(profileId, chromeArgs, {
           autoNavigate: false,
           resetStorage: bundleHasRestorableLogin(sessionBundle),
           sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
-          restoreSession,
         });
-        return { launched, inlineRestoreStarted, inlineRestoreCompleted };
       };
-      let launchAttempt: Awaited<ReturnType<typeof startBrowser>>;
+      let launched: Awaited<ReturnType<typeof startBrowser>>;
       try {
-        launchAttempt = await startBrowser();
+        launched = await startBrowser();
       } catch (error) {
         if (error instanceof SessionRestoreError) throw error;
         const launchError = normalizeBrowserLaunchError(error);
@@ -311,17 +288,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         if (!stopped) throw launchError;
         this.log(`${profileId}: stopped retained browser launch ownership; retrying once`);
         try {
-          launchAttempt = await startBrowser();
+          launched = await startBrowser();
         } catch (retryError) {
           if (retryError instanceof SessionRestoreError) throw retryError;
           throw normalizeBrowserLaunchError(retryError);
         }
       }
-      const {
-        launched,
-        inlineRestoreStarted,
-        inlineRestoreCompleted,
-      } = launchAttempt;
       this.diagnosticEvents.record("browser_started");
       const launch = this.options.store.getLaunch(profileId);
       if (!launch) throw new Error("browser launch did not create durable lifecycle state");
@@ -335,13 +307,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
-      if (!inlineRestoreStarted) this.diagnosticEvents.record("session_restore_started");
-      if (
-        profile.proxy
-        && (!inlineRestoreStarted || !inlineRestoreCompleted || !launched.sessionRestored)
-      ) {
-        throw new SessionRestoreError("connect", "failed");
-      }
+      this.diagnosticEvents.record("session_restore_started");
       await this.options.launcher.verifyRunningIdentity(profileId);
       const verifiedLaunch = this.options.store.getLaunch(profileId);
       if (
@@ -351,7 +317,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       ) {
         throw new Error("Cloud browser identity changed before session restore");
       }
-      if (!profile.proxy) await this.options.writeSession(verifiedLaunch.ws, sessionBundle);
+      // ONE CDP attach: restore the authoritative bundle (no-op attach-free when
+      // the bundle is empty) and open the startup pages, then detach once.
+      const home = platformHomeUrl(profile.platform, bundleTelegramClient(sessionBundle) ?? "a");
+      const urls = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
+      await this.options.applySession(verifiedLaunch.ws, sessionBundle, urls);
       await this.options.launcher.verifyRunningIdentity(profileId);
       const restoredLaunch = this.options.store.getLaunch(profileId);
       if (
@@ -375,27 +345,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         throw new Error("Cloud open lifecycle state disappeared after restore");
       }
 
-      stage = "navigation";
-      const home = platformHomeUrl(profile.platform, bundleTelegramClient(sessionBundle) ?? "a");
-      const urls = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
-      let navigationWarning: string | undefined;
-      if (urls.length > 0) {
-        try {
-          await this.options.launcher.navigate(restoredLaunch.ws, urls);
-        } catch (error) {
-          this.log(
-            `${profileId}: Cloud startup navigation failed (${errorCode(error)}, ${safeErrorType(error)}); continuing`,
-          );
-          navigationWarning = "Profile opened, but startup navigation failed. Open the site manually.";
-        }
-      }
+      // Startup navigation already happened inside the single restore attach above.
       this.diagnosticEvents.record("open_running");
       this.startHeartbeat(profileId);
       const warnings = [
         opened.activeOpens.length > 0
           ? `This profile is also open in ${opened.activeOpens.length} other session(s).`
           : undefined,
-        navigationWarning,
       ].filter((warning): warning is string => !!warning);
       return {
         ok: true,

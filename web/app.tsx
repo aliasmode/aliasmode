@@ -188,6 +188,8 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   session_restore_cookie_clear_timeout: "Cookie clear timed out",
   session_restore_cookie_add_failed: "Cookie restore failed",
   session_restore_cookie_add_timeout: "Cookie restore timed out",
+  session_restore_navigation_failed: "Startup navigation failed",
+  session_restore_navigation_timeout: "Startup navigation timed out",
   session_restore_disconnect_failed: "Browser connection cleanup failed",
   session_restore_disconnect_timeout: "Browser connection cleanup timed out",
   open_running: "Cloud profile is running",

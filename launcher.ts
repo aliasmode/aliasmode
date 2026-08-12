@@ -31,7 +31,7 @@ import { deriveFingerprintFlags, isMobileUserAgent, platformFromUA, proxyServerF
 export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderSetupResult } from "./search-provider.ts";
-import { verifyBrowserProxy, type EgressInfo, type VerifiedBrowserAction } from "./egress.ts";
+import { verifyRelayEgress, type EgressInfo } from "./egress.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { SessionRestoreError } from "./session.ts";
 
@@ -86,7 +86,7 @@ export interface SpawnedProcess {
 export type SpawnFn = (binary: string, args: string[]) => SpawnedProcess;
 export type FetchFn = (url: string) => Promise<{ ok: boolean; json(): Promise<any> }>;
 export type LaunchNavigator = (ws: string, urls: string[]) => Promise<void>;
-export type ProxyVerifier = (ws: string, afterVerified?: VerifiedBrowserAction) => Promise<EgressInfo>;
+export type ProxyVerifier = (relayPort: number) => Promise<EgressInfo>;
 export interface BrowserProcessIdentity {
   profileId: string;
   debugPort: number;
@@ -361,14 +361,11 @@ export interface LaunchStartOptions {
   resetStorage?: boolean;
   /** Hub session version the browser is being opened from; persisted for safe survivor reattach. */
   sessionBaseVersion?: number;
-  /** Apply a Cloud session inside a verified proxy CDP lease before it detaches. */
-  restoreSession?: (browser: any) => Promise<boolean>;
 }
 
 export interface LaunchStartResult {
   ws: string;
   port: number;
-  sessionRestored?: true;
 }
 
 const DEFAULT_DATA_ROOT = "profiles";
@@ -599,7 +596,6 @@ export class Launcher {
   private verifiedExternal = new Map<string, VerifiedExternalLaunch>();
   private relays = new Map<string, ProxyRelay>(); // auth-injecting proxy relay per running authed-proxy profile
   /** Proxied browser websocket generations verified by this manager process. */
-  private verifiedProxyWs = new Map<string, string>();
   /** Full profile + launch generations certified by this manager process. */
   private certifiedLaunches = new Map<string, string>();
   private certificationsInFlight = new Map<string, Promise<boolean>>();
@@ -656,7 +652,7 @@ export class Launcher {
     this.navigateFn = opts.navigate ?? defaultNavigate;
     this.verifyProxyFn = opts.verifyProxy === false
       ? undefined
-      : opts.verifyProxy ?? ((ws, afterVerified) => verifyBrowserProxy(ws, {}, afterVerified));
+      : opts.verifyProxy ?? ((relayPort) => verifyRelayEgress(relayPort));
     // Test spawners do not implicitly weaken production policy. Every disabled
     // identity gate must be requested through the conspicuous unsafe option.
     this.enforceHostCompatibility = opts.enforceHostCompatibility ?? !this.unsafeDisableIdentityGates;
@@ -921,39 +917,20 @@ export class Launcher {
     await this.navigateFn(ws, urls);
   }
 
-  private async verifyConfiguredProxy(
-    profile: Profile,
-    ws: string,
-    restoreSession?: (browser: any) => Promise<boolean>,
-  ): Promise<boolean> {
-    if (!profile.proxy || !this.verifyProxyFn) return false;
-    const proofKey = JSON.stringify([ws, profile.proxy, profile.timezone]);
-    if (this.verifiedProxyWs.get(profile.id) === proofKey && !restoreSession) return false;
-    let restorePromise: Promise<void> | undefined;
-    let sessionRestored = false;
-    const afterVerified: VerifiedBrowserAction | undefined = restoreSession
-      ? (browser) => {
-          if (restorePromise) return restorePromise;
-          restorePromise = (async () => {
-            sessionRestored = await restoreSession(browser);
-          })();
-          void restorePromise.catch(() => {});
-          return restorePromise;
-        }
-      : undefined;
-    let verificationFailed = false;
+  /**
+   * Relay-level proxy proof, run BEFORE the browser spawns: one HTTPS request
+   * through the freshly started loopback relay. The browser always points at
+   * the relay and the relay never falls back to direct egress, so this checks
+   * the exact upstream path without a single CDP attach.
+   */
+  private async preflightProxyRelay(profile: Profile, relayPort: number): Promise<void> {
+    if (!this.verifyProxyFn) return;
     try {
-      await this.verifyProxyFn(ws, afterVerified);
+      await this.verifyProxyFn(relayPort);
     } catch {
-      verificationFailed = true;
-    }
-    if (restorePromise) await restorePromise;
-    if (verificationFailed || (restoreSession && !restorePromise)) {
       throw new BrowserLaunchError("proxy_egress");
     }
-    this.verifiedProxyWs.set(profile.id, proofKey);
-    this.log(`${profile.id}: verified proxy egress`);
-    return sessionRestored;
+    this.log(`${profile.id}: verified proxy egress through the local relay`);
   }
 
   private identityCertificationKey(profileId: string): string | null {
@@ -992,7 +969,6 @@ export class Launcher {
 
   private clearIdentityCertification(profileId: string): void {
     this.certifiedLaunches.delete(profileId);
-    this.verifiedProxyWs.delete(profileId);
   }
 
   private requireUnchangedProfile(profileId: string, snapshot: string, stage: string): Profile {
@@ -1208,19 +1184,17 @@ export class Launcher {
             existing = { ...existing, sessionBaseVersion: opts.sessionBaseVersion };
             this.store.recordLaunch(existing);
           }
-          // A browser surviving a manager restart has no in-memory proxy proof.
-          // Restore its relay and verify browser HTTP egress before returning an
-          // authenticated endpoint to any caller.
-          let survivorSessionRestored = false;
-          if (!this.isIdentityCertified(profileId) || opts.restoreSession) {
+          // A browser surviving a manager restart lost its in-memory relay;
+          // rebind it on the recorded port so the running browser's
+          // --proxy-server keeps working. The browser was verified at its
+          // original launch; relay restoration is pure loopback setup.
+          if (!this.isIdentityCertified(profileId)) {
             try {
               await this.ensureSurvivorRelay(profile, existing);
-              profile = this.requireUnchangedProfile(profileId, profileSnapshot, "live-browser relay restoration");
-              survivorSessionRestored = await this.verifyConfiguredProxy(profile, currentWs, opts.restoreSession);
-              this.requireUnchangedProfile(profileId, profileSnapshot, "live-browser proxy verification");
+              this.requireUnchangedProfile(profileId, profileSnapshot, "live-browser relay restoration");
               this.markIdentityCertified(profileId);
             } catch (error) {
-              return await this.rejectUnsafeExistingLaunch(profileId, "live-browser proxy verification", error);
+              return await this.rejectUnsafeExistingLaunch(profileId, "live-browser relay restoration", error);
             }
           }
           this.log(
@@ -1232,7 +1206,6 @@ export class Launcher {
           return {
             ws: currentWs,
             port: existing.debugPort,
-            ...(survivorSessionRestored ? { sessionRestored: true as const } : {}),
           };
         }
       }
@@ -1314,7 +1287,6 @@ export class Launcher {
     let spawnAttempted = false;
     let relayPort: number | undefined;
     let launchStartedAt = Date.now();
-    let sessionRestored = false;
     try {
       // Bring up the loopback HTTP/auth-or-SOCKS bridge before launch. Started
       // here (inside the try) so a later failure rolls it back too.
@@ -1342,6 +1314,10 @@ export class Launcher {
         this.relays.set(profileId, relay);
         relayPort = relay.port;
         this.log(`proxy relay ready for ${profileId}`);
+        // Prove the authenticated upstream works before spawning the browser.
+        // The browser can only reach the network through this relay (no direct
+        // fallback), so a failure here means account pages could never load.
+        await this.preflightProxyRelay(profile, relayPort);
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
       const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort);
@@ -1395,12 +1371,6 @@ export class Launcher {
 
       const ws = await this.waitForCdp(port, proc);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser startup");
-
-      // Prove the exact launched browser can reach the network through its
-      // configured direct or relayed path before touching cookies or
-      // any account site; bad credentials must fail closed.
-      sessionRestored = await this.verifyConfiguredProxy(profile, ws, opts.restoreSession);
-      profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser proxy verification");
 
       // Fresh ungoogled Chromium profiles can default to "No Search", which
       // treats address-bar phrases as hostnames (https://<phrase>). Configure
@@ -1545,7 +1515,7 @@ export class Launcher {
       };
       this.store.recordLaunch(info);
       this.markIdentityCertified(profileId);
-      return { ws, port, ...(sessionRestored ? { sessionRestored: true as const } : {}) };
+      return { ws, port };
     } catch (err) {
       // Roll back partial state so a failed start can't leak a zombie — including the relay, which
       // is brought up before the browser, so an error after that point would strand a listener.
@@ -2310,13 +2280,9 @@ export class Launcher {
       this.markIdentityCertified(profileId);
       return;
     }
-    if (!this.verifyProxyFn) {
-      throw new Error(`cannot verify survivor ${profileId}: proxy egress verifier is unavailable`);
-    }
-
     let current = this.store.getLaunch(profileId);
     if (!current || `${current.debugPort}:${current.startedAt}` !== generation) {
-      throw new Error(`cannot verify survivor ${profileId}: launch generation changed before proxy verification`);
+      throw new Error(`cannot verify survivor ${profileId}: launch generation changed before relay restoration`);
     }
     await this.ensureSurvivorRelay(profile, current);
     profile = this.requireUnchangedProfile(profileId, snapshot, "survivor relay restoration");
@@ -2324,14 +2290,8 @@ export class Launcher {
     if (!current || `${current.debugPort}:${current.startedAt}` !== generation) {
       throw new Error(`cannot verify survivor ${profileId}: launch generation changed during relay restoration`);
     }
-    await this.verifyConfiguredProxy(profile, current.ws);
-    this.requireUnchangedProfile(profileId, snapshot, "survivor browser verification");
-    current = this.store.getLaunch(profileId);
-    if (!current || `${current.debugPort}:${current.startedAt}` !== generation) {
-      throw new Error(`cannot verify survivor ${profileId}: launch generation changed during browser verification`);
-    }
     this.markIdentityCertified(profileId);
-    this.log(`survivor identity verified for ${profileId}: host persona + proxy HTTP egress`);
+    this.log(`survivor identity verified for ${profileId}: host persona + relay restored`);
   }
 
   /**

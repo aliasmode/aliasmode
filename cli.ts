@@ -33,6 +33,7 @@ import {
   READ_SESSION_WORKER_ARG,
   runReadSessionWorker,
   writeSession,
+  applySessionToEndpoint,
 } from "./session.ts";
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
 import { ensureStateDirectories, profileDataPaths, resolveStateRoot, statePaths, type StatePaths } from "./paths.ts";
@@ -57,7 +58,7 @@ import { hostname } from "node:os";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
-import { verifyBrowserProxy } from "./egress.ts";
+import { verifyRelayEgress } from "./egress.ts";
 import { canonicalIp } from "./ip.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
 import {
@@ -370,7 +371,7 @@ function makeCloudBrowser(
     accountId: () => connection.accountId(),
     deviceId: () => connection.deviceId(),
     readSession: readSessionInSubprocess,
-    writeSession,
+    applySession: applySessionToEndpoint,
   });
 }
 
@@ -578,12 +579,13 @@ function cloudLauncherSmokeProxy(
   }
   return {
     profileProxy: { type, host, port, user, pass },
-    verifyProxy: async (ws, afterVerified) => verifyBrowserProxy(ws, {}, async (browser, egress) => {
+    verifyProxy: async (relayPort) => {
+      const egress = await verifyRelayEgress(relayPort);
       if (canonicalIp(egress.ip) !== expectedIp) {
         throw new Error("Cloud launcher smoke proxy egress did not match");
       }
-      await afterVerified?.(browser, egress);
-    }),
+      return egress;
+    },
   };
 }
 
@@ -679,7 +681,7 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     accountId: () => "smoke-account",
     deviceId: () => "smoke-device",
     readSession: readSessionInSubprocess,
-    writeSession,
+    applySession: applySessionToEndpoint,
     heartbeatMs: 0,
   });
 

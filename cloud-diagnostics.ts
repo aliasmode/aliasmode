@@ -22,6 +22,8 @@ export const CLOUD_DIAGNOSTIC_TYPES = [
   "session_restore_cookie_clear_timeout",
   "session_restore_cookie_add_failed",
   "session_restore_cookie_add_timeout",
+  "session_restore_navigation_failed",
+  "session_restore_navigation_timeout",
   "session_restore_disconnect_failed",
   "session_restore_disconnect_timeout",
   "open_running",

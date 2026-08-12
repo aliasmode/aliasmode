@@ -7,8 +7,8 @@ import { CloudBrowserCoordinator } from "./cloud-browser.ts";
 import { BrowserLaunchError, Launcher } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
-import { readSession, writeSession } from "./session.ts";
-import { verifyBrowserProxy } from "./egress.ts";
+import { applySessionToEndpoint, readSession } from "./session.ts";
+import { verifyRelayEgress } from "./egress.ts";
 import { ProfileStore } from "./store.ts";
 import type { ProxyType } from "./types.ts";
 
@@ -61,7 +61,9 @@ async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
   });
   try {
     const launched = await launcher.start(profile.id, [], { autoNavigate: false });
-    const verified = await verifyBrowserProxy(launched.ws);
+    const relayPort = store.getLaunch(profile.id)?.relayPort;
+    expect(relayPort).toBeNumber();
+    const verified = await verifyRelayEgress(relayPort!);
     return { ip: verified.ip, launcher, store, profileId: profile.id, root };
   } catch (error) {
     await launcher.stop(profile.id).catch(() => {});
@@ -177,7 +179,7 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     accountId: () => "live-account",
     deviceId: () => "live-device",
     readSession,
-    writeSession,
+    applySession: applySessionToEndpoint,
     heartbeatMs: 0,
   });
 
@@ -188,7 +190,11 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
       if (!opened.ok || !opened.ws) throw new Error(opened.error ?? "live Cloud proxy smoke could not open");
       expect(store.getProfile(profile.id)?.proxy).toEqual(profile.proxy);
       expect(store.getLaunch(profile.id)?.relayPort).toBeNumber();
-      expect((await verifyBrowserProxy(opened.ws)).ip).toBe(expectedIp);
+      {
+        const relayPort = store.getLaunch(profile.id)?.relayPort;
+        expect(relayPort).toBeNumber();
+        expect((await verifyRelayEgress(relayPort!)).ip).toBe(expectedIp);
+      }
       expect(await launcher.active(profile.id)).toBe(true);
       expect(await coordinator.close(profile.id)).toBe(true);
       expect(await launcher.active(profile.id)).toBe(false);

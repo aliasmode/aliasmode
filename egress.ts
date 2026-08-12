@@ -1,16 +1,13 @@
-/** Shared browser/direct egress lookup and validation. */
+/** Shared relay/direct egress lookup and validation. */
 
-import { withCdpPage } from "./cdp.ts";
+import net from "node:net";
+import tls from "node:tls";
 import { canonicalIp } from "./ip.ts";
 
 export const DEFAULT_EGRESS_ENDPOINTS = [
   "https://ipinfo.io/json",
   "https://api.ipify.org?format=json",
 ] as const;
-
-// Playwright force-terminates a stalled CDP transport after five seconds.
-// The mandatory proxy probe must wait beyond that boundary before handoff.
-const PROXY_PROBE_CLEANUP_TIMEOUT_MS = 6_000;
 
 export interface EgressInfo {
   ip: string;
@@ -23,11 +20,9 @@ export interface EgressInfo {
 export interface EgressLookupOptions {
   endpoints?: readonly string[];
   timeoutMs?: number;
-  /** Injectable CDP connector for deterministic lease-order tests. */
-  connect?: (ws: string, options: { timeout: number }) => Promise<any>;
+  /** Injectable tunnel fetch for deterministic tests. */
+  fetchThroughRelay?: (relayPort: number, endpoint: string, timeoutMs: number) => Promise<EgressInfo | null>;
 }
-
-export type VerifiedBrowserAction = (browser: any, egress: EgressInfo) => Promise<void>;
 
 /**
  * Resolve the lookup list. Operators whose proxy pools block the defaults may
@@ -78,23 +73,6 @@ export function parseEgressResponse(body: string): EgressInfo | null {
   return ip ? { ip } : null;
 }
 
-/** Fetch egress through an already-connected Playwright page. */
-export async function fetchPageEgress(page: any, opts: EgressLookupOptions = {}): Promise<EgressInfo | null> {
-  const endpoints = opts.endpoints ? [...opts.endpoints] : resolveEgressEndpoints();
-  const timeoutMs = opts.timeoutMs ?? 15_000;
-  for (const endpoint of endpoints) {
-    try {
-      const response = await page.goto(endpoint, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-      if (!response?.ok()) continue;
-      const info = parseEgressResponse(await page.locator("body").innerText({ timeout: Math.min(timeoutMs, 5_000) }));
-      if (info) return info;
-    } catch {
-      // Try the next independent endpoint.
-    }
-  }
-  return null;
-}
-
 /** Fetch this machine's direct egress using the same endpoints/parser. */
 export async function fetchDirectEgress(
   opts: EgressLookupOptions = {},
@@ -115,11 +93,16 @@ export async function fetchDirectEgress(
   return null;
 }
 
-/** Prove that the configured browser proxy can reach public HTTPS before account traffic. */
-export async function verifyBrowserProxy(
-  ws: string,
+/**
+ * Prove the configured proxy works BEFORE the browser launches, using only the
+ * loopback relay — no CDP, no Playwright, no browser tab. The browser is always
+ * launched with `--proxy-server=http://127.0.0.1:<relay>` and the relay never
+ * falls back to a direct connection, so a relay that answers an HTTPS request
+ * through the authenticated upstream is the same path the browser will use.
+ */
+export async function verifyRelayEgress(
+  relayPort: number,
   opts: EgressLookupOptions = {},
-  afterVerified?: VerifiedBrowserAction,
 ): Promise<EgressInfo> {
   const endpoints = opts.endpoints ? [...opts.endpoints] : resolveEgressEndpoints();
   for (const endpoint of endpoints) {
@@ -127,38 +110,105 @@ export async function verifyBrowserProxy(
       throw new Error(`proxy verification endpoint must use HTTPS: ${endpoint}`);
     }
   }
-  let actionFailed = false;
-  let actionError: unknown;
-  try {
-    const egress = await withCdpPage(
-      ws,
-      async (page, browser, lease) => {
-        const result = await fetchPageEgress(page, { ...opts, endpoints });
-        if (!result) throw new Error("no egress endpoint was reachable");
-        await lease.closeTemporaryPage();
-        if (afterVerified) {
-          try {
-            await afterVerified(browser, result);
-          } catch (error) {
-            actionFailed = true;
-            actionError = error;
-            throw error;
-          }
-        }
-        return result;
-      },
-      {
-        timeoutMs: opts.timeoutMs ?? 15_000,
-        cleanupTimeoutMs: PROXY_PROBE_CLEANUP_TIMEOUT_MS,
-        temporaryPage: true,
-        requireConfirmedCleanup: true,
-        connect: opts.connect,
-      },
-    );
-    return egress;
-  } catch (error) {
-    if (actionFailed) throw actionError;
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Proxy verification failed before account traffic: ${message}`, { cause: error });
+  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const fetcher = opts.fetchThroughRelay ?? fetchRelayEgress;
+  let lastError: unknown;
+  for (const endpoint of endpoints) {
+    try {
+      const info = await fetcher(relayPort, endpoint, timeoutMs);
+      if (info) return info;
+    } catch (error) {
+      lastError = error;
+    }
   }
+  throw new Error("proxy verification failed before account traffic", { cause: lastError });
+}
+
+/** One HTTPS GET through the loopback relay: CONNECT via the relay, then TLS to the origin. */
+async function fetchRelayEgress(relayPort: number, endpoint: string, timeoutMs: number): Promise<EgressInfo | null> {
+  const url = new URL(endpoint);
+  const host = url.hostname;
+  const target = `${host}:${url.port || 443}`;
+  const socket = net.connect({ host: "127.0.0.1", port: relayPort });
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  try {
+    socket.setNoDelay(true);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("relay connection timed out")), remaining(deadline));
+      socket.once("connect", () => { clearTimeout(timer); resolve(); });
+      socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+    });
+    const established = await new Promise<Buffer>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("relay CONNECT timed out")), remaining(deadline));
+      let buf = Buffer.alloc(0);
+      const onData = (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        const end = buf.indexOf("\r\n\r\n");
+        if (end === -1) {
+          if (buf.length > 16 * 1024) { clearTimeout(timer); reject(new Error("relay CONNECT response too large")); }
+          return;
+        }
+        clearTimeout(timer);
+        socket.removeListener("data", onData);
+        const status = buf.subarray(0, end).toString("latin1").split("\r\n")[0] ?? "";
+        if (!/\s2\d\d\s/.test(status)) { reject(new Error("relay CONNECT refused")); return; }
+        resolve(buf.subarray(end + 4));
+      };
+      socket.on("data", onData);
+      socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
+    });
+    // Any bytes the upstream already pushed inside the tunnel (rare for a fresh
+    // CONNECT) must seed the TLS socket — but TLS handshakes start client-side,
+    // so a well-behaved relay/upstream has sent nothing yet.
+    if (established.length) throw new Error("unexpected bytes before TLS handshake");
+    const body = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("relay HTTPS request timed out")), remaining(deadline));
+      // The response is only an IP echo used for a liveness/egress check; the
+      // authoritative proxy-auth proof is the relay's own upstream handshake.
+      // Skip origin cert validation so private/self-signed egress endpoints work.
+      const tlsSocket = tls.connect({ socket, servername: host, rejectUnauthorized: false });
+      let buf = Buffer.alloc(0);
+      tlsSocket.once("secureConnect", () => {
+        tlsSocket.write(
+          `GET ${url.pathname || "/"}${url.search} HTTP/1.1\r\nHost: ${target}\r\nAccept: */*\r\nConnection: close\r\n\r\n`,
+        );
+      });
+      tlsSocket.on("data", (chunk: Buffer) => { buf = Buffer.concat([buf, chunk]); });
+      tlsSocket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      tlsSocket.once("close", () => {
+        clearTimeout(timer);
+        const text = buf.toString("latin1");
+        const headEnd = text.indexOf("\r\n\r\n");
+        if (headEnd === -1) { reject(new Error("relay HTTPS response was incomplete")); return; }
+        const status = text.slice(0, headEnd).split("\r\n")[0] ?? "";
+        if (!/\s2\d\d\s/.test(status)) { reject(new Error("egress endpoint did not answer 2xx")); return; }
+        let body = text.slice(headEnd + 4);
+        if (/^transfer-encoding:\s*chunked/im.test(text.slice(0, headEnd))) body = decodeChunked(body);
+        resolve(body);
+      });
+    });
+    return parseEgressResponse(body);
+  } finally {
+    socket.destroy();
+  }
+}
+
+function remaining(deadline: number): number {
+  return Math.max(1, deadline - Date.now());
+}
+
+/** Minimal chunked-transfer decoder for the small JSON egress payloads. */
+function decodeChunked(raw: string): string {
+  let out = "";
+  let rest = raw;
+  while (rest.length) {
+    const lineEnd = rest.indexOf("\r\n");
+    if (lineEnd === -1) break;
+    const size = parseInt(rest.slice(0, lineEnd), 16);
+    if (!Number.isFinite(size) || size <= 0) break;
+    out += rest.slice(lineEnd + 2, lineEnd + 2 + size);
+    rest = rest.slice(lineEnd + 2 + size + 2);
+  }
+  return out;
 }

@@ -97,6 +97,7 @@ export type SessionRestoreOperation =
   | "origin_storage"
   | "cookie_clear"
   | "cookie_add"
+  | "navigation"
   | "disconnect";
 
 export type SessionRestoreOutcome = "failed" | "timeout";
@@ -963,18 +964,6 @@ function parseSessionBundle(bundle: string): NormalizedSessionBundle {
   }
 }
 
-/** Apply an authoritative bundle through a borrowed CDP browser without detaching it. */
-export async function applySessionToBrowser(
-  browser: any,
-  bundle: string,
-  options: { writeTimeoutMs?: number } = {},
-): Promise<void> {
-  await writeSessionToBrowser(browser, parseSessionBundle(bundle), {
-    writeTimeoutMs: options.writeTimeoutMs,
-    disconnect: false,
-  });
-}
-
 export interface WriteSessionOptions {
   connectTimeoutMs?: number;
   contextRetryMs?: number;
@@ -1051,8 +1040,59 @@ export async function writeSession(
   options: WriteSessionOptions = {},
 ): Promise<void> {
   const parsed = parseSessionBundle(bundle);
+  if (isSessionBundleEmpty(parsed)) return; // nothing to enforce on a fresh profile
   const browser = await connectPersistentSessionBrowser(ws, options);
   await writeSessionToBrowser(browser, parsed, options);
+}
+
+/** A bundle with no cookies and no origin storage needs no browser attach at all. */
+function isSessionBundleEmpty(parsed: NormalizedSessionBundle): boolean {
+  return parsed.cookies.length === 0 && parsed.origins.length === 0;
+}
+
+/**
+ * ONE CDP attach for the whole Cloud open: wait for the persistent context,
+ * restore the authoritative bundle (skipped when empty), navigate the startup
+ * pages, then detach exactly once. Replaces the probe/restore/navigate chain of
+ * separate connects that hung against CloakBrowser's CDP server on real devices.
+ */
+export async function applySessionToEndpoint(
+  ws: string,
+  bundle: string,
+  urls: readonly string[],
+  options: WriteSessionOptions = {},
+): Promise<void> {
+  const parsed = parseSessionBundle(bundle);
+  const browser = await connectPersistentSessionBrowser(ws, options);
+  if (!isSessionBundleEmpty(parsed)) {
+    await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
+  }
+  let navigationError: unknown;
+  try {
+    const context = browser.contexts()[0];
+    if (!context) throw new Error("persistent context unavailable");
+    for (let i = 0; i < urls.length; i++) {
+      const page = i === 0 ? context.pages()[0] ?? (await context.newPage()) : await context.newPage();
+      await page.goto(urls[i]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    }
+  } catch (error) {
+    navigationError = error;
+  }
+  const disconnectTimeoutMs = Math.max(1, options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS);
+  try {
+    // connectOverCDP close() detaches; the managed browser keeps running.
+    await withDeadline(Promise.resolve().then(() => browser.close()), disconnectTimeoutMs, "session detach");
+  } catch (error) {
+    throw new SessionRestoreError(
+      "disconnect",
+      error instanceof DeadlineExceededError ? "timeout" : "failed",
+    );
+  }
+  if (navigationError) {
+    throw navigationError instanceof SessionRestoreError
+      ? navigationError
+      : new SessionRestoreError("navigation", "failed");
+  }
 }
 
 if (import.meta.main && Bun.argv[2] === READ_SESSION_WORKER_ARG) {

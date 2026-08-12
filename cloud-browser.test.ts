@@ -49,9 +49,6 @@ function setup(options: {
   startError?: unknown;
   verifyWebSockets?: string[];
   proxy?: PortableProfileV1["profile"]["proxy"];
-  inlineRestoreFailure?: boolean;
-  ignoreRestoreSession?: boolean;
-  claimRestoreWithoutCallbackOnRetry?: boolean;
 } = {}) {
   const events: string[] = [];
   const logs: string[] = [];
@@ -119,37 +116,6 @@ function setup(options: {
       expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
       if (options.startError) throw options.startError;
-      let sessionRestored = false;
-      if (
-        startOptions.restoreSession
-        && options.claimRestoreWithoutCallbackOnRetry
-        && startCalls > 1
-      ) {
-        sessionRestored = true;
-      } else if (startOptions.restoreSession && options.ignoreRestoreSession) {
-        events.push("inline-restore");
-        void startOptions.restoreSession({
-          contexts: () => [{
-            pages: () => [],
-            clearCookies: () => new Promise<void>(() => {}),
-            async addCookies() {},
-          }],
-          async close() { throw new Error("borrowed browser must not close during inline restore"); },
-        });
-        sessionRestored = true; // Malformed adapter invokes without awaiting, then claims completion.
-      } else if (startOptions.restoreSession) {
-        events.push("inline-restore");
-        sessionRestored = await startOptions.restoreSession({
-          contexts: () => [{
-            pages: () => [],
-            async clearCookies() {
-              if (options.inlineRestoreFailure) throw new Error("raw cookie clear failure");
-            },
-            async addCookies() {},
-          }],
-          async close() { throw new Error("borrowed browser must not close during inline restore"); },
-        });
-      }
       store.recordLaunch({
         profileId,
         pid: 10,
@@ -161,11 +127,7 @@ function setup(options: {
       if (options.startRetainedFailure && startCalls === 1) {
         throw new Error("stale browser retained");
       }
-      return {
-        ws: "ws://browser",
-        port: 9222,
-        ...(sessionRestored ? { sessionRestored: true as const } : {}),
-      };
+      return { ws: "ws://browser", port: 9222 };
     },
     async stop(profileId: string) {
       events.push("stop");
@@ -174,14 +136,6 @@ function setup(options: {
       return true;
     },
     async active() { return true; },
-    async navigate(endpoint: string, urls: string[]) {
-      events.push("navigate");
-      navigateEndpoints.push(endpoint);
-      if (options.navigateFailure) throw new Error("navigation secret");
-      navigatedUrls.push(urls);
-      expect(queue.getOpen("profile1", "account1")?.phase).toBe("running");
-      expect(store.getLaunch("profile1")?.sessionBaseVersion).toBe(4);
-    },
     async verifyRunningIdentity(profileId: string) {
       verifyCalls++;
       const ws = options.verifyWebSockets?.[verifyCalls - 1];
@@ -205,11 +159,14 @@ function setup(options: {
       events.push("capture");
       return JSON.stringify(payload().session);
     },
-    async writeSession(endpoint: string) {
+    async applySession(endpoint: string, _bundle: string, urls: readonly string[]) {
       const expectedEndpoint = options.verifyWebSockets?.[0] ?? "ws://browser";
       expect(endpoint).toBe(expectedEndpoint);
       restoreEndpoints.push(endpoint);
       events.push("restore");
+      navigatedUrls.push([...urls]);
+      navigateEndpoints.push(endpoint);
+      if (options.navigateFailure) throw new SessionRestoreError("navigation", "failed");
       expect(queue.getOpen("profile1", "account1")?.phase).toBe("restoring");
       expect(store.getLaunch("profile1")?.sessionBaseVersion).toBe(-1);
     },
@@ -241,6 +198,7 @@ test("Cloud browser creates a portable profile without a local-only fallback", a
   state.store.close();
 });
 
+
 test("Cloud browser passes the authenticated proxy to Launcher without exposing it", async () => {
   const proxy = {
     type: "socks5" as const,
@@ -253,8 +211,7 @@ test("Cloud browser passes the authenticated proxy to Launcher without exposing 
 
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   expect(state.startedProxy()).toEqual(proxy);
-  expect(state.restoreEndpoints).toEqual([]);
-  expect(state.events).toContain("inline-restore");
+  expect(state.restoreEndpoints).toEqual(["ws://browser"]);
   const publicState = JSON.stringify({ logs: state.logs, diagnostics: state.coordinator.diagnostics() });
   for (const secret of [proxy.host, proxy.user, proxy.pass]) expect(publicState).not.toContain(secret);
 
@@ -262,83 +219,18 @@ test("Cloud browser passes the authenticated proxy to Launcher without exposing 
   state.store.close();
 });
 
-test("proxied Cloud restore failure keeps exact diagnostics and never reconnects", async () => {
-  const state = setup({
-    proxy: { type: "http", host: "proxy.invalid", port: "8080", user: "user", pass: "pass" },
-    inlineRestoreFailure: true,
-  });
 
-  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
-
-  expect(result).toEqual({
-    ok: false,
-    error: "Cloud profile open failed at session_restore/cookie_clear (failed)",
-  });
-  expect(state.restoreEndpoints).toEqual([]);
-  expect(state.coordinator.diagnostics().map((event) => event.type).slice(-2)).toEqual([
-    "session_restore_cookie_clear_failed",
-    "open_failed",
-  ]);
-  expect(state.abandonCalls()).toBe(1);
-  expect(state.store.getLaunch("profile1")).toBeNull();
-  expect(JSON.stringify({ result, logs: state.logs })).not.toContain("raw cookie clear failure");
-  state.queue.close();
-  state.store.close();
-});
-
-test("proxied Cloud restore fails closed when launch does not await its verified browser work", async () => {
-  const state = setup({
-    proxy: { type: "http", host: "proxy.invalid", port: "8080", user: "user", pass: "pass" },
-    ignoreRestoreSession: true,
-  });
-
-  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
-
-  expect(result).toEqual({
-    ok: false,
-    error: "Cloud profile open failed at session_restore/connect (failed)",
-  });
-  expect(state.restoreEndpoints).toEqual([]);
-  expect(state.events).toContain("inline-restore");
-  expect(state.navigateEndpoints).toEqual([]);
-  expect(state.abandonCalls()).toBe(1);
-  expect(state.store.getLaunch("profile1")).toBeNull();
-  state.queue.close();
-  state.store.close();
-});
-
-test("proxied Cloud retry does not accept restore state from the failed attempt", async () => {
-  const state = setup({
-    proxy: { type: "http", host: "proxy.invalid", port: "8080", user: "user", pass: "pass" },
-    startRetainedFailure: true,
-    claimRestoreWithoutCallbackOnRetry: true,
-  });
-
-  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
-
-  expect(result).toEqual({
-    ok: false,
-    error: "Cloud profile open failed at session_restore/connect (failed)",
-  });
-  expect(state.startCalls()).toBe(2);
-  expect(state.events.filter((event) => event === "inline-restore")).toHaveLength(1);
-  expect(state.navigateEndpoints).toEqual([]);
-  expect(state.abandonCalls()).toBe(1);
-  expect(state.store.getLaunch("profile1")).toBeNull();
-  state.queue.close();
-  state.store.close();
-});
-
-test("Cloud browser restores the authoritative session before navigation", async () => {
+test("Cloud browser restores the session and navigates in one attach", async () => {
   const state = setup();
   const result = await state.coordinator.open("profile1", [
     "--window-size=1200,800",
     "https://x.com/messages",
   ]);
   expect(result).toMatchObject({ ok: true, ws: "ws://browser", port: 9222 });
-  expect(state.events).toEqual(["cloud-open", "start", "restore", "navigate"]);
+  expect(state.events).toEqual(["cloud-open", "start", "restore"]);
   expect(state.verifyCalls()).toBe(2);
   expect(state.navigatedUrls).toEqual([["https://x.com/messages"]]);
+  expect(state.navigateEndpoints).toEqual(["ws://browser"]);
   expect(state.coordinator.diagnostics().map((event) => event.type)).toEqual([
     "open_started",
     "cloud_registered",
@@ -394,7 +286,7 @@ test("Cloud browser rejects a replacement endpoint after session mutation", asyn
     error: "Cloud profile open failed at session_restore (transport_error)",
   });
   expect(state.restoreEndpoints).toEqual(["ws://restored-browser"]);
-  expect(state.navigateEndpoints).toEqual([]);
+  expect(state.navigateEndpoints).toEqual(["ws://restored-browser"]);
   expect(state.abandonCalls()).toBe(1);
   expect(state.store.getLaunch("profile1")).toBeNull();
   state.queue.close();
@@ -407,28 +299,29 @@ test("Cloud browser stops retained launch ownership and retries once", async () 
   const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
 
   expect(result).toMatchObject({ ok: true, ws: "ws://browser", port: 9222 });
-  expect(state.events).toEqual(["cloud-open", "start", "stop", "start", "restore", "navigate"]);
+  expect(state.events).toEqual(["cloud-open", "start", "stop", "start", "restore"]);
   expect(state.abandonCalls()).toBe(0);
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
   state.queue.close();
   state.store.close();
 });
 
-test("Cloud browser stays open when startup navigation fails", async () => {
+
+test("Cloud browser reports a safe classified error when startup navigation fails", async () => {
   const state = setup({ navigateFailure: true });
   const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
-  expect(result).toMatchObject({
-    ok: true,
-    warning: "Profile opened, but startup navigation failed. Open the site manually.",
+  expect(result).toEqual({
+    ok: false,
+    error: "Cloud profile open failed at session_restore/navigation (failed)",
   });
-  expect(state.events).toEqual(["cloud-open", "start", "restore", "navigate"]);
-  expect(state.logs).toEqual([
-    "profile1: Cloud startup navigation failed (transport_error, Error); continuing",
+  expect(state.events).toEqual(["cloud-open", "start", "restore", "stop", "abandon"]);
+  expect(state.coordinator.diagnostics().map((event) => event.type).slice(-2)).toEqual([
+    "session_restore_navigation_failed",
+    "open_failed",
   ]);
   expect(JSON.stringify({ result, logs: state.logs })).not.toContain("navigation secret");
-  expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
-  expect(state.store.getLaunch("profile1")).not.toBeNull();
-  expect(state.abandonCalls()).toBe(0);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.abandonCalls()).toBe(1);
   state.queue.close();
   state.store.close();
 });
@@ -678,7 +571,7 @@ test("Cloud browser normalizes an untyped launcher adapter failure", async () =>
 
 test("Cloud browser reports the exact safe session restore operation", async () => {
   const state = setup();
-  (state.coordinator as any).options.writeSession = async () => {
+  (state.coordinator as any).options.applySession = async () => {
     throw new SessionRestoreError("cookie_clear", "failed");
   };
 
@@ -715,7 +608,7 @@ test("Cloud browser reports the exact safe session restore operation", async () 
 
 test("Cloud browser reports a safe restore stage and abandons after teardown", async () => {
   const state = setup();
-  (state.coordinator as any).options.writeSession = async () => { throw new Error("secret restore detail"); };
+  (state.coordinator as any).options.applySession = async () => { throw new Error("secret restore detail"); };
   const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
   expect(result).toMatchObject({
     ok: false,
