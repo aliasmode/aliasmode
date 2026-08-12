@@ -28,3 +28,79 @@ test("browser proxy verification refuses plaintext endpoints before CDP", async 
     { endpoints: ["http://example.test/ip"] },
   )).rejects.toThrow("must use HTTPS");
 });
+
+test("browser proxy verification applies session work before its only CDP detach", async () => {
+  const events: string[] = [];
+  const page = {
+    async goto() {
+      events.push("proof");
+      return { ok: () => true };
+    },
+    locator() {
+      return { innerText: async () => "203.0.113.9" };
+    },
+    async close() { events.push("page-close"); },
+  };
+  const browser = {
+    contexts: () => [{ pages: () => [], newPage: async () => page }],
+    async close() { events.push("browser-close"); },
+  };
+
+  const result = await verifyBrowserProxy(
+    "ws://test",
+    {
+      endpoints: ["https://example.test/ip"],
+      connect: async () => {
+        events.push("connect");
+        return browser;
+      },
+    },
+    async (attachedBrowser, egress) => {
+      expect(attachedBrowser).toBe(browser);
+      expect(egress.ip).toBe("203.0.113.9");
+      events.push("session-apply");
+    },
+  );
+
+  expect(result.ip).toBe("203.0.113.9");
+  expect(events).toEqual(["connect", "proof", "session-apply", "page-close", "browser-close"]);
+});
+
+test("browser proxy verification preserves session work errors after proof", async () => {
+  const original = new Error("session apply failed");
+  const page = {
+    async goto() { return { ok: () => true }; },
+    locator() { return { innerText: async () => "203.0.113.9" }; },
+    async close() {},
+  };
+  const browser = {
+    contexts: () => [{ pages: () => [], newPage: async () => page }],
+    async close() {},
+  };
+
+  await expect(verifyBrowserProxy(
+    "ws://test",
+    { endpoints: ["https://example.test/ip"], connect: async () => browser },
+    async () => { throw original; },
+  )).rejects.toBe(original);
+});
+
+test("browser proxy verification never applies session work before proof", async () => {
+  let actionCalled = false;
+  const page = {
+    async goto() { return { ok: () => false }; },
+    locator() { return { innerText: async () => "" }; },
+    async close() {},
+  };
+  const browser = {
+    contexts: () => [{ pages: () => [], newPage: async () => page }],
+    async close() {},
+  };
+
+  await expect(verifyBrowserProxy(
+    "ws://test",
+    { endpoints: ["https://example.test/ip"], connect: async () => browser },
+    async () => { actionCalled = true; },
+  )).rejects.toThrow("Proxy verification failed before account traffic");
+  expect(actionCalled).toBe(false);
+});

@@ -18,6 +18,7 @@ import {
 } from "./pending-sync.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import {
+  applySessionToBrowser,
   bundleHasRestorableLogin,
   bundleTelegramClient,
   SessionRestoreError,
@@ -130,6 +131,10 @@ function sessionRestoreDiagnostic(error: SessionRestoreError): CloudDiagnosticTy
 
 function browserLaunchDiagnostic(error: BrowserLaunchError): CloudDiagnosticType {
   return `browser_launch_${error.failure}_failed` as CloudDiagnosticType;
+}
+
+function normalizeBrowserLaunchError(error: unknown): BrowserLaunchError {
+  return error instanceof BrowserLaunchError ? error : new BrowserLaunchError("preflight");
 }
 
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
@@ -262,24 +267,61 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
       stage = "browser_launch";
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
-      const startOptions = {
-        autoNavigate: false,
-        resetStorage: bundleHasRestorableLogin(sessionBundle),
-        sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
+      const startBrowser = async () => {
+        let inlineRestoreStarted = false;
+        let inlineRestoreCompleted = false;
+        const restoreSession = profile.proxy
+          ? (browser: any): Promise<boolean> => {
+              inlineRestoreStarted = true;
+              this.diagnosticEvents.record("session_restore_started");
+              const operation = applySessionToBrowser(browser, sessionBundle).then(
+                () => {
+                  inlineRestoreCompleted = true;
+                  return true;
+                },
+                (error) => {
+                  throw error instanceof SessionRestoreError
+                    ? error
+                    : new SessionRestoreError("context", "failed");
+                },
+              );
+              void operation.catch(() => {});
+              return operation;
+            }
+          : undefined;
+        const launched = await this.options.launcher.start(profileId, chromeArgs, {
+          autoNavigate: false,
+          resetStorage: bundleHasRestorableLogin(sessionBundle),
+          sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
+          restoreSession,
+        });
+        return { launched, inlineRestoreStarted, inlineRestoreCompleted };
       };
-      let launched: { ws: string; port: number };
+      let launchAttempt: Awaited<ReturnType<typeof startBrowser>>;
       try {
-        launched = await this.options.launcher.start(profileId, chromeArgs, startOptions);
+        launchAttempt = await startBrowser();
       } catch (error) {
+        if (error instanceof SessionRestoreError) throw error;
+        const launchError = normalizeBrowserLaunchError(error);
         // A failed start can retain exact ownership when an older CloakBrowser still holds the
         // persistent Cloud profile directory. Stop only that recorded launch, require confirmed
         // death, then retry once so Chromium cannot hand the new command line to the stale singleton.
-        if (!this.options.store.getLaunch(profileId)) throw error;
+        if (!this.options.store.getLaunch(profileId)) throw launchError;
         const stopped = await this.options.launcher.stop(profileId).catch(() => false);
-        if (!stopped) throw error;
+        if (!stopped) throw launchError;
         this.log(`${profileId}: stopped retained browser launch ownership; retrying once`);
-        launched = await this.options.launcher.start(profileId, chromeArgs, startOptions);
+        try {
+          launchAttempt = await startBrowser();
+        } catch (retryError) {
+          if (retryError instanceof SessionRestoreError) throw retryError;
+          throw normalizeBrowserLaunchError(retryError);
+        }
       }
+      const {
+        launched,
+        inlineRestoreStarted,
+        inlineRestoreCompleted,
+      } = launchAttempt;
       this.diagnosticEvents.record("browser_started");
       const launch = this.options.store.getLaunch(profileId);
       if (!launch) throw new Error("browser launch did not create durable lifecycle state");
@@ -293,7 +335,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       stage = "session_restore";
-      this.diagnosticEvents.record("session_restore_started");
+      if (!inlineRestoreStarted) this.diagnosticEvents.record("session_restore_started");
+      if (
+        profile.proxy
+        && (!inlineRestoreStarted || !inlineRestoreCompleted || !launched.sessionRestored)
+      ) {
+        throw new SessionRestoreError("connect", "failed");
+      }
       await this.options.launcher.verifyRunningIdentity(profileId);
       const verifiedLaunch = this.options.store.getLaunch(profileId);
       if (
@@ -303,7 +351,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       ) {
         throw new Error("Cloud browser identity changed before session restore");
       }
-      await this.options.writeSession(verifiedLaunch.ws, sessionBundle);
+      if (!profile.proxy) await this.options.writeSession(verifiedLaunch.ws, sessionBundle);
       await this.options.launcher.verifyRunningIdentity(profileId);
       const restoredLaunch = this.options.store.getLaunch(profileId);
       if (
@@ -366,10 +414,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       this.diagnosticEvents.record("open_failed");
       const code = errorCode(error);
-      const failureStage = stage === "session_restore" && error instanceof SessionRestoreError
-        ? `${stage}/${error.operation}`
-        : stage === "browser_launch" && error instanceof BrowserLaunchError
-          ? `${stage}/${error.failure}`
+      const failureStage = error instanceof SessionRestoreError
+        ? `session_restore/${error.operation}`
+        : error instanceof BrowserLaunchError
+          ? `browser_launch/${error.failure}`
           : stage;
       this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})`);
       const stopped = registrationId

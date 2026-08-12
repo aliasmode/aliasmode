@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import {
+  applySessionToBrowser,
   bundleHasRestorableLogin,
   bundleLoggedInPlatforms,
   bundleTelegramClient,
@@ -253,6 +254,55 @@ test("writeSessionToBrowser bounds a hung origin restore and disconnects", async
     disconnectTimeoutMs: 5,
   }), "origin_storage", "timeout");
   expect(closes).toBe(1);
+});
+
+test("applySessionToBrowser restores without detaching its borrowed CDP lease", async () => {
+  let closes = 0;
+  let cleared = false;
+  let injected: any[] = [];
+  const browser = {
+    contexts: () => [{
+      pages: () => [],
+      async clearCookies() { cleared = true; },
+      async addCookies(cookies: any[]) { injected = cookies; },
+    }],
+    async close() { closes++; },
+  };
+
+  await applySessionToBrowser(browser, JSON.stringify({
+    cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }],
+  }));
+
+  expect(cleared).toBe(true);
+  expect(injected.map((cookie) => cookie.name)).toEqual(["auth_token"]);
+  expect(closes).toBe(0);
+});
+
+test("timed-out borrowed session work cannot continue after its owner detaches", async () => {
+  let finishClear!: () => void;
+  const clearing = new Promise<void>((resolve) => { finishClear = resolve; });
+  let added = false;
+  let closes = 0;
+  const browser = {
+    contexts: () => [{
+      pages: () => [],
+      clearCookies: () => clearing,
+      async addCookies() { added = true; },
+    }],
+    async close() {
+      closes++;
+      finishClear();
+    },
+  };
+
+  await expectRestoreError(applySessionToBrowser(browser, JSON.stringify({
+    cookies: [{ name: "auth_token", value: "live", domain: ".x.com", path: "/" }],
+  }), { writeTimeoutMs: 5 }), "cookie_clear", "timeout");
+  expect(closes).toBe(0);
+
+  await browser.close();
+  await Promise.resolve();
+  expect(added).toBe(false);
 });
 
 test("writeSessionToBrowser restores cookie auth without opening a cookie-platform origin", async () => {

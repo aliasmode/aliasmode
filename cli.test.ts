@@ -76,7 +76,7 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
   ]);
 });
 
-test("Cloud launcher smoke requires fresh and cached opens to stay alive and close cleanly", async () => {
+test("Cloud launcher smoke requires fresh and repeated cached opens to stay alive and close cleanly", async () => {
   const events: string[] = [];
   let running = false;
   let launch: object | null = null;
@@ -117,6 +117,10 @@ test("Cloud launcher smoke requires fresh and cached opens to stay alive and clo
     "active:2:profile-smoke:true",
     "close:2:profile-smoke",
     "active:2:profile-smoke:false",
+    "open:3:profile-smoke",
+    "active:3:profile-smoke:true",
+    "close:3:profile-smoke",
+    "active:3:profile-smoke:false",
   ]);
 });
 

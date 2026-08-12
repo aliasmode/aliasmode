@@ -46,9 +46,12 @@ function setup(options: {
   closeTransportFailure?: boolean;
   navigateFailure?: boolean;
   startRetainedFailure?: boolean;
-  startError?: BrowserLaunchError;
+  startError?: unknown;
   verifyWebSockets?: string[];
   proxy?: PortableProfileV1["profile"]["proxy"];
+  inlineRestoreFailure?: boolean;
+  ignoreRestoreSession?: boolean;
+  claimRestoreWithoutCallbackOnRetry?: boolean;
 } = {}) {
   const events: string[] = [];
   const logs: string[] = [];
@@ -116,6 +119,37 @@ function setup(options: {
       expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
       if (options.startError) throw options.startError;
+      let sessionRestored = false;
+      if (
+        startOptions.restoreSession
+        && options.claimRestoreWithoutCallbackOnRetry
+        && startCalls > 1
+      ) {
+        sessionRestored = true;
+      } else if (startOptions.restoreSession && options.ignoreRestoreSession) {
+        events.push("inline-restore");
+        void startOptions.restoreSession({
+          contexts: () => [{
+            pages: () => [],
+            clearCookies: () => new Promise<void>(() => {}),
+            async addCookies() {},
+          }],
+          async close() { throw new Error("borrowed browser must not close during inline restore"); },
+        });
+        sessionRestored = true; // Malformed adapter invokes without awaiting, then claims completion.
+      } else if (startOptions.restoreSession) {
+        events.push("inline-restore");
+        sessionRestored = await startOptions.restoreSession({
+          contexts: () => [{
+            pages: () => [],
+            async clearCookies() {
+              if (options.inlineRestoreFailure) throw new Error("raw cookie clear failure");
+            },
+            async addCookies() {},
+          }],
+          async close() { throw new Error("borrowed browser must not close during inline restore"); },
+        });
+      }
       store.recordLaunch({
         profileId,
         pid: 10,
@@ -127,7 +161,11 @@ function setup(options: {
       if (options.startRetainedFailure && startCalls === 1) {
         throw new Error("stale browser retained");
       }
-      return { ws: "ws://browser", port: 9222 };
+      return {
+        ws: "ws://browser",
+        port: 9222,
+        ...(sessionRestored ? { sessionRestored: true as const } : {}),
+      };
     },
     async stop(profileId: string) {
       events.push("stop");
@@ -187,6 +225,7 @@ function setup(options: {
     queue,
     closeCalls: () => closeCalls,
     abandonCalls: () => abandonCalls,
+    startCalls: () => startCalls,
     startedProxy: () => startedProxy,
     verifyCalls: () => verifyCalls,
   };
@@ -214,9 +253,78 @@ test("Cloud browser passes the authenticated proxy to Launcher without exposing 
 
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   expect(state.startedProxy()).toEqual(proxy);
+  expect(state.restoreEndpoints).toEqual([]);
+  expect(state.events).toContain("inline-restore");
   const publicState = JSON.stringify({ logs: state.logs, diagnostics: state.coordinator.diagnostics() });
   for (const secret of [proxy.host, proxy.user, proxy.pass]) expect(publicState).not.toContain(secret);
 
+  state.queue.close();
+  state.store.close();
+});
+
+test("proxied Cloud restore failure keeps exact diagnostics and never reconnects", async () => {
+  const state = setup({
+    proxy: { type: "http", host: "proxy.invalid", port: "8080", user: "user", pass: "pass" },
+    inlineRestoreFailure: true,
+  });
+
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+
+  expect(result).toEqual({
+    ok: false,
+    error: "Cloud profile open failed at session_restore/cookie_clear (failed)",
+  });
+  expect(state.restoreEndpoints).toEqual([]);
+  expect(state.coordinator.diagnostics().map((event) => event.type).slice(-2)).toEqual([
+    "session_restore_cookie_clear_failed",
+    "open_failed",
+  ]);
+  expect(state.abandonCalls()).toBe(1);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(JSON.stringify({ result, logs: state.logs })).not.toContain("raw cookie clear failure");
+  state.queue.close();
+  state.store.close();
+});
+
+test("proxied Cloud restore fails closed when launch does not await its verified browser work", async () => {
+  const state = setup({
+    proxy: { type: "http", host: "proxy.invalid", port: "8080", user: "user", pass: "pass" },
+    ignoreRestoreSession: true,
+  });
+
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+
+  expect(result).toEqual({
+    ok: false,
+    error: "Cloud profile open failed at session_restore/connect (failed)",
+  });
+  expect(state.restoreEndpoints).toEqual([]);
+  expect(state.events).toContain("inline-restore");
+  expect(state.navigateEndpoints).toEqual([]);
+  expect(state.abandonCalls()).toBe(1);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("proxied Cloud retry does not accept restore state from the failed attempt", async () => {
+  const state = setup({
+    proxy: { type: "http", host: "proxy.invalid", port: "8080", user: "user", pass: "pass" },
+    startRetainedFailure: true,
+    claimRestoreWithoutCallbackOnRetry: true,
+  });
+
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+
+  expect(result).toEqual({
+    ok: false,
+    error: "Cloud profile open failed at session_restore/connect (failed)",
+  });
+  expect(state.startCalls()).toBe(2);
+  expect(state.events.filter((event) => event === "inline-restore")).toHaveLength(1);
+  expect(state.navigateEndpoints).toEqual([]);
+  expect(state.abandonCalls()).toBe(1);
+  expect(state.store.getLaunch("profile1")).toBeNull();
   state.queue.close();
   state.store.close();
 });
@@ -547,6 +655,25 @@ test("Cloud browser reports fixed safe browser launch operations", async () => {
     state.queue.close();
     state.store.close();
   }
+});
+
+test("Cloud browser normalizes an untyped launcher adapter failure", async () => {
+  const rawFailure = "sentinel launcher adapter failure";
+  const state = setup({ startError: new Error(rawFailure) });
+
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+
+  expect(result).toEqual({
+    ok: false,
+    error: "Cloud profile open failed at browser_launch/preflight (failed)",
+  });
+  expect(state.coordinator.diagnostics().map((event) => event.type).slice(-2)).toEqual([
+    "browser_launch_preflight_failed",
+    "open_failed",
+  ]);
+  expect(JSON.stringify({ result, logs: state.logs, diagnostics: state.coordinator.diagnostics() })).not.toContain(rawFailure);
+  state.queue.close();
+  state.store.close();
 });
 
 test("Cloud browser reports the exact safe session restore operation", async () => {

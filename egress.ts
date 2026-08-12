@@ -23,7 +23,11 @@ export interface EgressInfo {
 export interface EgressLookupOptions {
   endpoints?: readonly string[];
   timeoutMs?: number;
+  /** Injectable CDP connector for deterministic lease-order tests. */
+  connect?: (ws: string, options: { timeout: number }) => Promise<any>;
 }
+
+export type VerifiedBrowserAction = (browser: any, egress: EgressInfo) => Promise<void>;
 
 /**
  * Resolve the lookup list. Operators whose proxy pools block the defaults may
@@ -115,6 +119,7 @@ export async function fetchDirectEgress(
 export async function verifyBrowserProxy(
   ws: string,
   opts: EgressLookupOptions = {},
+  afterVerified?: VerifiedBrowserAction,
 ): Promise<EgressInfo> {
   const endpoints = opts.endpoints ? [...opts.endpoints] : resolveEgressEndpoints();
   for (const endpoint of endpoints) {
@@ -122,22 +127,36 @@ export async function verifyBrowserProxy(
       throw new Error(`proxy verification endpoint must use HTTPS: ${endpoint}`);
     }
   }
+  let actionFailed = false;
+  let actionError: unknown;
   try {
     const egress = await withCdpPage(
       ws,
-      (page) => fetchPageEgress(page, { ...opts, endpoints }),
+      async (page, browser) => {
+        const result = await fetchPageEgress(page, { ...opts, endpoints });
+        if (!result) throw new Error("no egress endpoint was reachable");
+        if (afterVerified) {
+          try {
+            await afterVerified(browser, result);
+          } catch (error) {
+            actionFailed = true;
+            actionError = error;
+            throw error;
+          }
+        }
+        return result;
+      },
       {
         timeoutMs: opts.timeoutMs ?? 15_000,
         cleanupTimeoutMs: PROXY_PROBE_CLEANUP_TIMEOUT_MS,
         temporaryPage: true,
         requireConfirmedCleanup: true,
+        connect: opts.connect,
       },
     );
-    if (!egress) {
-      throw new Error("no egress endpoint was reachable");
-    }
     return egress;
   } catch (error) {
+    if (actionFailed) throw actionError;
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Proxy verification failed before account traffic: ${message}`, { cause: error });
   }

@@ -31,8 +31,9 @@ import { deriveFingerprintFlags, isMobileUserAgent, platformFromUA, proxyServerF
 export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderSetupResult } from "./search-provider.ts";
-import { verifyBrowserProxy, type EgressInfo } from "./egress.ts";
+import { verifyBrowserProxy, type EgressInfo, type VerifiedBrowserAction } from "./egress.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
+import { SessionRestoreError } from "./session.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
 // onAuthRequired (whose service worker can't answer reliably during a page-load burst), the browser
@@ -85,7 +86,7 @@ export interface SpawnedProcess {
 export type SpawnFn = (binary: string, args: string[]) => SpawnedProcess;
 export type FetchFn = (url: string) => Promise<{ ok: boolean; json(): Promise<any> }>;
 export type LaunchNavigator = (ws: string, urls: string[]) => Promise<void>;
-export type ProxyVerifier = (ws: string) => Promise<EgressInfo>;
+export type ProxyVerifier = (ws: string, afterVerified?: VerifiedBrowserAction) => Promise<EgressInfo>;
 export interface BrowserProcessIdentity {
   profileId: string;
   debugPort: number;
@@ -360,6 +361,14 @@ export interface LaunchStartOptions {
   resetStorage?: boolean;
   /** Hub session version the browser is being opened from; persisted for safe survivor reattach. */
   sessionBaseVersion?: number;
+  /** Apply a Cloud session inside a verified proxy CDP lease before it detaches. */
+  restoreSession?: (browser: any) => Promise<boolean>;
+}
+
+export interface LaunchStartResult {
+  ws: string;
+  port: number;
+  sessionRestored?: true;
 }
 
 const DEFAULT_DATA_ROOT = "profiles";
@@ -603,7 +612,7 @@ export class Launcher {
    * after CDP/cookie seeding, so this promise is the only thing that catches an
    * overlap during that window.
    */
-  private startsInFlight = new Map<string, Promise<{ ws: string; port: number }>>();
+  private startsInFlight = new Map<string, Promise<LaunchStartResult>>();
   /**
    * In-flight stop() per profile. start() waits for this promise before it
    * inspects or creates a launch, and overlapping stops share it. Together with
@@ -647,7 +656,7 @@ export class Launcher {
     this.navigateFn = opts.navigate ?? defaultNavigate;
     this.verifyProxyFn = opts.verifyProxy === false
       ? undefined
-      : opts.verifyProxy ?? verifyBrowserProxy;
+      : opts.verifyProxy ?? ((ws, afterVerified) => verifyBrowserProxy(ws, {}, afterVerified));
     // Test spawners do not implicitly weaken production policy. Every disabled
     // identity gate must be requested through the conspicuous unsafe option.
     this.enforceHostCompatibility = opts.enforceHostCompatibility ?? !this.unsafeDisableIdentityGates;
@@ -912,17 +921,39 @@ export class Launcher {
     await this.navigateFn(ws, urls);
   }
 
-  private async verifyConfiguredProxy(profile: Profile, ws: string): Promise<void> {
-    if (!profile.proxy || !this.verifyProxyFn) return;
+  private async verifyConfiguredProxy(
+    profile: Profile,
+    ws: string,
+    restoreSession?: (browser: any) => Promise<boolean>,
+  ): Promise<boolean> {
+    if (!profile.proxy || !this.verifyProxyFn) return false;
     const proofKey = JSON.stringify([ws, profile.proxy, profile.timezone]);
-    if (this.verifiedProxyWs.get(profile.id) === proofKey) return;
+    if (this.verifiedProxyWs.get(profile.id) === proofKey && !restoreSession) return false;
+    let restorePromise: Promise<void> | undefined;
+    let sessionRestored = false;
+    const afterVerified: VerifiedBrowserAction | undefined = restoreSession
+      ? (browser) => {
+          if (restorePromise) return restorePromise;
+          restorePromise = (async () => {
+            sessionRestored = await restoreSession(browser);
+          })();
+          void restorePromise.catch(() => {});
+          return restorePromise;
+        }
+      : undefined;
+    let verificationFailed = false;
     try {
-      await this.verifyProxyFn(ws);
+      await this.verifyProxyFn(ws, afterVerified);
     } catch {
+      verificationFailed = true;
+    }
+    if (restorePromise) await restorePromise;
+    if (verificationFailed || (restoreSession && !restorePromise)) {
       throw new BrowserLaunchError("proxy_egress");
     }
     this.verifiedProxyWs.set(profile.id, proofKey);
     this.log(`${profile.id}: verified proxy egress`);
+    return sessionRestored;
   }
 
   private identityCertificationKey(profileId: string): string | null {
@@ -1032,7 +1063,7 @@ export class Launcher {
     if (!this.store.getLaunch(profileId) && !this.procs.has(profileId)) throw error;
     this.clearIdentityCertification(profileId);
     const stopped = await this.doStop(profileId);
-    if (error instanceof BrowserLaunchError) throw error;
+    if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) throw error;
     if (stopped) {
       throw new Error(`${detail}; unsafe existing browser was stopped during ${stage} and process/CDP death was confirmed`);
     }
@@ -1051,7 +1082,7 @@ export class Launcher {
     profileId: string,
     launchArgs: string[] = [],
     opts: LaunchStartOptions = {},
-  ): Promise<{ ws: string; port: number }> {
+  ): Promise<LaunchStartResult> {
     const stopping = this.stopsInFlight.get(profileId);
     const inFlight = this.startsInFlight.get(profileId);
     // Coalesce only starts in the same lifecycle generation. If the existing
@@ -1061,7 +1092,7 @@ export class Launcher {
     // until after the map entry exists so even a synchronously-reentrant injected
     // fetch/spawn cannot start a duplicate. Capturing also avoids a wait cycle:
     // only the later transition waits for the one that was already registered.
-    let promise!: Promise<{ ws: string; port: number }>;
+    let promise!: Promise<LaunchStartResult>;
     promise = Promise.resolve()
       .then(async () => {
         if (stopping) {
@@ -1071,7 +1102,7 @@ export class Launcher {
         return await this.doStart(profileId, launchArgs, opts);
       })
       .catch((error) => {
-        if (error instanceof BrowserLaunchError) throw error;
+        if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) throw error;
         throw new BrowserLaunchError("preflight");
       })
       .finally(() => {
@@ -1090,7 +1121,7 @@ export class Launcher {
     profileId: string,
     launchArgs: string[],
     opts: LaunchStartOptions = {},
-  ): Promise<{ ws: string; port: number }> {
+  ): Promise<LaunchStartResult> {
     const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
     // Reject unsafe ids and switches before touching the profile directory or
     // opening a proxy connection.
@@ -1180,11 +1211,12 @@ export class Launcher {
           // A browser surviving a manager restart has no in-memory proxy proof.
           // Restore its relay and verify browser HTTP egress before returning an
           // authenticated endpoint to any caller.
-          if (!this.isIdentityCertified(profileId)) {
+          let survivorSessionRestored = false;
+          if (!this.isIdentityCertified(profileId) || opts.restoreSession) {
             try {
               await this.ensureSurvivorRelay(profile, existing);
               profile = this.requireUnchangedProfile(profileId, profileSnapshot, "live-browser relay restoration");
-              await this.verifyConfiguredProxy(profile, currentWs);
+              survivorSessionRestored = await this.verifyConfiguredProxy(profile, currentWs, opts.restoreSession);
               this.requireUnchangedProfile(profileId, profileSnapshot, "live-browser proxy verification");
               this.markIdentityCertified(profileId);
             } catch (error) {
@@ -1197,7 +1229,11 @@ export class Launcher {
               : `profile ${profileId} already running on port ${existing.debugPort} (reattached after restart)`,
           );
           this.liveReserved.add(existing.debugPort);
-          return { ws: currentWs, port: existing.debugPort };
+          return {
+            ws: currentWs,
+            port: existing.debugPort,
+            ...(survivorSessionRestored ? { sessionRestored: true as const } : {}),
+          };
         }
       }
       if (existing && liveness.process !== "dead") {
@@ -1278,6 +1314,7 @@ export class Launcher {
     let spawnAttempted = false;
     let relayPort: number | undefined;
     let launchStartedAt = Date.now();
+    let sessionRestored = false;
     try {
       // Bring up the loopback HTTP/auth-or-SOCKS bridge before launch. Started
       // here (inside the try) so a later failure rolls it back too.
@@ -1362,7 +1399,7 @@ export class Launcher {
       // Prove the exact launched browser can reach the network through its
       // configured direct or relayed path before touching cookies or
       // any account site; bad credentials must fail closed.
-      await this.verifyConfiguredProxy(profile, ws);
+      sessionRestored = await this.verifyConfiguredProxy(profile, ws, opts.restoreSession);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser proxy verification");
 
       // Fresh ungoogled Chromium profiles can default to "No Search", which
@@ -1508,7 +1545,7 @@ export class Launcher {
       };
       this.store.recordLaunch(info);
       this.markIdentityCertified(profileId);
-      return { ws, port };
+      return { ws, port, ...(sessionRestored ? { sessionRestored: true as const } : {}) };
     } catch (err) {
       // Roll back partial state so a failed start can't leak a zombie — including the relay, which
       // is brought up before the browser, so an error after that point would strand a listener.

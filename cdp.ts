@@ -21,7 +21,7 @@ export interface CdpPageOptions {
  */
 export async function withCdpPage<T>(
   ws: string,
-  run: (page: any) => Promise<T>,
+  run: (page: any, browser: any) => Promise<T>,
   opts: CdpPageOptions = {},
 ): Promise<T> {
   const timeout = opts.timeoutMs ?? 30_000;
@@ -41,7 +41,7 @@ export async function withCdpPage<T>(
     const page = opts.temporaryPage
       ? (temporaryPage = await context.newPage())
       : context.pages()[0] ?? (temporaryPage = await context.newPage());
-    result = await run(page);
+    result = await run(page, browser);
   } catch (error) {
     operationFailed = true;
     operationError = error;
