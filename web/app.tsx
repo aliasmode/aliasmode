@@ -1613,6 +1613,23 @@ function App() {
         </div>
       )}
 
+      {(logView || logErr) && (
+        <div className="modal-backdrop" onClick={() => { setLogView(null); setLogErr(null); }}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">Detailed logs</div>
+            <div className="modal-body">
+              {logErr && <p className="hint">{logErr}</p>}
+              {logView && (
+                <pre className="hint" style={{ maxHeight: 360, overflow: "auto", whiteSpace: "pre-wrap", textAlign: "left", userSelect: "text" }}>
+                  {logView.file + "\n" + logView.content}
+                </pre>
+              )}
+            </div>
+            <div className="modal-foot"><button className="link" type="button" onClick={() => { setLogView(null); setLogErr(null); }}>Close</button></div>
+          </div>
+        </div>
+      )}
+
       {pendingMode && (
         <ModeSwitchConfirmation
           mode={pendingMode}
