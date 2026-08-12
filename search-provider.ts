@@ -1,5 +1,5 @@
-import type { BrowserContext } from "playwright-core";
-import { loadPlaywright } from "./playwright-runtime.ts";
+type BrowserContext = any;
+import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 export type SearchProviderSetupResult = {
   status: "already-default" | "configured" | "kept-existing";
@@ -42,22 +42,10 @@ export function existingSearchProvider(
 export async function ensureDuckDuckGoDefault(
   ws: string,
 ): Promise<SearchProviderSetupResult> {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 10_000 });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`DuckDuckGo setup timed out after ${CONFIGURE_TIMEOUT_MS}ms`)),
-        CONFIGURE_TIMEOUT_MS,
-      );
-    });
-    return await Promise.race([configureDuckDuckGo(context), timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    await browser.close().catch(() => {});
-  }
+  return runPlaywrightWorker<SearchProviderSetupResult>("search-provider", {
+    endpoint: ws,
+    connectTimeoutMs: 10_000,
+  }, { timeoutMs: CONFIGURE_TIMEOUT_MS + 15_000 });
 }
 
 /**

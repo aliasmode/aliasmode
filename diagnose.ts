@@ -19,7 +19,7 @@
 
 import type { Profile } from "./types.ts";
 import { fetchDirectEgress, parseEgressResponse, resolveEgressEndpoints, type EgressInfo } from "./egress.ts";
-import { withCdpPage } from "./cdp.ts";
+import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 // Preserve diagnose.ts's existing public type surface while sharing the parser.
 export type { EgressInfo } from "./egress.ts";
@@ -379,32 +379,27 @@ export async function diagnoseOverCDP(
   opts: DiagnoseProfileOptions = {},
 ): Promise<Pick<ProfileReport, "fingerprint" | "egress" | "webrtcIps" | "login">> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
-  return withCdpPage(ws, async (page) => {
-    await page.goto("https://example.com", { waitUntil: "domcontentloaded", timeout: timeoutMs }).catch(() => {});
-    const fingerprint = await page.evaluate(fingerprintProbe).catch((e: unknown) => ({ errors: { probe: String(e) } }) as FingerprintSample);
-    const webrtcIps = await page.evaluate(webrtcProbe).catch(() => [] as string[]);
-    const egress = await diagnosePageEgress(page, timeoutMs);
-
-    let login: LoginInfo | null = null;
-    if (opts.collectLogin !== false) {
-      try {
-        await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: timeoutMs });
-        // Wait until the SPA commits to a signed-in or signed-out state rather
-        // than probing a half-hydrated page (which reads as "login?"). Headful
-        // paints slower, so give it real time.
-        await page
-          .waitForSelector(
-            '[data-testid="SideNav_NewTweet_Button"], [data-testid="AppTabBar_Home_Link"], [aria-label="Home timeline"], input[name="text"], a[href="/login"], [data-testid="loginButton"]',
-            { timeout: 15_000 },
-          )
-          .catch(() => {});
-        login = await page.evaluate(loginProbe);
-      } catch (e) {
-        login = { loggedIn: false, loggedOut: false, url: "error", title: String(e) };
-      }
-    }
-    return { fingerprint, egress, webrtcIps, login };
-  }, { timeoutMs: 30_000 });
+  const result = await runPlaywrightWorker<{
+    fingerprint: FingerprintSample;
+    webrtcIps: string[];
+    egress: string | null;
+    login: LoginInfo | null;
+  }>("diagnostics", {
+    endpoint: ws,
+    timeoutMs,
+    collectLogin: opts.collectLogin !== false,
+    fingerprintScript: fingerprintProbe.toString(),
+    webrtcScript: webrtcProbe.toString(),
+    loginScript: loginProbe.toString(),
+    egressUrls: resolveEgressEndpoints(),
+    connectTimeoutMs: timeoutMs,
+  }, { timeoutMs: timeoutMs * 3 + 20_000 });
+  return {
+    fingerprint: result.fingerprint,
+    egress: result.egress ? parseEgressResponse(result.egress) : null,
+    webrtcIps: result.webrtcIps,
+    login: result.login,
+  };
 }
 
 // ---------------------------------------------------------------------------

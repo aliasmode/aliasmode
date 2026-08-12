@@ -3,23 +3,15 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  loadPlaywrightFromRoot,
-  playwrightFromModule,
+  playwrightWorkerCommand,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
 
-const chromium = { async connectOverCDP() {} };
-
-test("accepts named Playwright exports", () => {
-  expect(playwrightFromModule({ chromium }).chromium).toBe(chromium);
-});
-
-test("accepts a CommonJS Playwright default export", () => {
-  expect(playwrightFromModule({ default: { chromium } }).chromium).toBe(chromium);
-});
-
-test("rejects an invalid Playwright runtime", () => {
-  expect(() => playwrightFromModule({ default: {} })).toThrow("Playwright runtime is invalid");
+test("uses packaged Node and keeps requests off argv", () => {
+  expect(playwrightWorkerCommand("C:\\AliasMode\\playwright")).toEqual([
+    "C:\\AliasMode\\playwright/node/node.exe",
+    "C:\\AliasMode\\playwright/worker.mjs",
+  ]);
 });
 
 test("loads the installed Playwright ESM entrypoint", async () => {
@@ -37,12 +29,12 @@ test("loads the installed Playwright ESM entrypoint", async () => {
       name: "ws",
       version: "8.21.0",
     }));
-    await writeFile(join(packageRoot, "index.mjs"), `
-      export const chromium = { async connectOverCDP() {} };
-    `);
+    await writeFile(join(packageRoot, "index.mjs"), "export const chromium = {};");
+    await mkdir(join(root, "node"));
+    await writeFile(join(root, "node", "node.exe"), "node");
+    await writeFile(join(root, "worker.mjs"), "worker");
 
     await verifyPlaywrightRuntime(root);
-    expect((await loadPlaywrightFromRoot(root)).chromium.connectOverCDP).toBeFunction();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -10,7 +10,12 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { installCloakBrowser } from "../browser-install.ts";
+import { extractZipTo } from "../unzip.ts";
 import { ALIASMODE_VERSION } from "../version.ts";
+
+export const NODE_WINDOWS_X64_VERSION = "22.23.2";
+export const NODE_WINDOWS_X64_SHA256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97";
+export const NODE_WINDOWS_X64_URL = `https://nodejs.org/dist/v${NODE_WINDOWS_X64_VERSION}/node-v${NODE_WINDOWS_X64_VERSION}-win-x64.zip`;
 
 export interface PreparedBrowserMetadata {
   executable: string;
@@ -25,6 +30,8 @@ export interface PrepareWindowsBundleOptions {
   compileSidecar?: (output: string) => Promise<void>;
   installBrowser?: (cwd: string) => Promise<{ path: string; sha256: string }>;
   hashFile?: (path: string) => Promise<string>;
+  downloadNode?: () => Promise<Uint8Array>;
+  installNode?: (playwrightRoot: string) => Promise<void>;
 }
 
 async function sha256File(path: string): Promise<string> {
@@ -82,6 +89,26 @@ export async function prepareWindowsBundle(
 
   await (options.compileSidecar ?? ((output) => compileSidecar(cwd, output)))(sidecar);
   if (!statSync(sidecar).isFile()) throw new Error("sidecar compiler did not create the expected Windows executable");
+
+  if (options.installNode) {
+    await options.installNode(playwrightRoot);
+  } else {
+    const nodeStaging = join(staging, "node");
+    const nodeBytes = await (options.downloadNode ?? (async () => {
+      const response = await fetch(NODE_WINDOWS_X64_URL, { signal: AbortSignal.timeout(120_000) });
+      if (!response.ok) throw new Error("official Node runtime download failed");
+      return new Uint8Array(await response.arrayBuffer());
+    }))();
+    const nodeHash = createHash("sha256").update(nodeBytes).digest("hex");
+    if (nodeHash !== NODE_WINDOWS_X64_SHA256) throw new Error("official Node runtime SHA-256 mismatch");
+    await extractZipTo(nodeBytes, nodeStaging);
+    const extractedNode = join(nodeStaging, `node-v${NODE_WINDOWS_X64_VERSION}-win-x64`, "node.exe");
+    if (!statSync(extractedNode).isFile()) throw new Error("official Node runtime archive is incomplete");
+    mkdirSync(join(playwrightRoot, "node"), { recursive: true });
+    cpSync(extractedNode, join(playwrightRoot, "node", "node.exe"));
+  }
+  if (!statSync(join(playwrightRoot, "node", "node.exe")).isFile()) throw new Error("official Node runtime is incomplete");
+  cpSync(join(cwd, "playwright-worker.mjs"), join(playwrightRoot, "worker.mjs"));
 
   for (const dependency of ["playwright-core", "ws"]) {
     const source = join(cwd, "node_modules", dependency);

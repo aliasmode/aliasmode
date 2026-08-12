@@ -4,7 +4,7 @@
  * testable without pulling Playwright into unit tests.
  */
 
-import { loadPlaywright } from "./playwright-runtime.ts";
+import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 export interface CdpPageOptions {
   timeoutMs?: number;
@@ -33,12 +33,8 @@ export async function withCdpPage<T>(
 ): Promise<T> {
   const timeout = opts.timeoutMs ?? 30_000;
   let browser: any;
-  if (opts.connect) {
-    browser = await opts.connect(ws, { timeout });
-  } else {
-    const { chromium } = await loadPlaywright();
-    browser = await chromium.connectOverCDP(ws, { timeout });
-  }
+  if (!opts.connect) throw new Error("withCdpPage requires an injected connector");
+  browser = await opts.connect(ws, { timeout });
   let temporaryPage: any | undefined;
   let temporaryTargetId: string | undefined;
   let temporaryPageClosed = false;
@@ -203,7 +199,11 @@ async function closeWithin(close: (() => unknown) | undefined, timeoutMs: number
   }
 }
 
-/** Connect over CDP and return the page's navigator.userAgent. */
+/** Connect through the isolated Node worker and return the page's navigator.userAgent. */
 export async function connectOverCDP(ws: string): Promise<string> {
-  return withCdpPage(ws, (page) => page.evaluate(() => navigator.userAgent));
+  return runPlaywrightWorker<string>("page", {
+    endpoint: ws,
+    kind: "user-agent",
+    connectTimeoutMs: 30_000,
+  });
 }

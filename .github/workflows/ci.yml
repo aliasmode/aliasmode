@@ -243,6 +243,12 @@ jobs:
           $browserPath = Join-Path $installRoot (Join-Path "cloakbrowser" $metadata.executable)
           if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
           $playwrightRuntime = Join-Path $installRoot "playwright"
+          if (-not (Test-Path (Join-Path $playwrightRuntime "node\node.exe") -PathType Leaf)) {
+            throw "installed official Node runtime is missing"
+          }
+          if (-not (Test-Path (Join-Path $playwrightRuntime "worker.mjs") -PathType Leaf)) {
+            throw "installed Playwright worker is missing"
+          }
           if (-not (Test-Path (Join-Path $playwrightRuntime "node_modules\playwright-core\package.json") -PathType Leaf)) {
             throw "installed Playwright runtime is missing"
           }

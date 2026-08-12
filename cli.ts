@@ -24,7 +24,7 @@ import { ProfileStore } from "./store.ts";
 import { Launcher } from "./launcher.ts";
 import {
   defaultPlaywrightRuntimeRoot,
-  loadPlaywright,
+  runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
 import { serveDashboard } from "./web.ts";
@@ -469,15 +469,11 @@ async function currentCdpWebSocketEndpoint(endpoint: string): Promise<string> {
 }
 
 async function navigateSmokePage(endpoint: string): Promise<void> {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
-  try {
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
-  } finally {
-    await browser.close();
-  }
+  await runPlaywrightWorker("navigate", {
+    endpoint,
+    urls: ["about:blank"],
+    connectTimeoutMs: 30_000,
+  });
 }
 
 export async function runCompiledSidecarSmoke(

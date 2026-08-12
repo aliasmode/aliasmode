@@ -33,7 +33,7 @@ import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderSetupResult } from "./search-provider.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { SessionRestoreError } from "./session.ts";
-import { loadPlaywright } from "./playwright-runtime.ts";
+import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
 // onAuthRequired (whose service worker can't answer reliably during a page-load burst), the browser
@@ -3484,26 +3484,11 @@ function profileCardUrl(profileId: string): string {
  * automation's own tab (tab 0) is never disturbed. Best-effort — never fails a launch.
  */
 async function openProfileCardTab(ws: string, url: string): Promise<void> {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 10_000 });
-  try {
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    // Tab 0 is the automation tab — where automation drives the x.com login and reads its cookies.
-    // context.newPage() below opens the card as a FOREGROUND tab, which pushes the x.com tab into
-    // the BACKGROUND; Chromium then throttles/deprioritizes that background tab, so the CDP-driven
-    // login and cookie reads on x.com run slow and stall (the "first CDP read timed out" wedge, the
-    // false NOLOGIN, the "only works when clicked" behaviour — clicking = focusing = un-throttling).
-    // Keep a handle to the automation tab and re-foreground it after the card opens so x.com stays
-    // the active tab and is never throttled. The card remains available as a background tab.
-    const automationPage = context.pages()[0] ?? null;
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
-    if (automationPage && automationPage !== page) {
-      await automationPage.bringToFront().catch(() => {});
-    }
-  } finally {
-    await browser.close();
-  }
+  await runPlaywrightWorker("profile-card", {
+    endpoint: ws,
+    url,
+    connectTimeoutMs: 10_000,
+  });
 }
 
 /**
@@ -3537,17 +3522,11 @@ function writeIdentityBookmark(userDataDir: string, name: string, url: string): 
 }
 
 const defaultNavigate: LaunchNavigator = async (ws, urls) => {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
-  try {
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    for (let i = 0; i < urls.length; i++) {
-      const page = i === 0 ? context.pages()[0] ?? (await context.newPage()) : await context.newPage();
-      await page.goto(urls[i]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    }
-  } finally {
-    await browser.close();
-  }
+  await runPlaywrightWorker("navigate", {
+    endpoint: ws,
+    urls,
+    connectTimeoutMs: 30_000,
+  });
 };
 
 /** The window-title prefix that identifies a profile: `<name> · #<serial> — `. */
@@ -3589,21 +3568,11 @@ function buildLabelScript(label: string): string {
  * Short connect timeout so a launch is never held up on labeling.
  */
 const defaultLabelWindow: WindowLabeler = async (ws, label) => {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 10_000 });
-  try {
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    const script = buildLabelScript(label);
-    // Future navigations of existing pages (CDP registration persists on the
-    // target even after this client disconnects).
-    await context.addInitScript(script).catch(() => {});
-    // The page that's already open (about:blank / the platform home).
-    for (const page of context.pages()) {
-      await page.evaluate(script).catch(() => {});
-    }
-  } finally {
-    await browser.close();
-  }
+  await runPlaywrightWorker("label-window", {
+    endpoint: ws,
+    script: buildLabelScript(label),
+    connectTimeoutMs: 10_000,
+  });
 };
 
 /**
@@ -3614,17 +3583,11 @@ const defaultLabelWindow: WindowLabeler = async (ws, label) => {
 const defaultEnsureCookies: CookieEnsurer = async (ws, cookies) => {
   const target = cookieBootstrapTarget(cookies);
   if (!target) return { injected: false };
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
-  try {
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    // Already logged in? Keep the persisted (possibly rotated) session and
-    // don't overwrite it with the stale exported cookies.
-    const existing = await context.cookies(target.url);
-    if (target.hasUsableCookie(existing as CookieRecord[])) return { injected: false };
-    await context.addCookies(cookies as any);
-    return { injected: true };
-  } finally {
-    await browser.close();
-  }
+  return runPlaywrightWorker<{ injected: boolean }>("ensure-cookies", {
+    endpoint: ws,
+    url: target.url,
+    target: target.name,
+    cookies,
+    connectTimeoutMs: 30_000,
+  });
 };
