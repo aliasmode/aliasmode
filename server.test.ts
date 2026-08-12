@@ -90,9 +90,6 @@ function harness(): Harness {
     portProbe: () => true,
     spawn,
     fetch: fetchFn,
-    // The harness models CDP liveness but does not run a real browser. Proxy
-    // verification behavior is covered in launcher.test.ts + proxy-live.test.ts.
-    verifyProxy: async () => ({ ip: "203.0.113.9" }),
     ensureCookies,
     // stop() routes kills through killPidFn (tree-kill); track them here.
     killPid: async (pid) => {

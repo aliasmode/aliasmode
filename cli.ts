@@ -21,7 +21,7 @@
 
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
 import { ProfileStore } from "./store.ts";
-import { Launcher, type ProxyVerifier } from "./launcher.ts";
+import { Launcher } from "./launcher.ts";
 import { serveDashboard } from "./web.ts";
 import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
@@ -55,11 +55,11 @@ import { runDiagnostics } from "./diagnose.ts";
 import { appendFileSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
+import net from "node:net";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
-import { verifyRelayEgress } from "./egress.ts";
-import { canonicalIp } from "./ip.ts";
+import { resolveEgressEndpoints } from "./egress.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
 import {
   DESKTOP_PROTOCOL,
@@ -327,7 +327,6 @@ function makeLauncher(
   rest: string[],
   remoteMode = false,
   defaultDataRoot = "profiles",
-  verifyProxy?: ProxyVerifier,
 ): Launcher {
   return new Launcher({
     store,
@@ -347,7 +346,6 @@ function makeLauncher(
       ...(has(rest, "no-sandbox") ? ["--no-sandbox"] : []),
     ],
     ensureSearchProvider: ensureDuckDuckGoDefault,
-    ...(verifyProxy ? { verifyProxy } : {}),
     // In remote mode the coordinator injects the roamed session over CDP, so the launcher's own
     // bootstrap cookie injection is turned off — and because the login is re-injected from the hub,
     // it's safe to reset a crash-corrupted profile's volatile storage on launch (auto-heals the
@@ -534,9 +532,10 @@ export interface CloudLauncherSmokeRuntime {
 export async function exerciseCloudLauncherSmoke(
   runtime: CloudLauncherSmokeRuntime,
   profileId = "aliasmode-cloud-smoke",
+  launchArgs: string[] = [],
 ): Promise<void> {
   for (let cycle = 0; cycle < 3; cycle++) {
-    const opened = await runtime.coordinator.open(profileId);
+    const opened = await runtime.coordinator.open(profileId, launchArgs);
     if (!opened.ok) throw new Error(opened.error ?? "Cloud launcher smoke could not open the profile");
     if (!await runtime.launcher.active(profileId)) {
       throw new Error("Cloud launcher smoke browser was not alive after restore");
@@ -558,8 +557,80 @@ export async function exerciseCloudLauncherSmoke(
 
 type CloudLauncherSmokeProxy = {
   profileProxy: NonNullable<Profile["proxy"]>;
-  verifyProxy: ProxyVerifier;
+  startupUrl?: string;
+  assertComplete?(): void;
+  close?(): void;
 };
+
+const PROXY_MISMATCH_URL = "http://cloud-open.invalid/ok";
+
+/**
+ * Local authenticated upstream used only by the compiled acceptance command.
+ * It rejects every HTTPS tunnel, so the old Node TLS precheck fails, while the
+ * real Chromium HTTP request succeeds through AliasMode's credential relay.
+ */
+async function startProxyMismatchFixture(): Promise<CloudLauncherSmokeProxy> {
+  const expectedAuth = `Basic ${Buffer.from("aliasmode-smoke:aliasmode-smoke").toString("base64")}`;
+  let targetRequests = 0;
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    let input = Buffer.alloc(0);
+    socket.on("data", (chunk) => {
+      input = Buffer.concat([input, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
+      const end = input.indexOf("\r\n\r\n");
+      if (end === -1) return;
+      const head = input.subarray(0, end).toString("latin1");
+      const lines = head.split("\r\n");
+      const requestLine = lines[0] ?? "";
+      const auth = lines.find((line) => /^proxy-authorization:/i.test(line))
+        ?.replace(/^proxy-authorization:\s*/i, "");
+      if (auth !== expectedAuth) {
+        socket.end("HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n");
+      } else if (/^CONNECT\s/i.test(requestLine)) {
+        socket.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+      } else if (requestLine.startsWith(`GET ${PROXY_MISMATCH_URL} `)) {
+        targetRequests++;
+        socket.end(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        );
+      } else {
+        socket.end("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      }
+    });
+    socket.on("error", () => socket.destroy());
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("proxy mismatch fixture did not bind a loopback port");
+  }
+  return {
+    profileProxy: {
+      type: "http",
+      host: "127.0.0.1",
+      port: String(address.port),
+      user: "aliasmode-smoke",
+      pass: "aliasmode-smoke",
+    },
+    startupUrl: PROXY_MISMATCH_URL,
+    assertComplete() {
+      if (targetRequests < 3) throw new Error("browser proxy mismatch smoke did not reach its target on every cycle");
+    },
+    close() {
+      for (const socket of sockets) socket.destroy();
+      server.close();
+    },
+  };
+}
 
 function cloudLauncherSmokeProxy(
   rest: string[],
@@ -574,19 +645,12 @@ function cloudLauncherSmokeProxy(
   const port = env.ALIASMODE_LIVE_PROXY_PORT?.trim() ?? "";
   const user = env.ALIASMODE_LIVE_PROXY_USER ?? "";
   const pass = env.ALIASMODE_LIVE_PROXY_PASS ?? "";
-  const expectedIp = canonicalIp(env.ALIASMODE_LIVE_PROXY_IP?.trim() ?? "");
-  if (!host || !port || !user || !pass || !expectedIp) {
+  if (!host || !port || !user || !pass) {
     throw new Error("Cloud launcher smoke proxy environment is incomplete");
   }
   return {
     profileProxy: { type, host, port, user, pass },
-    verifyProxy: async (relayPort) => {
-      const egress = await verifyRelayEgress(relayPort);
-      if (canonicalIp(egress.ip) !== expectedIp) {
-        throw new Error("Cloud launcher smoke proxy egress did not match");
-      }
-      return egress;
-    },
+    startupUrl: resolveEgressEndpoints()[0],
   };
 }
 
@@ -594,7 +658,9 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
   const profileId = "aliasmode-cloud-smoke";
   const store = new ProfileStore(paths.cloudDatabase);
   const queue = new PendingSyncQueue(paths.pendingSync, new Uint8Array(32).fill(1));
-  const smokeProxy = cloudLauncherSmokeProxy(rest);
+  const smokeProxy = has(rest, "proxy-mismatch")
+    ? await startProxyMismatchFixture()
+    : cloudLauncherSmokeProxy(rest);
   // Exercise the persisted proxy-only preparation path that clean CI profiles previously missed.
   if (smokeProxy) {
     const defaultProfileDir = resolve(paths.cloudProfiles, profileId, "Default");
@@ -606,7 +672,6 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     rest,
     true,
     paths.cloudProfiles,
-    smokeProxy?.verifyProxy,
   );
   const profile: Profile = {
     id: profileId,
@@ -688,10 +753,16 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
   });
 
   try {
-    await exerciseCloudLauncherSmoke({ coordinator, launcher, store }, profileId);
+    await exerciseCloudLauncherSmoke(
+      { coordinator, launcher, store },
+      profileId,
+      smokeProxy?.startupUrl ? [smokeProxy.startupUrl] : [],
+    );
+    smokeProxy?.assertComplete?.();
   } finally {
     await coordinator.releaseAll(true).catch(() => false);
     await launcher.stop(profileId).catch(() => false);
+    smokeProxy?.close?.();
     queue.close();
     store.close();
   }

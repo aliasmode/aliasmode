@@ -173,7 +173,6 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   browser_launch_relay_setup_failed: "Proxy relay setup failed",
   browser_launch_process_spawn_failed: "CloakBrowser process could not start",
   browser_launch_cdp_readiness_failed: "CloakBrowser debugging connection was not ready",
-  browser_launch_proxy_egress_failed: "Proxy connection verification failed",
   session_restore_started: "Session restore started",
   session_restore_completed: "Session restore completed",
   session_restore_unclassified_failed: "Session restore failed before classification",

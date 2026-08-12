@@ -520,7 +520,6 @@ test("Cloud browser reports fixed safe browser launch operations", async () => {
     "relay_setup",
     "process_spawn",
     "cdp_readiness",
-    "proxy_egress",
   ] as const;
 
   for (const operation of operations) {

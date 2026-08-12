@@ -82,9 +82,9 @@ test("Cloud launcher smoke requires fresh and repeated cached opens to stay aliv
   let launch: object | null = null;
   let opens = 0;
   const coordinator = {
-    async open(profileId: string) {
+    async open(profileId: string, launchArgs: string[]) {
       opens++;
-      events.push(`open:${opens}:${profileId}`);
+      events.push(`open:${opens}:${profileId}:${launchArgs.join(",")}`);
       running = true;
       launch = { profileId };
       return { ok: true, ws: `ws://smoke/${opens}`, port: 9200 + opens };
@@ -106,18 +106,22 @@ test("Cloud launcher smoke requires fresh and repeated cached opens to stay aliv
   };
   const store = { getLaunch: () => launch };
 
-  await exerciseCloudLauncherSmoke({ coordinator, launcher, store } as any, "profile-smoke");
+  await exerciseCloudLauncherSmoke(
+    { coordinator, launcher, store } as any,
+    "profile-smoke",
+    ["http://cloud-open.invalid/ok"],
+  );
 
   expect(events).toEqual([
-    "open:1:profile-smoke",
+    "open:1:profile-smoke:http://cloud-open.invalid/ok",
     "active:1:profile-smoke:true",
     "close:1:profile-smoke",
     "active:1:profile-smoke:false",
-    "open:2:profile-smoke",
+    "open:2:profile-smoke:http://cloud-open.invalid/ok",
     "active:2:profile-smoke:true",
     "close:2:profile-smoke",
     "active:2:profile-smoke:false",
-    "open:3:profile-smoke",
+    "open:3:profile-smoke:http://cloud-open.invalid/ok",
     "active:3:profile-smoke:true",
     "close:3:profile-smoke",
     "active:3:profile-smoke:false",

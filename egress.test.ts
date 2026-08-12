@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseEgressResponse, resolveEgressEndpoints, verifyRelayEgress } from "./egress.ts";
+import { fetchDirectEgress, parseEgressResponse, resolveEgressEndpoints } from "./egress.ts";
 
 test("parseEgressResponse accepts JSON and plain IPv4/IPv6 responses", () => {
   expect(parseEgressResponse('{"ip":"203.0.113.4","country":"US"}')).toEqual({ ip: "203.0.113.4", country: "US" });
@@ -22,60 +22,16 @@ test("egress endpoints support an operator override and reject invalid schemes",
   expect(() => resolveEgressEndpoints("file:///tmp/ip")).toThrow("must use http or https");
 });
 
-test("relay proxy verification refuses plaintext endpoints before connecting", async () => {
-  await expect(verifyRelayEgress(
-    1, // never contacted: endpoint validation happens first
-    { endpoints: ["http://example.test/ip"] },
-  )).rejects.toThrow("must use HTTPS");
-});
-
-test("relay proxy verification returns the egress IP from the tunnel", async () => {
-  const calls: Array<[number, string]> = [];
-  const info = await verifyRelayEgress(4321, {
-    endpoints: ["https://example.test/ip"],
-    fetchThroughRelay: async (relayPort, endpoint) => {
-      calls.push([relayPort, endpoint]);
-      return { ip: "203.0.113.9" };
-    },
-  });
-  expect(info.ip).toBe("203.0.113.9");
-  expect(calls).toEqual([[4321, "https://example.test/ip"]]);
-});
-
-test("relay proxy verification tries the next endpoint after a failure", async () => {
+test("direct egress tries the next endpoint after a failure", async () => {
   const seen: string[] = [];
-  const info = await verifyRelayEgress(4321, {
+  const info = await fetchDirectEgress({
     endpoints: ["https://one.test/ip", "https://two.test/ip"],
-    fetchThroughRelay: async (_port, endpoint) => {
-      seen.push(endpoint);
-      if (endpoint.includes("one")) throw new Error("refused");
-      return { ip: "198.51.100.7" };
-    },
-  });
-  expect(info.ip).toBe("198.51.100.7");
+  }, (async (endpoint: string) => {
+    seen.push(endpoint);
+    if (endpoint.includes("one")) throw new Error("unavailable");
+    return new Response('{"ip":"198.51.100.7"}');
+  }) as typeof fetch);
+
+  expect(info).toEqual({ ip: "198.51.100.7" });
   expect(seen).toEqual(["https://one.test/ip", "https://two.test/ip"]);
-});
-
-test("relay proxy verification fails closed when every endpoint fails", async () => {
-  await expect(verifyRelayEgress(4321, {
-    endpoints: ["https://one.test/ip", "https://two.test/ip"],
-    fetchThroughRelay: async () => { throw new Error("refused"); },
-  })).rejects.toThrow("proxy verification failed before account traffic");
-});
-
-test("relay proxy verification reports fixed safe reason codes", async () => {
-  const err = await verifyRelayEgress(4321, {
-    endpoints: ["https://one.test/ip", "https://two.test/ip"],
-    fetchThroughRelay: async () => { throw new Error("secret-host.invalid:443 details"); },
-  }).then(() => { throw new Error("must reject"); }, (e: unknown) => e as Error);
-  expect(err.message).toBe("proxy verification failed before account traffic [relay_unknown_error,relay_unknown_error]");
-  expect(err.message).not.toContain("secret-host.invalid");
-});
-
-test("relay proxy verification preserves fixed reason codes", async () => {
-  const err = await verifyRelayEgress(4321, {
-    endpoints: ["https://one.test/ip"],
-    fetchThroughRelay: async () => { throw new Error("relay_connect_refused"); },
-  }).then(() => { throw new Error("must reject"); }, (e: unknown) => e as Error);
-  expect(err.message).toContain("[relay_connect_refused]");
 });

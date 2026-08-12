@@ -31,7 +31,6 @@ import { deriveFingerprintFlags, isMobileUserAgent, platformFromUA, proxyServerF
 export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderSetupResult } from "./search-provider.ts";
-import { verifyRelayEgress, type EgressInfo } from "./egress.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { SessionRestoreError } from "./session.ts";
 
@@ -51,8 +50,7 @@ export type BrowserLaunchFailure =
   | "preflight"
   | "relay_setup"
   | "process_spawn"
-  | "cdp_readiness"
-  | "proxy_egress";
+  | "cdp_readiness";
 
 /** Closed, public-safe browser launch failure. Never attach a raw cause. */
 export class BrowserLaunchError extends Error {
@@ -86,7 +84,6 @@ export interface SpawnedProcess {
 export type SpawnFn = (binary: string, args: string[]) => SpawnedProcess;
 export type FetchFn = (url: string) => Promise<{ ok: boolean; json(): Promise<any> }>;
 export type LaunchNavigator = (ws: string, urls: string[]) => Promise<void>;
-export type ProxyVerifier = (relayPort: number) => Promise<EgressInfo>;
 export interface BrowserProcessIdentity {
   profileId: string;
   debugPort: number;
@@ -285,11 +282,6 @@ export interface LauncherOptions {
   ensureSearchProvider?: SearchProviderEnsurer;
   /** Navigate initial platform URLs after session seeding, never as argv URLs. */
   navigate?: LaunchNavigator;
-  /**
-   * Verify a proxied launch through the browser before cookies or account URLs.
-   * Pass false only in controlled tests; production defaults fail closed.
-   */
-  verifyProxy?: ProxyVerifier | false;
   /**
    * Explicit test-only escape hatch for fake binaries, hosts and network
    * probes. Supplying a custom spawn function never disables gates by itself.
@@ -566,7 +558,6 @@ export class Launcher {
   private ensureCookiesFn: CookieEnsurer;
   private ensureSearchProviderFn?: SearchProviderEnsurer;
   private navigateFn: LaunchNavigator;
-  private verifyProxyFn?: ProxyVerifier;
   private enforceHostCompatibility: boolean;
   private hostPlatform: NodeJS.Platform;
   private hostArch: string;
@@ -650,9 +641,6 @@ export class Launcher {
     this.ensureCookiesFn = opts.ensureCookies ?? defaultEnsureCookies;
     this.ensureSearchProviderFn = opts.ensureSearchProvider;
     this.navigateFn = opts.navigate ?? defaultNavigate;
-    this.verifyProxyFn = opts.verifyProxy === false
-      ? undefined
-      : opts.verifyProxy ?? ((relayPort) => verifyRelayEgress(relayPort));
     // Test spawners do not implicitly weaken production policy. Every disabled
     // identity gate must be requested through the conspicuous unsafe option.
     this.enforceHostCompatibility = opts.enforceHostCompatibility ?? !this.unsafeDisableIdentityGates;
@@ -915,26 +903,6 @@ export class Launcher {
   async navigate(ws: string, urls: string[]): Promise<void> {
     if (urls.length === 0) return;
     await this.navigateFn(ws, urls);
-  }
-
-  /**
-   * Relay-level proxy proof, run BEFORE the browser spawns: one HTTPS request
-   * through the freshly started loopback relay. The browser always points at
-   * the relay and the relay never falls back to direct egress, so this checks
-   * the exact upstream path without a single CDP attach.
-   */
-  private async preflightProxyRelay(profile: Profile, relayPort: number): Promise<void> {
-    if (!this.verifyProxyFn) return;
-    try {
-      await this.verifyProxyFn(relayPort);
-    } catch (error) {
-      // Reason codes are fixed safe strings (no hosts/ports/credentials).
-      const message = error instanceof Error ? error.message : "";
-      const reasons = message.match(/\[([a-z_,]+)\]/)?.[1] ?? "relay_unknown_error";
-      this.log(`${profile.id}: proxy relay precheck failed (${reasons})`);
-      throw new BrowserLaunchError("proxy_egress");
-    }
-    this.log(`${profile.id}: verified proxy egress through the local relay`);
   }
 
   private identityCertificationKey(profileId: string): string | null {
@@ -1318,10 +1286,6 @@ export class Launcher {
         this.relays.set(profileId, relay);
         relayPort = relay.port;
         this.log(`proxy relay ready for ${profileId}`);
-        // Prove the authenticated upstream works before spawning the browser.
-        // The browser can only reach the network through this relay (no direct
-        // fallback), so a failure here means account pages could never load.
-        await this.preflightProxyRelay(profile, relayPort);
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
       const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort);

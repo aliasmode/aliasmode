@@ -6,7 +6,6 @@ export const CLOUD_DIAGNOSTIC_TYPES = [
   "browser_launch_relay_setup_failed",
   "browser_launch_process_spawn_failed",
   "browser_launch_cdp_readiness_failed",
-  "browser_launch_proxy_egress_failed",
   "session_restore_started",
   "session_restore_completed",
   "session_restore_unclassified_failed",

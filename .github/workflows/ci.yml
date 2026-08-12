@@ -87,6 +87,8 @@ jobs:
           try {
             & ".\aliasmode-sidecar.exe" __cloud-launcher-smoke --headless --state-root "$smoke\cloud-state"
             if ($LASTEXITCODE -ne 0) { throw "Cloud launcher smoke exited with code $LASTEXITCODE" }
+            & ".\aliasmode-sidecar.exe" __cloud-launcher-smoke --proxy-mismatch --headless --state-root "$smoke\proxy-mismatch-state"
+            if ($LASTEXITCODE -ne 0) { throw "deterministic proxy mismatch smoke exited with code $LASTEXITCODE" }
           } finally {
             Pop-Location
           }
@@ -185,10 +187,6 @@ jobs:
           }
           if ($shutdownFailure) { throw $shutdownFailure }
 
-          if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
-            Write-Host "Installed headful Cloud proxy smoke skipped: no temporary test proxy configured"
-            exit 0
-          }
           $sidecars = @(Get-ChildItem $installRoot -Recurse -File -Filter "aliasmode-sidecar*.exe")
           if ($sidecars.Count -ne 1) { throw "expected exactly one installed sidecar, found $($sidecars.Count)" }
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
@@ -197,6 +195,15 @@ jobs:
           $env:CLOAKBROWSER_BINARY_PATH = $browserPath
           $env:CLOAKBROWSER_BINARY_SHA256 = $metadata.sha256
           $env:ALIASMODE_SESSION_LAUNCH = "0"
+          & $sidecars[0].FullName __cloud-launcher-smoke --proxy-mismatch --state-root (Join-Path $env:RUNNER_TEMP "aliasmode-installed-proxy-mismatch")
+          if ($LASTEXITCODE -ne 0) {
+            throw "installed deterministic proxy mismatch smoke exited with code $LASTEXITCODE"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
+            Write-Host "Installed headful Cloud proxy smoke skipped: no temporary test proxy configured"
+            exit 0
+          }
           foreach ($proxyType in @("http", "socks5")) {
             $stateRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed-cloud-$proxyType"
             & $sidecars[0].FullName __cloud-launcher-smoke --proxy-type $proxyType --state-root $stateRoot
