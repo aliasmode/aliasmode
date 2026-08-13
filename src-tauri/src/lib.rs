@@ -62,8 +62,13 @@ pub fn run() {
                 .join("node_modules")
                 .join("playwright-core")
                 .join("package.json");
-            if !playwright_manifest.is_file() {
-                return Err(boxed("packaged Playwright runtime is incomplete"));
+            let node_executable = playwright_runtime.join("node").join("node.exe");
+            let worker_script = playwright_runtime.join("worker.mjs");
+            if !playwright_manifest.is_file()
+                || !node_executable.is_file()
+                || !worker_script.is_file()
+            {
+                return Err(boxed("packaged Playwright worker is incomplete"));
             }
             let nonce = hex::encode(random::<[u8; 32]>());
             let handle = app.handle().clone();

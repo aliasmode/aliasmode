@@ -8,7 +8,8 @@
  */
 
 import type { CookieRecord } from "./types.ts";
-import { loadPlaywright, loadPlaywrightStorageScript } from "./playwright-runtime.ts";
+import { join } from "node:path";
+import { PlaywrightWorkerError, runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
 
 const SESSION_URLS = [
   "https://x.com",
@@ -33,7 +34,6 @@ const SESSION_CONTEXT_RETRY_MS = 100;
 const SESSION_DISCONNECT_TIMEOUT_MS = 5_000;
 const SESSION_SUBPROCESS_TIMEOUT_MS = 85_000;
 export const READ_SESSION_WORKER_ARG = "--read-session-worker";
-const RUNNING_COMPILED = typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true;
 const PLAYWRIGHT_TRANSPORT_STATS = Symbol.for("aliasmode.playwrightTransportStats");
 
 export interface PlaywrightTransportAttribution {
@@ -615,9 +615,10 @@ export async function readSessionFromBrowser(
 
 /** Read the running browser's current supported-platform cookies + origin storage into a bundle. */
 export async function readSession(ws: string): Promise<string> {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
-  return readSessionFromBrowser(browser);
+  return runPlaywrightWorker<string>("session-capture", {
+    endpoint: ws,
+    connectTimeoutMs: 30_000,
+  }, { timeoutMs: SESSION_SUBPROCESS_TIMEOUT_MS });
 }
 
 export type ReadSessionResult =
@@ -647,61 +648,25 @@ export function decodeReadSessionResult(raw: string): ReadSessionResult {
   throw new Error("invalid session capture subprocess response");
 }
 
-interface ReadSessionSubprocess {
-  stdout: ReadableStream<Uint8Array>;
-  stderr: ReadableStream<Uint8Array>;
-  exited: Promise<number>;
-  kill(): unknown;
-}
-
-interface ReadSessionSubprocessOptions {
-  timeoutMs?: number;
-  spawn?: (argv: string[]) => ReadSessionSubprocess;
-}
+interface ReadSessionSubprocessOptions extends PlaywrightWorkerOptions {}
 
 export function readSessionWorkerCommand(
-  ws: string,
-  compiled = RUNNING_COMPILED,
+  _ws: string,
+  runtimeRoot?: string,
 ): string[] {
-  return compiled
-    ? [process.execPath, READ_SESSION_WORKER_ARG, ws]
-    : [process.execPath, import.meta.path, READ_SESSION_WORKER_ARG, ws];
+  const root = runtimeRoot ?? process.env.ALIASMODE_PLAYWRIGHT_RUNTIME;
+  return root ? [join(root, "node", "node.exe"), join(root, "worker.mjs")] : [];
 }
 
-/** Isolate repeated captures so Windows reclaims Playwright/Bun native allocations after every read. */
+/** Capture in the common one-shot official Node worker. */
 export async function readSessionInSubprocess(
   ws: string,
   options: ReadSessionSubprocessOptions = {},
 ): Promise<string> {
-  const timeoutMs = Math.max(1, options.timeoutMs ?? SESSION_SUBPROCESS_TIMEOUT_MS);
-  const spawn = options.spawn ?? ((argv: string[]) => Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" }));
-  const child = spawn(readSessionWorkerCommand(ws));
-  const stdout = new Response(child.stdout).text();
-  const stderr = new Response(child.stderr).text();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try { child.kill(); } catch {}
-  }, timeoutMs);
-
-  const [stdoutResult, , exitResult] = await Promise.allSettled([stdout, stderr, child.exited]);
-  clearTimeout(timer);
-
-  if (timedOut) throw new Error(`session capture subprocess exceeded ${timeoutMs}ms`);
-  if (exitResult.status === "rejected") throw new Error("session capture subprocess exit could not be observed");
-  const exitCode = exitResult.value;
-  if (stdoutResult.status === "rejected") throw new Error("session capture subprocess output could not be read");
-
-  let result: ReadSessionResult;
-  try {
-    result = decodeReadSessionResult(stdoutResult.value);
-  } catch (error) {
-    if (exitCode !== 0) throw new Error(`session capture subprocess exited ${exitCode}`);
-    throw error;
-  }
-  if (!result.ok) throw new Error(result.error);
-  if (exitCode !== 0) throw new Error(`session capture subprocess exited ${exitCode}`);
-  return result.bundle;
+  return runPlaywrightWorker<string>("session-capture", {
+    endpoint: ws,
+    connectTimeoutMs: 30_000,
+  }, { ...options, timeoutMs: options.timeoutMs ?? SESSION_SUBPROCESS_TIMEOUT_MS });
 }
 
 export async function runReadSessionWorker(
@@ -739,18 +704,16 @@ export async function runReadSessionWorker(
  * blocked raw-CDP read. Returns the raw Playwright cookie records (httpOnly included).
  */
 export async function harvestCookies(ws: string, urls: string[]): Promise<CookieRecord[]> {
-  const { chromium } = await loadPlaywright();
-  const browser = await chromium.connectOverCDP(ws, { timeout: 30_000 });
-  try {
-    const ctx = browser.contexts()[0] ?? (await browser.newContext());
-    return (await ctx.cookies(urls && urls.length ? urls : SESSION_URLS)) as CookieRecord[];
-  } finally {
-    await browser.close();
-  }
+  return runPlaywrightWorker<CookieRecord[]>("cookie-harvest", {
+    endpoint: ws,
+    urls,
+    connectTimeoutMs: 30_000,
+  });
 }
 
 async function storageScriptSource(): Promise<string> {
-  return loadPlaywrightStorageScript();
+  // Main-process helpers remain injectable/testable, but production Playwright storage work runs in worker.mjs.
+  return "module.exports.StorageScript = class StorageScript {};";
 }
 
 /**
@@ -982,10 +945,8 @@ async function connectPersistentSessionBrowser(
   const connectTimeoutMs = Math.max(1, options.connectTimeoutMs ?? SESSION_CONNECT_TIMEOUT_MS);
   const contextRetryMs = Math.max(1, options.contextRetryMs ?? SESSION_CONTEXT_RETRY_MS);
   const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
-  const connect = options.connect ?? (async (ws: string, timeoutMs: number) => {
-    const { chromium } = await loadPlaywright();
-    return chromium.connectOverCDP(ws, { timeout: timeoutMs });
-  });
+  const connect = options.connect;
+  if (!connect) throw new SessionRestoreError("connect", "failed");
   const deadline = Date.now() + connectTimeoutMs;
   let waitingFor: SessionRestoreOperation = "connect";
 
@@ -1042,9 +1003,29 @@ export async function writeSession(
   options: WriteSessionOptions = {},
 ): Promise<void> {
   const parsed = parseSessionBundle(bundle);
-  if (isSessionBundleEmpty(parsed)) return; // nothing to enforce on a fresh profile
-  const browser = await connectPersistentSessionBrowser(ws, options);
-  await writeSessionToBrowser(browser, parsed, options);
+  if (isSessionBundleEmpty(parsed)) return;
+  if (options.connect) {
+    const browser = await connectPersistentSessionBrowser(ws, options);
+    await writeSessionToBrowser(browser, parsed, options);
+    return;
+  }
+  try {
+    await runPlaywrightWorker("session-restore", {
+      endpoint: ws,
+      bundle,
+      urls: [],
+      connectTimeoutMs: options.connectTimeoutMs ?? SESSION_CONNECT_TIMEOUT_MS,
+    }, { timeoutMs: options.writeTimeoutMs ?? SESSION_WRITE_TIMEOUT_MS });
+  } catch (error) {
+    if (error instanceof SessionRestoreError) throw error;
+    if (error instanceof PlaywrightWorkerError && error.details?.operation) {
+      throw new SessionRestoreError(
+        error.details.operation as SessionRestoreOperation,
+        error.details.outcome === "timeout" ? "timeout" : "failed",
+      );
+    }
+    throw new SessionRestoreError("connect", error instanceof PlaywrightWorkerError && error.code === "timeout" ? "timeout" : "failed");
+  }
 }
 
 /** A bundle with no cookies and no origin storage needs no browser attach at all. */
@@ -1064,52 +1045,37 @@ export async function applySessionToEndpoint(
   urls: readonly string[],
   options: WriteSessionOptions = {},
 ): Promise<void> {
-  const log = options.log ?? (() => {});
-  const startedAt = Date.now();
   const parsed = parseSessionBundle(bundle);
   const empty = isSessionBundleEmpty(parsed);
-  log(`session attach: connecting (empty bundle: ${empty}, ${urls.length} startup page(s))`);
-  const browser = await connectPersistentSessionBrowser(ws, options);
-  log(`session attach: connected with persistent context after ${Date.now() - startedAt}ms`);
-  let operationError: unknown;
+  if (options.connect) {
+    const log = options.log ?? (() => {});
+    const browser = await connectPersistentSessionBrowser(ws, options);
+    try {
+      if (!empty) await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
+      const context = browser.contexts()[0];
+      if (!context) throw new SessionRestoreError("context", "failed");
+      for (let i = 0; i < urls.length; i++) {
+        const page = i === 0 ? context.pages()[0] ?? await context.newPage() : await context.newPage();
+        await page.goto(urls[i]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      }
+    } finally { await browser.close(); }
+    log("session attach: detached");
+    return;
+  }
   try {
-    if (!empty) {
-      await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
-      log(`session attach: restored ${parsed.cookies.length} cookie(s), ${parsed.origins.length} origin(s) after ${Date.now() - startedAt}ms`);
-    }
-    const context = browser.contexts()[0];
-    if (!context) throw new Error("persistent context unavailable");
-    for (let i = 0; i < urls.length; i++) {
-      const page = i === 0 ? context.pages()[0] ?? (await context.newPage()) : await context.newPage();
-      await page.goto(urls[i]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      log(`session attach: startup page ${i + 1}/${urls.length} loaded after ${Date.now() - startedAt}ms`);
-    }
+    await runPlaywrightWorker("session-restore", {
+      endpoint: ws,
+      bundle,
+      urls,
+      connectTimeoutMs: options.connectTimeoutMs ?? SESSION_CONNECT_TIMEOUT_MS,
+    }, { timeoutMs: options.writeTimeoutMs ?? SESSION_WRITE_TIMEOUT_MS });
   } catch (error) {
-    operationError = error;
+    if (error instanceof PlaywrightWorkerError && error.details?.operation) {
+      throw new SessionRestoreError(
+        error.details.operation as SessionRestoreOperation,
+        error.details.outcome === "timeout" ? "timeout" : "failed",
+      );
+    }
+    throw error;
   }
-  const disconnectTimeoutMs = Math.max(1, options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS);
-  try {
-    // connectOverCDP close() detaches; the managed browser keeps running.
-    await withDeadline(Promise.resolve().then(() => browser.close()), disconnectTimeoutMs, "session detach");
-    log(`session attach: detached after ${Date.now() - startedAt}ms`);
-  } catch (error) {
-    log(`session attach: detach ${error instanceof DeadlineExceededError ? "timed out" : "failed"} after ${Date.now() - startedAt}ms`);
-    throw new SessionRestoreError(
-      "disconnect",
-      error instanceof DeadlineExceededError ? "timeout" : "failed",
-    );
-  }
-  if (operationError) {
-    throw operationError instanceof SessionRestoreError
-      ? operationError
-      : new SessionRestoreError("navigation", "failed");
-  }
-}
-
-if (import.meta.main && Bun.argv[2] === READ_SESSION_WORKER_ARG) {
-  void runReadSessionWorker(Bun.argv.slice(2), {
-    readSession,
-    write: (value) => Bun.write(Bun.stdout, value),
-    exit: (code) => process.exit(code),
-  }).catch(() => process.exit(1));
 }

@@ -10,6 +10,7 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 function workspace(): string {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-windows-bundle-"));
   mkdirSync(join(cwd, "src-tauri"), { recursive: true });
+  writeFileSync(join(cwd, "playwright-worker.mjs"), "worker");
   for (const dependency of ["playwright-core", "ws"]) {
     const root = join(cwd, "node_modules", dependency);
     mkdirSync(root, { recursive: true });
@@ -27,6 +28,10 @@ test("Windows bundle preparation packages the official runtime and records its h
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      installNode: async (root) => {
+        mkdirSync(join(root, "node"), { recursive: true });
+        writeFileSync(join(root, "node", "node.exe"), "node");
+      },
       installBrowser: async (staging) => {
         const runtime = join(staging, "cloakbrowser");
         mkdirSync(join(runtime, "locales"), { recursive: true });
@@ -43,10 +48,12 @@ test("Windows bundle preparation packages the official runtime and records its h
       wrapperVersion: "0.4.11",
     });
     expect(readFileSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chrome.dll"), "utf8")).toBe("dll");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node", "node.exe"), "utf8")).toBe("node");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "worker.mjs"), "utf8")).toBe("worker");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8"))).toEqual({ name: "playwright-core" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8"))).toEqual({ name: "ws" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "generated", "browser.json"), "utf8"))).toEqual(metadata);
-    expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.21\n");
+    expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.22\n");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -63,6 +70,10 @@ test("Windows bundle preparation rejects installer paths outside staging", async
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      installNode: async (root) => {
+        mkdirSync(join(root, "node"), { recursive: true });
+        writeFileSync(join(root, "node", "node.exe"), "node");
+      },
       installBrowser: async () => ({ path: outside, sha256: sha256("browser") }),
     })).rejects.toThrow("outside its staging directory");
   } finally {
@@ -78,6 +89,10 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      installNode: async (root) => {
+        mkdirSync(join(root, "node"), { recursive: true });
+        writeFileSync(join(root, "node", "node.exe"), "node");
+      },
       installBrowser: async (staging) => {
         const runtime = join(staging, "cloakbrowser");
         mkdirSync(runtime, { recursive: true });
