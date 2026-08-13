@@ -37,8 +37,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.89
+          components: rustfmt
       - run: bun install --frozen-lockfile
       - run: bun run desktop:prepare
+      - run: bun test
+      - run: bun run typecheck
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: bun run desktop:check
+      - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
         shell: pwsh
         run: |
@@ -115,6 +121,15 @@ jobs:
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
       - run: bunx tauri build --bundles nsis
+      - name: Select NSIS installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($installers.Count)"
+          }
+          "ALIASMODE_NSIS_INSTALLER=$($installers[0].FullName)" | Add-Content $env:GITHUB_ENV
       - name: Smoke-test installed desktop and headful Cloud proxies
         shell: pwsh
         env:
@@ -125,14 +140,8 @@ jobs:
           ALIASMODE_LIVE_PROXY_IP: ${{ secrets.ALIASMODE_LIVE_PROXY_IP }}
         run: |
           $ErrorActionPreference = "Stop"
-          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
-          if ($installers.Count -ne 1) {
-            throw "expected exactly one NSIS installer, found $($installers.Count)"
-          }
-
           $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode installed"
-          $install = Start-Process -Wait -PassThru $installers[0].FullName -ArgumentList @(
+          $install = Start-Process -Wait -PassThru $env:ALIASMODE_NSIS_INSTALLER -ArgumentList @(
             "/S",
             "/D=$installRoot"
           )
@@ -321,22 +330,18 @@ jobs:
       - name: Stage unsigned installer and checksum
         shell: pwsh
         run: |
-          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
-          if ($installers.Count -ne 1) {
-            throw "expected exactly one NSIS installer, found $($installers.Count)"
-          }
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $installerName = Split-Path $env:ALIASMODE_NSIS_INSTALLER -Leaf
           $versionMarker = "_$($bundleVersion)_"
-          if (-not $installers[0].Name.Contains($versionMarker)) {
-            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $($installers[0].Name)"
+          if (-not $installerName.Contains($versionMarker)) {
+            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $installerName"
           }
           $artifact = ".\artifacts\windows"
           New-Item -ItemType Directory -Force $artifact | Out-Null
-          Copy-Item $installers[0].FullName $artifact
-          $installer = Join-Path $artifact $installers[0].Name
+          $installer = Join-Path $artifact $installerName
+          Copy-Item $env:ALIASMODE_NSIS_INSTALLER $installer
           $sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $($installers[0].Name)" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+          "$sha256  $installerName" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
       - uses: actions/upload-artifact@v4
         with:
           name: aliasmode-windows-unsigned
