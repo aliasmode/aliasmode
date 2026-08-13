@@ -845,6 +845,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       this.diagnosticEvents.record("heartbeat_failed");
       this.log(`${profileId}: Cloud heartbeat failed (${errorCode(error)})`);
+      await this.refreshCheckpoint(open, context.queue);
     }
   }
 
@@ -999,12 +1000,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   async releaseAll(permanent = false): Promise<boolean> {
     if (permanent) this.shuttingDown = true;
     this.draining = true;
+    let released = false;
     try {
       await this.stopPendingRetry();
       await Promise.allSettled([...this.opening.values()]);
       const queue = this.options.queue();
       const accountId = this.options.accountId();
-      if (!queue || !accountId) return true;
+      if (!queue || !accountId) {
+        released = true;
+        return true;
+      }
 
       let complete = true;
       while (true) {
@@ -1021,10 +1026,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }
         if (closedThisPass === 0) break;
       }
-      return complete && queue.listOpens(accountId).length === 0;
+      released = complete && queue.listOpens(accountId).length === 0;
+      return released;
     } finally {
-      // Keep lifecycle admission closed through credential teardown. A successful
-      // authentication recovery reopens it in resumeAfterAuthentication().
+      if (!permanent && !this.shuttingDown && !released) {
+        this.draining = false;
+        this.startPendingRetry();
+      }
+      // Permanent shutdown and successful sign-out keep lifecycle admission closed.
+      // Authentication recovery reopens it in resumeAfterAuthentication().
     }
   }
 

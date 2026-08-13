@@ -583,6 +583,25 @@ test("Cloud heartbeat refreshes the encrypted checkpoint", async () => {
   state.store.close();
 });
 
+test("Cloud heartbeat refreshes its checkpoint during a Cloud outage", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const baselineId = state.queue.list("account1")[0]?.id;
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    state.events.push("heartbeat");
+    throw new Error("offline");
+  };
+  state.events.length = 0;
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events).toEqual(["heartbeat", "capture"]);
+  expect(state.queue.list("account1")[0]?.id).not.toBe(baselineId);
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud browser durably captures before confirmed stop and CAS close", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -722,6 +741,19 @@ test("Cloud sign-out drain remains reusable after the next sign-in", async () =>
   expect(await state.coordinator.releaseAll()).toBe(true);
   expect(state.queue.listOpens("account1")).toEqual([]);
   await state.coordinator.resumeAfterAuthentication();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("failed Cloud sign-out drain keeps the current account usable", async () => {
+  const state = setup({ stopResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.releaseAll()).toBe(false);
+  state.queue.removeUnreadyCaptures("profile1", "account1", "registration1");
+  state.queue.removeOpenRegistration("profile1", "account1", "registration1");
+  state.store.clearLaunch("profile1");
+
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   state.queue.close();
   state.store.close();
