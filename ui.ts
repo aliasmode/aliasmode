@@ -18,8 +18,10 @@ import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
+import { CloudApiError } from "./cloud-client.ts";
 import {
   CloudProfileEditor,
+  CloudProfileEditorError,
   cloudProfileEditorErrorStatus,
 } from "./cloud-profile-editor.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
@@ -626,13 +628,27 @@ export async function handleUiRequest(
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
       if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
       if (options.cloudBrowser) {
-        const summaries = (await options.cloudConnection!.client.listProfiles()).profiles;
+        const editor = new CloudProfileEditor(options.cloudConnection!.client, store);
+        const locked: string[] = [];
+        const failed: string[] = [];
+        let deleted = 0;
         for (const id of ids) {
-          const profile = summaries.find((item) => item.id === id);
-          if (!profile) continue;
-          await options.cloudConnection!.client.trashProfile(id, { expectedVersion: profile.version });
+          try {
+            const expectedVersion = await editor.closedProfileVersion(id);
+            await options.cloudConnection!.client.trashProfile(id, { expectedVersion });
+            deleted++;
+          } catch (error) {
+            if (
+              error instanceof CloudProfileEditorError && error.status === 409 ||
+              error instanceof CloudApiError && error.status === 409 && error.code === "profile_open"
+            ) {
+              locked.push(id);
+            } else {
+              failed.push(id);
+            }
+          }
         }
-        return Response.json({ ok: true, deleted: ids.length, locked: [] });
+        return Response.json({ ok: true, deleted, locked, failed });
       }
       if (remote) {
         const r = await remote.deleteProfiles(ids);

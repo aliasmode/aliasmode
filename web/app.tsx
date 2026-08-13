@@ -849,7 +849,7 @@ function App() {
     ? (team?.folders.filter((folder) => folder.permission === "edit" && !folder.archivedAt).map((folder) => folder.name) ??
       existingGroups.filter((name) => profiles.some((profile) => profile.group === name && profile.permission === "edit")))
     : existingGroups;
-  const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission !== "view");
+  const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");
   const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
 
   const toggle = (id: string) =>
@@ -901,8 +901,11 @@ function App() {
         setActionErr(r.error || "delete failed");
         return;
       }
-      // Any that were open elsewhere are refused, not deleted — surface that.
-      if (r.locked && r.locked.length) setActionErr(`${r.locked.length} in use, not deleted: ${r.locked.join(", ")}`);
+      const problems = [
+        r.locked?.length && `${r.locked.length} in use, not deleted: ${r.locked.join(", ")}`,
+        r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`,
+      ].filter(Boolean);
+      if (problems.length) setActionErr(problems.join("; "));
       setSelected(new Set());
       await load();
     } catch (e) {
@@ -1540,7 +1543,7 @@ function App() {
           </>
         )}
         <span className="spacer" />
-        {!isCloudMode && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}
+        {(!isCloudMode || selectedEditable) && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}
         </>}
       </div>
 

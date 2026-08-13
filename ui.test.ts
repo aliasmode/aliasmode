@@ -11,6 +11,7 @@ import { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { PendingSyncRuntime } from "./pending-sync.ts";
 import type { SupabaseAuthClient } from "./supabase-auth.ts";
+import { CloudApiError } from "./cloud-client.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 
 const SAMPLE = `id=k1d0cd11
@@ -1512,6 +1513,42 @@ test("app mode API rejects cross-site simple requests", async () => {
   expect(appConfig.read().mode).toBe("unconfigured");
   s.close();
 });
+
+test("Cloud bulk delete keeps closed profiles, rejects opens, and continues after errors", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-delete-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const deleted: string[] = [];
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        if (id === "open") return { profile: { version: 1, activeOpens: [{}] } };
+        return { profile: { version: 1, activeOpens: [] } };
+      },
+      async trashProfile(id: string) {
+        if (id === "raced") throw new CloudApiError("profile is open", "profile_open", 409);
+        if (id === "broken") throw new Error("service unavailable");
+        deleted.push(id);
+      },
+    },
+  } as any;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/delete", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids: ["closed", "open", "raced", "broken"] }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(response!.status).toBe(200);
+  expect(await response!.json()).toEqual({ ok: true, deleted: 1, locked: ["open", "raced"], failed: ["broken"] });
+  expect(deleted).toEqual(["closed"]);
+  s.close();
+});
+
 
 test("Cloud profile editor routes return no session data and forward expectedVersion", async () => {
   const s = store();
