@@ -255,6 +255,35 @@ jobs:
           if (-not (Test-Path (Join-Path $playwrightRuntime "node_modules\ws\package.json") -PathType Leaf)) {
             throw "installed Playwright WebSocket runtime is missing"
           }
+
+          $workerStart = [System.Diagnostics.ProcessStartInfo]::new()
+          $workerStart.FileName = Join-Path $playwrightRuntime "node\node.exe"
+          $workerStart.ArgumentList.Add((Join-Path $playwrightRuntime "worker.mjs"))
+          $workerStart.UseShellExecute = $false
+          $workerStart.RedirectStandardInput = $true
+          $workerStart.RedirectStandardOutput = $true
+          $workerStart.RedirectStandardError = $true
+          $workerStart.Environment.Clear()
+          foreach ($name in @("SystemRoot", "WINDIR", "TEMP", "TMP")) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "required worker environment variable is missing: $name" }
+            $workerStart.Environment[$name] = $value
+          }
+          $worker = [System.Diagnostics.Process]::new()
+          $worker.StartInfo = $workerStart
+          if (-not $worker.Start()) { throw "installed Playwright worker did not start" }
+          $worker.StandardInput.Write('{"version":1,"operation":"page","payload":{"endpoint":"not-a-url"}}')
+          $worker.StandardInput.Close()
+          $workerOutput = $worker.StandardOutput.ReadToEnd()
+          $workerError = $worker.StandardError.ReadToEnd()
+          $worker.WaitForExit()
+          if ($worker.ExitCode -ne 1) { throw "installed Playwright worker exited with code $($worker.ExitCode)" }
+          try { $workerResponse = $workerOutput | ConvertFrom-Json } catch { throw "installed Playwright worker returned malformed JSON" }
+          if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "operation_failed") {
+            throw "installed Playwright worker returned an unexpected protocol response"
+          }
+          if (-not [string]::IsNullOrEmpty($workerError)) { throw "installed Playwright worker wrote to stderr" }
+
           $env:ALIASMODE_PLAYWRIGHT_RUNTIME = $playwrightRuntime
           $env:CLOAKBROWSER_BINARY_PATH = $browserPath
           $env:CLOAKBROWSER_BINARY_SHA256 = $metadata.sha256
