@@ -7,6 +7,7 @@ src-tauri/gen/
 src-tauri/generated/
 src-tauri/binaries/
 src-tauri/resources/cloakbrowser/
+src-tauri/resources/playwright/
 *.msi
 *.exe
 *.dmg
