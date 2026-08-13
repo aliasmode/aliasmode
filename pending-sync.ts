@@ -421,6 +421,11 @@ export class PendingSyncQueue {
     `).run(profileId, accountId).changes === 1;
   }
 
+  removeOpenRegistration(profileId: string, accountId: string, registrationId: string): boolean {
+    if (this.getOpen(profileId, accountId)?.registrationId !== registrationId) return false;
+    return this.removeOpen(profileId, accountId);
+  }
+
   private updateStatus(
     id: string,
     accountId: string,

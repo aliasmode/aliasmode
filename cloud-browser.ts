@@ -72,7 +72,7 @@ type CloudBrowserClient = Pick<
 
 type CloudBrowserLauncher = Pick<
   Launcher,
-  "start" | "stop" | "active" | "verifyRunningIdentity"
+  "start" | "stop" | "active" | "hasPageTargets" | "verifyRunningIdentity" | "reconcileOrphans"
 >;
 
 export interface CloudBrowserOptions {
@@ -163,7 +163,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   async listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }> {
-    this.requireContext(false);
+    const { queue, accountId } = this.requireContext(false);
+    await this.reconcileClosedBrowsers(queue, accountId);
     const response = await this.options.cloud.listProfiles();
     return {
       profiles: response.profiles
@@ -194,6 +195,27 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }),
       healthSources: [],
     };
+  }
+
+  private async reconcileClosedBrowsers(queue: PendingSyncQueue, accountId: string): Promise<void> {
+    await this.options.launcher.reconcileOrphans();
+    for (const candidate of queue.listOpens(accountId)) {
+      const launch = this.options.store.getLaunch(candidate.profileId);
+      if (launch && this.isExactRunningLaunch(candidate, launch)) {
+        const hasPageTargets = await this.options.launcher.hasPageTargets(candidate.profileId).catch(() => true);
+        if (!hasPageTargets) await this.close(candidate.profileId).catch(() => false);
+        continue;
+      }
+      if (launch) continue;
+      await this.withProfileTransition(candidate.profileId, async () => {
+        const current = queue.getOpen(candidate.profileId, accountId);
+        if (!current || current.registrationId !== candidate.registrationId) return;
+        if (this.options.store.getLaunch(candidate.profileId)) return;
+        await this.stopHeartbeat(candidate.profileId);
+        const finished = await this.finishStoppedOpen(current, queue);
+        if (!finished) this.startHeartbeat(candidate.profileId);
+      });
+    }
   }
 
   async create(profile: Profile): Promise<{ id: string }> {
@@ -477,6 +499,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private async doClose(profileId: string): Promise<boolean> {
     this.diagnosticEvents.record("close_started");
     const { queue, accountId } = this.requireContext(false);
+    await this.options.launcher.reconcileOrphans();
     const open = queue.getOpen(profileId, accountId);
     const launch = this.options.store.getLaunch(profileId);
     if (!open) {
@@ -581,11 +604,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private async abandonStoppedOpen(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
     try {
       await this.options.cloud.abandon(open.registrationId);
-      queue.removeOpen(open.profileId, open.accountId);
+      queue.removeOpenRegistration(open.profileId, open.accountId, open.registrationId);
       return true;
     } catch (error) {
       if (error instanceof CloudApiError && error.code === "profile_not_found") {
-        queue.removeOpen(open.profileId, open.accountId);
+        queue.removeOpenRegistration(open.profileId, open.accountId, open.registrationId);
         return true;
       }
       return false;
@@ -652,6 +675,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       return;
     }
     const active = await this.options.launcher.active(profileId).catch(() => true);
+    if (active) {
+      const hasPageTargets = await this.options.launcher.hasPageTargets(profileId).catch(() => true);
+      if (!hasPageTargets) {
+        queueMicrotask(() => {
+          void this.close(profileId).catch(() => {});
+        });
+        return;
+      }
+    }
     if (!active) {
       this.stopHeartbeat(profileId);
       const stopped = await this.options.launcher.stop(profileId).catch(() => false);

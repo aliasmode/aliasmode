@@ -861,6 +861,7 @@ export class Launcher {
       // timeout (the operator saw browsers "only work when clicked" — focusing them un-throttles).
       // These keep an unfocused window at full speed; they touch only internal scheduling, not any
       // JS-visible surface, so the fingerprint is unchanged.
+      `--disable-background-mode`,
       `--disable-background-timer-throttling`,
       `--disable-backgrounding-occluded-windows`,
       `--disable-renderer-backgrounding`,
@@ -2154,6 +2155,25 @@ export class Launcher {
       );
     }
     return teardownConfirmed;
+  }
+
+  /** True iff the profile still has a visible page target for its current generation. */
+  async hasPageTargets(profileId: string): Promise<boolean> {
+    const launch = this.store.getLaunch(profileId);
+    if (!launch) return false;
+    try {
+      const response = await this.fetchFn(`http://127.0.0.1:${launch.debugPort}/json/list`);
+      if (!response.ok) return true;
+      const targets = await response.json() as Array<{ type?: unknown }>;
+      const current = this.store.getLaunch(profileId);
+      if (!current || current.debugPort !== launch.debugPort || current.startedAt !== launch.startedAt) {
+        return true;
+      }
+      return targets.some((target) => target?.type === "page");
+    } catch {
+      // Surface detection must never reinterpret an uncertain CDP probe as a user close.
+      return true;
+    }
   }
 
   /** True iff the profile's browser is currently reachable over CDP. */
