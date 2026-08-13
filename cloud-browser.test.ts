@@ -43,6 +43,7 @@ function payload(): PortableProfileV1 {
 function setup(options: {
   stopResult?: boolean;
   activeResult?: boolean;
+  hasPageTargets?: boolean;
   closeConflict?: boolean;
   closeTransportFailure?: boolean;
   navigateFailure?: boolean;
@@ -65,6 +66,8 @@ function setup(options: {
   let startCalls = 0;
   let startedProxy: unknown;
   let verifyCalls = 0;
+  let reconcileHook: (() => void | Promise<void>) | undefined;
+  let abandonHook: (() => void | Promise<void>) | undefined;
   const openedPayload = payload();
   openedPayload.profile.proxy = options.proxy ?? null;
   const opened: OpenProfileResponse = {
@@ -75,6 +78,25 @@ function setup(options: {
     activeOpens: [],
   };
   const cloud = {
+    async listProfiles() {
+      events.push("cloud-list");
+      return {
+        ok: true as const,
+        profiles: [{
+          id: "profile1",
+          name: "Profile",
+          group: "",
+          platform: "x.com",
+          tags: [],
+          version: 4,
+          trashedAt: null,
+          trashedBy: null,
+          updatedAt: 1,
+          activeOpens: [],
+          permission: "edit" as const,
+        }],
+      };
+    },
     async createProfile(request: { payload: PortableProfileV1 }) {
       events.push("cloud-create");
       expect(request.payload.profile.id).toBe("profile1");
@@ -106,6 +128,7 @@ function setup(options: {
     async abandon() {
       abandonCalls++;
       events.push("abandon");
+      await abandonHook?.();
       return { ok: true as const, status: "abandoned" as const };
     },
   };
@@ -136,6 +159,12 @@ function setup(options: {
       if (options.stopResult === false) return false;
       store.clearLaunch(profileId);
       return true;
+    },
+    async hasPageTargets() { return options.hasPageTargets ?? true; },
+    async reconcileOrphans() {
+      events.push("reconcile");
+      await reconcileHook?.();
+      return { cleared: 0 };
     },
     async active() { return options.activeResult ?? true; },
     async verifyRunningIdentity(profileId: string) {
@@ -188,6 +217,12 @@ function setup(options: {
     startCalls: () => startCalls,
     startedProxy: () => startedProxy,
     verifyCalls: () => verifyCalls,
+    setReconcileHook(hook: () => void | Promise<void>) {
+      reconcileHook = hook;
+    },
+    setAbandonHook(hook: () => void | Promise<void>) {
+      abandonHook = hook;
+    },
   };
 }
 
@@ -348,7 +383,7 @@ test("Cloud browser retains a verified launch when worker restore fails", async 
 
   state.events.length = 0;
   expect(await state.coordinator.close("profile1")).toBe(true);
-  expect(state.events).toEqual(["stop", "abandon"]);
+  expect(state.events).toEqual(["reconcile", "stop", "abandon"]);
   expect(state.closeCalls()).toBe(0);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   state.queue.close();
@@ -369,7 +404,7 @@ test("Cloud close does not stop a replacement for a retained restoring browser",
 
   expect(await state.coordinator.close("profile1")).toBe(false);
 
-  expect(state.events).toEqual([]);
+  expect(state.events).toEqual(["reconcile"]);
   expect(state.store.getLaunch("profile1")).toMatchObject({ debugPort: 9333, startedAt: 2000 });
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("restoring");
   state.queue.close();
@@ -393,6 +428,133 @@ test("Cloud heartbeat never auto-closes a retained restoring browser", async () 
   state.store.close();
 });
 
+test("Cloud roster reconciles a manually closed browser and releases its registration", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+
+  const roster = await state.coordinator.listRoster();
+
+  expect(state.events).toEqual(["reconcile", "abandon", "cloud-list"]);
+  expect(roster.profiles[0]?.running).toBe(false);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.abandonCalls()).toBe(1);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster captures and closes a surviving browser with no page targets", async () => {
+  const state = setup({ hasPageTargets: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+
+  const roster = await state.coordinator.listRoster();
+
+  expect(state.events).toEqual(["reconcile", "reconcile", "capture", "stop", "cloud-close", "cloud-list"]);
+  expect(roster.profiles[0]?.running).toBe(false);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud close reconciles a manually closed browser before session capture", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+
+  expect(await state.coordinator.close("profile1")).toBe(true);
+
+  expect(state.events).toEqual(["reconcile", "abandon"]);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.abandonCalls()).toBe(1);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll reconciles a manually closed browser", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+
+  expect(await state.coordinator.releaseAll()).toBe(true);
+
+  expect(state.events).toEqual(["reconcile", "abandon"]);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster reconciliation does not release a replacement registration", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => {
+    state.store.clearLaunch("profile1");
+    state.queue.removeOpen("profile1", "account1");
+    state.queue.recordOpen({
+      accountId: "account1",
+      profileId: "profile1",
+      registrationId: "replacement-registration",
+      expectedVersion: 5,
+    });
+    state.store.recordLaunch({
+      profileId: "profile1",
+      pid: 11,
+      debugPort: 9333,
+      ws: "ws://replacement",
+      startedAt: 2000,
+    });
+  });
+
+  await state.coordinator.listRoster();
+
+  expect(state.events).toEqual(["reconcile", "cloud-list"]);
+  expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe("replacement-registration");
+  expect(state.abandonCalls()).toBe(0);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster reconciliation cannot delete a replacement created while abandoning", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+  state.setAbandonHook(() => {
+    state.queue.removeOpen("profile1", "account1");
+    state.queue.recordOpen({
+      accountId: "account1",
+      profileId: "profile1",
+      registrationId: "replacement-registration",
+      expectedVersion: 5,
+    });
+  });
+
+  await state.coordinator.listRoster();
+
+  expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe("replacement-registration");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat captures and closes a background-only browser", async () => {
+  const state = setup({ hasPageTargets: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+
+  await state.coordinator.heartbeatOnce("profile1");
+  await Bun.sleep(0);
+
+  expect(state.events).toEqual(["reconcile", "capture", "stop", "cloud-close"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud browser durably captures before confirmed stop and CAS close", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -407,7 +569,7 @@ test("Cloud browser durably captures before confirmed stop and CAS close", async
   };
 
   expect(await state.coordinator.close("profile1")).toBe(true);
-  expect(state.events).toEqual(["capture", "stop", "cloud-close"]);
+  expect(state.events).toEqual(["reconcile", "capture", "stop", "cloud-close"]);
   expect(state.closeCalls()).toBe(1);
   expect(state.queue.list("account1")).toEqual([]);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();

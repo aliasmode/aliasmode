@@ -348,6 +348,22 @@ test("pending sync encrypts durable Cloud open registrations", () => {
   expect(readFileSync(state.path).toString("utf8")).not.toContain("registration-secret");
 });
 
+test("pending open removal can be fenced to its registration", () => {
+  const state = queue();
+  state.queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 1,
+  });
+
+  expect(state.queue.removeOpenRegistration("profile1", "account1", "replacement")).toBe(false);
+  expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe("registration1");
+  expect(state.queue.removeOpenRegistration("profile1", "account1", "registration1")).toBe(true);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+});
+
 test("pending sync queue requires an AES-256 key", () => {
   const path = join(mkdtempSync(join(tmpdir(), "aliasmode-pending-")), "pending.sqlite");
   expect(() => new PendingSyncQueue(path, new Uint8Array(16))).toThrow("32 bytes");

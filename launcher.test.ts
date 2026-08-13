@@ -2441,6 +2441,23 @@ test("Linux cleanup never signals a recycled stored PID or a changed group leade
   store.close();
 });
 
+test("hasPageTargets distinguishes a background-only browser", async () => {
+  const store = seeded();
+  store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+  let targets: Array<{ type: string }> = [];
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake",
+    fetch: async () => ({ ok: true, json: async () => targets }),
+    ensureCookies: async () => ({ injected: false }),
+  });
+
+  expect(await launcher.hasPageTargets("k1d0cd11")).toBe(false);
+  targets = [{ type: "page" }];
+  expect(await launcher.hasPageTargets("k1d0cd11")).toBe(true);
+  store.close();
+});
+
 test("active() requires a CDP webSocketDebuggerUrl, not just any HTTP 200", async () => {
   const store = seeded();
   // Record a launch row so active() has a port to probe.
@@ -2955,8 +2972,9 @@ test("buildArgs disables background throttling so minimized/occluded windows kee
   const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
   const args = launcher.buildArgs(profile, 9333, "/data", []);
   // The session launcher opens the window MINIMIZED (/MIN) so it doesn't steal focus.
-  // Without these, Chromium backgrounds the occluded renderer and throttles its timers,
-  // so the automated login crawls and blows the reconnect timeout. These keep it full-speed.
+  // Keep minimized windows responsive, but let Chromium exit when the user closes
+  // the final visible window instead of retaining an invisible background process.
+  expect(args).toContain("--disable-background-mode");
   expect(args).toContain("--disable-background-timer-throttling");
   expect(args).toContain("--disable-backgrounding-occluded-windows");
   expect(args).toContain("--disable-renderer-backgrounding");
