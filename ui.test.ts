@@ -1390,6 +1390,51 @@ test("Cloud diagnostics route returns only sanitized current-process events", as
   s.close();
 });
 
+test("Cloud sign-out keeps auth and account state when browsers cannot release", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const cloudAuth = {
+    state() { return { authenticated: true }; },
+    async signOut() { calls.push("signOut"); },
+  } as unknown as CloudAuthRuntime;
+  const cloudConnection = {
+    accountId() { return "account1"; },
+    clearDevice() { calls.push("clearDevice"); },
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
+  const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return false; } } as any;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+
+  expect(response!.status).toBe(409);
+  expect(calls).toEqual(["releaseAll"]);
+  expect(cloudConnection.accountId()).toBe("account1");
+  s.close();
+});
+
+test("Cloud sign-out releases browsers before queue, device, and credentials", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const cloudAuth = {
+    async signOut() { calls.push("signOut"); },
+  } as unknown as CloudAuthRuntime;
+  const cloudConnection = {
+    clearDevice() { calls.push("clearDevice"); },
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
+  const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return true; } } as any;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+
+  expect(response!.status).toBe(200);
+  expect(calls).toEqual(["releaseAll", "closeQueue", "clearDevice", "signOut"]);
+  s.close();
+});
+
 test("Cloud profile routes use the Cloud browser coordinator without local fallback", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-browser-"));

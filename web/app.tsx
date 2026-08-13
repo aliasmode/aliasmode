@@ -23,6 +23,7 @@ import {
   fetchCloudTeam,
   cloudWorkspaceAction,
   signInCloud,
+  signOutCloud,
   signUpCloud,
   restoreCloudSession,
   resendCloudSignUp,
@@ -523,6 +524,7 @@ function App() {
   const [bulkErr, setBulkErr] = useState<string | null>(null);
   const [bulkOver, setBulkOver] = useState(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
+  const authGeneration = useRef(0);
   const isCloudMode = appMode?.mode === "cloud";
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
@@ -610,6 +612,7 @@ function App() {
   };
 
   const submitCloudAuth = async () => {
+    const generation = authGeneration.current;
     setAuthBusy(true);
     setAuthErr(null);
     setAuthNotice(null);
@@ -624,6 +627,7 @@ function App() {
       } else {
         const stored = await readDesktopCloudCredentials();
         const result = await signInCloud(authEmail, authPassword, stored?.queueKey);
+        if (generation !== authGeneration.current) return;
         if (typeof result.refreshToken !== "string" || !result.refreshToken) {
           throw new Error("Cloud did not return a refresh token");
         }
@@ -638,6 +642,7 @@ function App() {
           result.deviceCredential,
           typeof result.queueKey === "string" ? result.queueKey : undefined,
         );
+        if (generation !== authGeneration.current) return;
         setCloudAuth({
           authenticated: true,
           expiresAt: result.expiresAt,
@@ -648,6 +653,30 @@ function App() {
         setAuthPassword("");
         if (!persisted) setAuthNotice("Signed in for this run; desktop credential storage is unavailable.");
       }
+    } catch (error) {
+      if (generation === authGeneration.current) {
+        setAuthErr(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (generation === authGeneration.current) setAuthBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      await signOutCloud();
+      authGeneration.current++;
+      setCloudAuth({ authenticated: false });
+      setProfiles([]);
+      setHealthSources([]);
+      setSelected(new Set());
+      setTeam(null);
+      setCloudEvents([]);
+      setAuthPassword("");
+      setAuthNotice(null);
+      setShowAccount(false);
     } catch (error) {
       setAuthErr(error instanceof Error ? error.message : String(error));
     } finally {
@@ -710,16 +739,17 @@ function App() {
   useEffect(() => {
     if (appMode?.mode !== "cloud" || restartRequired) return;
     let active = true;
+    const generation = authGeneration.current;
     const restore = async () => {
       try {
         const state = await fetchCloudAuth();
         if (state.authenticated) {
-          if (active) setCloudAuth(state);
+          if (active && generation === authGeneration.current) setCloudAuth(state);
           return;
         }
         const stored = await readDesktopCloudCredentials();
         if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
-          if (active) setCloudAuth(state);
+          if (active && generation === authGeneration.current) setCloudAuth(state);
           return;
         }
         const result = await restoreCloudSession(
@@ -727,8 +757,9 @@ function App() {
           stored.deviceCredential,
           stored.queueKey,
         );
+        if (!active || generation !== authGeneration.current) return;
         await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
-        if (active) {
+        if (active && generation === authGeneration.current) {
           setCloudAuth({
             authenticated: true,
             expiresAt: result.expiresAt,
@@ -739,7 +770,7 @@ function App() {
           setAuthErr(null);
         }
       } catch (error) {
-        if (active) {
+        if (active && generation === authGeneration.current) {
           setCloudAuth({ authenticated: false });
           setAuthErr(error instanceof Error ? error.message : String(error));
         }
@@ -758,6 +789,7 @@ function App() {
     ) return;
     const delay = Math.max(1_000, cloudAuth.expiresAt - Date.now() - 60_000);
     const timer = window.setTimeout(async () => {
+      const generation = authGeneration.current;
       try {
         const stored = await readDesktopCloudCredentials();
         if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
@@ -768,7 +800,9 @@ function App() {
           stored.deviceCredential,
           stored.queueKey,
         );
+        if (generation !== authGeneration.current) return;
         await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
+        if (generation !== authGeneration.current) return;
         setCloudAuth({
           authenticated: true,
           expiresAt: result.expiresAt,
@@ -777,6 +811,7 @@ function App() {
           legal: result.legal,
         });
       } catch (error) {
+        if (generation !== authGeneration.current) return;
         setCloudAuth({ authenticated: false });
         setAuthErr(error instanceof Error ? error.message : String(error));
       }
@@ -1652,6 +1687,11 @@ function App() {
                 <div className="settings-row"><span>Signed in as</span><strong>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local · no account"}</strong></div>
                 <div className="settings-row"><span>Mode</span><strong>{isCloudMode ? "AliasMode Cloud" : "AliasMode Local"}</strong></div>
                 <div className="settings-row"><span>App version</span><strong className="mono">{appVersion || "—"}</strong></div>
+                {isCloudMode && cloudAuth?.authenticated && (
+                  <button type="button" disabled={authBusy} onClick={() => void signOut()}>
+                    {authBusy ? "Signing out…" : "Sign out / Switch account"}
+                  </button>
+                )}
               </section>
               <section className="settings-section">
                 <h2>{isCloudMode ? "Team" : "Workspace"}</h2>

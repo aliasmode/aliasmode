@@ -25,6 +25,16 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain(">Stay Local</button>");
 });
 
+test("Account settings offers fenced Cloud sign-out and clears account state", () => {
+  expect(app).toContain('"Sign out / Switch account"');
+  expect(app).toContain("await signOutCloud();");
+  expect(app).toContain("authGeneration.current++;");
+  expect(app).toContain("setCloudAuth({ authenticated: false });");
+  expect(app).toContain("setProfiles([]);");
+  expect(app).toContain("setTeam(null);");
+  expect(app).toContain("generation !== authGeneration.current");
+});
+
 test("Account settings exposes fixed Cloud diagnostics without raw server messages", () => {
   expect(app).toContain("fetchCloudEvents");
   expect(app).toContain("Recent diagnostics");
