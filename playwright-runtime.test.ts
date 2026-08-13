@@ -5,15 +5,32 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   playwrightWorkerCommand,
+  playwrightWorkerEnvironment,
   runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
 
-test("uses packaged Node and keeps requests off argv", () => {
-  expect(playwrightWorkerCommand("C:\\AliasMode\\playwright")).toEqual([
-    "C:\\AliasMode\\playwright/node/node.exe",
-    "C:\\AliasMode\\playwright/worker.mjs",
-  ]);
+test("uses packaged Node bootstrap and keeps requests off argv", () => {
+  const command = playwrightWorkerCommand("C:\\AliasMode\\playwright");
+  expect(command[0]).toBe("C:\\AliasMode\\playwright/node/node.exe");
+  expect(command.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
+  expect(command[3]).toContain("await import");
+  expect(command[4]).toBe("C:\\AliasMode\\playwright/worker.mjs");
+});
+
+test("worker inherits normal environment without Node hooks or app secrets", () => {
+  expect(playwrightWorkerEnvironment({
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+    Node_Options: "--require injected.js",
+    NODE_PATH: "C:\\untrusted",
+    ALIASMODE_DESKTOP_NONCE: "private",
+    cloakbrowser_license_key: "private",
+    HUB_PASSWORD: "private",
+  })).toEqual({
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Windows\\System32",
+  });
 });
 
 function textStream(value: string): ReadableStream<Uint8Array> {
@@ -45,7 +62,9 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
       return worker;
     },
   });
-  expect(argv).toEqual(["/fake/runtime/node/node.exe", "/fake/runtime/worker.mjs"]);
+  expect(argv[0]).toBe("/fake/runtime/node/node.exe");
+  expect(argv.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
+  expect(argv[4]).toBe("/fake/runtime/worker.mjs");
   expect(argv.join(" ")).not.toContain("secret");
   expect(argv.join(" ")).not.toContain("private");
   expect(JSON.parse(input).payload).toEqual({ endpoint, token: "private" });
@@ -134,6 +153,24 @@ test("worker distinguishes success output with a nonzero exit", async () => {
     },
   });
   expect(JSON.stringify(error)).not.toContain("sentinel");
+});
+
+test("bootstrap returns a structured error when the worker cannot load", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-bootstrap-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const error = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+      runtimeRoot: root,
+      timeoutMs: 1_000,
+    }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ code: "runtime_unavailable" });
+    expect(error.details).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("installed Playwright storage source uses the supported direct export shape", async () => {

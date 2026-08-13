@@ -9,6 +9,7 @@ use rand::random;
 use std::{
     error::Error,
     fs, io,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
 use tauri::{
@@ -20,6 +21,32 @@ struct PendingFocus(AtomicBool);
 
 fn boxed(error: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(error.into()).into()
+}
+
+fn cli_compatible_windows_path(path: &Path) -> PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    text.strip_prefix(r"\\?\UNC\")
+        .map(|path| PathBuf::from(format!(r"\\{path}")))
+        .or_else(|| text.strip_prefix(r"\\?\").map(PathBuf::from))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cli_compatible_windows_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn removes_windows_namespace_prefix_before_cli_use() {
+        assert_eq!(
+            cli_compatible_windows_path(Path::new(r"\\?\C:\Users\AliasMode\playwright")),
+            PathBuf::from(r"C:\Users\AliasMode\playwright"),
+        );
+        assert_eq!(
+            cli_compatible_windows_path(Path::new(r"\\?\UNC\server\share\playwright")),
+            PathBuf::from(r"\\server\share\playwright"),
+        );
+    }
 }
 
 pub fn run() {
@@ -49,15 +76,16 @@ pub fn run() {
 
             let resource_dir = app.path().resource_dir()?;
             let browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
-            let playwright_runtime =
-                resource_dir
+            let playwright_runtime = cli_compatible_windows_path(
+                &resource_dir
                     .join("playwright")
                     .canonicalize()
                     .map_err(|error| {
                         boxed(format!(
                             "packaged Playwright runtime is unavailable: {error}"
                         ))
-                    })?;
+                    })?,
+            );
             let playwright_manifest = playwright_runtime
                 .join("node_modules")
                 .join("playwright-core")

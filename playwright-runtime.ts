@@ -3,6 +3,19 @@ import { dirname, join } from "node:path";
 
 export const PLAYWRIGHT_PROTOCOL_VERSION = 1;
 export const PLAYWRIGHT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+const PLAYWRIGHT_WORKER_BOOTSTRAP = `
+  import { pathToFileURL } from "node:url";
+  try {
+    await import(pathToFileURL(process.argv[1]).href);
+  } catch {
+    process.stdout.write(JSON.stringify({
+      version: 1,
+      ok: false,
+      error: { code: "runtime_unavailable", message: "Playwright runtime is unavailable" },
+    }));
+    process.exitCode = 1;
+  }
+`;
 
 export type PlaywrightWorkerOperation =
   | "page"
@@ -72,8 +85,22 @@ function runtimeRoot(env: NodeJS.ProcessEnv = process.env): string {
   return env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim() || defaultPlaywrightRuntimeRoot();
 }
 
+export function playwrightWorkerEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter(([key, value]) =>
+    value !== undefined
+    && !/^(ALIASMODE_|CLOAKBROWSER_)/i.test(key)
+    && !/^(NODE_OPTIONS|NODE_PATH|HUB_PASSWORD)$/i.test(key),
+  )) as Record<string, string>;
+}
+
 export function playwrightWorkerCommand(root = runtimeRoot()): string[] {
-  return [join(root, "node", "node.exe"), join(root, "worker.mjs")];
+  return [
+    join(root, "node", "node.exe"),
+    "--input-type=module",
+    "--eval",
+    PLAYWRIGHT_WORKER_BOOTSTRAP,
+    join(root, "worker.mjs"),
+  ];
 }
 
 interface BoundedOutput {
@@ -143,9 +170,7 @@ export async function runPlaywrightWorker<T>(
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: Object.fromEntries(
-      ["SystemRoot", "WINDIR", "TEMP", "TMP"].flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []),
-    ),
+    env: playwrightWorkerEnvironment(),
   }) as unknown as WorkerProcess);
   let child: WorkerProcess;
   try {

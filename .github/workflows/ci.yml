@@ -258,16 +258,30 @@ jobs:
 
           $workerStart = [System.Diagnostics.ProcessStartInfo]::new()
           $workerStart.FileName = Join-Path $playwrightRuntime "node\node.exe"
+          $workerStart.ArgumentList.Add("--input-type=module")
+          $workerStart.ArgumentList.Add("--eval")
+          $workerStart.ArgumentList.Add(@'
+          import { pathToFileURL } from "node:url";
+          try {
+            await import(pathToFileURL(process.argv[1]).href);
+          } catch {
+            process.stdout.write(JSON.stringify({
+              version: 1,
+              ok: false,
+              error: { code: "runtime_unavailable", message: "Playwright runtime is unavailable" },
+            }));
+            process.exitCode = 1;
+          }
+          '@)
           $workerStart.ArgumentList.Add((Join-Path $playwrightRuntime "worker.mjs"))
           $workerStart.UseShellExecute = $false
           $workerStart.RedirectStandardInput = $true
           $workerStart.RedirectStandardOutput = $true
           $workerStart.RedirectStandardError = $true
-          $workerStart.Environment.Clear()
-          foreach ($name in @("SystemRoot", "WINDIR", "TEMP", "TMP")) {
-            $value = [Environment]::GetEnvironmentVariable($name)
-            if ([string]::IsNullOrWhiteSpace($value)) { throw "required worker environment variable is missing: $name" }
-            $workerStart.Environment[$name] = $value
+          foreach ($name in @($workerStart.Environment.Keys)) {
+            if ($name -match '^(ALIASMODE_|CLOAKBROWSER_)' -or $name -match '^(NODE_OPTIONS|NODE_PATH|HUB_PASSWORD)$') {
+              $workerStart.Environment.Remove($name)
+            }
           }
           $worker = [System.Diagnostics.Process]::new()
           $worker.StartInfo = $workerStart
