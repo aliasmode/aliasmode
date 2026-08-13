@@ -439,6 +439,15 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .settings-row > span { color: var(--muted); }
 .settings-row > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.settings-row small { display: block; font-size: 10px; }
+.team-code { display: flex; gap: 6px; }
+.team-code input { min-width: 0; flex: 1; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; }
+.team-code select, .settings-row select { padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.team-code button, .settings-row button { padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: #fff; cursor: pointer; }
+.team-member { display: flex; flex-direction: column; gap: 5px; padding: 6px 0; border-top: 1px solid var(--line); }
+.team-grants { display: flex; flex-wrap: wrap; gap: 5px; }
+.team-grants label { display: flex; align-items: center; gap: 3px; color: var(--muted); font-size: 10px; }
+.team-grants select { padding: 3px; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
 .diagnostics-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .diagnostics-head button { padding: 0; color: var(--accent); background: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; }
 .diagnostics-head button:hover:not(:disabled) { text-decoration: underline; }

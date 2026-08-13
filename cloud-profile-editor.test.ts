@@ -147,6 +147,47 @@ test("Cloud editor save forwards the version once and preserves session and uned
   expect(updateRequest.payload.session.futureSessionField).toBe("retained");
 });
 
+test("Cloud editor moves folders before saving metadata with the incremented version", async () => {
+  const authoritative = response();
+  const calls: unknown[] = [];
+  const cloud = {
+    getProfile: async () => authoritative,
+    moveProfile: async (profileId: string, request: unknown) => {
+      calls.push(["move", profileId, request]);
+      authoritative.profile.version++;
+      return { ok: true, profile: authoritative.profile };
+    },
+    updateProfile: async (profileId: string, request: any) => {
+      calls.push(["update", profileId, request.expectedVersion, request.payload.profile.group]);
+    },
+  } as any;
+
+  await new CloudProfileEditor(cloud, readOnlyStore()).save("cloud1", 7, {
+    group: "group-2",
+    name: "Renamed",
+  });
+
+  expect(calls).toEqual([
+    ["move", "cloud1", { destination: "group-2", expectedVersion: 7 }],
+    ["update", "cloud1", 8, "group-2"],
+  ]);
+});
+
+test("Cloud editor does not move when the folder is unchanged", async () => {
+  let moveCalls = 0;
+  let updateVersion: number | undefined;
+  const cloud = {
+    getProfile: async () => response(),
+    moveProfile: async () => { moveCalls++; },
+    updateProfile: async (_profileId: string, request: any) => { updateVersion = request.expectedVersion; },
+  } as any;
+
+  await new CloudProfileEditor(cloud, readOnlyStore()).save("cloud1", 7, { group: "group-1", name: "Renamed" });
+
+  expect(moveCalls).toBe(0);
+  expect(updateVersion).toBe(7);
+});
+
 test("Cloud editor preserves timezone when the submitted proxy is unchanged", async () => {
   const authoritative = response();
   let updated: any;

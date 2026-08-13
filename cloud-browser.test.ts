@@ -559,6 +559,27 @@ test("Cloud drain waits for an already admitted open", async () => {
   state.store.close();
 });
 
+test("folder access revocation stops without capturing or submitting", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    throw new CloudApiError("denied", "folder_access_denied", 403);
+  };
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events).toEqual(["stop"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.queue.list("account1")).toEqual([]);
+  expect(state.closeCalls()).toBe(0);
+  expect(state.abandonCalls()).toBe(0);
+  expect(state.coordinator.diagnostics().at(-1)?.type).toBe("access_ended");
+  state.queue.close();
+  state.store.close();
+});
+
 test("terminal Cloud heartbeat errors capture and stop the browser", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);

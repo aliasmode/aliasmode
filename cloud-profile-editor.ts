@@ -8,7 +8,7 @@ import { proxyLegacyString } from "./proxy.ts";
 import type { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
 
-type CloudProfileEditorClient = Pick<CloudClient, "getProfile" | "updateProfile">;
+type CloudProfileEditorClient = Pick<CloudClient, "getProfile" | "moveProfile" | "updateProfile">;
 type CloudProfileEditorStore = Pick<ProfileStore, "getLaunch">;
 
 export interface CloudProfileEditView {
@@ -152,6 +152,12 @@ export class CloudProfileEditor {
 
     const { profile } = decodePortableProfile(authoritative.payload);
     if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
+    const destination = "group" in set ? String(set.group ?? "") : profile.group;
+    let updateVersion = expectedVersion;
+    if (destination !== profile.group) {
+      const moved = await this.cloud.moveProfile(profileId, { destination, expectedVersion });
+      updateVersion = moved.profile.version;
+    }
     applyEdits(profile, set);
 
     const encoded = encodePortableProfile(profile, JSON.stringify(authoritative.payload.session));
@@ -166,7 +172,7 @@ export class CloudProfileEditor {
       profile: encodedProfile,
       session: authoritative.payload.session,
     } as PortableProfileV1;
-    await this.cloud.updateProfile(profileId, { expectedVersion, payload });
+    await this.cloud.updateProfile(profileId, { expectedVersion: updateVersion, payload });
   }
 
   private assertClosed(profileId: string, activeOpenCount: number): void {

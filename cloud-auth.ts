@@ -72,6 +72,10 @@ export class CloudAuthRuntime {
     return this.auth.signUp(email, password);
   }
 
+  resendSignUpConfirmation(email: string): Promise<void> {
+    return this.auth.resendSignUpConfirmation(email);
+  }
+
   async signIn(email: string, password: string): Promise<CloudAuthResult> {
     return this.acceptAndPersist(await this.auth.signIn(email, password));
   }

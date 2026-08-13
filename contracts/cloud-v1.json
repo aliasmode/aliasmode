@@ -13,9 +13,10 @@
   },
   "workspace": {
     "membershipsPerAccount": 1,
-    "roles": ["owner", "member"],
-    "profileVisibility": "all_members",
-    "addMember": "existing_verified_empty_workspace_account_only"
+    "roles": ["owner", "admin", "member"],
+    "folderPermissions": ["view", "edit"],
+    "profileVisibility": "folder_permission",
+    "addMember": "invitation_only"
   },
   "profiles": {
     "portableSchemaVersion": 1,
@@ -23,7 +24,7 @@
     "closeConflict": "mandatory_compare_and_swap_first_valid_close_wins",
     "merge": false,
     "trash": {
-      "trashAndRestore": ["owner", "member"],
+      "trashAndRestore": ["owner", "admin", "member"],
       "purge": ["owner"],
       "activeOpenBlocksTrash": true,
       "automaticExpiry": false
@@ -34,7 +35,14 @@
     "bootstrap": "POST /v1/account/bootstrap",
     "acceptLegal": "POST /v1/account/legal",
     "requestDeletion": "POST /v1/account/deletion-request",
-    "members": "GET|POST|DELETE /v1/workspace/members",
+    "members": "GET /v1/workspace/members; PATCH|DELETE /v1/workspace/members/:accountId",
+    "folders": "GET|POST /v1/workspace/folders",
+    "folder": "PATCH|DELETE /v1/workspace/folders/:name; POST /v1/workspace/folders/:name/archive",
+    "folderGrants": "PUT|DELETE /v1/workspace/folders/:name/grants/:accountId",
+    "moveProfile": "POST /v1/profiles/:id/move",
+    "invitations": "GET|POST /v1/workspace/invitations",
+    "invitation": "POST /v1/workspace/invitations/:id/resend; POST /v1/workspace/invitations/:id/revoke",
+    "acceptInvitation": "POST /v1/invitations/accept",
     "devices": "GET|POST|DELETE /v1/devices",
     "profiles": "GET|POST /v1/profiles",
     "profile": "GET|PATCH /v1/profiles/:id",
@@ -54,6 +62,8 @@
     "device_revoked",
     "membership_revoked",
     "workspace_conflict",
+    "folder_access_denied",
+    "invitation_invalid",
     "profile_not_found",
     "profile_trashed",
     "profile_open",

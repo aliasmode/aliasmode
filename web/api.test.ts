@@ -5,6 +5,8 @@ import {
   fetchAppMode,
   fetchCloudAuth,
   fetchCloudEvents,
+  fetchCloudTeam,
+  cloudWorkspaceAction,
   fetchProfiles,
   openProfile,
   restoreCloudSession,
@@ -106,6 +108,7 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
     authenticated: false,
     expiresAt: undefined,
     user: undefined,
+    workspace: undefined,
     legal: undefined,
   });
   expect(await signInCloud("user@example.com", "password", "queue-key")).toMatchObject({ authenticated: true });
@@ -125,6 +128,20 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
   await acceptCloudLegal();
   expect(requests[3]?.input).toBe("/ui/api/cloud-auth/accept-legal");
 });
+
+test("Cloud team client uses the compact workspace endpoint", async () => {
+  const requests: RequestInit[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init) requests.push(init);
+    return Response.json({ ok: true, folders: [], members: [], invitations: [] });
+  }) as unknown as typeof fetch;
+  expect(await fetchCloudTeam()).toEqual({ folders: [], members: [], invitations: [] });
+  await cloudWorkspaceAction("grant", { folderName: "Sales", accountId: "a1", permission: "view" });
+  expect(JSON.parse(String(requests[0]?.body))).toEqual({
+    action: "grant", folderName: "Sales", accountId: "a1", permission: "view",
+  });
+});
+
 
 test("Cloud workspace becomes ready only after current legal acceptance", () => {
   const current = { terms: "v2", privacy: "v2", acceptableUse: "v2" };

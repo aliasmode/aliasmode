@@ -1020,6 +1020,77 @@ test("app mode API uses the packaged Cloud endpoint", async () => {
   s.close();
 });
 
+test("Cloud workspace API returns editable folders to members without loading invitations", async () => {
+  const s = store();
+  let invitationCalls = 0;
+  const client = {
+    async status() { return { workspace: { role: "member" } }; },
+    async listFolders() { return { ok: true, folders: [{ name: "Sales", archivedAt: null, permission: "edit" }] }; },
+    async listMembers() { return { ok: true, members: [] }; },
+    async listInvitations() { invitationCalls++; throw new Error("members cannot list invitations"); },
+  };
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-workspace"),
+    {} as any,
+    s,
+    null,
+    { cloudConnection: { client } as unknown as CloudConnectionRuntime },
+  );
+  expect(response!.status).toBe(200);
+  expect(await response!.json()).toEqual({
+    ok: true, folders: [{ name: "Sales", archivedAt: null, permission: "edit" }], members: [], invitations: [],
+  });
+  expect(invitationCalls).toBe(0);
+  s.close();
+});
+
+test("Cloud workspace API returns pending invitations to admins", async () => {
+  const s = store();
+  const invitation = { id: "invite-admin", email: "next-admin@example.com", role: "admin", acceptedAt: null, revokedAt: null };
+  const client = {
+    async status() { return { workspace: { role: "admin" } }; },
+    async listFolders() { return { ok: true, folders: [] }; },
+    async listMembers() { return { ok: true, members: [] }; },
+    async listInvitations() { return { ok: true, invitations: [invitation] }; },
+  };
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-workspace"),
+    {} as any,
+    s,
+    null,
+    { cloudConnection: { client } as unknown as CloudConnectionRuntime },
+  );
+  expect(response!.status).toBe(200);
+  expect((await response!.json()).invitations).toEqual([invitation]);
+  s.close();
+});
+
+test("Cloud workspace API combines team state and forwards grants", async () => {
+  const s = store();
+  const calls: unknown[] = [];
+  const client = {
+    async status() { return { workspace: { role: "owner" } }; },
+    async listFolders() { return { ok: true, folders: [{ name: "Sales", archivedAt: null, permission: "edit" }] }; },
+    async listMembers() { return { ok: true, members: [] }; },
+    async listInvitations() { return { ok: true, invitations: [] }; },
+    async setFolderGrant(folderName: string, accountId: string, permission: string) {
+      calls.push({ folderName, accountId, permission });
+      return { ok: true, grant: { folderName, accountId, permission } };
+    },
+  };
+  const options = { cloudConnection: { client } as unknown as CloudConnectionRuntime };
+  const listed = await handleUiRequest(new Request("http://x/ui/api/cloud-workspace"), {} as any, s, null, options);
+  expect(await listed!.json()).toEqual({
+    ok: true, folders: [{ name: "Sales", archivedAt: null, permission: "edit" }], members: [], invitations: [],
+  });
+  const granted = await handleUiRequest(new Request("http://x/ui/api/cloud-workspace", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "grant", folderName: "Sales", accountId: "account1", permission: "view" }),
+  }), {} as any, s, null, options);
+  expect(granted!.status).toBe(200);
+  expect(calls).toEqual([{ folderName: "Sales", accountId: "account1", permission: "view" }]);
+  s.close();
+});
 test("Cloud auth API accepts verified sign-in without exposing extra user metadata", async () => {
   const s = store();
   const cloudAuth = new CloudAuthRuntime({
@@ -1453,6 +1524,7 @@ test("Cloud profile editor routes return no session data and forward expectedVer
     name: "Authoritative Cloud name",
   });
   let updateRequest: any;
+  let moveRequest: any;
   const cloudConnection = {
     client: {
       async getProfile() {
@@ -1473,6 +1545,10 @@ test("Cloud profile editor routes return no session data and forward expectedVer
           payload,
           payloadDigest: "digest",
         };
+      },
+      async moveProfile(_id: string, request: unknown) {
+        moveRequest = request;
+        return { ok: true, profile: { version: 12 } };
       },
       async updateProfile(_id: string, request: unknown) {
         updateRequest = request;
@@ -1499,7 +1575,7 @@ test("Cloud profile editor routes return no session data and forward expectedVer
     new Request("http://x/ui/api/profiles/k1d0cd11/update", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expectedVersion: 11, set: { name: "Saved Cloud name" } }),
+      body: JSON.stringify({ expectedVersion: 11, set: { name: "Saved Cloud name", group: "va2" } }),
     }),
     {} as any,
     s,
@@ -1507,8 +1583,10 @@ test("Cloud profile editor routes return no session data and forward expectedVer
     { appConfig, cloudBrowser, cloudConnection },
   );
   expect(saveResponse!.status).toBe(200);
-  expect(updateRequest.expectedVersion).toBe(11);
+  expect(moveRequest).toEqual({ destination: "va2", expectedVersion: 11 });
+  expect(updateRequest.expectedVersion).toBe(12);
   expect(updateRequest.payload.profile.name).toBe("Saved Cloud name");
+  expect(updateRequest.payload.profile.group).toBe("va2");
   expect(updateRequest.payload.session).toEqual(payload.session);
   expect(s.getProfile("k1d0cd11")!.name).toBe(localName);
   s.close();

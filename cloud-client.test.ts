@@ -69,6 +69,40 @@ test("Cloud client sends bearer and device credentials to versioned endpoints", 
   expect(JSON.parse(String(request?.body))).toEqual({ deviceId: "device-1" });
 });
 
+test("Cloud client encodes folder and account path segments", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json(init?.method === "PUT"
+      ? { ok: true, grant: { folderName: "Sales / US", accountId: "account/1", permission: "view" } }
+      : { ok: true, folder: { name: "Sales", archivedAt: null, permission: "edit" } });
+  });
+  await cloud.renameFolder("Sales / US", "Sales");
+  await cloud.setFolderGrant("Sales / US", "account/1", "view");
+  expect(calls.map((call) => call.url)).toEqual([
+    "https://cloud.aliasmode.test/v1/workspace/folders/Sales%20%2F%20US",
+    "https://cloud.aliasmode.test/v1/workspace/folders/Sales%20%2F%20US/grants/account%2F1",
+  ]);
+  expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ name: "Sales" });
+  expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({ permission: "view" });
+});
+
+test("Cloud client uses invitation and move request shapes", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json({ ok: true });
+  });
+  await cloud.createInvitation("person@example.com", "member");
+  await cloud.acceptInvitation("pasted-code");
+  await cloud.moveProfile("profile/1", { destination: "Sales", expectedVersion: 4 });
+  expect(calls.map((call) => [call.url, call.init?.method, JSON.parse(String(call.init?.body))])).toEqual([
+    ["https://cloud.aliasmode.test/v1/workspace/invitations", "POST", { email: "person@example.com", role: "member" }],
+    ["https://cloud.aliasmode.test/v1/invitations/accept", "POST", { code: "pasted-code" }],
+    ["https://cloud.aliasmode.test/v1/profiles/profile%2F1/move", "POST", { destination: "Sales", expectedVersion: 4 }],
+  ]);
+});
+
 test("Cloud client rejects calls without an in-memory access token", async () => {
   const cloud = new CloudClient({
     baseUrl: "https://cloud.aliasmode.test",
