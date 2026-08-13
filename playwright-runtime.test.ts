@@ -20,11 +20,11 @@ function textStream(value: string): ReadableStream<Uint8Array> {
   return new Response(value).body as ReadableStream<Uint8Array>;
 }
 
-function fakeWorker(output: string, exit = 0, onKill?: () => void) {
+function fakeWorker(output: string, exit = 0, onKill?: () => void, errorOutput = "") {
   return {
     stdin: { write() {}, end() {} },
     stdout: textStream(output),
-    stderr: textStream(""),
+    stderr: textStream(errorOutput),
     exited: Promise.resolve(exit),
     kill() { onKill?.(); },
   };
@@ -71,14 +71,69 @@ test("worker timeout kills only the worker and waits for its exit", async () => 
   expect(await result).toMatchObject({ code: "timeout" });
 });
 
-test("worker rejects abrupt exit and malformed responses without affecting the parent", async () => {
-  await expect(runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
-    spawn: () => fakeWorker("", 9),
-  })).rejects.toMatchObject({ code: "invalid_response" });
-  await expect(runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+test("worker reports secret-safe response diagnostics without affecting the parent", async () => {
+  const abrupt = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    spawn: () => fakeWorker("", 9, undefined, "private stderr"),
+  }).then(() => null, (error) => error);
+  expect(abrupt).toMatchObject({
+    code: "runtime_unavailable",
+    details: {
+      workerOperation: "page",
+      responseCategory: "empty_stdout",
+      stdoutBytes: 0,
+      exitCode: 9,
+      stderrPresent: true,
+    },
+  });
+  expect(abrupt.message).toBe("Playwright worker page failed: empty_stdout, 0 stdout bytes, exit 9, stderr present");
+  expect(abrupt.message).not.toContain("private");
+
+  const malformed = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
     spawn: () => fakeWorker("{broken", 0),
-  })).rejects.toMatchObject({ code: "invalid_response" });
+  }).then(() => null, (error) => error);
+  expect(malformed).toMatchObject({
+    code: "invalid_response",
+    details: {
+      workerOperation: "page",
+      responseCategory: "malformed_json",
+      stdoutBytes: 7,
+      exitCode: 0,
+      stderrPresent: false,
+    },
+  });
   expect(1 + 1).toBe(2);
+});
+
+test("worker distinguishes a wrong protocol shape", async () => {
+  const error = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    spawn: () => fakeWorker(JSON.stringify({ version: 2, ok: true, result: null }), 0),
+  }).then(() => null, (failure) => failure);
+  expect(error).toMatchObject({
+    code: "invalid_response",
+    details: {
+      workerOperation: "page",
+      responseCategory: "wrong_protocol_shape",
+      stdoutBytes: 37,
+      exitCode: 0,
+      stderrPresent: false,
+    },
+  });
+});
+
+test("worker distinguishes success output with a nonzero exit", async () => {
+  const error = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    spawn: () => fakeWorker(success("sentinel result"), 9, undefined, "sentinel stderr"),
+  }).then(() => null, (failure) => failure);
+  expect(error).toMatchObject({
+    code: "operation_failed",
+    details: {
+      workerOperation: "page",
+      responseCategory: "success_nonzero_exit",
+      exitCode: 9,
+      stderrPresent: true,
+    },
+  });
+  expect(JSON.stringify(error)).not.toContain("sentinel");
 });
 
 test("installed Playwright storage source uses the supported direct export shape", async () => {

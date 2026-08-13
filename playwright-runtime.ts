@@ -16,13 +16,23 @@ export type PlaywrightWorkerOperation =
   | "cookie-harvest"
   | "diagnostics";
 
+export interface PlaywrightWorkerErrorDetails {
+  operation?: string;
+  outcome?: string;
+  workerOperation?: PlaywrightWorkerOperation;
+  responseCategory?: "empty_stdout" | "malformed_json" | "wrong_protocol_shape" | "stdout_overflow" | "stdout_read_failed" | "success_nonzero_exit";
+  stdoutBytes?: number;
+  exitCode?: number;
+  stderrPresent?: boolean;
+}
+
 export class PlaywrightWorkerError extends Error {
   override readonly name = "PlaywrightWorkerError";
 
   constructor(
     readonly code: "invalid_request" | "invalid_response" | "operation_failed" | "timeout" | "runtime_unavailable",
     message: string,
-    readonly details?: { operation?: string; outcome?: string },
+    readonly details?: PlaywrightWorkerErrorDetails,
   ) {
     super(message);
   }
@@ -40,7 +50,7 @@ interface WorkerErrorResponse {
   error: {
     code: PlaywrightWorkerError["code"];
     message: string;
-    details?: { operation?: string; outcome?: string };
+    details?: PlaywrightWorkerErrorDetails;
   };
 }
 
@@ -66,7 +76,18 @@ export function playwrightWorkerCommand(root = runtimeRoot()): string[] {
   return [join(root, "node", "node.exe"), join(root, "worker.mjs")];
 }
 
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<string> {
+interface BoundedOutput {
+  text: string;
+  bytes: number;
+}
+
+class OutputLimitError extends Error {
+  constructor(readonly bytes: number) {
+    super("output limit exceeded");
+  }
+}
+
+async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<BoundedOutput> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -75,7 +96,7 @@ async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): P
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > limit) throw new PlaywrightWorkerError("invalid_response", "Playwright worker response exceeded its limit");
+      if (total > limit) throw new OutputLimitError(total);
       chunks.push(value);
     }
   } finally {
@@ -87,7 +108,25 @@ async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): P
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(bytes);
+  return { text: new TextDecoder().decode(bytes), bytes: total };
+}
+
+function responseFailure(
+  code: PlaywrightWorkerError["code"],
+  operation: PlaywrightWorkerOperation,
+  outcome: NonNullable<PlaywrightWorkerErrorDetails["responseCategory"]>,
+  stdoutBytes: number,
+  exit: PromiseSettledResult<number>,
+  stderr: PromiseSettledResult<BoundedOutput>,
+): PlaywrightWorkerError {
+  const exitCode = exit.status === "fulfilled" ? exit.value : undefined;
+  const stderrPresent = stderr.status === "rejected" || stderr.value.bytes > 0;
+  const exitLabel = exitCode === undefined ? "unavailable" : String(exitCode);
+  return new PlaywrightWorkerError(
+    code,
+    `Playwright worker ${operation} failed: ${outcome}, ${stdoutBytes} stdout bytes, exit ${exitLabel}, stderr ${stderrPresent ? "present" : "absent"}`,
+    { workerOperation: operation, responseCategory: outcome, stdoutBytes, exitCode, stderrPresent },
+  );
 }
 
 export async function runPlaywrightWorker<T>(
@@ -123,20 +162,28 @@ export async function runPlaywrightWorker<T>(
     try { child.kill(); } catch {}
   }, timeoutMs);
   const stdout = readBounded(child.stdout, PLAYWRIGHT_MAX_MESSAGE_BYTES);
-  // Drain stderr so a child cannot block, but never include it in errors or logs.
-  const stderr = readBounded(child.stderr, 64 * 1024).catch(() => "");
-  const [output, , exit] = await Promise.allSettled([stdout, stderr, child.exited]);
+  // Drain stderr so a child cannot block. Keep only its presence for diagnostics.
+  const stderr = readBounded(child.stderr, 64 * 1024);
+  const [output, errorOutput, exit] = await Promise.allSettled([stdout, stderr, child.exited]);
   clearTimeout(timer);
   if (timedOut) throw new PlaywrightWorkerError("timeout", "Playwright worker timed out");
-  if (output.status === "rejected") throw output.reason;
+  if (output.status === "rejected") {
+    if (output.reason instanceof OutputLimitError) {
+      throw responseFailure("invalid_response", operation, "stdout_overflow", output.reason.bytes, exit, errorOutput);
+    }
+    throw responseFailure("runtime_unavailable", operation, "stdout_read_failed", 0, exit, errorOutput);
+  }
+  if (output.value.bytes === 0) {
+    throw responseFailure("runtime_unavailable", operation, "empty_stdout", 0, exit, errorOutput);
+  }
   let response: WorkerResponse<T> | WorkerErrorResponse;
   try {
-    response = JSON.parse(output.value);
+    response = JSON.parse(output.value.text);
   } catch {
-    throw new PlaywrightWorkerError("invalid_response", "Playwright worker returned an invalid response");
+    throw responseFailure("invalid_response", operation, "malformed_json", output.value.bytes, exit, errorOutput);
   }
   if (response?.version !== PLAYWRIGHT_PROTOCOL_VERSION || typeof response.ok !== "boolean") {
-    throw new PlaywrightWorkerError("invalid_response", "Playwright worker returned an invalid response");
+    throw responseFailure("invalid_response", operation, "wrong_protocol_shape", output.value.bytes, exit, errorOutput);
   }
   if (!response.ok) {
     const code = response.error?.code;
@@ -148,7 +195,7 @@ export async function runPlaywrightWorker<T>(
     );
   }
   if (exit.status === "rejected" || exit.value !== 0) {
-    throw new PlaywrightWorkerError("operation_failed", "Playwright worker exited unexpectedly");
+    throw responseFailure("operation_failed", operation, "success_nonzero_exit", output.value.bytes, exit, errorOutput);
   }
   return response.result;
 }
