@@ -428,18 +428,24 @@ test("Cloud heartbeat never auto-closes a retained restoring browser", async () 
   state.store.close();
 });
 
-test("Cloud roster reconciles a manually closed browser and releases its registration", async () => {
+test("Cloud roster reconciles a manually closed browser from its latest checkpoint", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.queue.list("account1")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: false,
+  }]);
   state.events.length = 0;
   state.setReconcileHook(() => state.store.clearLaunch("profile1"));
 
   const roster = await state.coordinator.listRoster();
 
-  expect(state.events).toEqual(["reconcile", "abandon", "cloud-list"]);
+  expect(state.events).toEqual(["reconcile", "cloud-close", "cloud-list"]);
   expect(roster.profiles[0]?.running).toBe(false);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
-  expect(state.abandonCalls()).toBe(1);
+  expect(state.queue.list("account1")).toEqual([]);
+  expect(state.closeCalls()).toBe(1);
+  expect(state.abandonCalls()).toBe(0);
   state.queue.close();
   state.store.close();
 });
@@ -466,9 +472,10 @@ test("Cloud close reconciles a manually closed browser before session capture", 
 
   expect(await state.coordinator.close("profile1")).toBe(true);
 
-  expect(state.events).toEqual(["reconcile", "abandon"]);
+  expect(state.events).toEqual(["reconcile", "cloud-close"]);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
-  expect(state.abandonCalls()).toBe(1);
+  expect(state.closeCalls()).toBe(1);
+  expect(state.abandonCalls()).toBe(0);
   state.queue.close();
   state.store.close();
 });
@@ -481,8 +488,10 @@ test("Cloud releaseAll reconciles a manually closed browser", async () => {
 
   expect(await state.coordinator.releaseAll()).toBe(true);
 
-  expect(state.events).toEqual(["reconcile", "abandon"]);
+  expect(state.events).toEqual(["reconcile", "cloud-close"]);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.queue.list("account1")).toEqual([]);
+  expect(state.closeCalls()).toBe(1);
   state.queue.close();
   state.store.close();
 });
@@ -518,12 +527,13 @@ test("Cloud roster reconciliation does not release a replacement registration", 
   state.store.close();
 });
 
-test("Cloud roster reconciliation cannot delete a replacement created while abandoning", async () => {
-  const state = setup();
+test("Cloud stopped checkpoint finalization cannot delete a replacement registration", async () => {
+  const state = setup({ closeTransportFailure: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   state.events.length = 0;
   state.setReconcileHook(() => state.store.clearLaunch("profile1"));
-  state.setAbandonHook(() => {
+  (state.coordinator as any).options.cloud.closeOpen = async () => {
+    state.events.push("cloud-close");
     state.queue.removeOpen("profile1", "account1");
     state.queue.recordOpen({
       accountId: "account1",
@@ -531,7 +541,8 @@ test("Cloud roster reconciliation cannot delete a replacement created while aban
       registrationId: "replacement-registration",
       expectedVersion: 5,
     });
-  });
+    throw new Error("offline");
+  };
 
   await state.coordinator.listRoster();
 
@@ -551,6 +562,23 @@ test("Cloud heartbeat captures and closes a background-only browser", async () =
   expect(state.events).toEqual(["reconcile", "capture", "stop", "cloud-close"]);
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat refreshes the encrypted checkpoint", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const baselineId = state.queue.list("account1")[0]?.id;
+  state.events.length = 0;
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  const refreshed = state.queue.list("account1");
+  expect(state.events).toEqual(["heartbeat", "capture"]);
+  expect(refreshed).toHaveLength(1);
+  expect(refreshed[0]?.id).not.toBe(baselineId);
+  expect(refreshed[0]?.readyToSubmit).toBe(false);
   state.queue.close();
   state.store.close();
 });
@@ -737,7 +765,38 @@ test("folder access revocation stops without capturing or submitting", async () 
   expect(state.queue.list("account1")).toEqual([]);
   expect(state.closeCalls()).toBe(0);
   expect(state.abandonCalls()).toBe(0);
-  expect(state.coordinator.diagnostics().at(-1)?.type).toBe("access_ended");
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toContain("access_ended");
+  state.queue.close();
+  state.store.close();
+});
+
+test("folder access revocation retries retained teardown without submitting", async () => {
+  const state = setup({ stopResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    throw new CloudApiError("denied", "folder_access_denied", 403);
+  };
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBe("discard");
+  expect(state.queue.list("account1")).toHaveLength(1);
+  expect(state.closeCalls()).toBe(0);
+  expect(state.abandonCalls()).toBe(0);
+
+  (state.coordinator as any).options.launcher.stop = async (profileId: string) => {
+    state.events.push("stop-retry");
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+  await state.coordinator.retryPending();
+
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.queue.list("account1")).toEqual([]);
+  expect(state.closeCalls()).toBe(0);
+  expect(state.abandonCalls()).toBe(0);
   state.queue.close();
   state.store.close();
 });

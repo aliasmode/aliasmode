@@ -200,6 +200,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private async reconcileClosedBrowsers(queue: PendingSyncQueue, accountId: string): Promise<void> {
     await this.options.launcher.reconcileOrphans();
     for (const candidate of queue.listOpens(accountId)) {
+      if (candidate.cleanupMode) {
+        await this.withProfileTransition(candidate.profileId, async () => {
+          const current = queue.getOpen(candidate.profileId, accountId);
+          if (current?.registrationId === candidate.registrationId) {
+            await this.retryCleanup(current, queue);
+          }
+        });
+        continue;
+      }
       const launch = this.options.store.getLaunch(candidate.profileId);
       if (launch && this.isExactRunningLaunch(candidate, launch)) {
         const hasPageTargets = await this.options.launcher.hasPageTargets(candidate.profileId).catch(() => true);
@@ -407,6 +416,14 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       })) {
         throw new Error("Cloud open lifecycle state disappeared after restore");
       }
+      queue.enqueue({
+        accountId,
+        profileId,
+        registrationId,
+        expectedVersion: opened.baseVersion,
+        payload: encodePortableProfile(profile, sessionBundle),
+        readyToSubmit: false,
+      });
 
       // Startup navigation already happened inside the single restore attach above.
       this.diagnosticEvents.record("open_running");
@@ -459,18 +476,25 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const stopped = registrationId
         ? await this.options.launcher.stop(profileId).catch(() => false)
         : false;
-      if (!stopped && registrationId) this.diagnosticEvents.record("cleanup_retained");
+      if (!stopped && registrationId) {
+        if (registrationRecorded) {
+          queue.setOpenCleanup(profileId, accountId, registrationId, "abandon");
+        }
+        this.diagnosticEvents.record("cleanup_retained");
+      }
       if (stopped && registrationId) {
         try {
           await this.options.cloud.abandon(registrationId);
-          if (registrationRecorded) queue.removeOpen(profileId, accountId);
+          if (registrationRecorded) {
+            queue.removeOpenRegistration(profileId, accountId, registrationId);
+          }
         } catch (abandonError) {
           if (
             registrationRecorded &&
             abandonError instanceof CloudApiError &&
             abandonError.code === "profile_not_found"
           ) {
-            queue.removeOpen(profileId, accountId);
+            queue.removeOpenRegistration(profileId, accountId, registrationId);
           } else {
             this.diagnosticEvents.record("cleanup_retained");
           }
@@ -571,6 +595,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         readyToSubmit: false,
       });
       this.diagnosticEvents.record("session_captured");
+      if (!queue.setOpenCleanup(profileId, accountId, open.registrationId, "sync")) {
+        this.diagnosticEvents.record("cleanup_retained");
+        this.startHeartbeat(profileId);
+        return false;
+      }
     } catch (error) {
       this.diagnosticEvents.record("cleanup_retained");
       this.startHeartbeat(profileId);
@@ -586,7 +615,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     this.diagnosticEvents.record("browser_stopped");
 
     queue.markReady(pendingId, accountId);
-    queue.removeOpen(profileId, accountId);
+    queue.removeOpenRegistration(profileId, accountId, open.registrationId);
     await retryPendingSync(queue, this.options.cloud, accountId);
     this.diagnosticEvents.record(
       queue.get(pendingId, accountId) ? "cleanup_retained" : "session_synced",
@@ -615,6 +644,33 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
   }
 
+  private async retryCleanup(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
+    const current = queue.getOpen(open.profileId, open.accountId);
+    if (!current || current.registrationId !== open.registrationId) return true;
+    const launch = this.options.store.getLaunch(open.profileId);
+    if (launch) {
+      const exact = current.debugPort !== null && current.startedAt !== null &&
+        launch.debugPort === current.debugPort && launch.startedAt === current.startedAt;
+      if (!exact || !await this.options.launcher.stop(open.profileId).catch(() => false)) {
+        this.diagnosticEvents.record("cleanup_retained");
+        return false;
+      }
+    }
+
+    if (current.cleanupMode === "discard") {
+      queue.removeUnreadyCaptures(current.profileId, current.accountId, current.registrationId);
+      return queue.removeOpenRegistration(
+        current.profileId,
+        current.accountId,
+        current.registrationId,
+      );
+    }
+    if (current.cleanupMode === "abandon" || current.phase !== "running") {
+      return this.abandonStoppedOpen(current, queue);
+    }
+    return this.finishStoppedOpen(current, queue);
+  }
+
   private async finishStoppedOpen(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
     const captures = this.pendingCapturesForOpen(open, queue);
     if (captures.length > 0) {
@@ -623,7 +679,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           queue.markReady(capture.id, open.accountId);
         }
       }
-      queue.removeOpen(open.profileId, open.accountId);
+      queue.removeOpenRegistration(open.profileId, open.accountId, open.registrationId);
       await retryPendingSync(queue, this.options.cloud, open.accountId);
       return true;
     }
@@ -631,10 +687,65 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     return this.abandonStoppedOpen(open, queue);
   }
 
+  private checkpointOpen(open: PendingOpenSession, queue: PendingSyncQueue, sessionBundle: string): boolean {
+    const current = queue.getOpen(open.profileId, open.accountId);
+    const profile = this.options.store.getProfile(open.profileId);
+    if (
+      !current ||
+      !profile ||
+      current.registrationId !== open.registrationId ||
+      current.phase !== "running" ||
+      current.cleanupMode
+    ) return false;
+    queue.enqueue({
+      accountId: open.accountId,
+      profileId: open.profileId,
+      registrationId: open.registrationId,
+      expectedVersion: open.expectedVersion,
+      payload: encodePortableProfile(profile, sessionBundle),
+      readyToSubmit: false,
+    });
+    return true;
+  }
+
+  private async refreshCheckpoint(open: PendingOpenSession, queue: PendingSyncQueue): Promise<void> {
+    const launch = this.options.store.getLaunch(open.profileId);
+    if (!launch || !this.isExactRunningLaunch(open, launch)) return;
+    try {
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const verified = this.options.store.getLaunch(open.profileId);
+      const current = queue.getOpen(open.profileId, open.accountId);
+      if (
+        !verified ||
+        !current ||
+        current.registrationId !== open.registrationId ||
+        current.cleanupMode ||
+        !this.isExactRunningLaunch(current, verified)
+      ) return;
+      const sessionBundle = await this.options.readSession(verified.ws);
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const captured = this.options.store.getLaunch(open.profileId);
+      const latest = queue.getOpen(open.profileId, open.accountId);
+      if (
+        !captured ||
+        !latest ||
+        latest.registrationId !== open.registrationId ||
+        latest.cleanupMode ||
+        !this.isExactRunningLaunch(latest, captured)
+      ) return;
+      this.checkpointOpen(latest, queue, sessionBundle);
+    } catch {
+      // Keep the last durable checkpoint when a background capture is inconclusive.
+    }
+  }
+
   async heartbeatOnce(profileId: string): Promise<void> {
     const existing = this.heartbeatInFlight.get(profileId);
     if (existing) return existing;
-    const promise = this.doHeartbeat(profileId).finally(() => {
+    const promise = this.withProfileTransition(
+      profileId,
+      () => this.doHeartbeat(profileId),
+    ).finally(() => {
       if (this.heartbeatInFlight.get(profileId) === promise) {
         this.heartbeatInFlight.delete(profileId);
       }
@@ -652,6 +763,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     const open = context.queue.getOpen(profileId, context.accountId);
     if (!open || (open.phase !== "running" && open.phase !== "restoring")) return;
+    if (open.cleanupMode) {
+      if (await this.retryCleanup(open, context.queue)) this.stopHeartbeat(profileId);
+      return;
+    }
     if (open.phase === "restoring") {
       try {
         await this.options.cloud.heartbeat(open.registrationId);
@@ -686,18 +801,34 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     if (!active) {
       this.stopHeartbeat(profileId);
-      const stopped = await this.options.launcher.stop(profileId).catch(() => false);
-      if (stopped) await this.finishStoppedOpen(open, context.queue);
+      context.queue.setOpenCleanup(
+        profileId,
+        context.accountId,
+        open.registrationId,
+        open.phase === "running" ? "sync" : "abandon",
+      );
+      const retained = context.queue.getOpen(profileId, context.accountId);
+      if (retained && !await this.retryCleanup(retained, context.queue)) {
+        this.startHeartbeat(profileId);
+      }
       return;
     }
     try {
       await this.options.cloud.heartbeat(open.registrationId);
+      await this.refreshCheckpoint(open, context.queue);
     } catch (error) {
       if (error instanceof CloudApiError && error.code === "folder_access_denied") {
         this.diagnosticEvents.record("access_ended");
         this.stopHeartbeat(profileId);
-        const stopped = await this.options.launcher.stop(profileId).catch(() => false);
-        if (stopped) context.queue.removeOpen(profileId, context.accountId);
+        context.queue.setOpenCleanup(
+          profileId,
+          context.accountId,
+          open.registrationId,
+          "discard",
+        );
+        const retained = context.queue.getOpen(profileId, context.accountId);
+        const stopped = !!retained && await this.retryCleanup(retained, context.queue);
+        if (!stopped) this.startHeartbeat(profileId);
         this.log(stopped
           ? `${profileId}: Cloud access ended (${error.code}); browser stopped`
           : `${profileId}: Cloud access ended (${error.code}); browser was retained`);
@@ -837,12 +968,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         payload: encodePortableProfile(profile, sessionBundle),
         readyToSubmit: false,
       });
+      if (!queue.setOpenCleanup(open.profileId, open.accountId, open.registrationId, "sync")) {
+        return false;
+      }
     } catch {
       return false;
     }
     if (!await this.options.launcher.stop(open.profileId).catch(() => false)) return false;
     queue.markReady(pendingId, open.accountId);
-    queue.removeOpen(open.profileId, open.accountId);
+    queue.removeOpenRegistration(open.profileId, open.accountId, open.registrationId);
     if (submitAfterStop) {
       await retryPendingSync(queue, this.options.cloud, open.accountId);
     }
@@ -853,6 +987,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (this.pendingRetryInFlight) return this.pendingRetryInFlight;
     const pending = (async () => {
       const { queue, accountId } = this.requireContext(false);
+      await this.reconcileClosedBrowsers(queue, accountId);
       await retryPendingSync(queue, this.options.cloud, accountId);
     })().finally(() => {
       if (this.pendingRetryInFlight === pending) this.pendingRetryInFlight = null;

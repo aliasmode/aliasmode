@@ -364,6 +364,45 @@ test("pending open removal can be fenced to its registration", () => {
   state.queue.close();
 });
 
+test("pending opens encrypt cleanup intent and fence updates to the registration", () => {
+  const state = queue();
+  state.queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration-secret",
+    expectedVersion: 1,
+  });
+
+  expect(state.queue.setOpenCleanup("profile1", "account1", "replacement", "discard")).toBe(false);
+  expect(state.queue.setOpenCleanup(
+    "profile1",
+    "account1",
+    "registration-secret",
+    "discard",
+  )).toBe(true);
+  expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBe("discard");
+  state.queue.close();
+  expect(readFileSync(state.path).toString("utf8")).not.toContain("discard");
+});
+
+test("pending checkpoint removal is registration-fenced", () => {
+  const state = queue();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 1,
+    payload: payload("checkpoint"),
+    readyToSubmit: false,
+  });
+
+  expect(state.queue.removeUnreadyCaptures("profile1", "account1", "replacement")).toBe(0);
+  expect(state.queue.list("account1")).toHaveLength(1);
+  expect(state.queue.removeUnreadyCaptures("profile1", "account1", "registration1")).toBe(1);
+  expect(state.queue.list("account1")).toEqual([]);
+  state.queue.close();
+});
+
 test("pending sync queue requires an AES-256 key", () => {
   const path = join(mkdtempSync(join(tmpdir(), "aliasmode-pending-")), "pending.sqlite");
   expect(() => new PendingSyncQueue(path, new Uint8Array(16))).toThrow("32 bytes");
