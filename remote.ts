@@ -21,7 +21,7 @@ import {
   type RemoteRoster,
 } from "./hub-client.ts";
 import { isTelegramPlatform, splitLaunchUrls, platformHomeUrl, type Launcher } from "./launcher.ts";
-import { bundleHasRestorableLogin, bundleHasTelegramOrigin, bundleTelegramClient, telegramAuthSignature } from "./session.ts";
+import { bundleHasRestorableLogin, bundleHasTelegramOrigin, bundleTelegramClient, parseCapturedSessionBundle, telegramAuthSignature } from "./session.ts";
 import type { ProfileStore } from "./store.ts";
 import type { NewProfileInput } from "./create.ts";
 import type { ImportOverrides } from "./inbox.ts";
@@ -216,7 +216,11 @@ export class RemoteCoordinator {
     }
 
     this.sessionCapturesStarted++;
-    const read = Promise.resolve().then(() => this.d.readSession(ws));
+    const read = Promise.resolve().then(async () => {
+      const bundle = await this.d.readSession(ws);
+      parseCapturedSessionBundle(bundle);
+      return bundle;
+    });
     this.sessionReadsInFlight.set(profileId, read);
     void read.then((bundle) => {
       const bytes = Buffer.byteLength(bundle);

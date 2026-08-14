@@ -481,6 +481,42 @@ export class PendingSyncQueue {
     ).changes === 1;
   }
 
+  finalizeOpenCheckpoint(
+    profileId: string,
+    accountId: string,
+    registrationId: string,
+  ): boolean {
+    const finalize = this.db.transaction(() => {
+      const open = this.getOpen(profileId, accountId);
+      if (!open || open.registrationId !== registrationId) return false;
+      const rows = this.db.query<PendingRow, [string, string]>(`
+        SELECT * FROM pending_closes
+        WHERE profile_id = ? AND account_id = ?
+        ORDER BY created_at, id
+      `).all(profileId, accountId);
+      const captures = rows.map((row) => ({ row, capture: this.get(row.id, accountId) }))
+        .filter((item) => item.capture?.registrationId === registrationId);
+      if (captures.length === 0) return false;
+
+      const now = Date.now();
+      for (const { row, capture } of captures) {
+        if (capture!.readyToSubmit || capture!.status === "conflict") continue;
+        const changed = this.db.query(`
+          UPDATE pending_closes
+          SET ready_to_submit = 1, updated_at = ?
+          WHERE id = ? AND account_id = ? AND ready_to_submit = 0 AND status != 'conflict'
+        `).run(now, row.id, accountId).changes;
+        if (changed !== 1) throw new Error("pending checkpoint finalization changed concurrently");
+      }
+      const removed = this.db.query(`
+        DELETE FROM pending_open_sessions WHERE profile_id = ? AND account_id = ?
+      `).run(profileId, accountId).changes;
+      if (removed !== 1) throw new Error("pending open finalization changed concurrently");
+      return true;
+    });
+    return finalize();
+  }
+
   removeOpen(profileId: string, accountId: string): boolean {
     return this.db.query(`
       DELETE FROM pending_open_sessions WHERE profile_id = ? AND account_id = ?
@@ -501,8 +537,8 @@ export class PendingSyncQueue {
     return this.db.query(`
       UPDATE pending_closes
       SET status = ?, error = ?, updated_at = ?
-      WHERE id = ? AND account_id = ?
-    `).run(status, error, Date.now(), id, accountId).changes === 1;
+      WHERE id = ? AND account_id = ? AND status != ?
+    `).run(status, error, Date.now(), id, accountId, status).changes === 1;
   }
 }
 
@@ -623,25 +659,23 @@ export async function retryPendingSync(
         payload: pending.payload,
       });
       if (response.ok) {
-        queue.remove(pending.id, accountId);
-        result.accepted++;
-      } else {
-        queue.markConflict(
-          pending.id,
-          accountId,
-          `version conflict (current version ${response.error.currentVersion})`,
-        );
+        if (queue.remove(pending.id, accountId)) result.accepted++;
+      } else if (queue.markConflict(
+        pending.id,
+        accountId,
+        `version conflict (current version ${response.error.currentVersion})`,
+      )) {
         result.conflicts++;
       }
     } catch (error) {
       if (error instanceof CloudApiError && TERMINAL_PENDING_CLOSE_ERRORS.has(error.code)) {
-        queue.markConflict(pending.id, accountId, error.code);
-        result.conflicts++;
+        if (queue.markConflict(pending.id, accountId, error.code)) result.conflicts++;
         continue;
       }
-      queue.markRetrying(pending.id, accountId, "transport_error");
-      result.failed++;
-      break;
+      if (queue.markRetrying(pending.id, accountId, "transport_error")) {
+        result.failed++;
+        break;
+      }
     }
   }
   return result;

@@ -2212,6 +2212,42 @@ test("parallel reconciliation cannot apply a stale probe to a replacement launch
   store.close();
 });
 
+test("targeted orphan reconciliation cannot clear a replacement launch generation", async () => {
+  const store = seeded();
+  const oldLaunch = {
+    profileId: "k1d0cd11",
+    pid: 9001,
+    debugPort: 9333,
+    ws: "ws://127.0.0.1:9333/devtools/browser/old",
+    startedAt: 1,
+    binaryPath: "/fake/cloak",
+    userDataDir: "/tmp/cloak-targeted-reconcile-test/k1d0cd11",
+  };
+  store.recordLaunch(oldLaunch);
+  let scanEntered!: () => void;
+  let finishScan!: () => void;
+  const entered = new Promise<void>((resolve) => { scanEntered = resolve; });
+  const blocked = new Promise<void>((resolve) => { finishScan = resolve; });
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot: "/tmp/cloak-targeted-reconcile-test",
+    fetch: async () => ({ ok: false, json: async () => ({}) }),
+    isPidAlive: () => false,
+    findOwnedBrowserPids: async () => { scanEntered(); await blocked; return []; },
+  });
+
+  const reconciling = launcher.reconcileOrphan("k1d0cd11", { debugPort: 9333, startedAt: 1 });
+  await entered;
+  store.clearLaunch("k1d0cd11");
+  store.recordLaunch({ ...oldLaunch, pid: 9002, debugPort: 9334, ws: "ws://127.0.0.1:9334/devtools/browser/new", startedAt: 2 });
+  finishScan();
+
+  expect(await reconciling).toBe("generation_changed");
+  expect(store.getLaunch("k1d0cd11")?.debugPort).toBe(9334);
+  store.close();
+});
+
 test("stale teardown cleanup cannot clear a replacement launch generation", () => {
   const store = seeded();
   const oldLaunch = {
@@ -2468,6 +2504,29 @@ test("hasPageTargets distinguishes a background-only browser", async () => {
   expect(await launcher.hasPageTargets("k1d0cd11")).toBe(false);
   targets = [{ type: "page" }];
   expect(await launcher.hasPageTargets("k1d0cd11")).toBe(true);
+  store.close();
+});
+
+test("pageTargetFingerprint is generation-fenced and stable across target order", async () => {
+  const store = seeded();
+  store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+  let targets = [
+    { id: "b", type: "page", url: "https://example.com/b" },
+    { id: "a", type: "page", url: "https://example.com/a" },
+    { id: "worker", type: "service_worker", url: "https://example.com/sw.js" },
+  ];
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake",
+    fetch: async () => ({ ok: true, json: async () => targets }),
+  });
+
+  const first = await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 });
+  targets = [targets[1]!, targets[0]!];
+  expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 })).toBe(first);
+  targets[0] = { ...targets[0]!, url: "https://example.com/changed" };
+  expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 })).not.toBe(first);
+  expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9444, startedAt: 2 })).toBeNull();
   store.close();
 });
 

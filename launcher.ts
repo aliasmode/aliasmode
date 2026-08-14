@@ -2176,6 +2176,40 @@ export class Launcher {
     }
   }
 
+  /** In-memory page target fingerprint for dirty-session detection; null means the probe was uncertain or stale. */
+  async pageTargetFingerprint(
+    profileId: string,
+    expected: { debugPort: number; startedAt: number },
+  ): Promise<string | null> {
+    const launch = this.store.getLaunch(profileId);
+    if (!launch || launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt) return null;
+    try {
+      const response = await this.fetchFn(`http://127.0.0.1:${launch.debugPort}/json/list`);
+      if (!response.ok) return null;
+      const raw = await response.json();
+      if (!Array.isArray(raw)) return null;
+      const targets = raw.flatMap((target) =>
+        target?.type === "page" && typeof target.id === "string" && typeof target.url === "string"
+          ? [{ id: target.id, url: target.url }]
+          : []
+      ).sort((left, right) => left.id.localeCompare(right.id) || left.url.localeCompare(right.url));
+      const current = this.store.getLaunch(profileId);
+      if (!current || current.debugPort !== expected.debugPort || current.startedAt !== expected.startedAt) return null;
+      return JSON.stringify(targets);
+    } catch {
+      return null;
+    }
+  }
+
+  browserStorageWatchPaths(profileId: string): string[] {
+    const root = this.store.getLaunch(profileId)?.userDataDir ?? this.userDataDir(profileId);
+    return [
+      join(root, "Default", "Network"),
+      join(root, "Default", "Local Storage", "leveldb"),
+      join(root, "Default", "IndexedDB"),
+    ];
+  }
+
   /** True iff the profile's browser is currently reachable over CDP. */
   async active(profileId: string): Promise<boolean> {
     const launch = this.store.getLaunch(profileId);
@@ -2703,6 +2737,53 @@ export class Launcher {
     if (!dir) return false;
     rmSync(dir, { recursive: true, force: true });
     return true;
+  }
+
+  async reconcileOrphan(
+    profileId: string,
+    expected: { debugPort: number; startedAt: number },
+  ): Promise<"alive" | "dead" | "generation_changed"> {
+    const launch = this.store.getLaunch(profileId);
+    if (!launch) return "dead";
+    if (launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt) {
+      return "generation_changed";
+    }
+    const trackedProc = this.procs.get(profileId);
+    const { liveness, exactVerified } = await this.inspectForReconcile(launch, trackedProc);
+    const current = this.store.getLaunch(profileId);
+    if (!current) return "dead";
+    if (current.debugPort !== expected.debugPort || current.startedAt !== expected.startedAt) {
+      return "generation_changed";
+    }
+
+    if (!trackedProc) {
+      if (liveness.process === "alive" && exactVerified) {
+        this.verifiedExternal.set(profileId, {
+          pid: liveness.pid,
+          debugPort: launch.debugPort,
+          ws: liveness.cdpWs ?? current.ws,
+          verifiedAt: Date.now(),
+        });
+      } else if (liveness.process !== "alive") {
+        this.verifiedExternal.delete(profileId);
+      }
+    }
+    if (liveness.process !== "dead") {
+      this.liveReserved.add(launch.debugPort);
+      if (liveness.cdpAlive && liveness.process === "alive" && liveness.cdpWs && liveness.cdpWs !== current.ws) {
+        this.store.recordLaunch({ ...current, ws: liveness.cdpWs });
+      }
+      return "alive";
+    }
+    if (!await this.confirmPersistedLaunchStopped(profileId, current)) {
+      this.liveReserved.add(launch.debugPort);
+      return "alive";
+    }
+    if (this.forgetLaunch(profileId, current)) return "dead";
+    const latest = this.store.getLaunch(profileId);
+    return latest && (latest.debugPort !== expected.debugPort || latest.startedAt !== expected.startedAt)
+      ? "generation_changed"
+      : "alive";
   }
 
   /**

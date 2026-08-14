@@ -108,7 +108,6 @@ const SESSION_URLS = [
   "https://www.instagram.com", "https://instagram.com", "https://www.facebook.com", "https://facebook.com",
   "https://www.tiktok.com", "https://tiktok.com", "https://www.reddit.com", "https://reddit.com",
 ];
-const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const LINKEDIN_DEVICE_COOKIES = new Set(["bcookie", "bscookie", "li_rm"]);
 const TELEGRAM_AUTH_INDEXEDDB_RULES = [
@@ -117,9 +116,19 @@ const TELEGRAM_AUTH_INDEXEDDB_RULES = [
   { databasePattern: "^tweb(?:-account-\\d+)?$", stores: ["session", "session__encrypted"], presence: [{ stores: ["session", "session__encrypted"], anyKeyPattern: "^dc[1-5]_auth_key$", caseInsensitive: true }] },
 ];
 
-function sessionCookie(cookie) {
-  const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
-  return SESSION_HOSTS.some((host) => domain === host || domain.endsWith(`.${host}`));
+function normalizeWebOriginStorage(origin, storage) {
+  try {
+    const parsed = new URL(origin);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.origin !== origin) return undefined;
+  } catch {
+    return undefined;
+  }
+  const localStorage = (Array.isArray(storage?.localStorage) ? storage.localStorage : [])
+    .filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string")
+    .map((entry) => ({ name: entry.name, value: entry.value }));
+  const indexedDB = origin === TELEGRAM_ORIGIN ? filterTelegramIndexedDB(storage?.indexedDB) : [];
+  if (!localStorage.length && !indexedDB.length) return undefined;
+  return { origin, localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
 }
 
 function telegramRule(name) {
@@ -214,67 +223,126 @@ async function collectPasscodeStorage(page) {
   }, { rules: TELEGRAM_AUTH_INDEXEDDB_RULES, source });
 }
 
+function validOptionalKeyPath(value) {
+  return (value.keyPath === undefined || typeof value.keyPath === "string")
+    && (value.keyPathArray === undefined
+      || (Array.isArray(value.keyPathArray) && value.keyPathArray.every((part) => typeof part === "string")));
+}
+
+function validCapturedTelegramIndexedDB(raw) {
+  if (!Array.isArray(raw) || !raw.length) return false;
+  return raw.every((database) => {
+    if (!database || typeof database !== "object" || Array.isArray(database)
+      || typeof database.name !== "string" || !Number.isInteger(database.version) || database.version <= 0
+      || !Array.isArray(database.stores) || !database.stores.length) return false;
+    const rule = telegramRule(database.name);
+    if (!rule) return false;
+    const allowedStores = new Set(rule.stores);
+    return database.stores.every((store) => {
+      if (!store || typeof store !== "object" || Array.isArray(store)
+        || typeof store.name !== "string" || !allowedStores.has(store.name)
+        || typeof store.autoIncrement !== "boolean" || !Array.isArray(store.records)
+        || !store.records.every((record) => record && typeof record === "object" && !Array.isArray(record))
+        || !Array.isArray(store.indexes) || !validOptionalKeyPath(store)) return false;
+      return store.indexes.every((index) => index && typeof index === "object" && !Array.isArray(index)
+        && typeof index.name === "string" && typeof index.multiEntry === "boolean"
+        && typeof index.unique === "boolean" && validOptionalKeyPath(index));
+    });
+  });
+}
+
+function capturedWebOriginStorage(origin, storage) {
+  let canonical;
+  try {
+    const parsed = new URL(origin);
+    canonical = (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.origin === origin;
+  } catch {
+    canonical = false;
+  }
+  if (!canonical || !storage || typeof storage !== "object" || Array.isArray(storage)
+    || !Array.isArray(storage.localStorage)
+    || !storage.localStorage.every((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+      && typeof entry.name === "string" && typeof entry.value === "string")) {
+    throw new Error("Invalid captured origin storage");
+  }
+  if (storage.indexedDB !== undefined
+    && (origin !== TELEGRAM_ORIGIN || !validCapturedTelegramIndexedDB(storage.indexedDB))) {
+    throw new Error("Invalid captured origin storage");
+  }
+  return normalizeWebOriginStorage(origin, storage);
+}
+
 async function captureSession(browser) {
   const context = contextOf(browser);
   const state = await context.storageState();
   const byOrigin = new Map();
   for (const origin of state.origins || []) {
-    if (origin.origin !== TELEGRAM_ORIGIN) continue;
-    const localStorage = (Array.isArray(origin.localStorage) ? origin.localStorage : []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string");
-    const indexedDB = filterTelegramIndexedDB(origin.indexedDB);
-    if (localStorage.length || indexedDB.length) byOrigin.set(TELEGRAM_ORIGIN, { origin: TELEGRAM_ORIGIN, localStorage, ...(indexedDB.length ? { indexedDB } : {}) });
+    const normalized = capturedWebOriginStorage(origin?.origin, origin);
+    if (normalized) byOrigin.set(normalized.origin, normalized);
   }
   let telegramClient;
+  let telegramPageSeen = false;
+  let telegramPageCaptured = false;
   for (const page of context.pages()) {
     try {
       const url = new URL(page.url());
       if (url.origin !== TELEGRAM_ORIGIN) continue;
+      telegramPageSeen = true;
       if (url.pathname === "/a" || url.pathname.startsWith("/a/")) telegramClient = "a";
       if (url.pathname === "/k" || url.pathname.startsWith("/k/")) telegramClient = "k";
       let storage = await page.evaluate(() => ({ localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })) }));
       let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
-      if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page).catch(() => false);
-      if (capturePasscode) storage = await collectPasscodeStorage(page).catch(() => storage);
-      const localStorage = (storage.localStorage || []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string");
-      const indexedDB = filterTelegramIndexedDB(storage.indexedDB);
+      if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
+      if (capturePasscode) storage = await collectPasscodeStorage(page);
+      const captured = capturedWebOriginStorage(TELEGRAM_ORIGIN, storage);
+      const localStorage = captured?.localStorage ?? [];
+      const indexedDB = captured?.indexedDB ?? [];
       const previous = byOrigin.get(TELEGRAM_ORIGIN);
       if (localStorage.length || indexedDB.length || previous?.indexedDB) byOrigin.set(TELEGRAM_ORIGIN, {
         origin: TELEGRAM_ORIGIN,
         localStorage,
         ...(indexedDB.length ? { indexedDB } : previous?.indexedDB ? { indexedDB: previous.indexedDB } : {}),
       });
+      telegramPageCaptured = true;
       break;
     } catch {}
   }
-  return JSON.stringify({ cookies: (state.cookies || []).filter(sessionCookie), origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
+  if (telegramPageSeen && !telegramPageCaptured) throw new Error("Telegram session capture failed");
+  if (!Array.isArray(state.cookies) || state.cookies.some((cookie) =>
+    typeof cookie?.name !== "string" || typeof cookie.value !== "string" ||
+    typeof cookie.domain !== "string" || typeof cookie.path !== "string" ||
+    (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires))) ||
+    (cookie.httpOnly !== undefined && typeof cookie.httpOnly !== "boolean") ||
+    (cookie.secure !== undefined && typeof cookie.secure !== "boolean") ||
+    (cookie.sameSite !== undefined && !["Strict", "Lax", "None"].includes(cookie.sameSite))
+  )) throw new Error("Invalid captured cookies");
+  return JSON.stringify({ cookies: state.cookies, origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
 }
 
 async function restoreSession(browser, context, payload) {
   let bundle;
   try { bundle = JSON.parse(payload.bundle); } catch { throw sessionError("invalid_bundle"); }
-  const origins = Array.isArray(bundle.origins) ? bundle.origins.filter((item) => item?.origin === TELEGRAM_ORIGIN).map((target) => ({
-    origin: TELEGRAM_ORIGIN,
-    localStorage: (Array.isArray(target.localStorage) ? target.localStorage : []).filter((entry) => typeof entry?.name === "string" && typeof entry.value === "string"),
-    indexedDB: filterTelegramIndexedDB(target.indexedDB),
-  })).filter((target) => target.localStorage.length || target.indexedDB.length) : [];
+  const origins = Array.isArray(bundle.origins)
+    ? bundle.origins.map((target) => normalizeWebOriginStorage(target?.origin, target)).filter(Boolean)
+    : [];
   const cookies = Array.isArray(bundle.cookies) ? bundle.cookies : [];
   if (!cookies.length && !origins.length && !(payload.urls || []).length) return null;
-  const storageSource = origins.some((target) => target.indexedDB.length)
+  const storageSource = origins.some((target) => target.indexedDB?.length)
     ? await sessionStep("origin_storage", storageScriptSource)
     : undefined;
   for (const target of origins) {
     await sessionStep("origin_storage", async () => {
       const existing = context.pages();
       for (const page of existing) {
-      try { if (new URL(page.url()).origin === TELEGRAM_ORIGIN) await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }); } catch {}
-    }
-    const page = await context.newPage();
-    const restoreUrl = `${TELEGRAM_ORIGIN}/?__aliasmode_session_restore__=${Date.now()}`;
-    const handler = (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>restore</title>" });
-    try {
-      await context.route(restoreUrl, handler);
-      await page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
-      if (new URL(page.url()).origin !== TELEGRAM_ORIGIN) throw new Error("wrong restore origin");
+        try { if (new URL(page.url()).origin === target.origin) await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 }); } catch {}
+      }
+      const page = await context.newPage();
+      const restoreUrl = `${target.origin}/?__aliasmode_session_restore__=${Date.now()}`;
+      const handler = (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>restore</title>" });
+      try {
+        await context.route(restoreUrl, handler);
+        await page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        if (new URL(page.url()).origin !== target.origin) throw new Error("wrong restore origin");
       await page.evaluate(async ({ entries, databases, source }) => {
         if (databases.length) {
           const module = { exports: {} };
@@ -299,7 +367,7 @@ async function restoreSession(browser, context, payload) {
           try { localStorage.clear(); for (const entry of backup) localStorage.setItem(entry.name, entry.value); } catch {}
           throw error;
         }
-      }, { entries: target.localStorage, databases: target.indexedDB, source: storageSource });
+        }, { entries: target.localStorage, databases: target.indexedDB ?? [], source: storageSource });
       } finally {
         await context.unroute(restoreUrl, handler).catch(() => {});
         await page.close();

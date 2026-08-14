@@ -264,6 +264,121 @@ bunAsNodeTest("worker restore failures preserve operation and outcome details", 
   }
 });
 
+bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed captures, and restores safely", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-web-session-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/" };
+      const page = {
+        currentUrl: "about:blank",
+        async goto(url) { this.currentUrl = url; },
+        url() { return this.currentUrl; },
+        async evaluate(_fn, input) {
+          if (input.entries?.length !== 1 || input.entries[0].name !== "session" || input.entries[0].value !== "active") throw new Error("wrong localStorage");
+          if (input.databases?.length) throw new Error("unexpected IndexedDB");
+          return true;
+        },
+        async close() {},
+      };
+      let pagesCreated = 0;
+      let captureMode = "valid";
+      let liveUrl = "https://example.com/dashboard";
+      const livePage = {
+        url() { return liveUrl; },
+        async goto(url) { liveUrl = url; },
+      };
+      const context = {
+        async storageState() {
+          return {
+            cookies: captureMode === "malformed-cookie" ? [{ name: "broken" }] : [cookie],
+            origins: captureMode === "internal-origin"
+              ? [{ origin: "chrome-extension://abc", localStorage: [{ name: "private", value: "drop" }] }]
+              : captureMode === "malformed-storage"
+                ? [{ origin: "https://example.com", localStorage: [{ name: "session", value: 42 }] }]
+                : [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
+          };
+        },
+        pages() { return [livePage]; },
+        async newPage() { if (++pagesCreated > 1) throw new Error("extra restore page"); return page; },
+        async route(url) { if (!url.startsWith("https://example.com/?__aliasmode_session_restore__=")) throw new Error("wrong restore URL"); },
+        async unroute() {},
+        async clearCookies() { if (liveUrl !== "about:blank") throw new Error("live target page was not blanked"); },
+        async addCookies(cookies) { if (JSON.stringify(cookies) !== JSON.stringify([cookie])) throw new Error("wrong cookies"); },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        if (endpoint.includes("malformed-cookie")) captureMode = "malformed-cookie";
+        else if (endpoint.includes("malformed-storage")) captureMode = "malformed-storage";
+        else if (endpoint.includes("internal-origin")) captureMode = "internal-origin";
+        else captureMode = "valid";
+        return { contexts: () => [context], async close() {} };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }));
+    expect(captured).toEqual({
+      cookies: [{ name: "custom_auth", value: "value", domain: ".example.com", path: "/" }],
+      origins: [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
+    });
+    const malformedCookie = await runPlaywrightWorker("session-capture", {
+      endpoint: "ws://malformed-cookie",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+
+    for (const endpoint of ["ws://malformed-storage", "ws://internal-origin"]) {
+      const invalidOrigin = await runPlaywrightWorker("session-capture", {
+        endpoint,
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(invalidOrigin).toMatchObject({ code: "operation_failed" });
+    }
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({
+        cookies: captured.cookies,
+        origins: [
+          ...captured.origins,
+          { origin: "chrome-extension://abc", localStorage: [{ name: "private", value: "drop" }] },
+        ],
+      }),
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker rejects capture when an attached Telegram page cannot be read", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-telegram-capture-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const page = { url: () => "https://web.telegram.org/a/", async evaluate() { throw new Error("unavailable"); } };
+      const context = { async storageState() { return { cookies: [], origins: [] }; }, pages: () => [page] };
+      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const error = await runPlaywrightWorker("session-capture", {
+      endpoint: "ws://browser",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ code: "operation_failed" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("loads the installed Playwright ESM entrypoint", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-playwright-runtime-"));
   try {

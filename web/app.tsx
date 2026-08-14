@@ -188,8 +188,8 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   session_restore_connect_timeout: "Browser connection timed out",
   session_restore_context_failed: "Persistent browser context was unavailable",
   session_restore_context_timeout: "Persistent browser context timed out",
-  session_restore_origin_storage_failed: "Telegram storage restore failed",
-  session_restore_origin_storage_timeout: "Telegram storage restore timed out",
+  session_restore_origin_storage_failed: "Website storage restore failed",
+  session_restore_origin_storage_timeout: "Website storage restore timed out",
   session_restore_cookie_clear_failed: "Cookie clear failed",
   session_restore_cookie_clear_timeout: "Cookie clear timed out",
   session_restore_cookie_add_failed: "Cookie restore failed",
@@ -204,6 +204,13 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   session_captured: "Session captured",
   browser_stopped: "CloakBrowser stopped",
   session_synced: "Session synchronized",
+  checkpoint_saved: "Session checkpoint saved",
+  checkpoint_unchanged: "Session checkpoint unchanged",
+  checkpoint_capture_failed: "Session checkpoint capture failed",
+  checkpoint_invalid: "Session checkpoint was invalid",
+  manual_stop_detected: "Manual browser close detected",
+  session_sync_pending: "Session synchronization is pending",
+  dirty_monitor_unavailable: "Fast session monitoring is unavailable",
   cloud_registration_released: "Cloud session registration released",
   cleanup_retained: "Browser or recovery state was retained",
   heartbeat_failed: "Cloud heartbeat failed",
@@ -211,7 +218,8 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
 };
 
 function cloudDiagnosticFailed(type: CloudDiagnosticEvent["type"]): boolean {
-  return type.includes("failed") || type.includes("timeout") || type === "cleanup_retained" || type === "access_ended";
+  return type.includes("failed") || type.includes("timeout") || type === "checkpoint_invalid"
+    || type === "session_sync_pending" || type === "cleanup_retained" || type === "access_ended";
 }
 
 function StatusDot({ running }: { running: boolean }) {

@@ -1,13 +1,14 @@
 /**
  * Session bundle read/write over CDP, for roaming. A bundle is JSON
- * `{ cookies: CookieRecord[], origins: OriginStorage[], telegramClient?: "a"|"k" }` for the supported
- * platform URLs. Raw cookie files are DPAPI-encrypted per machine and not
+ * `{ cookies: CookieRecord[], origins: OriginStorage[], telegramClient?: "a"|"k" }` for normal
+ * HTTP/HTTPS websites. Raw cookie files are DPAPI-encrypted per machine and not
  * portable, so cookies move through CDP. Telegram Web keeps its login in
  * origin storage (localStorage/IndexedDB) instead of a stable auth cookie —
  * cookies alone can never roam a Telegram session, so origin storage roams too.
  */
 
 import type { CookieRecord } from "./types.ts";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { PlaywrightWorkerError, runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
 
@@ -80,6 +81,10 @@ export interface SessionBundle {
   origins?: OriginStorage[];
   /** Telegram web variant last used in this profile. A and K share an origin but not all passcode DBs. */
   telegramClient?: TelegramWebClient;
+}
+
+export interface CapturedSessionBundle extends SessionBundle {
+  origins: OriginStorage[];
 }
 
 export interface NormalizedSessionBundle {
@@ -190,17 +195,30 @@ export function isSessionCookie(cookie: { domain?: string }): boolean {
   return SESSION_HOSTS.some((host) => domainMatchesHost(cookie.domain, host));
 }
 
-/** Keep only well-shaped localStorage/indexedDB entries for a known origin; null if there's nothing usable. */
+function canonicalWebOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return value === parsed.origin ? parsed.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep well-shaped localStorage for web origins and only allowlisted Telegram auth IndexedDB. */
 export function normalizeOriginStorage(origin: string, storage: any): OriginStorage | null {
-  if (origin !== TELEGRAM_ORIGIN) return null;
+  const normalizedOrigin = canonicalWebOrigin(origin);
+  if (!normalizedOrigin) return null;
   const localStorage = Array.isArray(storage?.localStorage)
     ? storage.localStorage
         .filter((e: any) => typeof e?.name === "string" && typeof e?.value === "string")
         .map((e: any) => ({ name: e.name, value: e.value }))
     : [];
-  const indexedDB = filterTelegramAuthIndexedDB(storage?.indexedDB);
+  const indexedDB = normalizedOrigin === TELEGRAM_ORIGIN
+    ? filterTelegramAuthIndexedDB(storage?.indexedDB)
+    : [];
   if (localStorage.length === 0 && indexedDB.length === 0) return null;
-  return { origin, localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
+  return { origin: normalizedOrigin, localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
 }
 
 // Per-platform auth cookie — the one whose live presence means "logged in". Telegram is deliberately
@@ -221,6 +239,83 @@ function parseBundle(bundle: string): any | null {
   } catch {
     return null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validOptionalKeyPath(value: Record<string, unknown>): boolean {
+  return (value.keyPath === undefined || typeof value.keyPath === "string")
+    && (value.keyPathArray === undefined
+      || (Array.isArray(value.keyPathArray) && value.keyPathArray.every((part) => typeof part === "string")));
+}
+
+function validCapturedTelegramIndexedDB(raw: unknown): boolean {
+  if (!Array.isArray(raw) || raw.length === 0) return false;
+  return raw.every((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.name !== "string"
+      || !Number.isInteger(candidate.version) || (candidate.version as number) <= 0
+      || !Array.isArray(candidate.stores) || candidate.stores.length === 0) return false;
+    const rule = telegramAuthIndexedDBRule(candidate.name);
+    if (!rule) return false;
+    const allowedStores = new Set(rule.stores);
+    return candidate.stores.every((store) => {
+      if (!isRecord(store) || typeof store.name !== "string" || !allowedStores.has(store.name)
+        || typeof store.autoIncrement !== "boolean" || !Array.isArray(store.records)
+        || !store.records.every(isRecord) || !Array.isArray(store.indexes)
+        || !validOptionalKeyPath(store)) return false;
+      return store.indexes.every((index) => isRecord(index)
+        && typeof index.name === "string"
+        && typeof index.multiEntry === "boolean"
+        && typeof index.unique === "boolean"
+        && validOptionalKeyPath(index));
+    });
+  });
+}
+
+function capturedOriginStorage(origin: unknown, storage: unknown): OriginStorage | null {
+  if (typeof origin !== "string" || canonicalWebOrigin(origin) !== origin || !isRecord(storage)
+    || !Array.isArray(storage.localStorage)
+    || !storage.localStorage.every((entry) => isRecord(entry)
+      && typeof entry.name === "string" && typeof entry.value === "string")) {
+    throw new Error("invalid captured origin storage");
+  }
+  if (storage.indexedDB !== undefined
+    && (origin !== TELEGRAM_ORIGIN || !validCapturedTelegramIndexedDB(storage.indexedDB))) {
+    throw new Error("invalid captured origin storage");
+  }
+  return normalizeOriginStorage(origin, storage);
+}
+
+/** Strictly validate a newly captured bundle before it can replace a known-good checkpoint. */
+export function parseCapturedSessionBundle(bundle: string): CapturedSessionBundle {
+  const parsed = parseBundle(bundle);
+  const invalid = () => { throw new Error("invalid captured session bundle"); };
+  if (!isRecord(parsed) || !Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) invalid();
+  if (parsed.telegramClient !== undefined && parsed.telegramClient !== "a" && parsed.telegramClient !== "k") invalid();
+
+  for (const cookie of parsed.cookies) {
+    if (!isRecord(cookie)
+      || typeof cookie.name !== "string" || typeof cookie.value !== "string"
+      || typeof cookie.domain !== "string" || typeof cookie.path !== "string"
+      || (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires)))
+      || (cookie.httpOnly !== undefined && typeof cookie.httpOnly !== "boolean")
+      || (cookie.secure !== undefined && typeof cookie.secure !== "boolean")
+      || (cookie.sameSite !== undefined && cookie.sameSite !== "Strict" && cookie.sameSite !== "Lax" && cookie.sameSite !== "None")) invalid();
+  }
+
+  for (const origin of parsed.origins) {
+    if (!isRecord(origin) || typeof origin.origin !== "string"
+      || canonicalWebOrigin(origin.origin) !== origin.origin || !Array.isArray(origin.localStorage)
+      || !origin.localStorage.every((entry) => isRecord(entry)
+        && typeof entry.name === "string" && typeof entry.value === "string")) invalid();
+    const hasIndexedDB = origin.indexedDB !== undefined;
+    if (hasIndexedDB
+      && (origin.origin !== TELEGRAM_ORIGIN || !validCapturedTelegramIndexedDB(origin.indexedDB))) invalid();
+    if (origin.localStorage.length === 0 && !hasIndexedDB) invalid();
+  }
+  return parsed as unknown as CapturedSessionBundle;
 }
 
 function cookieDomainMatches(domain: string | undefined, parentDomain: string): boolean {
@@ -422,6 +517,35 @@ export function normalizeBundle(raw: any): NormalizedSessionBundle {
   return { cookies, origins, ...(telegramClient ? { telegramClient } : {}), hasOrigins };
 }
 
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+}
+
+function sortCanonical(values: unknown[]): unknown[] {
+  return values.map(canonicalValue).sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right))
+  );
+}
+
+/** Private deterministic fingerprint for suppressing unchanged local checkpoints. */
+export function sessionBundleSignature(bundle: string): string {
+  const raw = parseBundle(bundle);
+  const normalized = normalizeBundle(raw);
+  const origins = normalized.origins.map((origin) => ({
+    origin: origin.origin,
+    localStorage: sortCanonical(origin.localStorage),
+    ...(origin.indexedDB ? { indexedDB: sortCanonical(origin.indexedDB) } : {}),
+  })).sort((left, right) => left.origin.localeCompare(right.origin));
+  const canonical = JSON.stringify({
+    cookies: sortCanonical(normalized.cookies),
+    origins,
+    telegramClient: normalized.telegramClient ?? null,
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
 function telegramClientForUrl(raw: string): TelegramWebClient | undefined {
   try {
     const path = new URL(raw).pathname.toLowerCase();
@@ -456,7 +580,7 @@ async function collectAttachedPageOrigins(context: any): Promise<AttachedPageSto
     if (origin === TELEGRAM_ORIGIN && !telegramClient) telegramClient = telegramClientForUrl(pageUrl);
     if (origin !== TELEGRAM_ORIGIN || seen.has(origin)) continue;
     seen.add(origin);
-    let storage = await page.evaluate(localStorageExpr).catch(() => null);
+    let storage = await page.evaluate(localStorageExpr);
 
     // Normal A/K auth is localStorage. Check only the small optional-passcode DBs when local auth is
     // absent or encrypted passcode records exist; never walk Telegram's chat/media databases.
@@ -530,10 +654,10 @@ async function collectAttachedPageOrigins(context: any): Promise<AttachedPageSto
           return { localStorage, indexedDB };
         })();
       })()`;
-      const withPasscode = await page.evaluate(passcodeExpr).catch(() => null);
-      if (withPasscode) storage = withPasscode;
+      const withPasscode = await page.evaluate(passcodeExpr);
+      storage = withPasscode;
     }
-    const normalized = normalizeOriginStorage(origin, storage);
+    const normalized = capturedOriginStorage(origin, storage);
     if (normalized) origins.push(normalized);
   }
   return { origins, ...(telegramClient ? { telegramClient } : {}) };
@@ -544,10 +668,10 @@ export async function collectSessionFromContext(ctx: any): Promise<SessionBundle
   // localStorage, and collecting every cache DB made auth checkpoints slow and occasionally lossy.
   // collectAttachedPageOrigins adds only the allowlisted current/legacy passcode stores when needed.
   const state = await ctx.storageState();
-  const cookies = state.cookies.filter(isSessionCookie);
+  const cookies = state.cookies;
   const byOrigin = new Map<string, OriginStorage>();
   for (const origin of state.origins ?? []) {
-    const normalized = normalizeOriginStorage(origin.origin, origin);
+    const normalized = capturedOriginStorage(origin?.origin, origin);
     if (normalized) byOrigin.set(normalized.origin, normalized);
   }
   const attachedPages = await collectAttachedPageOrigins(ctx);
@@ -597,7 +721,9 @@ export async function readSessionFromBrowser(
   const disconnectTimeoutMs = options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS;
   const capture = (async () => {
     const ctx = browser.contexts()[0] ?? (await browser.newContext());
-    return JSON.stringify(await collectSessionFromContext(ctx));
+    const bundle = JSON.stringify(await collectSessionFromContext(ctx));
+    parseCapturedSessionBundle(bundle);
+    return bundle;
   })();
   try {
     return await withDeadline(capture, captureTimeoutMs, "session capture");
@@ -613,12 +739,14 @@ export async function readSessionFromBrowser(
   }
 }
 
-/** Read the running browser's current supported-platform cookies + origin storage into a bundle. */
+/** Read the running browser's portable web cookies and origin storage into a bundle. */
 export async function readSession(ws: string): Promise<string> {
-  return runPlaywrightWorker<string>("session-capture", {
+  const bundle = await runPlaywrightWorker<string>("session-capture", {
     endpoint: ws,
     connectTimeoutMs: 30_000,
   }, { timeoutMs: SESSION_SUBPROCESS_TIMEOUT_MS });
+  parseCapturedSessionBundle(bundle);
+  return bundle;
 }
 
 export type ReadSessionResult =
@@ -663,10 +791,12 @@ export async function readSessionInSubprocess(
   ws: string,
   options: ReadSessionSubprocessOptions = {},
 ): Promise<string> {
-  return runPlaywrightWorker<string>("session-capture", {
+  const bundle = await runPlaywrightWorker<string>("session-capture", {
     endpoint: ws,
     connectTimeoutMs: 30_000,
   }, { ...options, timeoutMs: options.timeoutMs ?? SESSION_SUBPROCESS_TIMEOUT_MS });
+  parseCapturedSessionBundle(bundle);
+  return bundle;
 }
 
 export async function runReadSessionWorker(
@@ -735,9 +865,12 @@ async function storageScriptSource(): Promise<string> {
  * its very first load — no script needs to run again after that.
  */
 export async function restoreOriginStorage(context: any, origins: OriginStorage[]): Promise<void> {
-  // Restore ONLY origins carried by the bundle. Always use a throwaway page in production so seeding
-  // never navigates or races the operator's real Telegram tab.
-  const targets = origins.filter((origin) => origin.origin === TELEGRAM_ORIGIN);
+  // Restore ONLY well-shaped web origins carried by the bundle. Always use a throwaway page in
+  // production so seeding never navigates or races the operator's real tabs.
+  const targets = origins.flatMap((target) => {
+    const origin = canonicalWebOrigin(target.origin);
+    return origin ? [{ ...target, origin }] : [];
+  });
   if (targets.length === 0) return;
   const existing = context.pages();
   const closePage = typeof context.newPage === "function";
@@ -745,20 +878,17 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
   if (!page) throw new Error("cannot restore origin storage: no page available");
   try {
     for (const target of targets) {
-      if (target.origin === TELEGRAM_ORIGIN) {
-        // Chrome can restore last-run Telegram tabs before the coordinator seeds the hub bundle. Move
-        // them off-origin first so no live A/K worker can overwrite localStorage or hold a passcode DB
-        // open while the authoritative snapshot is installed. launcher.navigate() reuses tab 0 after.
-        for (const existingPage of existing) {
-          try {
-            if (new URL(existingPage.url()).origin === TELEGRAM_ORIGIN) {
-              await existingPage.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
-            }
-          } catch {}
-        }
+      // Chrome can restore last-run tabs before the coordinator seeds the bundle. Move every matching
+      // page off-origin so live application code cannot overwrite localStorage during restore.
+      for (const existingPage of existing) {
+        try {
+          if (new URL(existingPage.url()).origin === target.origin) {
+            await existingPage.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
+          }
+        } catch {}
       }
-      // Fulfil a same-origin blank document where routing is available. Loading the Telegram app before
-      // its auth exists lets its worker observe "logged out" and mutate storage while we are restoring it.
+      // Fulfil a same-origin blank document where routing is available. Loading the real site before
+      // its session exists can let application code observe "logged out" and mutate storage during restore.
       const canRoute = typeof context.route === "function" && typeof context.unroute === "function";
       const restoreUrl = canRoute ? `${target.origin}/?__aliasmode_session_restore__=${Date.now()}` : target.origin;
       const routeHandler = (route: any) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>restore</title>" });
@@ -798,8 +928,8 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
         await page.evaluate(idbExpr);
       }
 
-      // Normal A/K auth is localStorage. Apply it transactionally: if quota/security/setItem fails,
-      // restore the prior values and throw instead of silently navigating onward with a partial login.
+      // Apply localStorage transactionally: if quota/security/setItem fails, restore the prior values
+      // and throw instead of silently navigating onward with a partial session.
       const localStorageExpr = `(() => {
         const entries = ${JSON.stringify(target.localStorage)};
         const backup = Object.keys(localStorage).map((name) => ({ name, value: localStorage.getItem(name) }));
@@ -827,7 +957,7 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
 }
 
 /**
- * Make the bundle the browser's authoritative supported-platform session: cookies
+ * Make the bundle the browser's authoritative portable web session: cookies
  * are always cleared first so stale local cookies from a previous run can't shadow
  * the roamed ones (an empty bundle still clears — authoritative logged out). Origin
  * storage is only rewritten for the origins the bundle actually carries, so roaming

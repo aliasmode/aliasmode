@@ -161,11 +161,17 @@ function setup(options: {
       return true;
     },
     async hasPageTargets() { return options.hasPageTargets ?? true; },
-    async reconcileOrphans() {
+    async reconcileOrphan(profileId: string, expected: { debugPort: number; startedAt: number }) {
       events.push("reconcile");
       await reconcileHook?.();
-      return { cleared: 0 };
+      const launch = store.getLaunch(profileId);
+      if (!launch) return "dead" as const;
+      return launch.debugPort === expected.debugPort && launch.startedAt === expected.startedAt
+        ? "alive" as const
+        : "generation_changed" as const;
     },
+    async pageTargetFingerprint() { return "[]"; },
+    browserStorageWatchPaths() { return []; },
     async active() { return options.activeResult ?? true; },
     async verifyRunningIdentity(profileId: string) {
       verifyCalls++;
@@ -182,13 +188,14 @@ function setup(options: {
     accountId: () => "account1",
     deviceId: () => "device1",
     heartbeatMs: 0,
+    dirtyMonitorMs: 0,
     log(message) {
       logs.push(message);
     },
     async readSession(endpoint: string) {
       expect(endpoint).toBe("ws://browser");
       events.push("capture");
-      return JSON.stringify(payload().session);
+      return JSON.stringify({ ...payload().session, origins: [] });
     },
     async applySession(endpoint: string, _bundle: string, urls: readonly string[]) {
       const expectedEndpoint = options.verifyWebSockets?.[0] ?? "ws://browser";
@@ -404,7 +411,7 @@ test("Cloud close does not stop a replacement for a retained restoring browser",
 
   expect(await state.coordinator.close("profile1")).toBe(false);
 
-  expect(state.events).toEqual(["reconcile"]);
+  expect(state.events).toEqual([]);
   expect(state.store.getLaunch("profile1")).toMatchObject({ debugPort: 9333, startedAt: 2000 });
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("restoring");
   state.queue.close();
@@ -421,9 +428,51 @@ test("Cloud heartbeat never auto-closes a retained restoring browser", async () 
 
   await state.coordinator.heartbeatOnce("profile1");
 
-  expect(state.events).toEqual(["heartbeat"]);
+  expect(state.events).toEqual(["reconcile", "heartbeat"]);
   expect(state.store.getLaunch("profile1")).not.toBeNull();
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("restoring");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat releases a retained restoring registration after manual browser X", async () => {
+  const state = setup({ restoreFailure: new Error("worker failed") });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(false);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events).toEqual(["reconcile", "abandon"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toContain("manual_stop_detected");
+  state.queue.close();
+  state.store.close();
+});
+
+test("terminal restoring heartbeat retries an uncertain stop", async () => {
+  const state = setup({ restoreFailure: new Error("worker failed"), stopResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(false);
+  state.events.length = 0;
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    throw new CloudApiError("revoked", "device_revoked", 403);
+  };
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events).toEqual(["reconcile", "stop"]);
+  expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBe("abandon");
+  (state.coordinator as any).options.launcher.stop = async (profileId: string) => {
+    state.events.push("stop-retry");
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+
+  await state.coordinator.retryPending();
+
+  expect(state.events.slice(-2)).toEqual(["stop-retry", "abandon"]);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   state.queue.close();
   state.store.close();
 });
@@ -566,7 +615,140 @@ test("Cloud heartbeat captures and closes a background-only browser", async () =
   state.store.close();
 });
 
-test("Cloud heartbeat refreshes the encrypted checkpoint", async () => {
+test("Cloud dirty monitor coalesces storage changes and captures target changes without Cloud calls", async () => {
+  const state = setup();
+  const storageDirty: Array<() => void> = [];
+  let pollTargets!: () => void;
+  let fingerprint = "targets:1";
+  let watcherCloses = 0;
+  let sessionValue = "storage-change";
+  const options = (state.coordinator as any).options;
+  (state.coordinator as any).dirtyMonitorMs = 10;
+  (state.coordinator as any).checkpointDebounceMs = 1;
+  (state.coordinator as any).checkpointMinIntervalMs = 0;
+  options.launcher.browserStorageWatchPaths = () => ["cookies", "local-storage", "indexed-db"];
+  options.launcher.pageTargetFingerprint = async () => fingerprint;
+  options.watchPath = (_path: string, onDirty: () => void) => {
+    storageDirty.push(onDirty);
+    return { close() { watcherCloses++; } };
+  };
+  options.setIntervalFn = (fn: () => void) => {
+    pollTargets = fn;
+    return { unref() {} };
+  };
+  options.clearIntervalFn = () => {};
+  options.readSession = async () => {
+    state.events.push("capture");
+    return JSON.stringify({
+      cookies: [{ name: "auth_token", value: sessionValue, domain: ".x.com", path: "/" }],
+      origins: [],
+    });
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const initialId = state.queue.list("account1")[0]?.id;
+  state.events.length = 0;
+  (state.coordinator as any).startDirtyMonitor("profile1");
+  await Bun.sleep(0);
+
+  for (const dirty of storageDirty) dirty();
+  await Bun.sleep(15);
+  const storageId = state.queue.list("account1")[0]?.id;
+  expect(storageDirty).toHaveLength(3);
+  expect(state.events).toEqual(["capture"]);
+  expect(storageId).not.toBe(initialId);
+  expect(state.events).not.toContain("heartbeat");
+  expect(state.events).not.toContain("cloud-close");
+
+  sessionValue = "target-change";
+  fingerprint = "targets:2";
+  pollTargets();
+  await Bun.sleep(15);
+  expect(state.events).toEqual(["capture", "capture"]);
+  expect(state.queue.list("account1")[0]?.id).not.toBe(storageId);
+
+  await state.coordinator.close("profile1");
+  expect(watcherCloses).toBe(3);
+  const capturesAfterClose = state.events.filter((event) => event === "capture").length;
+  storageDirty[0]!();
+  pollTargets();
+  await Bun.sleep(5);
+  expect(state.events.filter((event) => event === "capture")).toHaveLength(capturesAfterClose);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud dirty monitor latches one follow-up capture while a capture is running", async () => {
+  const state = setup();
+  const storageDirty: Array<() => void> = [];
+  let finishFirst!: () => void;
+  const firstCapture = new Promise<void>((resolve) => { finishFirst = resolve; });
+  let captures = 0;
+  const options = (state.coordinator as any).options;
+  (state.coordinator as any).dirtyMonitorMs = 10;
+  (state.coordinator as any).checkpointDebounceMs = 1;
+  (state.coordinator as any).checkpointMinIntervalMs = 0;
+  options.launcher.browserStorageWatchPaths = () => ["cookies"];
+  options.launcher.pageTargetFingerprint = async () => "targets";
+  options.watchPath = (_path: string, onDirty: () => void) => {
+    storageDirty.push(onDirty);
+    return { close() {} };
+  };
+  options.setIntervalFn = () => ({ unref() {} });
+  options.clearIntervalFn = () => {};
+  options.readSession = async () => {
+    captures++;
+    if (captures === 1) await firstCapture;
+    return JSON.stringify({
+      cookies: [{ name: "auth_token", value: `capture-${captures}`, domain: ".x.com", path: "/" }],
+      origins: [],
+    });
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  (state.coordinator as any).startDirtyMonitor("profile1");
+  await Bun.sleep(0);
+  storageDirty[0]!();
+  await Bun.sleep(5);
+  expect(captures).toBe(1);
+  storageDirty[0]!();
+  storageDirty[0]!();
+  finishFirst();
+  await Bun.sleep(20);
+  expect(captures).toBe(2);
+
+  await state.coordinator.close("profile1");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat remains a checkpoint fallback when storage watching is unavailable", async () => {
+  const state = setup();
+  const options = (state.coordinator as any).options;
+  (state.coordinator as any).dirtyMonitorMs = 10;
+  options.launcher.browserStorageWatchPaths = () => ["missing-storage"];
+  options.launcher.pageTargetFingerprint = async () => "targets";
+  options.watchPath = () => { throw new Error("unavailable"); };
+  options.setIntervalFn = () => ({ unref() {} });
+  options.clearIntervalFn = () => {};
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const baselineId = state.queue.list("account1")[0]?.id;
+  expect(state.coordinator.diagnostics().some((event) => event.type === "dirty_monitor_unavailable")).toBe(true);
+  options.readSession = async () => JSON.stringify({
+    cookies: [{ name: "auth_token", value: "heartbeat-change", domain: ".x.com", path: "/" }],
+    origins: [],
+  });
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.queue.list("account1")[0]?.id).not.toBe(baselineId);
+  await state.coordinator.close("profile1");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat keeps the existing checkpoint when the session is unchanged", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   const baselineId = state.queue.list("account1")[0]?.id;
@@ -577,8 +759,22 @@ test("Cloud heartbeat refreshes the encrypted checkpoint", async () => {
   const refreshed = state.queue.list("account1");
   expect(state.events).toEqual(["heartbeat", "capture"]);
   expect(refreshed).toHaveLength(1);
-  expect(refreshed[0]?.id).not.toBe(baselineId);
+  expect(refreshed[0]?.id).toBe(baselineId);
   expect(refreshed[0]?.readyToSubmit).toBe(false);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat keeps the last checkpoint when a fresh capture is invalid", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const baselineId = state.queue.list("account1")[0]?.id;
+  (state.coordinator as any).options.readSession = async () => "{}";
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.queue.list("account1")[0]?.id).toBe(baselineId);
+  expect(state.coordinator.diagnostics().at(-1)?.type).toBe("checkpoint_invalid");
   state.queue.close();
   state.store.close();
 });
@@ -590,6 +786,13 @@ test("Cloud heartbeat refreshes its checkpoint during a Cloud outage", async () 
   (state.coordinator as any).options.cloud.heartbeat = async () => {
     state.events.push("heartbeat");
     throw new Error("offline");
+  };
+  (state.coordinator as any).options.readSession = async () => {
+    state.events.push("capture");
+    return JSON.stringify({
+      cookies: [{ name: "auth_token", value: "changed", domain: ".x.com", path: "/" }],
+      origins: [],
+    });
   };
   state.events.length = 0;
 
@@ -607,6 +810,15 @@ test("Cloud browser durably captures before confirmed stop and CAS close", async
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   state.events.length = 0;
   const originalStop = (state.coordinator as any).options.launcher.stop;
+  const originalClose = (state.coordinator as any).options.cloud.closeOpen;
+  (state.coordinator as any).options.cloud.closeOpen = async (...args: unknown[]) => {
+    expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+    expect(state.queue.list("account1")).toMatchObject([{
+      profileId: "profile1",
+      readyToSubmit: true,
+    }]);
+    return originalClose(...args);
+  };
   (state.coordinator as any).options.launcher.stop = async (profileId: string) => {
     expect(state.queue.list("account1")).toMatchObject([{
       profileId: "profile1",
@@ -620,8 +832,9 @@ test("Cloud browser durably captures before confirmed stop and CAS close", async
   expect(state.closeCalls()).toBe(1);
   expect(state.queue.list("account1")).toEqual([]);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
-  expect(state.coordinator.diagnostics().map((event) => event.type).slice(-4)).toEqual([
+  expect(state.coordinator.diagnostics().map((event) => event.type).slice(-5)).toEqual([
     "close_started",
+    "checkpoint_unchanged",
     "session_captured",
     "browser_stopped",
     "session_synced",
@@ -649,7 +862,7 @@ test("Cloud browser never submits a capture before browser teardown is confirmed
 test("Cloud browser keeps stale CAS closes terminal", async () => {
   const state = setup({ closeConflict: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  expect(await state.coordinator.close("profile1")).toBe(true);
+  expect(await state.coordinator.close("profile1")).toBe(false);
   expect(state.closeCalls()).toBe(1);
   expect(state.queue.list("account1")).toMatchObject([{
     profileId: "profile1",
@@ -658,6 +871,11 @@ test("Cloud browser keeps stale CAS closes terminal", async () => {
   }]);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   expect(state.coordinator.diagnostics().at(-1)?.type).toBe("cleanup_retained");
+  expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toEqual({
+    ok: false,
+    error: "Pending Cloud synchronization must be resolved before reopening",
+  });
+  expect(state.events.filter((event) => event === "cloud-open")).toHaveLength(1);
   state.queue.close();
   state.store.close();
 });
@@ -666,7 +884,7 @@ test("Cloud close diagnostics retain unsynchronized transport failures", async (
   const state = setup({ closeTransportFailure: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
 
-  expect(await state.coordinator.close("profile1")).toBe(true);
+  expect(await state.coordinator.close("profile1")).toBe(false);
 
   expect(state.queue.list("account1")).toMatchObject([{
     profileId: "profile1",
@@ -690,7 +908,7 @@ test("Cloud browser refuses reopen while an older close remains unsynchronized",
   const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
   expect(result).toEqual({
     ok: false,
-    error: "Pending Cloud synchronization must finish before reopening",
+    error: "Pending Cloud synchronization must be resolved before reopening",
   });
   expect(state.events).toEqual(["cloud-close"]);
   expect(state.queue.list("account1")[0]).toMatchObject({ status: "retrying" });
