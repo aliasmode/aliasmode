@@ -33,12 +33,15 @@ import {
 import { parseExport } from "./parse.ts";
 import { SessionRestoreError } from "./session.ts";
 
+const linuxTest = process.platform === "win32" ? test.skip : test;
+
 /** Unit tests use fake executables, hosts, and CDP fleets. */
 class Launcher extends ProductionLauncher {
   constructor(opts: ConstructorParameters<typeof ProductionLauncher>[0]) {
     super({
       // Production policy is exercised explicitly in dedicated gate tests below.
       unsafeDisableIdentityGates: true,
+      findProfileDirHolderPids: async () => [],
       ...opts,
     });
   }
@@ -318,6 +321,7 @@ test("a restart with a different launch mode stops the stale persona instead of 
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
   });
@@ -634,7 +638,7 @@ test("tasklist image parser ignores localized status text", () => {
   ].join("\r\n"))).toEqual(new Set(["chrome.exe", "cloakbrowser.exe"]));
 });
 
-test("exact process matching adopts Linux deleted executables and quarantines wrong binaries", () => {
+linuxTest("exact process matching adopts Linux deleted executables and quarantines wrong binaries", () => {
   const identity = {
     profileId: "k1d0cd11",
     debugPort: 9333,
@@ -964,6 +968,7 @@ test("authenticated SOCKS5 uses the compatibility relay before browser setup", a
     labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1025,6 +1030,7 @@ test("proxy relay failures do not expose upstream or target details through laun
     labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1071,6 +1077,7 @@ test("proxied launch preserves stored timezone and routes through the relay", as
     labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1157,6 +1164,7 @@ test("a Windows persona launches on a Mac host (cross-OS spoofing allowed)", asy
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
@@ -1195,6 +1203,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
@@ -1300,6 +1309,8 @@ test("start injects cookies before navigating startup URLs", async () => {
     ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
     labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1369,6 +1380,8 @@ test("start opens the platform home page (deferred) when the caller passes no UR
     ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
     labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1527,7 +1540,7 @@ test("a spawner that throws after invocation retains ownership and returns a saf
   expect(store.getLaunch("k1d0cd11")).toMatchObject({
     pid: 0,
     binaryPath: "/fake/cloak",
-    userDataDir: "/tmp/cloak-spawn-throw-test/k1d0cd11",
+    userDataDir: resolve("/tmp/cloak-spawn-throw-test/k1d0cd11"),
   });
   expect(scans).toBe(1); // an early empty scan is intentionally not trusted
   expect((await launcher.reconcileOrphans()).cleared).toBe(1);

@@ -214,6 +214,7 @@ test("GET /ui/api/profiles clears a stale launch row before reporting status", a
     ensureCookies: async () => ({ injected: false }),
     killPid: async () => {},
     isPidAlive: () => false,
+    findOwnedBrowserPids: async () => [],
     cdpReadyTimeoutMs: 100,
   });
 

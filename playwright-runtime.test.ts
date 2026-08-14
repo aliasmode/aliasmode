@@ -10,12 +10,15 @@ import {
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
 
+const bunAsNodeTest = process.platform === "win32" ? test.skip : test;
+
 test("uses packaged Node bootstrap and keeps requests off argv", () => {
-  const command = playwrightWorkerCommand("C:\\AliasMode\\playwright");
-  expect(command[0]).toBe("C:\\AliasMode\\playwright/node/node.exe");
+  const runtime = "C:\\AliasMode\\playwright";
+  const command = playwrightWorkerCommand(runtime);
+  expect(command[0]).toBe(join(runtime, "node", "node.exe"));
   expect(command.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
   expect(command[3]).toContain("await import");
-  expect(command[4]).toBe("C:\\AliasMode\\playwright/worker.mjs");
+  expect(command[4]).toBe(join(runtime, "worker.mjs"));
 });
 
 test("worker inherits normal environment without Node hooks or app secrets", () => {
@@ -53,8 +56,9 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
   const endpoint = "ws://user:secret@127.0.0.1/browser";
   let argv: string[] = [];
   let input = "";
+  const runtime = "/fake/runtime";
   await runPlaywrightWorker("session-capture", { endpoint, token: "private" }, {
-    runtimeRoot: "/fake/runtime",
+    runtimeRoot: runtime,
     spawn(command) {
       argv = command;
       const worker = fakeWorker(success("bundle"));
@@ -62,9 +66,9 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
       return worker;
     },
   });
-  expect(argv[0]).toBe("/fake/runtime/node/node.exe");
+  expect(argv[0]).toBe(join(runtime, "node", "node.exe"));
   expect(argv.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
-  expect(argv[4]).toBe("/fake/runtime/worker.mjs");
+  expect(argv[4]).toBe(join(runtime, "worker.mjs"));
   expect(argv.join(" ")).not.toContain("secret");
   expect(argv.join(" ")).not.toContain("private");
   expect(JSON.parse(input).payload).toEqual({ endpoint, token: "private" });
@@ -155,7 +159,7 @@ test("worker distinguishes success output with a nonzero exit", async () => {
   expect(JSON.stringify(error)).not.toContain("sentinel");
 });
 
-test("bootstrap returns a structured error when the worker cannot load", async () => {
+bunAsNodeTest("bootstrap returns a structured error when the worker cannot load", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-bootstrap-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -183,7 +187,7 @@ test("installed Playwright storage source uses the supported direct export shape
   expect(() => new (StorageScript())(false)).not.toThrow();
 });
 
-test("installed worker loads its packaged ESM dependency", async () => {
+bunAsNodeTest("installed worker loads its packaged ESM dependency", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-layout-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -204,7 +208,7 @@ test("installed worker loads its packaged ESM dependency", async () => {
   }
 });
 
-test("worker retries until the persistent context appears without creating an incognito context", async () => {
+bunAsNodeTest("worker retries until the persistent context appears without creating an incognito context", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-delayed-context-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -236,7 +240,7 @@ test("worker retries until the persistent context appears without creating an in
   }
 });
 
-test("worker restore failures preserve operation and outcome details", async () => {
+bunAsNodeTest("worker restore failures preserve operation and outcome details", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-error-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
