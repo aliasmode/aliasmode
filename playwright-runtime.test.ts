@@ -57,7 +57,12 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
   let argv: string[] = [];
   let input = "";
   const runtime = "/fake/runtime";
-  await runPlaywrightWorker("session-capture", { endpoint, token: "private" }, {
+  const payload = {
+    endpoint,
+    token: "private",
+    captureSeed: { origins: ["https://private-origin.example"] },
+  };
+  await runPlaywrightWorker("session-capture", payload, {
     runtimeRoot: runtime,
     spawn(command) {
       argv = command;
@@ -71,7 +76,8 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
   expect(argv[4]).toBe(join(runtime, "worker.mjs"));
   expect(argv.join(" ")).not.toContain("secret");
   expect(argv.join(" ")).not.toContain("private");
-  expect(JSON.parse(input).payload).toEqual({ endpoint, token: "private" });
+  expect(argv.join(" ")).not.toContain("private-origin");
+  expect(JSON.parse(input).payload).toEqual(payload);
 });
 
 test("worker timeout kills only the worker and waits for its exit", async () => {
@@ -274,46 +280,65 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
     await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
       const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/" };
-      const page = {
-        currentUrl: "about:blank",
-        async goto(url) { this.currentUrl = url; },
-        url() { return this.currentUrl; },
-        async evaluate(_fn, input) {
-          if (input.entries?.length !== 1 || input.entries[0].name !== "session" || input.entries[0].value !== "active") throw new Error("wrong localStorage");
-          if (input.databases?.length) throw new Error("unexpected IndexedDB");
-          return true;
-        },
-        async close() {},
-      };
-      let pagesCreated = 0;
       let captureMode = "valid";
+      let bypassServiceWorker = false;
       let liveUrl = "https://example.com/dashboard";
       const livePage = {
         url() { return liveUrl; },
         async goto(url) { liveUrl = url; },
       };
+      const routes = new Map();
       const context = {
         async storageState() {
           return {
             cookies: captureMode === "malformed-cookie" ? [{ name: "broken" }] : [cookie],
-            origins: captureMode === "internal-origin"
-              ? [{ origin: "chrome-extension://abc", localStorage: [{ name: "private", value: "drop" }] }]
-              : captureMode === "malformed-storage"
-                ? [{ origin: "https://example.com", localStorage: [{ name: "session", value: 42 }] }]
-                : [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
+            origins: [],
           };
         },
         pages() { return [livePage]; },
-        async newPage() { if (++pagesCreated > 1) throw new Error("extra restore page"); return page; },
-        async route(url) { if (!url.startsWith("https://example.com/?__aliasmode_session_restore__=")) throw new Error("wrong restore URL"); },
-        async unroute() {},
+        async newPage() {
+          return {
+            currentUrl: "about:blank",
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("route missing");
+              this.currentUrl = url;
+              if (captureMode !== "service-worker" || bypassServiceWorker) await handler({ fulfill: async () => {} });
+            },
+            url() { return this.currentUrl; },
+            async evaluate(_fn, input) {
+              if (input) {
+                if (input.entries?.length !== 1 || input.entries[0].name !== "session" || input.entries[0].value !== "active") throw new Error("wrong localStorage");
+                if (input.databases?.length) throw new Error("unexpected IndexedDB");
+                return true;
+              }
+              return { localStorage: [{ name: "session", value: captureMode === "malformed-storage" ? 42 : "active" }] };
+            },
+            async close() {},
+          };
+        },
+        async newCDPSession() {
+          return {
+            async send(method, params) {
+              if (method === "Network.setBypassServiceWorker" && params?.bypass === true) bypassServiceWorker = true;
+            },
+            async detach() {},
+          };
+        },
+        async route(url, handler) {
+          if (!url.startsWith("https://example.com/?__aliasmode_session_")) throw new Error("wrong session URL");
+          routes.set(url, handler);
+        },
+        async unroute(url) { routes.delete(url); },
         async clearCookies() { if (liveUrl !== "about:blank") throw new Error("live target page was not blanked"); },
         async addCookies(cookies) { if (JSON.stringify(cookies) !== JSON.stringify([cookie])) throw new Error("wrong cookies"); },
       };
       export const chromium = { async connectOverCDP(endpoint) {
+        bypassServiceWorker = false;
         if (endpoint.includes("malformed-cookie")) captureMode = "malformed-cookie";
         else if (endpoint.includes("malformed-storage")) captureMode = "malformed-storage";
         else if (endpoint.includes("internal-origin")) captureMode = "internal-origin";
+        else if (endpoint.includes("service-worker")) captureMode = "service-worker";
         else captureMode = "valid";
         return { contexts: () => [context], async close() {} };
       } };
@@ -335,9 +360,16 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
     for (const endpoint of ["ws://malformed-storage", "ws://internal-origin"]) {
       const invalidOrigin = await runPlaywrightWorker("session-capture", {
         endpoint,
+        ...(endpoint.endsWith("internal-origin")
+          ? { captureSeed: { origins: ["chrome-extension://abc"] } }
+          : {}),
       }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
       expect(invalidOrigin).toMatchObject({ code: "operation_failed" });
     }
+
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://service-worker",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual(captured);
 
     await expect(runPlaywrightWorker("session-restore", {
       endpoint: "ws://browser",
@@ -350,6 +382,157 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       }),
       urls: [],
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker fails closed on Telegram IndexedDB reads and applies empty tombstones", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-telegram-tombstone-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let mode = "capture";
+      const routes = new Map();
+      const livePage = { url: () => "https://web.telegram.org/a/" };
+      const context = {
+        pages: () => mode === "capture" ? [livePage] : [],
+        async newPage() {
+          return {
+            currentUrl: "about:blank",
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("route missing");
+              this.currentUrl = url;
+              await handler({ fulfill: async () => {} });
+            },
+            url() { return this.currentUrl; },
+            async evaluate(fn, input) {
+              if (mode === "capture") {
+                if (Array.isArray(input)) throw new Error("IndexedDB request failed");
+                return { localStorage: [{ name: "dc2_auth_key", value: "live" }] };
+              }
+              const databases = new Set(["tt-passcode", "tweb-common", "tweb-account-2", "cache-db"]);
+              const deleted = [];
+              const values = new Map([["dc2_auth_key", "stale"]]);
+              globalThis.indexedDB = {
+                async databases() { return [...databases].map((name) => ({ name })); },
+                deleteDatabase(name) {
+                  const request = {};
+                  queueMicrotask(() => { databases.delete(name); deleted.push(name); request.onsuccess?.(); });
+                  return request;
+                },
+              };
+              globalThis.localStorage = {};
+              Object.defineProperties(globalThis.localStorage, {
+                getItem: { value: (name) => values.get(name) ?? null },
+                setItem: { value: (name, value) => values.set(name, value) },
+                clear: { value: () => values.clear() },
+              });
+              await fn(input);
+              if (JSON.stringify(deleted.sort()) !== JSON.stringify(["tt-passcode", "tweb-account-2", "tweb-common"])) throw new Error("wrong databases deleted");
+              if (databases.size !== 1 || !databases.has("cache-db")) throw new Error("unrelated database deleted");
+              if (values.size !== 0) throw new Error("localStorage not cleared");
+              return true;
+            },
+            async close() {},
+          };
+        },
+        async route(url, handler) { routes.set(url, handler); },
+        async unroute(url) { routes.delete(url); },
+        async storageState() { return { cookies: [], origins: [] }; },
+        async clearCookies() {},
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        mode = endpoint.includes("restore") ? "restore" : "capture";
+        return { contexts: () => [context], async close() {} };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captureError = await runPlaywrightWorker("session-capture", {
+      endpoint: "ws://capture",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(captureError).toMatchObject({ code: "operation_failed" });
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://restore",
+      bundle: JSON.stringify({ cookies: [], origins: [{ origin: "https://web.telegram.org" }] }),
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://restore",
+      bundle: JSON.stringify({ cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [] }] }),
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker captures current localStorage for a closed known origin", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-closed-origin-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const storage = {
+        "https://closed.example": [{ name: "token", value: "fresh-closed-value" }],
+        "https://live.example": [{ name: "live", value: "current-value" }],
+      };
+      const livePage = { url: () => "https://live.example/dashboard" };
+      const pages = [];
+      const routes = new Map();
+      const context = {
+        pages: () => [livePage],
+        async newPage() {
+          const page = {
+            currentUrl: "about:blank",
+            closed: false,
+            url() { return this.currentUrl; },
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("network request was not intercepted");
+              await handler({ fulfill: async () => {} });
+              this.currentUrl = url;
+            },
+            async evaluate() { return { localStorage: storage[new URL(this.currentUrl).origin] ?? [] }; },
+            async close() { this.closed = true; },
+          };
+          pages.push(page);
+          return page;
+        },
+        async route(url, handler) { routes.set(url, handler); },
+        async unroute(url) { routes.delete(url); },
+        async storageState() {
+          if (pages.some((page) => page.closed)) throw new Error("capture page closed before storage snapshot");
+          return { cookies: [], origins: [] };
+        },
+      };
+      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+      captureSeed: { origins: ["https://closed.example", "https://empty.example"] },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }));
+    expect(captured).toEqual({
+      cookies: [],
+      origins: [
+        { origin: "https://closed.example", localStorage: [{ name: "token", value: "fresh-closed-value" }] },
+        { origin: "https://empty.example", localStorage: [] },
+        { origin: "https://live.example", localStorage: [{ name: "live", value: "current-value" }] },
+      ],
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

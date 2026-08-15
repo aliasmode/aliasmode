@@ -21,7 +21,7 @@ use zeroize::Zeroize;
 
 const PROTOCOL: &str = "aliasmode-desktop-v1";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
 #[derive(Debug, Deserialize)]

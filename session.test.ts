@@ -162,19 +162,23 @@ test("writeSessionToBrowser restores cookies and localStorage for a web origin",
   let cleared = false;
   let injected: any[] = [];
   let currentUrl = "about:blank";
+  const routes = new Map<string, (route: any) => unknown>();
   const context = {
     pages: () => [],
     async newPage() {
       opened = true;
       return {
-        async goto(url: string) { currentUrl = url; },
+        async goto(url: string) {
+          currentUrl = url;
+          await routes.get(url)?.({ fulfill: async () => {} });
+        },
         url: () => currentUrl,
         async evaluate() {},
         async close() {},
       };
     },
-    async route() {},
-    async unroute() {},
+    async route(url: string, handler: (route: any) => unknown) { routes.set(url, handler); },
+    async unroute(url: string) { routes.delete(url); },
     async clearCookies() { cleared = true; },
     async addCookies(cookies: any[]) { injected = cookies; },
   };
@@ -496,7 +500,11 @@ test("normalizeOriginStorage accepts web origins and rejects non-web or malforme
   expect(normalizeOriginStorage("chrome-extension://example", { localStorage: [{ name: "a", value: "b" }] })).toBeNull();
   expect(normalizeOriginStorage("not a url", { localStorage: [{ name: "a", value: "b" }] })).toBeNull();
   expect(normalizeOriginStorage("https://web.telegram.org", {})).toBeNull();
-  expect(normalizeOriginStorage("https://web.telegram.org", { localStorage: [] })).toBeNull();
+  expect(normalizeOriginStorage("https://web.telegram.org", { localStorage: [{ name: "bad", value: 42 }] })).toBeNull();
+  expect(normalizeOriginStorage("https://web.telegram.org", { localStorage: [] })).toEqual({
+    origin: "https://web.telegram.org",
+    localStorage: [],
+  });
 });
 
 test("normalizeOriginStorage filters malformed localStorage entries but keeps well-shaped ones", () => {
@@ -562,6 +570,13 @@ test("parseCapturedSessionBundle accepts only complete fresh-capture shapes", ()
     origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: "value" }] }],
   };
   expect(parseCapturedSessionBundle(JSON.stringify(valid))).toEqual(valid);
+  expect(parseCapturedSessionBundle(JSON.stringify({
+    cookies: [],
+    origins: [{ origin: "https://example.com", localStorage: [] }],
+  }))).toEqual({
+    cookies: [],
+    origins: [{ origin: "https://example.com", localStorage: [] }],
+  });
 
   for (const invalid of [
     null,
@@ -570,7 +585,6 @@ test("parseCapturedSessionBundle accepts only complete fresh-capture shapes", ()
     { cookies: [{ name: "session", value: "active", domain: ".example.com" }], origins: [] },
     { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", secure: "yes" }], origins: [] },
     { cookies: [], origins: [{ origin: "https://example.com/path", localStorage: [] }] },
-    { cookies: [], origins: [{ origin: "https://example.com", localStorage: [] }] },
     { cookies: [], origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: 1 }] }] },
     { cookies: [], origins: [{ origin: "https://example.com", localStorage: [], indexedDB: [] }] },
     { cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [], indexedDB: [{ name: "tt-passcode", version: 1, stores: [] }] }] },
@@ -628,6 +642,8 @@ test("normalizeBundle keeps web origin localStorage and drops malformed or inter
       { origin: "https://web.telegram.org", localStorage: [{ name: "dc2_auth_key", value: "live" }] },
       { origin: "https://www.instagram.com", localStorage: [{ name: "incidental", value: "state" }] },
       { origin: "https://example.com", localStorage: [{ name: "auth", value: "value" }] },
+      { origin: "https://web.telegram.org" },
+      { origin: "https://invalid.example", localStorage: "invalid" },
       { origin: "chrome-extension://private", localStorage: [{ name: "private", value: "state" }] },
       { localStorage: [{ name: "no-origin-field", value: "x" }] },
       null,
@@ -659,12 +675,11 @@ test("restoreOriginStorage restores only origins present in the bundle, never wi
   // Only Telegram was visited + restored. x.com / linkedin were never navigated, so
   // restore(undefined) never ran against them — their local login is left untouched.
   expect(navigated.filter((u) => u !== "about:blank")).toEqual(["https://web.telegram.org"]);
-  expect(restored.length).toBe(1);
-  expect(restored[0]).toContain("dc2_auth_key");
-  // localStorage-only bundle → localStorage-only restore. It must NOT invoke Playwright's restore
-  // (which deletes every IndexedDB db first) — that would wipe the target's own Telegram cache/session.
-  expect(restored[0]).toContain("localStorage.setItem");
-  expect(restored[0]).not.toContain("StorageScript");
+  expect(restored.length).toBe(2);
+  expect(restored[0]).toContain("deleteDatabase(database.name)");
+  expect(restored[0]).toContain("ruleFor(database.name)");
+  expect(restored[1]).toContain("dc2_auth_key");
+  expect(restored[1]).toContain("localStorage.setItem");
 });
 
 test("restoreOriginStorage restores selected passcode IndexedDB first, then verified localStorage", async () => {
@@ -692,6 +707,26 @@ test("restoreOriginStorage restores selected passcode IndexedDB first, then veri
   expect(restored[1]).toContain("localStorage.setItem");
   expect(restored[1]).toContain("dc2_auth_key");
   expect(restored[1]).toContain("backup");
+});
+
+test("restoreOriginStorage applies an empty Telegram tombstone without deleting unrelated databases", async () => {
+  const restored: string[] = [];
+  const page = {
+    async goto() {},
+    async evaluate(expr: string) { restored.push(expr); },
+    async close() {},
+  };
+  const ctx = { pages: () => [page] };
+
+  await restoreOriginStorage(ctx, [{ origin: "https://web.telegram.org", localStorage: [] }]);
+
+  expect(restored.length).toBe(2);
+  expect(restored[0]).toContain("tt-passcode");
+  expect(restored[0]).toContain("tweb-common");
+  expect(restored[0]).toContain("if (database && database.name && ruleFor(database.name))");
+  expect(restored[0]).toContain("const databases = []");
+  expect(restored[1]).toContain("const entries = []");
+  expect(restored[1]).toContain("localStorage.clear()");
 });
 
 test("restoreOriginStorage restores localStorage for an arbitrary web origin", async () => {
@@ -842,6 +877,23 @@ test("collectSessionFromContext includes storage from pages loaded before CDP at
   expect(bundle.telegramClient).toBe("a");
 });
 
+test("collectSessionFromContext rejects Telegram passcode presence read errors", async () => {
+  const ctx = {
+    async storageState() { return { cookies: [], origins: [] }; },
+    pages() {
+      return [{
+        url: () => "https://web.telegram.org/a/",
+        async evaluate(expression: string) {
+          if (expression.includes("indexedDB.databases")) throw new Error("IndexedDB request failed");
+          return { localStorage: [{ name: "dc2_auth_key", value: "live" }] };
+        },
+      }];
+    },
+  };
+
+  await expect(collectSessionFromContext(ctx)).rejects.toThrow("IndexedDB request failed");
+});
+
 test("collectSessionFromContext preserves origin storage for every web platform", async () => {
   let evaluations = 0;
   const ctx = {
@@ -876,6 +928,59 @@ test("collectSessionFromContext preserves origin storage for every web platform"
     { origin: "https://example.com", localStorage: [{ name: "auth", value: "custom" }] },
   ]);
   expect(evaluations).toBe(0);
+});
+
+test("collectSessionFromContext reads a closed origin from its durable capture seed", async () => {
+  const storage = new Map([
+    ["https://closed.example", [{ name: "token", value: "fresh-closed-value" }]],
+    ["https://live.example", [{ name: "live", value: "current-value" }]],
+  ]);
+  const routes = new Map<string, (route: any) => unknown>();
+  const pages: Array<{ currentUrl: string; closed: boolean }> = [];
+  const livePage = { url: () => "https://live.example/dashboard" };
+  const ctx = {
+    pages: () => [livePage, ...pages.map((state) => ({
+      url: () => state.currentUrl,
+      close: async () => { state.closed = true; },
+    }))],
+    async newPage() {
+      const state = { currentUrl: "about:blank", closed: false };
+      pages.push(state);
+      return {
+        url: () => state.currentUrl,
+        async goto(url: string) {
+          const handler = routes.get(url);
+          if (!handler) throw new Error("capture escaped to the network");
+          await handler({ fulfill: async () => {} });
+          state.currentUrl = url;
+        },
+        async close() { state.closed = true; },
+      };
+    },
+    async route(url: string, handler: (route: any) => unknown) { routes.set(url, handler); },
+    async unroute(url: string) { routes.delete(url); },
+    async storageState() {
+      return {
+        cookies: [],
+        origins: pages.map((page) => {
+          const origin = new URL(page.currentUrl).origin;
+          return { origin, localStorage: storage.get(origin) ?? [] };
+        }),
+      };
+    },
+  };
+
+  const bundle = await collectSessionFromContext(ctx, {
+    origins: ["https://closed.example", "https://empty.example"],
+  });
+
+  expect(bundle.origins).toEqual([
+    { origin: "https://closed.example", localStorage: [{ name: "token", value: "fresh-closed-value" }] },
+    { origin: "https://empty.example", localStorage: [] },
+    { origin: "https://live.example", localStorage: [{ name: "live", value: "current-value" }] },
+  ]);
+  expect(pages.every((page) => page.closed)).toBe(true);
+  expect(routes.size).toBe(0);
 });
 
 test("collectSessionFromContext does not walk Telegram cache IndexedDB when localStorage auth exists", async () => {

@@ -52,12 +52,24 @@ function setup(options: {
   startError?: unknown;
   verifyWebSockets?: string[];
   proxy?: PortableProfileV1["profile"]["proxy"];
+  session?: PortableProfileV1["session"];
+  accountId?: () => string;
+  heartbeatMs?: number;
+  dirtyMonitorMs?: number;
+  checkpointDebounceMs?: number;
+  checkpointMinIntervalMs?: number;
+  setIntervalFn?: (fn: () => void, ms: number) => unknown;
+  clearIntervalFn?: (handle: unknown) => void;
+  watchPaths?: string[];
+  watchPath?: (path: string, dirty: () => void) => { close(): void };
+  observeTargets?: (endpoint: string, onTarget: (origin: string | null) => void) => { close(): void };
 } = {}) {
   const events: string[] = [];
   const logs: string[] = [];
   const navigatedUrls: string[][] = [];
   const navigateEndpoints: string[] = [];
   const restoreEndpoints: string[] = [];
+  const captureSeeds: any[] = [];
   const store = new ProfileStore(":memory:");
   const queuePath = join(mkdtempSync(join(tmpdir(), "aliasmode-cloud-browser-")), "pending.sqlite");
   const queue = new PendingSyncQueue(queuePath, new Uint8Array(32).fill(5));
@@ -70,6 +82,7 @@ function setup(options: {
   let abandonHook: (() => void | Promise<void>) | undefined;
   const openedPayload = payload();
   openedPayload.profile.proxy = options.proxy ?? null;
+  if (options.session) openedPayload.session = options.session;
   const opened: OpenProfileResponse = {
     ok: true,
     registrationId: "registration1",
@@ -171,7 +184,7 @@ function setup(options: {
         : "generation_changed" as const;
     },
     async pageTargetFingerprint() { return "[]"; },
-    browserStorageWatchPaths() { return []; },
+    browserStorageWatchPaths() { return options.watchPaths ?? []; },
     async active() { return options.activeResult ?? true; },
     async verifyRunningIdentity(profileId: string) {
       verifyCalls++;
@@ -185,15 +198,22 @@ function setup(options: {
     launcher: launcher as any,
     store,
     queue: () => queue,
-    accountId: () => "account1",
+    accountId: options.accountId ?? (() => "account1"),
     deviceId: () => "device1",
-    heartbeatMs: 0,
-    dirtyMonitorMs: 0,
+    heartbeatMs: options.heartbeatMs ?? 0,
+    dirtyMonitorMs: options.dirtyMonitorMs ?? 0,
+    checkpointDebounceMs: options.checkpointDebounceMs,
+    checkpointMinIntervalMs: options.checkpointMinIntervalMs,
+    setIntervalFn: options.setIntervalFn,
+    clearIntervalFn: options.clearIntervalFn,
+    watchPath: options.watchPath,
+    observeTargets: options.observeTargets ?? (() => ({ close() {} })),
     log(message) {
       logs.push(message);
     },
-    async readSession(endpoint: string) {
+    async readSession(endpoint: string, captureSeed: unknown) {
       expect(endpoint).toBe("ws://browser");
+      captureSeeds.push(captureSeed);
       events.push("capture");
       return JSON.stringify({ ...payload().session, origins: [] });
     },
@@ -217,6 +237,7 @@ function setup(options: {
     navigatedUrls,
     navigateEndpoints,
     restoreEndpoints,
+    captureSeeds,
     store,
     queue,
     closeCalls: () => closeCalls,
@@ -722,6 +743,69 @@ test("Cloud dirty monitor latches one follow-up capture while a capture is runni
   state.store.close();
 });
 
+test("Cloud checkpoint probes every origin from the durable open bundle", async () => {
+  const state = setup({
+    session: {
+      cookies: [],
+      origins: [{
+        origin: "https://closed.example",
+        localStorage: [{ name: "token", value: "prior-value" }],
+      }],
+      telegramClient: "k",
+    },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.captureSeeds.at(-1)).toEqual({
+    origins: ["https://closed.example"],
+    telegramClient: "k",
+  });
+  await state.coordinator.releaseAll(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud target observation retains a new origin after its tab closes", async () => {
+  let onTarget!: (origin: string | null) => void;
+  let observerCloses = 0;
+  const state = setup({
+    session: {
+      cookies: [],
+      origins: [{
+        origin: "https://closed.example",
+        localStorage: [{ name: "token", value: "prior-value" }],
+      }],
+    },
+    heartbeatMs: 60_000,
+    dirtyMonitorMs: 2_000,
+    checkpointDebounceMs: 0,
+    checkpointMinIntervalMs: 0,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+    observeTargets(_endpoint, target) {
+      onTarget = target;
+      return { close() { observerCloses++; } };
+    },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+
+  onTarget("https://new.example");
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (state.captureSeeds.length) break;
+    await Bun.sleep(5);
+  }
+
+  expect(state.captureSeeds.at(-1)).toEqual({
+    origins: ["https://closed.example", "https://new.example"],
+  });
+  await state.coordinator.releaseAll(true);
+  expect(observerCloses).toBe(1);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud heartbeat remains a checkpoint fallback when storage watching is unavailable", async () => {
   const state = setup();
   const options = (state.coordinator as any).options;
@@ -949,6 +1033,142 @@ test("Cloud authentication secures a previous account browser before legal accep
     status: "pending",
   }]);
   expect(state.closeCalls()).toBe(0);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud authentication abandons a stopped previous-account restore", async () => {
+  const state = setup();
+  state.store.recordLaunch({
+    profileId: "profile1",
+    pid: 10,
+    debugPort: 9222,
+    ws: "ws://browser",
+    startedAt: 1_000,
+    sessionBaseVersion: -1,
+  });
+  state.queue.recordOpen({
+    accountId: "previous-account",
+    profileId: "profile1",
+    registrationId: "previous-registration",
+    expectedVersion: 4,
+  });
+  state.queue.updateOpen("profile1", "previous-account", "restoring", {
+    debugPort: 9222,
+    startedAt: 1_000,
+  });
+
+  await state.coordinator.secureAfterAuthentication();
+
+  expect(state.events).toEqual(["stop", "abandon"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "previous-account")).toBeNull();
+  expect(state.abandonCalls()).toBe(1);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud authentication retries a failed previous-account restore abandon", async () => {
+  const state = setup();
+  state.store.recordLaunch({
+    profileId: "profile1",
+    pid: 10,
+    debugPort: 9222,
+    ws: "ws://browser",
+    startedAt: 1_000,
+    sessionBaseVersion: -1,
+  });
+  state.queue.recordOpen({
+    accountId: "previous-account",
+    profileId: "profile1",
+    registrationId: "previous-registration",
+    expectedVersion: 4,
+  });
+  state.queue.updateOpen("profile1", "previous-account", "restoring", {
+    debugPort: 9222,
+    startedAt: 1_000,
+  });
+  let attempts = 0;
+  state.setAbandonHook(() => {
+    if (++attempts === 1) throw new Error("offline");
+  });
+
+  await expect(state.coordinator.secureAfterAuthentication()).rejects.toThrow("could not be stopped");
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "previous-account")?.phase).toBe("restoring");
+
+  await state.coordinator.secureAfterAuthentication();
+  expect(state.queue.getOpen("profile1", "previous-account")).toBeNull();
+  expect(state.abandonCalls()).toBe(2);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud authentication replaces checkpoint monitors after an account switch", async () => {
+  let accountId = "account1";
+  let nextTimer = 0;
+  const activeTimers = new Set<number>();
+  const dirtyCallbacks: Array<() => void> = [];
+  let watcherCloses = 0;
+  const state = setup({
+    accountId: () => accountId,
+    heartbeatMs: 60_000,
+    dirtyMonitorMs: 2_000,
+    checkpointDebounceMs: 0,
+    checkpointMinIntervalMs: 0,
+    watchPaths: ["browser-storage"],
+    setIntervalFn() {
+      const timer = ++nextTimer;
+      activeTimers.add(timer);
+      return timer;
+    },
+    clearIntervalFn(timer) {
+      activeTimers.delete(timer as number);
+    },
+    watchPath(_path, dirty) {
+      dirtyCallbacks.push(dirty);
+      return { close() { watcherCloses++; } };
+    },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const internals = state.coordinator as any;
+  const firstMonitor = internals.dirtyMonitors.get("profile1");
+  const firstHeartbeat = internals.timers.get("profile1");
+  expect(firstMonitor).toBeDefined();
+  expect(activeTimers.has(firstHeartbeat)).toBe(true);
+
+  accountId = "account2";
+  await state.coordinator.secureAfterAuthentication();
+
+  expect(internals.dirtyMonitors.has("profile1")).toBe(false);
+  expect(internals.timers.has("profile1")).toBe(false);
+  expect(activeTimers.has(firstMonitor.pollTimer)).toBe(false);
+  expect(activeTimers.has(firstHeartbeat)).toBe(false);
+  expect(watcherCloses).toBe(1);
+
+  accountId = "account1";
+  await state.coordinator.resumeAfterAuthentication();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const secondMonitor = internals.dirtyMonitors.get("profile1");
+  const secondHeartbeat = internals.timers.get("profile1");
+  expect(secondMonitor).toBeDefined();
+  expect(secondMonitor).not.toBe(firstMonitor);
+  expect(secondHeartbeat).not.toBe(firstHeartbeat);
+  expect(activeTimers.has(secondMonitor.pollTimer)).toBe(true);
+  expect(activeTimers.has(secondHeartbeat)).toBe(true);
+
+  const capturesBeforeDirtySignal = state.events.filter((event) => event === "capture").length;
+  dirtyCallbacks[0]!();
+  await Bun.sleep(10);
+  expect(state.events.filter((event) => event === "capture")).toHaveLength(capturesBeforeDirtySignal);
+  dirtyCallbacks[1]!();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (state.events.filter((event) => event === "capture").length > capturesBeforeDirtySignal) break;
+    await Bun.sleep(5);
+  }
+  expect(state.events.filter((event) => event === "capture")).toHaveLength(capturesBeforeDirtySignal + 1);
+
+  await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();
 });

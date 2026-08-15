@@ -87,6 +87,11 @@ export interface CapturedSessionBundle extends SessionBundle {
   origins: OriginStorage[];
 }
 
+export interface SessionCaptureSeed {
+  origins: string[];
+  telegramClient?: TelegramWebClient;
+}
+
 export interface NormalizedSessionBundle {
   cookies: CookieRecord[];
   origins: OriginStorage[];
@@ -208,16 +213,14 @@ function canonicalWebOrigin(value: string): string | null {
 /** Keep well-shaped localStorage for web origins and only allowlisted Telegram auth IndexedDB. */
 export function normalizeOriginStorage(origin: string, storage: any): OriginStorage | null {
   const normalizedOrigin = canonicalWebOrigin(origin);
-  if (!normalizedOrigin) return null;
-  const localStorage = Array.isArray(storage?.localStorage)
-    ? storage.localStorage
-        .filter((e: any) => typeof e?.name === "string" && typeof e?.value === "string")
-        .map((e: any) => ({ name: e.name, value: e.value }))
-    : [];
+  if (!normalizedOrigin || !Array.isArray(storage?.localStorage)) return null;
+  const localStorage = storage.localStorage
+    .filter((e: any) => typeof e?.name === "string" && typeof e?.value === "string")
+    .map((e: any) => ({ name: e.name, value: e.value }));
+  if (storage.localStorage.length > 0 && localStorage.length === 0) return null;
   const indexedDB = normalizedOrigin === TELEGRAM_ORIGIN
     ? filterTelegramAuthIndexedDB(storage?.indexedDB)
     : [];
-  if (localStorage.length === 0 && indexedDB.length === 0) return null;
   return { origin: normalizedOrigin, localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
 }
 
@@ -313,7 +316,6 @@ export function parseCapturedSessionBundle(bundle: string): CapturedSessionBundl
     const hasIndexedDB = origin.indexedDB !== undefined;
     if (hasIndexedDB
       && (origin.origin !== TELEGRAM_ORIGIN || !validCapturedTelegramIndexedDB(origin.indexedDB))) invalid();
-    if (origin.localStorage.length === 0 && !hasIndexedDB) invalid();
   }
   return parsed as unknown as CapturedSessionBundle;
 }
@@ -517,6 +519,14 @@ export function normalizeBundle(raw: any): NormalizedSessionBundle {
   return { cookies, origins, ...(telegramClient ? { telegramClient } : {}), hasOrigins };
 }
 
+export function sessionCaptureSeed(bundle: string): SessionCaptureSeed {
+  const normalized = normalizeBundle(parseBundle(bundle));
+  return {
+    origins: normalized.origins.map((origin) => origin.origin),
+    ...(normalized.telegramClient ? { telegramClient: normalized.telegramClient } : {}),
+  };
+}
+
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
   if (!isRecord(value)) return value;
@@ -560,6 +570,67 @@ interface AttachedPageStorage {
   telegramClient?: TelegramWebClient;
 }
 
+function validateCaptureSeed(seed: SessionCaptureSeed): void {
+  if (!Array.isArray(seed.origins)
+    || seed.origins.some((origin) => typeof origin !== "string" || canonicalWebOrigin(origin) !== origin)
+    || (seed.telegramClient !== undefined && seed.telegramClient !== "a" && seed.telegramClient !== "k")) {
+    throw new Error("invalid session capture seed");
+  }
+}
+
+async function primeCaptureOrigins(context: any, seed: SessionCaptureSeed): Promise<() => Promise<void>> {
+  validateCaptureSeed(seed);
+  if (typeof context.newPage !== "function" || typeof context.route !== "function") return async () => {};
+  const origins = new Set(seed.origins);
+  for (const page of context.pages()) {
+    try {
+      const origin = new URL(page.url()).origin;
+      if (canonicalWebOrigin(origin)) origins.add(origin);
+    } catch {}
+  }
+  const pages: any[] = [];
+  const routes: Array<{ url: string; handler: (route: any) => unknown }> = [];
+  const cdpSessions: any[] = [];
+  try {
+    let ordinal = 0;
+    for (const origin of [...origins].sort()) {
+      const page = await context.newPage();
+      pages.push(page);
+      if (typeof context.newCDPSession === "function") {
+        const cdp = await context.newCDPSession(page);
+        cdpSessions.push(cdp);
+        await cdp.send("Network.enable");
+        await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+      }
+      const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
+      let intercepted = false;
+      const handler = (route: any) => {
+        intercepted = true;
+        return route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "<!doctype html><title>capture</title>",
+        });
+      };
+      routes.push({ url, handler });
+      await context.route(url, handler);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
+      if (!intercepted) throw new Error("capture navigation was not intercepted");
+      if (new URL(page.url()).origin !== origin) throw new Error("wrong capture origin");
+    }
+  } catch (error) {
+    for (const page of pages) await page.close().catch(() => {});
+    for (const cdp of cdpSessions) await cdp.detach().catch(() => {});
+    for (const route of routes) await context.unroute(route.url, route.handler).catch(() => {});
+    throw error;
+  }
+  return async () => {
+    for (const page of pages) await page.close().catch(() => {});
+    for (const cdp of cdpSessions) await cdp.detach().catch(() => {});
+    for (const route of routes) await context.unroute(route.url, route.handler).catch(() => {});
+  };
+}
+
 /** Collect storage from supported pages that were already loaded before Playwright attached over CDP. */
 async function collectAttachedPageOrigins(context: any): Promise<AttachedPageStorage> {
   const origins: OriginStorage[] = [];
@@ -594,9 +665,9 @@ async function collectAttachedPageOrigins(context: any): Promise<AttachedPageSto
         const ruleFor = (name) => rules.find((rule) => rule.databaseName
           ? name === rule.databaseName
           : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
-        const resultOf = (request) => new Promise((resolve) => {
+        const resultOf = (request) => new Promise((resolve, reject) => {
           request.onsuccess = () => resolve(request.result);
-          request.onerror = () => resolve(undefined);
+          request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
         });
         const open = (name) => resultOf(indexedDB.open(name));
         for (const meta of await indexedDB.databases()) {
@@ -627,7 +698,7 @@ async function collectAttachedPageOrigins(context: any): Promise<AttachedPageSto
         }
         return false;
       })()`;
-      needsPasscodeCapture = await page.evaluate(passcodePresenceExpr).catch(() => false);
+      needsPasscodeCapture = await page.evaluate(passcodePresenceExpr);
     }
     if (origin === TELEGRAM_ORIGIN && needsPasscodeCapture) {
       const source = await storageScriptSource();
@@ -663,30 +734,39 @@ async function collectAttachedPageOrigins(context: any): Promise<AttachedPageSto
   return { origins, ...(telegramClient ? { telegramClient } : {}) };
 }
 
-export async function collectSessionFromContext(ctx: any): Promise<SessionBundle> {
-  // The public no-IndexedDB state is deliberately the baseline. Telegram's normal A/K login is
-  // localStorage, and collecting every cache DB made auth checkpoints slow and occasionally lossy.
-  // collectAttachedPageOrigins adds only the allowlisted current/legacy passcode stores when needed.
-  const state = await ctx.storageState();
-  const cookies = state.cookies;
-  const byOrigin = new Map<string, OriginStorage>();
-  for (const origin of state.origins ?? []) {
-    const normalized = capturedOriginStorage(origin?.origin, origin);
-    if (normalized) byOrigin.set(normalized.origin, normalized);
+export async function collectSessionFromContext(
+  ctx: any,
+  captureSeed: SessionCaptureSeed = { origins: [] },
+): Promise<SessionBundle> {
+  const cleanup = await primeCaptureOrigins(ctx, captureSeed);
+  try {
+    // The public no-IndexedDB state is deliberately the baseline. Telegram's normal A/K login is
+    // localStorage, and collecting every cache DB made auth checkpoints slow and occasionally lossy.
+    // collectAttachedPageOrigins adds only the allowlisted current/legacy passcode stores when needed.
+    const state = await ctx.storageState();
+    const cookies = state.cookies;
+    const byOrigin = new Map<string, OriginStorage>();
+    for (const origin of state.origins ?? []) {
+      const normalized = capturedOriginStorage(origin?.origin, origin);
+      if (normalized) byOrigin.set(normalized.origin, normalized);
+    }
+    const attachedPages = await collectAttachedPageOrigins(ctx);
+    for (const attached of attachedPages.origins) {
+      // Prefer the attached page's fresher localStorage, but don't drop IndexedDB the storageState pass
+      // captured just because this page fell back to a localStorage-only collect.
+      const prev = byOrigin.get(attached.origin);
+      const merged = prev?.indexedDB && !attached.indexedDB ? { ...attached, indexedDB: prev.indexedDB } : attached;
+      byOrigin.set(attached.origin, merged);
+    }
+    const telegramClient = attachedPages.telegramClient ?? captureSeed.telegramClient;
+    return {
+      cookies,
+      origins: [...byOrigin.values()],
+      ...(telegramClient ? { telegramClient } : {}),
+    };
+  } finally {
+    await cleanup();
   }
-  const attachedPages = await collectAttachedPageOrigins(ctx);
-  for (const attached of attachedPages.origins) {
-    // Prefer the attached page's fresher localStorage, but don't drop IndexedDB the storageState pass
-    // captured just because this page fell back to a localStorage-only collect.
-    const prev = byOrigin.get(attached.origin);
-    const merged = prev?.indexedDB && !attached.indexedDB ? { ...attached, indexedDB: prev.indexedDB } : attached;
-    byOrigin.set(attached.origin, merged);
-  }
-  return {
-    cookies,
-    origins: [...byOrigin.values()],
-    ...(attachedPages.telegramClient ? { telegramClient: attachedPages.telegramClient } : {}),
-  };
 }
 
 class DeadlineExceededError extends Error {}
@@ -715,13 +795,17 @@ async function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: st
  */
 export async function readSessionFromBrowser(
   browser: any,
-  options: { captureTimeoutMs?: number; disconnectTimeoutMs?: number } = {},
+  options: {
+    captureTimeoutMs?: number;
+    disconnectTimeoutMs?: number;
+    captureSeed?: SessionCaptureSeed;
+  } = {},
 ): Promise<string> {
   const captureTimeoutMs = options.captureTimeoutMs ?? SESSION_CAPTURE_TIMEOUT_MS;
   const disconnectTimeoutMs = options.disconnectTimeoutMs ?? SESSION_DISCONNECT_TIMEOUT_MS;
   const capture = (async () => {
     const ctx = browser.contexts()[0] ?? (await browser.newContext());
-    const bundle = JSON.stringify(await collectSessionFromContext(ctx));
+    const bundle = JSON.stringify(await collectSessionFromContext(ctx, options.captureSeed));
     parseCapturedSessionBundle(bundle);
     return bundle;
   })();
@@ -740,10 +824,14 @@ export async function readSessionFromBrowser(
 }
 
 /** Read the running browser's portable web cookies and origin storage into a bundle. */
-export async function readSession(ws: string): Promise<string> {
+export async function readSession(
+  ws: string,
+  captureSeed: SessionCaptureSeed = { origins: [] },
+): Promise<string> {
   const bundle = await runPlaywrightWorker<string>("session-capture", {
     endpoint: ws,
     connectTimeoutMs: 30_000,
+    captureSeed,
   }, { timeoutMs: SESSION_SUBPROCESS_TIMEOUT_MS });
   parseCapturedSessionBundle(bundle);
   return bundle;
@@ -776,7 +864,9 @@ export function decodeReadSessionResult(raw: string): ReadSessionResult {
   throw new Error("invalid session capture subprocess response");
 }
 
-interface ReadSessionSubprocessOptions extends PlaywrightWorkerOptions {}
+interface ReadSessionSubprocessOptions extends PlaywrightWorkerOptions {
+  captureSeed?: SessionCaptureSeed;
+}
 
 export function readSessionWorkerCommand(
   _ws: string,
@@ -794,6 +884,7 @@ export async function readSessionInSubprocess(
   const bundle = await runPlaywrightWorker<string>("session-capture", {
     endpoint: ws,
     connectTimeoutMs: 30_000,
+    captureSeed: options.captureSeed ?? { origins: [] },
   }, { ...options, timeoutMs: options.timeoutMs ?? SESSION_SUBPROCESS_TIMEOUT_MS });
   parseCapturedSessionBundle(bundle);
   return bundle;
@@ -891,26 +982,42 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
       // its session exists can let application code observe "logged out" and mutate storage during restore.
       const canRoute = typeof context.route === "function" && typeof context.unroute === "function";
       const restoreUrl = canRoute ? `${target.origin}/?__aliasmode_session_restore__=${Date.now()}` : target.origin;
-      const routeHandler = (route: any) => route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>restore</title>" });
-      if (canRoute) await context.route(restoreUrl, routeHandler);
+      let intercepted = false;
+      const routeHandler = (route: any) => {
+        intercepted = true;
+        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>restore</title>" });
+      };
+      const cdp = typeof context.newCDPSession === "function" ? await context.newCDPSession(page) : null;
       try {
-        await page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        if (cdp) {
+          await cdp.send("Network.enable");
+          await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+        }
+        if (canRoute) await context.route(restoreUrl, routeHandler);
+        try {
+          await page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        } finally {
+          if (canRoute) await context.unroute(restoreUrl, routeHandler).catch(() => {});
+        }
+        if (canRoute && !intercepted) throw new Error("restore navigation was not intercepted");
       } finally {
-        if (canRoute) await context.unroute(restoreUrl, routeHandler).catch(() => {});
+        if (cdp) await cdp.detach().catch(() => {});
       }
       if (typeof page.url === "function" && new URL(page.url()).origin !== target.origin) {
         throw new Error(`origin restore navigated to ${page.url()} instead of ${target.origin}`);
       }
 
-      // Optional Telegram local-passcode state. Delete/rebuild ONLY the selected auth database(s), not
-      // every IndexedDB database under the origin. A failure is fatal and visible to the coordinator.
-      if (Array.isArray(target.indexedDB) && target.indexedDB.length > 0) {
-        const source = await storageScriptSource();
+      // Telegram passcode state is authoritative, including an empty tombstone. Remove only the
+      // allowlisted auth databases, then rebuild those present in the bundle.
+      if (target.origin === TELEGRAM_ORIGIN) {
+        const databases = Array.isArray(target.indexedDB) ? target.indexedDB : [];
+        const source = databases.length ? await storageScriptSource() : "";
         const idbExpr = `(() => {
-          const module = { exports: {} };
-          ${source}
-          const script = new (module.exports.StorageScript())(false);
-          const databases = ${JSON.stringify(target.indexedDB)};
+          const rules = ${JSON.stringify(TELEGRAM_AUTH_INDEXEDDB_RULES)};
+          const databases = ${JSON.stringify(databases)};
+          const ruleFor = (name) => rules.find((rule) => rule.databaseName
+            ? name === rule.databaseName
+            : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
           const deleteDatabase = (name) => new Promise((resolve, reject) => {
             const request = indexedDB.deleteDatabase(name);
             request.onsuccess = () => resolve();
@@ -918,9 +1025,14 @@ export async function restoreOriginStorage(context: any, origins: OriginStorage[
             request.onblocked = () => reject(new Error("deleteDatabase blocked: " + name));
           });
           return (async () => {
-            for (const database of databases) {
-              await deleteDatabase(database.name);
-              await script._restoreDB(database);
+            for (const database of await indexedDB.databases()) {
+              if (database && database.name && ruleFor(database.name)) await deleteDatabase(database.name);
+            }
+            if (databases.length) {
+              const module = { exports: {} };
+              ${source}
+              const script = new (module.exports.StorageScript())(false);
+              for (const database of databases) await script._restoreDB(database);
             }
             return true;
           })();

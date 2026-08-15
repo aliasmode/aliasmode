@@ -373,7 +373,7 @@ function makeCloudBrowser(
     queue: () => pendingSync.queue(),
     accountId: () => connection.accountId(),
     deviceId: () => connection.deviceId(),
-    readSession: readSessionInSubprocess,
+    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
     applySession: (endpoint, bundle, urls) =>
       applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
   });
@@ -747,7 +747,7 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     queue: () => queue,
     accountId: () => "smoke-account",
     deviceId: () => "smoke-device",
-    readSession: readSessionInSubprocess,
+    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
     applySession: (endpoint, bundle, urls) =>
       applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
     heartbeatMs: 0,
@@ -942,7 +942,7 @@ async function main() {
           hub: new HubClient(hubUrl, password, owner),
           launcher,
           store,
-          readSession: readSessionInSubprocess,
+          readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
           writeSession,
         });
         // Re-claim the lock + resume heartbeats for browsers that survived a
