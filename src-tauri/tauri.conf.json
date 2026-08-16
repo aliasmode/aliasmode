@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AliasMode",
-  "version": "0.1.0-beta.28",
+  "version": "0.1.0-beta.29",
   "identifier": "com.aliasmode.desktop",
   "build": {
     "frontendDist": "bootstrap"
@@ -22,6 +22,10 @@
       "resources/playwright/": "playwright/"
     },
     "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
       "nsis": {
         "installMode": "currentUser"
       }

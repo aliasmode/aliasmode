@@ -29,11 +29,11 @@ const SESSION_URLS = [
 const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
-const SESSION_WRITE_TIMEOUT_MS = 90_000;
+const SESSION_WRITE_TIMEOUT_MS = 240_000;
 const SESSION_CONNECT_TIMEOUT_MS = 30_000;
 const SESSION_CONTEXT_RETRY_MS = 100;
 const SESSION_DISCONNECT_TIMEOUT_MS = 5_000;
-const SESSION_SUBPROCESS_TIMEOUT_MS = 85_000;
+const SESSION_SUBPROCESS_TIMEOUT_MS = 240_000;
 export const READ_SESSION_WORKER_ARG = "--read-session-worker";
 const PLAYWRIGHT_TRANSPORT_STATS = Symbol.for("aliasmode.playwrightTransportStats");
 

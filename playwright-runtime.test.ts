@@ -100,6 +100,25 @@ test("worker timeout kills only the worker and waits for its exit", async () => 
   expect(await result).toMatchObject({ code: "timeout" });
 });
 
+test("worker timeout returns when kill and exit confirmation fail", async () => {
+  let killed = false;
+  const hangingStream = () => new ReadableStream<Uint8Array>({ start() {} });
+  const result = runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    timeoutMs: 5,
+    spawn: () => ({
+      stdin: { write() {}, end() {} },
+      stdout: hangingStream(),
+      stderr: hangingStream(),
+      exited: new Promise<number>(() => {}),
+      kill() { killed = true; throw new Error("failed"); },
+    }),
+  }).then(() => null, (error) => error);
+  const outcome = await Promise.race([result, Bun.sleep(100).then(() => "hung")]);
+  expect(killed).toBe(true);
+  expect(outcome).not.toBe("hung");
+  expect(outcome).toMatchObject({ code: "timeout" });
+});
+
 test("worker reports secret-safe response diagnostics without affecting the parent", async () => {
   const abrupt = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
     spawn: () => fakeWorker("", 9, undefined, "private stderr"),

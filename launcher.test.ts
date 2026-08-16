@@ -869,7 +869,8 @@ test("CLI identifies the manager with the AliasMode marker, never the Automation
   const cli = readFileSync(join(import.meta.dir, "cli.ts"), "utf8");
   expect(cli).toContain('`--aliasmode-launcher-pid=${process.pid}`');
   expect(cli).toContain('has(rest, "no-sandbox") ? ["--no-sandbox"] : []');
-  expect(cli).toContain('unsafeDisableIdentityGates: has(rest, "unsafe-disable-identity-gates")');
+  expect(cli).toContain('const unsafeCanary = has(rest, "unsafe-disable-identity-gates")');
+  expect(cli).toContain("unsafeDisableIdentityGates: unsafeCanary");
   expect(cli).not.toContain('`--automation-launcher-pid=${process.pid}`');
 });
 

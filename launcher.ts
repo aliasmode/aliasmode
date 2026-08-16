@@ -362,10 +362,10 @@ export interface LaunchStartResult {
 }
 
 const DEFAULT_DATA_ROOT = "profiles";
-const DEFAULT_CDP_READY_TIMEOUT_MS = 60_000;
+const DEFAULT_CDP_READY_TIMEOUT_MS = 180_000;
 const DEFAULT_PID_RECOVERY_GRACE_MS = 30_000;
 const SESSION_PID_RECOVERY_TIMEOUT_MS = 30_000;
-const WINDOWS_PROCESS_SCAN_TIMEOUT_MS = 10_000;
+const WINDOWS_PROCESS_SCAN_TIMEOUT_MS = 60_000;
 const WINDOWS_TASKLIST_TIMEOUT_MS = 10_000;
 const DARWIN_PROCESS_SCAN_TIMEOUT_MS = 10_000;
 const FAILED_PROCESS_SCAN_BACKOFF_MS = 60_000;
@@ -563,6 +563,7 @@ export class Launcher {
   private hostPlatform: NodeJS.Platform;
   private hostArch: string;
   private labelWindowFn: WindowLabeler;
+  private skipDefaultWindowLabel: boolean;
   private killPidFn: (pid: number) => Promise<void>;
   private killProcessGroupFn: (processGroupId: number) => Promise<void>;
   private readProcessSnapshotFn?: () => Promise<HostProcessSnapshot | null>;
@@ -571,7 +572,9 @@ export class Launcher {
   private isPidAliveFn: (pid: number) => boolean;
   private pidRecoveryGraceMs: number;
   private findOwnedBrowserPidsFn: OwnedBrowserProcessFinder;
+  private skipDefaultOwnedBrowserScan: boolean;
   private findProfileDirHolderPidsFn: (userDataDir: string) => Promise<number[] | null>;
+  private skipDefaultProfileDirHolderScan: boolean;
   private browserCloseFn: (ws: string, timeoutMs: number) => Promise<boolean>;
   private gracefulStopMs: number;
   private cdpReadyTimeoutMs: number;
@@ -648,6 +651,7 @@ export class Launcher {
     this.hostPlatform = opts.hostPlatform ?? process.platform;
     this.hostArch = opts.hostArch ?? process.arch;
     this.labelWindowFn = opts.labelWindow ?? defaultLabelWindow;
+    this.skipDefaultWindowLabel = this.unsafeDisableIdentityGates && opts.labelWindow === undefined;
     this.killPidFn = opts.killPid ?? killByPid;
     this.killProcessGroupFn = opts.killProcessGroup ?? killProcessGroup;
     this.readProcessSnapshotFn = opts.readProcessSnapshot
@@ -657,7 +661,11 @@ export class Launcher {
     this.isPidAliveFn = opts.isPidAlive ?? isPidAlive;
     this.pidRecoveryGraceMs = Math.max(0, opts.pidRecoveryGraceMs ?? DEFAULT_PID_RECOVERY_GRACE_MS);
     this.findOwnedBrowserPidsFn = opts.findOwnedBrowserPids ?? findOwnedBrowserPids;
+    this.skipDefaultOwnedBrowserScan = this.unsafeDisableIdentityGates
+      && opts.findOwnedBrowserPids === undefined;
     this.findProfileDirHolderPidsFn = opts.findProfileDirHolderPids ?? findProfileDirHolderPids;
+    this.skipDefaultProfileDirHolderScan = this.unsafeDisableIdentityGates
+      && opts.findProfileDirHolderPids === undefined;
     this.browserCloseFn = opts.browserClose ?? defaultBrowserClose;
     this.gracefulStopMs = opts.gracefulStopMs ?? 4000;
     this.cdpReadyTimeoutMs = opts.cdpReadyTimeoutMs ?? DEFAULT_CDP_READY_TIMEOUT_MS;
@@ -970,6 +978,7 @@ export class Launcher {
    * the dir, so a leaked browser from an earlier port never matches it.
    */
   private async reapForeignProfileDirHolders(profileId: string, userDataDir: string): Promise<void> {
+    if (this.skipDefaultProfileDirHolderScan) return;
     const scan = async (): Promise<number[]> => {
       let holders: number[] | null;
       try {
@@ -1368,11 +1377,13 @@ export class Launcher {
       // among many open profiles (the cue AdsPower's panel gave). Registered
       // before navigation so the title script is in place when the platform page
       // loads. Strictly best-effort — never fail or stall a launch on it.
-      try {
-        const serial = this.store.getSerial(profileId);
-        await this.labelWindowFn(ws, buildWindowLabel(profile.name, serial));
-      } catch (err) {
-        this.log(`window label failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
+      if (!this.skipDefaultWindowLabel) {
+        try {
+          const serial = this.store.getSerial(profileId);
+          await this.labelWindowFn(ws, buildWindowLabel(profile.name, serial));
+        } catch (err) {
+          this.log(`window label failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
+        }
       }
 
       // Identity card (#3): open the AdsPower-style landing page in its OWN tab (leaves the
@@ -1619,6 +1630,20 @@ export class Launcher {
     if (cdpAlive && !scanEvenWhenCdpAlive) {
       return { cdpAlive, cdpWs, pid: trackedPid, ownedPids: [], process: "unknown" };
     }
+    if (this.skipDefaultOwnedBrowserScan && proc && trackedPid > 0) {
+      try {
+        const alive = this.isPidAliveFn(trackedPid);
+        return {
+          cdpAlive,
+          cdpWs,
+          pid: trackedPid,
+          ownedPids: alive ? [trackedPid] : [],
+          process: alive ? "alive" : "dead",
+        };
+      } catch {
+        return { cdpAlive, cdpWs, pid: trackedPid, ownedPids: [], process: "unknown" };
+      }
+    }
 
     const identity = this.recordedProcessIdentity(profileId, launch);
     let scanned: number[] | null = null;
@@ -1776,6 +1801,16 @@ export class Launcher {
   }
 
   private async exactOwnedPids(profileId: string, launch: LaunchInfo): Promise<number[] | null> {
+    if (this.skipDefaultOwnedBrowserScan) {
+      const proc = this.procs.get(profileId);
+      const trackedPid = proc?.pid ?? 0;
+      if (trackedPid <= 0) return null;
+      try {
+        return this.isPidAliveFn(trackedPid) ? [trackedPid] : [];
+      } catch {
+        return null;
+      }
+    }
     const identity = this.recordedProcessIdentity(profileId, launch);
     if (!identity) return null;
     try {
@@ -3067,9 +3102,7 @@ async function readHostProcessSnapshot(): Promise<HostProcessSnapshot | null> {
   if (IS_WINDOWS) {
     try {
       const script = [
-        "Get-CimInstance Win32_Process -OperationTimeoutSec 8 -ErrorAction Stop",
-        "Where-Object { $_.CommandLine -ne $null }",
-        "Select-Object ProcessId,ExecutablePath,CommandLine",
+        "Get-CimInstance -Query 'SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE CommandLine IS NOT NULL' -OperationTimeoutSec 50 -ErrorAction Stop",
         "ConvertTo-Json -Compress",
       ].join(" | ");
       const child = Bun.spawn(
