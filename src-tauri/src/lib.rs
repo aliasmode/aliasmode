@@ -8,6 +8,7 @@ use credentials::{credential_delete, credential_get, credential_set, CredentialO
 use rand::random;
 use std::{
     error::Error,
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -15,7 +16,10 @@ use std::{
 use tauri::{
     ipc::CapabilityBuilder, webview::NewWindowResponse, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::ShellExt;
+
+const IMPORT_RESTRICTION: &str = "Windows DPAPI protects persisted browser secrets, so this import works only for the same Windows machine and account. Persisted persona fields are preserved, but runtime or browser differences can change the account-visible fingerprint.";
 
 const LEGAL_URLS: [&str; 3] = [
     "https://aliasmode.com/terms/",
@@ -47,10 +51,79 @@ fn cli_compatible_windows_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
+#[derive(Debug, PartialEq)]
+struct CloakpitImportRequest {
+    source: Option<PathBuf>,
+    profile_root: Option<PathBuf>,
+}
+
+fn parse_cloakpit_import_args(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<Option<CloakpitImportRequest>, String> {
+    let args: Vec<OsString> = args.into_iter().collect();
+    let marker = OsString::from("--import-cloakpit");
+    let Some(index) = args.iter().position(|arg| arg == &marker) else {
+        return Ok(None);
+    };
+    if args[..index].iter().any(|arg| !arg.is_empty()) {
+        return Err("--import-cloakpit cannot be combined with other arguments".to_owned());
+    }
+    let mut source = None;
+    let mut profile_root = None;
+    let mut cursor = index + 1;
+    while cursor < args.len() {
+        if args[cursor] == "--cloakpit-profile-root" {
+            cursor += 1;
+            let value = args
+                .get(cursor)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "--cloakpit-profile-root requires a directory".to_owned())?;
+            if profile_root.replace(PathBuf::from(value)).is_some() {
+                return Err("--cloakpit-profile-root was provided more than once".to_owned());
+            }
+        } else if args[cursor].to_string_lossy().starts_with("--") {
+            return Err(format!(
+                "unknown import option: {}",
+                args[cursor].to_string_lossy()
+            ));
+        } else if source.replace(PathBuf::from(&args[cursor])).is_some() {
+            return Err("only one Cloakpit source directory can be imported".to_owned());
+        }
+        cursor += 1;
+    }
+    Ok(Some(CloakpitImportRequest {
+        source,
+        profile_root,
+    }))
+}
+
+fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
+    app.dialog()
+        .message(message)
+        .title(if ok {
+            "Cloakpit import complete"
+        } else {
+            "Cloakpit import failed"
+        })
+        .kind(if ok {
+            MessageDialogKind::Info
+        } else {
+            MessageDialogKind::Error
+        })
+        .buttons(MessageDialogButtons::Ok)
+        .blocking_show();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{allowed_legal_url, cli_compatible_windows_path};
-    use std::path::{Path, PathBuf};
+    use super::{
+        allowed_legal_url, cli_compatible_windows_path, parse_cloakpit_import_args,
+        CloakpitImportRequest,
+    };
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn allows_only_public_legal_pages() {
@@ -83,9 +156,43 @@ mod tests {
             PathBuf::from(r"\\server\share\playwright"),
         );
     }
+
+    #[test]
+    fn parses_installed_cloakpit_import_arguments() {
+        let args = [
+            "--import-cloakpit",
+            r"C:\Cloakpit",
+            "--cloakpit-profile-root",
+            r"D:\Legacy\profiles",
+        ]
+        .map(OsString::from);
+        assert_eq!(
+            parse_cloakpit_import_args(args).unwrap(),
+            Some(CloakpitImportRequest {
+                source: Some(PathBuf::from(r"C:\Cloakpit")),
+                profile_root: Some(PathBuf::from(r"D:\Legacy\profiles")),
+            }),
+        );
+        assert_eq!(
+            parse_cloakpit_import_args([OsString::from("--import-cloakpit")]).unwrap(),
+            Some(CloakpitImportRequest {
+                source: None,
+                profile_root: None
+            }),
+        );
+        assert!(parse_cloakpit_import_args(
+            ["--import-cloakpit", "one", "two"].map(OsString::from)
+        )
+        .is_err());
+        assert_eq!(
+            parse_cloakpit_import_args(Vec::<OsString>::new()).unwrap(),
+            None
+        );
+    }
 }
 
 pub fn run() {
+    let import_request = parse_cloakpit_import_args(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
         .manage(PendingFocus::default())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -105,8 +212,43 @@ pub fn run() {
             credential_set,
             credential_delete,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
+            match import_request {
+                Err(error) => {
+                    present_import_result(
+                        app.handle(),
+                        false,
+                        &format!("{error}. {IMPORT_RESTRICTION}"),
+                    );
+                    app.handle().exit(1);
+                    return Ok(());
+                }
+                Ok(Some(request)) => {
+                    let result = tauri::async_runtime::block_on(sidecar::run_import(
+                        app.handle(),
+                        &data_dir,
+                        request.source.as_deref(),
+                        request.profile_root.as_deref(),
+                    ));
+                    match result {
+                        Ok(record) => {
+                            present_import_result(app.handle(), record.ok, &record.message);
+                            app.handle().exit(if record.ok { 0 } else { 1 });
+                        }
+                        Err(error) => {
+                            present_import_result(
+                                app.handle(),
+                                false,
+                                &format!("{error}. {IMPORT_RESTRICTION}"),
+                            );
+                            app.handle().exit(1);
+                        }
+                    }
+                    return Ok(());
+                }
+                Ok(None) => {}
+            }
             fs::create_dir_all(data_dir.join("profiles"))?;
             fs::create_dir_all(data_dir.join("inbox"))?;
 
@@ -203,7 +345,9 @@ pub fn run() {
 
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            let _ = app.state::<sidecar::SidecarSupervisor>().kill_owned();
+            if let Some(sidecar) = app.try_state::<sidecar::SidecarSupervisor>() {
+                let _ = sidecar.kill_owned();
+            }
         }
     });
 }

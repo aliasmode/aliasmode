@@ -53,6 +53,16 @@ bun run desktop:build:nsis
 
 The build obtains CloakBrowser through the pinned official wrapper, verifies the staged executable hash, and packages the separately licensed runtime as a third-party resource. AliasMode verifies the installed executable again before startup and before every browser launch.
 
+### Import from Cloakpit
+
+Close Cloakpit and all of its browsers. Then run:
+
+```powershell
+AliasMode.exe --import-cloakpit C:\Cloakpit
+```
+
+Use `--cloakpit-profile-root <dir>` if AliasMode reports browser data in multiple historical locations. Import works only into an empty Local destination on the same Windows machine and account because Windows DPAPI protects browser secrets. It preserves persisted persona data and session-bearing browser files, but runtime or browser differences can change the fingerprint visible to an account.
+
 ## Browser runtime
 
 AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The CloakBrowser binary is not part of this repository or the Apache-2.0 license.

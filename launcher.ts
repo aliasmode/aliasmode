@@ -390,6 +390,7 @@ interface VerifiedExternalLaunch {
 
 export interface HostProcessRecord {
   pid: number;
+  processName?: string;
   executablePath: string | null;
   /** Linux /proc ownership fields; absent on other platforms. */
   parentPid?: number;
@@ -3106,11 +3107,11 @@ function readLinuxProcessRecord(pid: number): HostProcessRecord | null {
   }
 }
 
-async function readHostProcessSnapshot(): Promise<HostProcessSnapshot | null> {
+export async function readHostProcessSnapshot(): Promise<HostProcessSnapshot | null> {
   if (IS_WINDOWS) {
     try {
       const script = [
-        "Get-CimInstance -Query 'SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE CommandLine IS NOT NULL' -OperationTimeoutSec 50 -ErrorAction Stop",
+        "Get-CimInstance -Query 'SELECT ProcessId, Name, ExecutablePath, CommandLine FROM Win32_Process' -OperationTimeoutSec 50 -ErrorAction Stop",
         "ConvertTo-Json -Compress",
       ].join(" | ");
       const child = Bun.spawn(
@@ -3130,6 +3131,7 @@ async function readHostProcessSnapshot(): Promise<HostProcessSnapshot | null> {
         if (!Number.isFinite(pid) || pid <= 0) continue;
         records.push({
           pid,
+          processName: typeof row?.Name === "string" && row.Name ? row.Name : undefined,
           executablePath: typeof row?.ExecutablePath === "string" && row.ExecutablePath ? row.ExecutablePath : null,
           commandLine: typeof row?.CommandLine === "string" ? row.CommandLine : "",
         });

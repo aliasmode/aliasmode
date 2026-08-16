@@ -9,8 +9,13 @@ import {
   OFFICIAL_CLOUD_URL,
   RemoteShutdownTimeoutError,
   runCompiledSidecarSmoke,
+  runCloakpitImportCommand,
   selectedCloudUrl,
 } from "./cli.ts";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { statePaths } from "./paths.ts";
 
 const cloudMode = {
   version: 1 as const,
@@ -23,6 +28,40 @@ const localMode = {
   mode: "local" as const,
   localAnalytics: false,
 };
+
+test("migration-only command dispatches directly and reports required restrictions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-cli-import-"));
+  const calls: unknown[][] = [];
+  const result = await runCloakpitImportCommand([
+    "--source", "C:\\Cloakpit",
+    "--state-root", root,
+    "--cloakpit-profile-root", "D:\\LegacyProfiles",
+  ], async (...args) => {
+    calls.push(args);
+    return { status: "migrated", profileCount: 2 };
+  });
+  expect(calls).toEqual([["C:\\Cloakpit", statePaths(root), { profileRoot: "D:\\LegacyProfiles" }]]);
+  expect(result.ok).toBe(true);
+  expect(result.message).toContain("DPAPI");
+  expect(result.message).toContain("persona fields are preserved");
+  expect(result.message).toContain("runtime or browser differences");
+});
+
+test("internal migration command exits before normal startup creates state", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "aliasmode-cli-import-main-"));
+  const destination = join(parent, "destination");
+  const child = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, "cli.ts"),
+    "__import-cloakpit",
+    "--source", join(parent, "missing"),
+    "--state-root", destination,
+  ], { stdout: "pipe", stderr: "pipe" });
+  const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  expect(exitCode).toBe(1);
+  expect(JSON.parse(stdout)).toMatchObject({ ok: false });
+  expect(existsSync(destination)).toBe(false);
+});
 
 test("compiled sidecar smoke restores before navigation and capture", async () => {
   const events: string[] = [];
