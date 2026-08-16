@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareWindowsBundle } from "./prepare-windows-bundle.ts";
@@ -53,7 +53,33 @@ test("Windows bundle preparation packages the official runtime and records its h
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8"))).toEqual({ name: "playwright-core" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8"))).toEqual({ name: "ws" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "generated", "browser.json"), "utf8"))).toEqual(metadata);
-    expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.29\n");
+    expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.30\n");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Windows bundle preparation rejects a non-Windows browser payload", async () => {
+  const cwd = workspace();
+  try {
+    await expect(prepareWindowsBundle({
+      cwd,
+      platform: "win32",
+      arch: "x64",
+      compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      installNode: async (root) => {
+        mkdirSync(join(root, "node"), { recursive: true });
+        writeFileSync(join(root, "node", "node.exe"), "node");
+      },
+      installBrowser: async (staging) => {
+        const runtime = join(staging, "cloakbrowser");
+        mkdirSync(runtime, { recursive: true });
+        writeFileSync(join(runtime, "chrome"), "browser");
+        writeFileSync(join(runtime, "libEGL.so"), "linux");
+        return { path: join(runtime, "chrome"), sha256: sha256("browser") };
+      },
+    })).rejects.toThrow("Windows chrome.exe");
+    expect(existsSync(join(cwd, "src-tauri", "generated", "browser.json"))).toBe(false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

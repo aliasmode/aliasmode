@@ -124,8 +124,11 @@ export async function prepareWindowsBundle(
   }
 
   const runtimeRoot = dirname(installedReal);
+  const executableRelative = relative(runtimeRoot, installedReal).replaceAll("\\", "/");
+  if (executableRelative !== "chrome.exe") {
+    throw new Error("official CloakBrowser installer did not provide Windows chrome.exe");
+  }
   cpSync(runtimeRoot, resourceRoot, { recursive: true, errorOnExist: false });
-  const executableRelative = relative(runtimeRoot, installedReal);
   const copiedExecutable = join(resourceRoot, executableRelative);
   const copiedHash = (await (options.hashFile ?? sha256File)(copiedExecutable)).toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(copiedHash) || copiedHash !== installed.sha256.toLowerCase()) {
@@ -133,7 +136,7 @@ export async function prepareWindowsBundle(
   }
 
   const metadata: PreparedBrowserMetadata = {
-    executable: executableRelative.replaceAll("\\", "/"),
+    executable: executableRelative,
     sha256: copiedHash,
     wrapperVersion: "0.4.11",
   };
