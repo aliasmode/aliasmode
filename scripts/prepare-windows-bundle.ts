@@ -52,7 +52,6 @@ async function compileSidecar(cwd: string, output: string): Promise<void> {
     "build",
     "--compile",
     `--target=${WINDOWS_SIDECAR_TARGET}`,
-    "--windows-hide-console",
     "--define=ALIASMODE_COMPILED=true",
     "--external=playwright-core",
     "--external=chromium-bidi",
