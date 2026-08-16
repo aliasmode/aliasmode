@@ -15,6 +15,22 @@ use std::{
 use tauri::{
     ipc::CapabilityBuilder, webview::NewWindowResponse, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_shell::ShellExt;
+
+const LEGAL_URLS: [&str; 3] = [
+    "https://aliasmode.com/terms/",
+    "https://aliasmode.com/privacy/",
+    "https://aliasmode.com/acceptable-use/",
+];
+
+fn allowed_legal_url(url: &str) -> bool {
+    LEGAL_URLS.contains(&url)
+}
+
+#[allow(deprecated)]
+fn open_external_url(app: &tauri::AppHandle, url: &str) {
+    let _ = app.shell().open(url, None);
+}
 
 #[derive(Default)]
 struct PendingFocus(AtomicBool);
@@ -33,8 +49,28 @@ fn cli_compatible_windows_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::cli_compatible_windows_path;
+    use super::{allowed_legal_url, cli_compatible_windows_path};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn allows_only_public_legal_pages() {
+        for url in [
+            "https://aliasmode.com/terms/",
+            "https://aliasmode.com/privacy/",
+            "https://aliasmode.com/acceptable-use/",
+        ] {
+            assert!(allowed_legal_url(url));
+        }
+        for url in [
+            "http://aliasmode.com/terms/",
+            "https://cloud.aliasmode.com/terms/",
+            "https://aliasmode.com/terms/extra",
+            "https://aliasmode.com/terms/?continue=https://example.com",
+            "https://example.com/terms/",
+        ] {
+            assert!(!allowed_legal_url(url));
+        }
+    }
 
     #[test]
     fn removes_windows_namespace_prefix_before_cli_use() {
@@ -124,6 +160,7 @@ pub fn run() {
             }
 
             let allowed_port = port;
+            let shell_handle = handle.clone();
             let url = format!("{origin}/")
                 .parse()
                 .map_err(|error| boxed(format!("invalid sidecar URL: {error}")))?;
@@ -139,7 +176,12 @@ pub fn run() {
                             && url.host_str() == Some("tauri.localhost"))
                         || (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
                 })
-                .on_new_window(|_, _| NewWindowResponse::Deny)
+                .on_new_window(move |url, _| {
+                    if allowed_legal_url(url.as_str()) {
+                        open_external_url(&shell_handle, url.as_str());
+                    }
+                    NewWindowResponse::Deny
+                })
                 .build()
             {
                 Ok(window) => window,
