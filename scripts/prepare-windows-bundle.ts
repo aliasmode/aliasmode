@@ -44,12 +44,15 @@ function isWithin(parent: string, child: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+export const WINDOWS_SIDECAR_TARGET = "bun-windows-x64-baseline";
+
 async function compileSidecar(cwd: string, output: string): Promise<void> {
   const child = Bun.spawn([
     process.execPath,
     "build",
     "--compile",
-    "--target=bun-windows-x64",
+    `--target=${WINDOWS_SIDECAR_TARGET}`,
+    "--windows-hide-console",
     "--define=ALIASMODE_COMPILED=true",
     "--external=playwright-core",
     "--external=chromium-bidi",

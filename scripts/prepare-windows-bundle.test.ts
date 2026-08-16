@@ -3,9 +3,13 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareWindowsBundle } from "./prepare-windows-bundle.ts";
+import { prepareWindowsBundle, WINDOWS_SIDECAR_TARGET } from "./prepare-windows-bundle.ts";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+
+test("Windows sidecar supports x64 CPUs without AVX2", () => {
+  expect(WINDOWS_SIDECAR_TARGET).toBe("bun-windows-x64-baseline");
+});
 
 function workspace(): string {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-windows-bundle-"));
@@ -53,7 +57,7 @@ test("Windows bundle preparation packages the official runtime and records its h
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8"))).toEqual({ name: "playwright-core" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8"))).toEqual({ name: "ws" });
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "generated", "browser.json"), "utf8"))).toEqual(metadata);
-    expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.31\n");
+    expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.32\n");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
