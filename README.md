@@ -42,7 +42,7 @@ The dashboard and compatibility API bind to loopback only.
 
 ### Windows desktop beta
 
-Published installers support Windows 10 or 11 and Windows Server 2016 or newer on x64 processors with SSE4.2. They install for the current user and remain unsigned while release signing is configured.
+Published installers support Windows 10 version 1809 or newer, Windows 11, and Windows Server 2016 or newer on x64 processors with SSE4.2. They install for the current user and remain unsigned while release signing is configured.
 
 Desktop packaging requires Windows x64, Bun, the Rust MSVC toolchain, WebView2, and Visual Studio C++ Build Tools. The approved Alias Loop icon is included at `src-tauri/icons/icon.ico`.
 
