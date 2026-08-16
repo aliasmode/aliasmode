@@ -30,6 +30,7 @@ jobs:
     name: Windows NSIS installer
     runs-on: windows-latest
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
@@ -39,7 +40,18 @@ jobs:
           toolchain: 1.89
           components: rustfmt
       - run: bun install --frozen-lockfile
-      - run: bun run desktop:prepare
+      - name: Prepare bundle with official baseline Bun
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+          $root = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
+          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $zip
+          Expand-Archive $zip $root -Force
+          $baselineBun = (Get-ChildItem $root -Recurse -File -Filter "bun.exe" | Select-Object -First 1).FullName
+          if (-not $baselineBun) { throw "official baseline Bun executable is missing" }
+          & $baselineBun scripts/prepare-windows-bundle.ts
+          if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
       - run: bun test
       - run: bun run typecheck
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
