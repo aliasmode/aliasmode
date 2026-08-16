@@ -318,7 +318,7 @@ jobs:
           $worker.WaitForExit()
           if ($worker.ExitCode -ne 1) { throw "installed Playwright worker exited with code $($worker.ExitCode)" }
           try { $workerResponse = $workerOutput | ConvertFrom-Json } catch { throw "installed Playwright worker returned malformed JSON" }
-          if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "operation_failed") {
+          if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "invalid_request") {
             throw "installed Playwright worker returned an unexpected protocol response"
           }
           if (-not [string]::IsNullOrEmpty($workerError)) { throw "installed Playwright worker wrote to stderr" }
