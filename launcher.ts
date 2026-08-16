@@ -2245,6 +2245,14 @@ export class Launcher {
     ];
   }
 
+  /** Block destructive profile deletion while any owned lifecycle can still use its data directory. */
+  profileDeletionBlocked(profileId: string): boolean {
+    return this.startsInFlight.has(profileId)
+      || this.stopsInFlight.has(profileId)
+      || this.procs.has(profileId)
+      || this.store.getLaunch(profileId) !== null;
+  }
+
   /** True iff the profile's browser is currently reachable over CDP. */
   async active(profileId: string): Promise<boolean> {
     const launch = this.store.getLaunch(profileId);

@@ -777,16 +777,14 @@ test("export in remote mode pulls every selected profile from the hub, not the l
   s.close();
 });
 
-test("delete (standalone) stops the browser AND removes the profile's user-data dir", async () => {
+test("delete (standalone) blocks an open profile without stopping it or removing its data", async () => {
   const s = store();
   const dataRoot = join("/tmp", `ui-del-${process.pid}-${s.count()}`);
-  const calls: string[] = [];
   const launcher: any = {
-    stop: async (id: string) => { calls.push(`stop:${id}`); return true; },
-    userDataDir: (id: string) => join(dataRoot, id),
-    removeUserDataDir: (id: string) => { rmSync(join(dataRoot, id), { recursive: true, force: true }); return true; },
+    profileDeletionBlocked: () => true,
+    stop: async () => { throw new Error("must not stop an open profile during delete"); },
+    removeUserDataDir: () => { throw new Error("must not remove an open profile"); },
   };
-  // Simulate an opened profile: a launch row + persistent session on disk.
   s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
   const dir = join(dataRoot, "k1d0cd11");
   mkdirSync(dir, { recursive: true });
@@ -798,48 +796,57 @@ test("delete (standalone) stops the browser AND removes the profile's user-data 
     s,
   );
   const body = await res!.json();
-  expect(body.ok).toBe(true);
-  expect(body.deleted).toBe(1);
-  expect(calls).toContain("stop:k1d0cd11"); // running browser stopped first
-  expect(existsSync(dir)).toBe(false); // the on-disk session is actually gone
-  expect(s.getProfile("k1d0cd11")).toBeNull();
-
-  rmSync(dataRoot, { recursive: true, force: true });
-  s.close();
-});
-
-test("delete preserves the profile and user-data when browser teardown is unconfirmed", async () => {
-  const s = store();
-  const dataRoot = join("/tmp", `ui-del-held-${process.pid}-${s.count()}`);
-  const dir = join(dataRoot, "k1d0cd11");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "Cookies"), "logged-in");
-  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
-  const launcher: any = {
-    stop: async () => false,
-    removeUserDataDir: () => { throw new Error("must not remove a live profile"); },
-  };
-
-  const res = await handleUiRequest(
-    new Request("http://x/ui/api/profiles/delete", { method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }) }),
-    launcher,
-    s,
-  );
-  const body = await res!.json();
-  expect(body.deleted).toBe(0);
-  expect(body.locked).toEqual(["k1d0cd11"]);
-  expect(s.getProfile("k1d0cd11")).not.toBeNull();
+  expect(res!.status).toBe(409);
+  expect(body).toMatchObject({ ok: false, deleted: 0, locked: ["k1d0cd11"] });
   expect(existsSync(dir)).toBe(true);
+  expect(s.getProfile("k1d0cd11")).not.toBeNull();
+
   rmSync(dataRoot, { recursive: true, force: true });
   s.close();
 });
 
-test("delete always waits on launcher.stop even before a launch row exists", async () => {
+test("delete (standalone) keeps a mixed open and closed selection atomic", async () => {
+  const s = store();
+  const closedId = "closed001";
+  s.upsertProfile({ ...s.getProfile("k1d0cd11")!, id: closedId, name: "closed" });
+  const dataRoot = join("/tmp", `ui-del-mixed-${process.pid}-${s.count()}`);
+  const openDir = join(dataRoot, "k1d0cd11");
+  const closedDir = join(dataRoot, closedId);
+  mkdirSync(openDir, { recursive: true });
+  mkdirSync(closedDir, { recursive: true });
+  writeFileSync(join(openDir, "Cookies"), "open");
+  writeFileSync(join(closedDir, "Cookies"), "closed");
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
+  const launcher: any = {
+    profileDeletionBlocked: (id: string) => id === "k1d0cd11",
+    stop: async () => { throw new Error("must not stop profiles during delete"); },
+    removeUserDataDir: () => { throw new Error("must not mutate a blocked batch"); },
+  };
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/delete", {
+      method: "POST", body: JSON.stringify({ ids: [closedId, "k1d0cd11"] }),
+    }),
+    launcher,
+    s,
+  );
+  expect(res!.status).toBe(409);
+  expect(await res!.json()).toMatchObject({ deleted: 0, locked: ["k1d0cd11"] });
+  expect(s.getProfile(closedId)).not.toBeNull();
+  expect(s.getProfile("k1d0cd11")).not.toBeNull();
+  expect(existsSync(closedDir)).toBe(true);
+  expect(existsSync(openDir)).toBe(true);
+  rmSync(dataRoot, { recursive: true, force: true });
+  s.close();
+});
+
+test("delete (standalone) removes a closed profile without calling stop", async () => {
   const s = store();
   const calls: string[] = [];
   const launcher: any = {
-    stop: async (id: string) => { calls.push(id); return true; },
-    removeUserDataDir: () => true,
+    profileDeletionBlocked: () => false,
+    stop: async () => { throw new Error("delete must not stop a profile"); },
+    removeUserDataDir: (id: string) => { calls.push(id); return true; },
   };
 
   const res = await handleUiRequest(
@@ -850,6 +857,32 @@ test("delete always waits on launcher.stop even before a launch row exists", asy
 
   expect(await res!.json()).toMatchObject({ ok: true, deleted: 1, locked: [] });
   expect(calls).toEqual(["k1d0cd11"]);
+  expect(s.getProfile("k1d0cd11")).toBeNull();
+  s.close();
+});
+
+test("delete (standalone) preserves a closed profile when data cleanup fails and allows retry", async () => {
+  const s = store();
+  let failCleanup = true;
+  const launcher: any = {
+    profileDeletionBlocked: () => false,
+    removeUserDataDir: () => {
+      if (failCleanup) throw new Error("cleanup failed");
+      return true;
+    },
+  };
+  const request = () => new Request("http://x/ui/api/profiles/delete", {
+    method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }),
+  });
+
+  const failed = await handleUiRequest(request(), launcher, s);
+  expect(failed!.status).toBe(500);
+  expect(s.getProfile("k1d0cd11")).not.toBeNull();
+
+  failCleanup = false;
+  const retried = await handleUiRequest(request(), launcher, s);
+  expect(retried!.status).toBe(200);
+  expect(await retried!.json()).toMatchObject({ ok: true, deleted: 1 });
   expect(s.getProfile("k1d0cd11")).toBeNull();
   s.close();
 });

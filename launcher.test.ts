@@ -1506,13 +1506,16 @@ test("start persists provisional ownership before spawn and CDP readiness", asyn
     cdpReadyTimeoutMs: 1000,
   });
 
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(false);
   const starting = launcher.start("k1d0cd11");
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // startsInFlight, before a launch row
   for (let i = 0; i < 20 && !store.getLaunch("k1d0cd11"); i++) await Bun.sleep(0);
   expect(store.getLaunch("k1d0cd11")).toMatchObject({ pid: 8124, debugPort: 9333, ws: "" });
   expect(sawPreSpawnReservation).toBe(true);
   release();
   await starting;
   expect(store.getLaunch("k1d0cd11")?.ws).toContain("devtools/browser/x");
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // tracked running process
   store.close();
 });
 
@@ -1739,6 +1742,7 @@ test("concurrent stop calls share one destructive teardown", async () => {
 
   const first = launcher.stop("k1d0cd11");
   await entered;
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // stop still owns the data directory
   const second = launcher.stop("k1d0cd11");
   await Promise.resolve();
   expect(killCalls).toBe(1);
@@ -1747,6 +1751,7 @@ test("concurrent stop calls share one destructive teardown", async () => {
   expect(await Promise.all([first, second])).toEqual([true, true]);
   expect(killCalls).toBe(1);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(false);
   store.close();
 });
 

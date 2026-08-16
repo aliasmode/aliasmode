@@ -654,26 +654,25 @@ export async function handleUiRequest(
         const r = await remote.deleteProfiles(ids);
         return Response.json({ ok: true, ...r });
       }
-      // Standalone: stop any running browser, then remove BOTH the SQLite rows
-      // and the persistent user-data dir — the saved login/session lives on disk
-      // there, so dropping only the rows leaves it behind and a re-import of the
-      // same id would silently resume the old session. removeUserDataDir refuses
-      // any path that escapes the data root, so a crafted/legacy id stays safe.
-      const locked: string[] = [];
+      // Standalone deletion never closes a browser implicitly. Preflight the
+      // full selection before mutation so a mixed open/closed batch is atomic.
+      const existing = ids.filter((id) => store.getProfile(id));
+      const locked = existing.filter((id) => launcher.profileDeletionBlocked(id));
+      if (locked.length > 0) {
+        return Response.json({
+          ok: false,
+          error: "close open profiles before deleting them",
+          deleted: 0,
+          locked,
+        }, { status: 409 });
+      }
       let deleted = 0;
-      for (const id of ids) {
-        if (!store.getProfile(id)) continue;
-        // stop() is also the serialization barrier for a start still in
-        // preflight, before that start has recorded a launch row.
-        if ((await launcher.stop(id)) !== true) {
-          locked.push(id);
-          continue;
-        }
+      for (const id of existing) {
         launcher.removeUserDataDir(id);
         store.deleteProfile(id);
         deleted++;
       }
-      return Response.json({ ok: true, deleted, locked });
+      return Response.json({ ok: true, deleted, locked: [] });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }
