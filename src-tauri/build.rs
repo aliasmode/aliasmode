@@ -20,6 +20,11 @@ fn main() {
             "browser metadata is missing {key}"
         );
     }
+    assert_eq!(
+        parsed.get("executable").and_then(|value| value.as_str()),
+        Some("chrome.exe"),
+        "browser metadata must target Windows chrome.exe"
+    );
     let sha256 = parsed
         .get("sha256")
         .and_then(|value| value.as_str())

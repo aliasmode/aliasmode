@@ -140,6 +140,36 @@ test("pending sync retry accepts first valid closes and preserves conflicts", as
   state.queue.close();
 });
 
+test("concurrent pending retries report only durable accepted transitions", async () => {
+  const state = queue();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 2,
+    payload: payload(),
+  });
+  let calls = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const cloud = {
+    async closeOpen() {
+      calls++;
+      await blocked;
+      return { ok: true as const, status: "accepted" as const, version: 3 };
+    },
+  };
+
+  const first = retryPendingSync(state.queue, cloud, "account1");
+  const second = retryPendingSync(state.queue, cloud, "account1");
+  while (calls < 2) await Bun.sleep(1);
+  release();
+  const results = await Promise.all([first, second]);
+  expect(results.reduce((count, result) => count + result.accepted, 0)).toBe(1);
+  expect(state.queue.list("account1")).toEqual([]);
+  state.queue.close();
+});
+
 test("pending sync retry surfaces terminal API errors and continues with later closes", async () => {
   const state = queue();
   const terminalId = state.queue.enqueue({
@@ -361,6 +391,72 @@ test("pending open removal can be fenced to its registration", () => {
   expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe("registration1");
   expect(state.queue.removeOpenRegistration("profile1", "account1", "registration1")).toBe(true);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+});
+
+test("pending open checkpoint finalization is atomic and registration-fenced", () => {
+  const state = queue();
+  state.queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 1,
+  });
+  const checkpointId = state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 1,
+    payload: payload(),
+    readyToSubmit: false,
+  });
+
+  expect(state.queue.finalizeOpenCheckpoint("profile1", "account1", "replacement")).toBe(false);
+  expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe("registration1");
+  expect(state.queue.get(checkpointId, "account1")?.readyToSubmit).toBe(false);
+
+  expect(state.queue.finalizeOpenCheckpoint("profile1", "account1", "registration1")).toBe(true);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.queue.get(checkpointId, "account1")?.readyToSubmit).toBe(true);
+  state.queue.close();
+});
+
+test("pending opens encrypt cleanup intent and fence updates to the registration", () => {
+  const state = queue();
+  state.queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration-secret",
+    expectedVersion: 1,
+  });
+
+  expect(state.queue.setOpenCleanup("profile1", "account1", "replacement", "discard")).toBe(false);
+  expect(state.queue.setOpenCleanup(
+    "profile1",
+    "account1",
+    "registration-secret",
+    "discard",
+  )).toBe(true);
+  expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBe("discard");
+  state.queue.close();
+  expect(readFileSync(state.path).toString("utf8")).not.toContain("discard");
+});
+
+test("pending checkpoint removal is registration-fenced", () => {
+  const state = queue();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 1,
+    payload: payload("checkpoint"),
+    readyToSubmit: false,
+  });
+
+  expect(state.queue.removeUnreadyCaptures("profile1", "account1", "replacement")).toBe(0);
+  expect(state.queue.list("account1")).toHaveLength(1);
+  expect(state.queue.removeUnreadyCaptures("profile1", "account1", "registration1")).toBe(1);
+  expect(state.queue.list("account1")).toEqual([]);
   state.queue.close();
 });
 

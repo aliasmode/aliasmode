@@ -102,6 +102,7 @@ function harness(): Harness {
       const pid = pidByPort.get(debugPort);
       return pid !== undefined && alivePids.has(pid) ? [pid] : [];
     },
+    findProfileDirHolderPids: async () => [],
     // stop() asks the browser to flush+close over CDP before the force-kill.
     browserClose: async (ws) => {
       gracefulCloses.push(ws);

@@ -180,18 +180,26 @@ export async function runPlaywrightWorker<T>(
   }
   child.stdin.write(request);
   child.stdin.end();
-  const timeoutMs = Math.max(1, options.timeoutMs ?? 120_000);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try { child.kill(); } catch {}
-  }, timeoutMs);
+  const timeoutMs = Math.max(1, options.timeoutMs ?? 240_000);
   const stdout = readBounded(child.stdout, PLAYWRIGHT_MAX_MESSAGE_BYTES);
   // Drain stderr so a child cannot block. Keep only its presence for diagnostics.
   const stderr = readBounded(child.stderr, 64 * 1024);
-  const [output, errorOutput, exit] = await Promise.allSettled([stdout, stderr, child.exited]);
-  clearTimeout(timer);
-  if (timedOut) throw new PlaywrightWorkerError("timeout", "Playwright worker timed out");
+  const completion = Promise.allSettled([stdout, stderr, child.exited]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    completion.then((results) => ({ kind: "completed" as const, results })),
+    new Promise<{ kind: "timeout" }>((resolve) => {
+      timer = setTimeout(() => {
+        try { child.kill(); } catch {}
+        resolve({ kind: "timeout" });
+      }, timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (outcome.kind === "timeout") {
+    throw new PlaywrightWorkerError("timeout", "Playwright worker timed out");
+  }
+  const [output, errorOutput, exit] = outcome.results;
   if (output.status === "rejected") {
     if (output.reason instanceof OutputLimitError) {
       throw responseFailure("invalid_response", operation, "stdout_overflow", output.reason.bytes, exit, errorOutput);

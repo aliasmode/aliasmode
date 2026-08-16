@@ -125,6 +125,14 @@ export class CloudProfileEditor {
     private readonly store: CloudProfileEditorStore,
   ) {}
 
+  /** Check Cloud's current open state and this machine's launch cache before a destructive operation. */
+  async closedProfileVersion(profileId: string): Promise<number> {
+    assertSafeProfileId(profileId);
+    const authoritative = await this.cloud.getProfile(profileId);
+    this.assertClosed(profileId, authoritative.profile.activeOpens.length);
+    return authoritative.profile.version;
+  }
+
   async get(profileId: string): Promise<CloudProfileEditView> {
     assertSafeProfileId(profileId);
     const authoritative = await this.cloud.getProfile(profileId);

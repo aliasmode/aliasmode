@@ -51,6 +51,12 @@ interface EncryptedPendingClose {
 }
 
 export type PendingOpenPhase = "opening" | "restoring" | "running";
+export type PendingOpenCleanupMode = "sync" | "abandon" | "discard";
+
+interface EncryptedPendingOpen {
+  registrationId: string;
+  cleanupMode?: PendingOpenCleanupMode;
+}
 
 export interface PendingOpenSession {
   accountId: string;
@@ -58,6 +64,7 @@ export interface PendingOpenSession {
   registrationId: string;
   expectedVersion: number;
   phase: PendingOpenPhase;
+  cleanupMode?: PendingOpenCleanupMode;
   debugPort: number | null;
   startedAt: number | null;
   createdAt: number;
@@ -305,6 +312,20 @@ export class PendingSyncQueue {
     ).run(id, accountId).changes === 1;
   }
 
+  removeUnreadyCaptures(
+    profileId: string,
+    accountId: string,
+    registrationId: string,
+  ): number {
+    let removed = 0;
+    for (const summary of this.list(accountId)) {
+      if (summary.profileId !== profileId || summary.readyToSubmit) continue;
+      const pending = this.get(summary.id, accountId);
+      if (pending?.registrationId === registrationId && this.remove(summary.id, accountId)) removed++;
+    }
+    return removed;
+  }
+
   recordOpen(input: {
     accountId: string;
     profileId: string;
@@ -317,7 +338,9 @@ export class PendingSyncQueue {
     const nonce = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", this.key, nonce);
     cipher.setAAD(openAad(input.accountId, input.profileId, input.expectedVersion));
-    const plaintext = Buffer.from(JSON.stringify({ registrationId: input.registrationId }));
+    const plaintext = Buffer.from(JSON.stringify({
+      registrationId: input.registrationId,
+    } satisfies EncryptedPendingOpen));
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     plaintext.fill(0);
     const authTag = cipher.getAuthTag();
@@ -361,9 +384,20 @@ export class PendingSyncQueue {
       decipher.final(),
     ]);
     try {
-      const encrypted = JSON.parse(plaintext.toString("utf8")) as { registrationId?: unknown };
+      const encrypted = JSON.parse(plaintext.toString("utf8")) as {
+        registrationId?: unknown;
+        cleanupMode?: unknown;
+      };
       if (typeof encrypted.registrationId !== "string" || !encrypted.registrationId) {
         throw new Error("pending open registration is invalid");
+      }
+      if (
+        encrypted.cleanupMode !== undefined &&
+        encrypted.cleanupMode !== "sync" &&
+        encrypted.cleanupMode !== "abandon" &&
+        encrypted.cleanupMode !== "discard"
+      ) {
+        throw new Error("pending open cleanup mode is invalid");
       }
       return {
         accountId: row.account_id,
@@ -371,6 +405,7 @@ export class PendingSyncQueue {
         registrationId: encrypted.registrationId,
         expectedVersion: row.expected_version,
         phase: row.phase,
+        ...(encrypted.cleanupMode ? { cleanupMode: encrypted.cleanupMode } : {}),
         debugPort: row.debug_port,
         startedAt: row.started_at,
         createdAt: row.created_at,
@@ -415,6 +450,73 @@ export class PendingSyncQueue {
     ).changes === 1;
   }
 
+  setOpenCleanup(
+    profileId: string,
+    accountId: string,
+    registrationId: string,
+    cleanupMode: PendingOpenCleanupMode,
+  ): boolean {
+    const current = this.getOpen(profileId, accountId);
+    if (!current || current.registrationId !== registrationId) return false;
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.key, nonce);
+    cipher.setAAD(openAad(accountId, profileId, current.expectedVersion));
+    const plaintext = Buffer.from(JSON.stringify({
+      registrationId,
+      cleanupMode,
+    } satisfies EncryptedPendingOpen));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    plaintext.fill(0);
+    return this.db.query(`
+      UPDATE pending_open_sessions
+      SET nonce = ?, ciphertext = ?, auth_tag = ?, updated_at = ?
+      WHERE profile_id = ? AND account_id = ?
+    `).run(
+      nonce,
+      ciphertext,
+      cipher.getAuthTag(),
+      Date.now(),
+      profileId,
+      accountId,
+    ).changes === 1;
+  }
+
+  finalizeOpenCheckpoint(
+    profileId: string,
+    accountId: string,
+    registrationId: string,
+  ): boolean {
+    const finalize = this.db.transaction(() => {
+      const open = this.getOpen(profileId, accountId);
+      if (!open || open.registrationId !== registrationId) return false;
+      const rows = this.db.query<PendingRow, [string, string]>(`
+        SELECT * FROM pending_closes
+        WHERE profile_id = ? AND account_id = ?
+        ORDER BY created_at, id
+      `).all(profileId, accountId);
+      const captures = rows.map((row) => ({ row, capture: this.get(row.id, accountId) }))
+        .filter((item) => item.capture?.registrationId === registrationId);
+      if (captures.length === 0) return false;
+
+      const now = Date.now();
+      for (const { row, capture } of captures) {
+        if (capture!.readyToSubmit || capture!.status === "conflict") continue;
+        const changed = this.db.query(`
+          UPDATE pending_closes
+          SET ready_to_submit = 1, updated_at = ?
+          WHERE id = ? AND account_id = ? AND ready_to_submit = 0 AND status != 'conflict'
+        `).run(now, row.id, accountId).changes;
+        if (changed !== 1) throw new Error("pending checkpoint finalization changed concurrently");
+      }
+      const removed = this.db.query(`
+        DELETE FROM pending_open_sessions WHERE profile_id = ? AND account_id = ?
+      `).run(profileId, accountId).changes;
+      if (removed !== 1) throw new Error("pending open finalization changed concurrently");
+      return true;
+    });
+    return finalize();
+  }
+
   removeOpen(profileId: string, accountId: string): boolean {
     return this.db.query(`
       DELETE FROM pending_open_sessions WHERE profile_id = ? AND account_id = ?
@@ -435,8 +537,8 @@ export class PendingSyncQueue {
     return this.db.query(`
       UPDATE pending_closes
       SET status = ?, error = ?, updated_at = ?
-      WHERE id = ? AND account_id = ?
-    `).run(status, error, Date.now(), id, accountId).changes === 1;
+      WHERE id = ? AND account_id = ? AND status != ?
+    `).run(status, error, Date.now(), id, accountId, status).changes === 1;
   }
 }
 
@@ -535,6 +637,7 @@ const TERMINAL_PENDING_CLOSE_ERRORS = new Set([
   "workspace_conflict",
   "profile_not_found",
   "profile_trashed",
+  "folder_access_denied",
   "validation_failed",
 ]);
 
@@ -556,25 +659,23 @@ export async function retryPendingSync(
         payload: pending.payload,
       });
       if (response.ok) {
-        queue.remove(pending.id, accountId);
-        result.accepted++;
-      } else {
-        queue.markConflict(
-          pending.id,
-          accountId,
-          `version conflict (current version ${response.error.currentVersion})`,
-        );
+        if (queue.remove(pending.id, accountId)) result.accepted++;
+      } else if (queue.markConflict(
+        pending.id,
+        accountId,
+        `version conflict (current version ${response.error.currentVersion})`,
+      )) {
         result.conflicts++;
       }
     } catch (error) {
       if (error instanceof CloudApiError && TERMINAL_PENDING_CLOSE_ERRORS.has(error.code)) {
-        queue.markConflict(pending.id, accountId, error.code);
-        result.conflicts++;
+        if (queue.markConflict(pending.id, accountId, error.code)) result.conflicts++;
         continue;
       }
-      queue.markRetrying(pending.id, accountId, "transport_error");
-      result.failed++;
-      break;
+      if (queue.markRetrying(pending.id, accountId, "transport_error")) {
+        result.failed++;
+        break;
+      }
     }
   }
   return result;

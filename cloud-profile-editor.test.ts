@@ -68,6 +68,16 @@ function readOnlyStore(launch: unknown = null) {
   }) as any;
 }
 
+test("Cloud editor closedProfileVersion reuses authoritative and local open guards", async () => {
+  const cloud = { getProfile: async () => response(9) } as any;
+  await expect(new CloudProfileEditor(cloud, readOnlyStore()).closedProfileVersion("cloud1")).resolves.toBe(9);
+  await expect(new CloudProfileEditor(cloud, readOnlyStore({ profileId: "cloud1" })).closedProfileVersion("cloud1"))
+    .rejects.toMatchObject({ status: 409 });
+  await expect(new CloudProfileEditor({ getProfile: async () => response(9, [{}]) } as any, readOnlyStore()).closedProfileVersion("cloud1"))
+    .rejects.toMatchObject({ status: 409 });
+});
+
+
 test("Cloud editor GET returns only editable data and the authoritative version", async () => {
   const cloud = new Proxy({
     async getProfile(profileId: string) {

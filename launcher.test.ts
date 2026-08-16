@@ -33,12 +33,15 @@ import {
 import { parseExport } from "./parse.ts";
 import { SessionRestoreError } from "./session.ts";
 
+const linuxTest = process.platform === "win32" ? test.skip : test;
+
 /** Unit tests use fake executables, hosts, and CDP fleets. */
 class Launcher extends ProductionLauncher {
   constructor(opts: ConstructorParameters<typeof ProductionLauncher>[0]) {
     super({
       // Production policy is exercised explicitly in dedicated gate tests below.
       unsafeDisableIdentityGates: true,
+      findProfileDirHolderPids: async () => [],
       ...opts,
     });
   }
@@ -318,6 +321,7 @@ test("a restart with a different launch mode stops the stale persona instead of 
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
   });
@@ -634,7 +638,7 @@ test("tasklist image parser ignores localized status text", () => {
   ].join("\r\n"))).toEqual(new Set(["chrome.exe", "cloakbrowser.exe"]));
 });
 
-test("exact process matching adopts Linux deleted executables and quarantines wrong binaries", () => {
+linuxTest("exact process matching adopts Linux deleted executables and quarantines wrong binaries", () => {
   const identity = {
     profileId: "k1d0cd11",
     debugPort: 9333,
@@ -865,7 +869,8 @@ test("CLI identifies the manager with the AliasMode marker, never the Automation
   const cli = readFileSync(join(import.meta.dir, "cli.ts"), "utf8");
   expect(cli).toContain('`--aliasmode-launcher-pid=${process.pid}`');
   expect(cli).toContain('has(rest, "no-sandbox") ? ["--no-sandbox"] : []');
-  expect(cli).toContain('unsafeDisableIdentityGates: has(rest, "unsafe-disable-identity-gates")');
+  expect(cli).toContain('const unsafeCanary = has(rest, "unsafe-disable-identity-gates")');
+  expect(cli).toContain("unsafeDisableIdentityGates: unsafeCanary");
   expect(cli).not.toContain('`--automation-launcher-pid=${process.pid}`');
 });
 
@@ -964,6 +969,7 @@ test("authenticated SOCKS5 uses the compatibility relay before browser setup", a
     labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1025,6 +1031,7 @@ test("proxy relay failures do not expose upstream or target details through laun
     labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1071,6 +1078,7 @@ test("proxied launch preserves stored timezone and routes through the relay", as
     labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1157,6 +1165,7 @@ test("a Windows persona launches on a Mac host (cross-OS spoofing allowed)", asy
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
@@ -1195,6 +1204,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
@@ -1300,6 +1310,8 @@ test("start injects cookies before navigating startup URLs", async () => {
     ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
     labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1369,6 +1381,8 @@ test("start opens the platform home page (deferred) when the caller passes no UR
     ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
     labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -1492,13 +1506,16 @@ test("start persists provisional ownership before spawn and CDP readiness", asyn
     cdpReadyTimeoutMs: 1000,
   });
 
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(false);
   const starting = launcher.start("k1d0cd11");
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // startsInFlight, before a launch row
   for (let i = 0; i < 20 && !store.getLaunch("k1d0cd11"); i++) await Bun.sleep(0);
   expect(store.getLaunch("k1d0cd11")).toMatchObject({ pid: 8124, debugPort: 9333, ws: "" });
   expect(sawPreSpawnReservation).toBe(true);
   release();
   await starting;
   expect(store.getLaunch("k1d0cd11")?.ws).toContain("devtools/browser/x");
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // tracked running process
   store.close();
 });
 
@@ -1527,7 +1544,7 @@ test("a spawner that throws after invocation retains ownership and returns a saf
   expect(store.getLaunch("k1d0cd11")).toMatchObject({
     pid: 0,
     binaryPath: "/fake/cloak",
-    userDataDir: "/tmp/cloak-spawn-throw-test/k1d0cd11",
+    userDataDir: resolve("/tmp/cloak-spawn-throw-test/k1d0cd11"),
   });
   expect(scans).toBe(1); // an early empty scan is intentionally not trusted
   expect((await launcher.reconcileOrphans()).cleared).toBe(1);
@@ -1725,6 +1742,7 @@ test("concurrent stop calls share one destructive teardown", async () => {
 
   const first = launcher.stop("k1d0cd11");
   await entered;
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // stop still owns the data directory
   const second = launcher.stop("k1d0cd11");
   await Promise.resolve();
   expect(killCalls).toBe(1);
@@ -1733,6 +1751,7 @@ test("concurrent stop calls share one destructive teardown", async () => {
   expect(await Promise.all([first, second])).toEqual([true, true]);
   expect(killCalls).toBe(1);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(false);
   store.close();
 });
 
@@ -2199,6 +2218,42 @@ test("parallel reconciliation cannot apply a stale probe to a replacement launch
   store.close();
 });
 
+test("targeted orphan reconciliation cannot clear a replacement launch generation", async () => {
+  const store = seeded();
+  const oldLaunch = {
+    profileId: "k1d0cd11",
+    pid: 9001,
+    debugPort: 9333,
+    ws: "ws://127.0.0.1:9333/devtools/browser/old",
+    startedAt: 1,
+    binaryPath: "/fake/cloak",
+    userDataDir: "/tmp/cloak-targeted-reconcile-test/k1d0cd11",
+  };
+  store.recordLaunch(oldLaunch);
+  let scanEntered!: () => void;
+  let finishScan!: () => void;
+  const entered = new Promise<void>((resolve) => { scanEntered = resolve; });
+  const blocked = new Promise<void>((resolve) => { finishScan = resolve; });
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot: "/tmp/cloak-targeted-reconcile-test",
+    fetch: async () => ({ ok: false, json: async () => ({}) }),
+    isPidAlive: () => false,
+    findOwnedBrowserPids: async () => { scanEntered(); await blocked; return []; },
+  });
+
+  const reconciling = launcher.reconcileOrphan("k1d0cd11", { debugPort: 9333, startedAt: 1 });
+  await entered;
+  store.clearLaunch("k1d0cd11");
+  store.recordLaunch({ ...oldLaunch, pid: 9002, debugPort: 9334, ws: "ws://127.0.0.1:9334/devtools/browser/new", startedAt: 2 });
+  finishScan();
+
+  expect(await reconciling).toBe("generation_changed");
+  expect(store.getLaunch("k1d0cd11")?.debugPort).toBe(9334);
+  store.close();
+});
+
 test("stale teardown cleanup cannot clear a replacement launch generation", () => {
   const store = seeded();
   const oldLaunch = {
@@ -2455,6 +2510,29 @@ test("hasPageTargets distinguishes a background-only browser", async () => {
   expect(await launcher.hasPageTargets("k1d0cd11")).toBe(false);
   targets = [{ type: "page" }];
   expect(await launcher.hasPageTargets("k1d0cd11")).toBe(true);
+  store.close();
+});
+
+test("pageTargetFingerprint is generation-fenced and stable across target order", async () => {
+  const store = seeded();
+  store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+  let targets = [
+    { id: "b", type: "page", url: "https://example.com/b" },
+    { id: "a", type: "page", url: "https://example.com/a" },
+    { id: "worker", type: "service_worker", url: "https://example.com/sw.js" },
+  ];
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake",
+    fetch: async () => ({ ok: true, json: async () => targets }),
+  });
+
+  const first = await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 });
+  targets = [targets[1]!, targets[0]!];
+  expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 })).toBe(first);
+  targets[0] = { ...targets[0]!, url: "https://example.com/changed" };
+  expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 })).not.toBe(first);
+  expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9444, startedAt: 2 })).toBeNull();
   store.close();
 });
 

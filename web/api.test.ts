@@ -12,6 +12,7 @@ import {
   restoreCloudSession,
   selectAppMode,
   signInCloud,
+  signOutCloud,
   updateProfile,
 } from "./api.ts";
 
@@ -127,6 +128,9 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
   });
   await acceptCloudLegal();
   expect(requests[3]?.input).toBe("/ui/api/cloud-auth/accept-legal");
+  await signOutCloud();
+  expect(requests[4]?.input).toBe("/ui/api/cloud-auth/signout");
+  expect(JSON.parse(String(requests[4]?.init?.body))).toEqual({});
 });
 
 test("Cloud team client uses the compact workspace endpoint", async () => {

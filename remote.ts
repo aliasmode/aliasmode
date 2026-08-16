@@ -21,7 +21,15 @@ import {
   type RemoteRoster,
 } from "./hub-client.ts";
 import { isTelegramPlatform, splitLaunchUrls, platformHomeUrl, type Launcher } from "./launcher.ts";
-import { bundleHasRestorableLogin, bundleHasTelegramOrigin, bundleTelegramClient, telegramAuthSignature } from "./session.ts";
+import {
+  bundleHasRestorableLogin,
+  bundleHasTelegramOrigin,
+  bundleTelegramClient,
+  parseCapturedSessionBundle,
+  sessionCaptureSeed,
+  type SessionCaptureSeed,
+  telegramAuthSignature,
+} from "./session.ts";
 import type { ProfileStore } from "./store.ts";
 import type { NewProfileInput } from "./create.ts";
 import type { ImportOverrides } from "./inbox.ts";
@@ -54,7 +62,7 @@ export interface RemoteDeps {
   hub: HubLike;
   launcher: LauncherLike;
   store: ProfileStore;
-  readSession: (ws: string) => Promise<string>;
+  readSession: (ws: string, captureSeed: SessionCaptureSeed) => Promise<string>;
   writeSession: (ws: string, bundle: string) => Promise<void>;
   log?: (msg: string) => void;
   /** Heartbeat interval; 0 disables the auto timer (tests drive heartbeatOnce). */
@@ -135,6 +143,7 @@ export class RemoteCoordinator {
   private pushesInFlight = new Map<string, Promise<PushSessionOutcome>>();
   private telegramSignatures = new Map<string, string>();
   private telegramProfiles = new Set<string>(); // only these profiles pay the fast CDP checkpoint cost
+  private sessionCaptureSeeds = new Map<string, SessionCaptureSeed>();
   private transitions = new Map<string, Promise<void>>(); // serialize open/close for each profile
   private opening = new Map<string, { promise: Promise<OpenResult>; generation: number }>();
   private lifecycleGenerations = new Map<string, number>();
@@ -216,7 +225,21 @@ export class RemoteCoordinator {
     }
 
     this.sessionCapturesStarted++;
-    const read = Promise.resolve().then(() => this.d.readSession(ws));
+    const read = Promise.resolve().then(async () => {
+      const seed = this.sessionCaptureSeeds.get(profileId) ?? { origins: [] };
+      const bundle = await this.d.readSession(ws, seed);
+      const captured = parseCapturedSessionBundle(bundle);
+      const next = sessionCaptureSeed(bundle);
+      const origins = new Set(seed.origins);
+      for (const origin of next.origins) origins.add(origin);
+      this.sessionCaptureSeeds.set(profileId, {
+        origins: [...origins].sort(),
+        ...(captured.telegramClient ?? seed.telegramClient
+          ? { telegramClient: captured.telegramClient ?? seed.telegramClient }
+          : {}),
+      });
+      return bundle;
+    });
     this.sessionReadsInFlight.set(profileId, read);
     void read.then((bundle) => {
       const bytes = Buffer.byteLength(bundle);
@@ -845,6 +868,7 @@ export class RemoteCoordinator {
       // profile's volatile storage on a crash — only when this bundle can actually restore the login
       // (otherwise a first-migration Telegram open would have its only local auth wiped before we inject).
       const bundle = session?.bundle ?? JSON.stringify({ cookies: profile.cookies });
+      this.sessionCaptureSeeds.set(profileId, sessionCaptureSeed(bundle));
       const resetStorage = bundleHasRestorableLogin(bundle);
       const startingTelegramSignature = telegramAuthSignature(bundle);
       const telegramProfile = isTelegramPlatform(profile.platform) || bundleHasTelegramOrigin(bundle);
@@ -1395,6 +1419,10 @@ export class RemoteCoordinator {
           );
           continue;
         } else {
+          this.sessionCaptureSeeds.set(
+            launch.profileId,
+            currentBundle ? sessionCaptureSeed(currentBundle) : { origins: [] },
+          );
           const signature = currentBundle ? telegramAuthSignature(currentBundle) : null;
           if (currentBundle && bundleHasTelegramOrigin(currentBundle)) this.telegramProfiles.add(launch.profileId);
           if (signature) this.telegramSignatures.set(launch.profileId, signature);

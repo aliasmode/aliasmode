@@ -62,6 +62,16 @@ test("extracts files (incl. nested) from a zip", async () => {
   expect(readFileSync(join(dir, "js/bg.js"), "utf8")).toBe("hi");
 });
 
+test("extracts raw-deflate entries without DecompressionStream", async () => {
+  const zip = Buffer.from(
+    "UEsDBBQAAAAIAJNrEF0kGtjVFAAAABIAAAAOAAAAY29tcHJlc3NlZC50eHRLzs8tKEotLk5NUShIrMzJT0wBAFBLAQIUAxQAAAAIAJNrEF0kGtjVFAAAABIAAAAOAAAAAAAAAAAAAACAAQAAAABjb21wcmVzc2VkLnR4dFBLBQYAAAAAAQABADwAAABAAAAAAAA=",
+    "base64",
+  );
+  const dir = mkdtempSync(join(tmpdir(), "cp-unzip-"));
+  expect(await extractZipTo(zip, dir)).toBe(1);
+  expect(readFileSync(join(dir, "compressed.txt"), "utf8")).toBe("compressed payload");
+});
+
 test("refuses path-traversal entries", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cp-unzip-"));
   await extractZipTo(storedZip({ "../evil.txt": "x", "ok.txt": "y" }), dir);

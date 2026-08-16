@@ -327,19 +327,23 @@ function attachDesktopControl(
   process.stdout.write(`${JSON.stringify(desktopReadyRecord(health.instance, port))}\n`);
 }
 
+const UNSAFE_CANARY_TIMEOUT_MS = 600_000;
+
 function makeLauncher(
   store: ProfileStore,
   rest: string[],
   remoteMode = false,
   defaultDataRoot = "profiles",
 ): Launcher {
+  const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
   return new Launcher({
     store,
     dataRoot: defaultDataRoot,
     headless: has(rest, "headless"),
     // Explicit canary-only escape hatch for constrained test hosts where a
     // full browser identity probe cannot complete. Never enable in production.
-    unsafeDisableIdentityGates: has(rest, "unsafe-disable-identity-gates"),
+    unsafeDisableIdentityGates: unsafeCanary,
+    ...(unsafeCanary ? { cdpReadyTimeoutMs: UNSAFE_CANARY_TIMEOUT_MS } : {}),
     // AliasMode owns the browser process, but it is not the external campaign
     // client that requested it. Keep the ownership namespaces distinct so that
     // client can identify a dead browser while AliasMode stays up.
@@ -350,7 +354,7 @@ function makeLauncher(
       `--aliasmode-launcher-pid=${process.pid}`,
       ...(has(rest, "no-sandbox") ? ["--no-sandbox"] : []),
     ],
-    ensureSearchProvider: ensureDuckDuckGoDefault,
+    ...(unsafeCanary ? {} : { ensureSearchProvider: ensureDuckDuckGoDefault }),
     // In remote mode the coordinator injects the roamed session over CDP, so the launcher's own
     // bootstrap cookie injection is turned off — and because the login is re-injected from the hub,
     // it's safe to reset a crash-corrupted profile's volatile storage on launch (auto-heals the
@@ -373,7 +377,7 @@ function makeCloudBrowser(
     queue: () => pendingSync.queue(),
     accountId: () => connection.accountId(),
     deviceId: () => connection.deviceId(),
-    readSession: readSessionInSubprocess,
+    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
     applySession: (endpoint, bundle, urls) =>
       applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
   });
@@ -657,6 +661,9 @@ function cloudLauncherSmokeProxy(
 
 async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
   const profileId = "aliasmode-cloud-smoke";
+  const canaryWorkerTimeoutMs = has(rest, "unsafe-disable-identity-gates")
+    ? UNSAFE_CANARY_TIMEOUT_MS
+    : undefined;
   const store = new ProfileStore(paths.cloudDatabase);
   const queue = new PendingSyncQueue(paths.pendingSync, new Uint8Array(32).fill(1));
   const smokeProxy = has(rest, "proxy-mismatch")
@@ -747,9 +754,15 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     queue: () => queue,
     accountId: () => "smoke-account",
     deviceId: () => "smoke-device",
-    readSession: readSessionInSubprocess,
+    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, {
+      captureSeed,
+      ...(canaryWorkerTimeoutMs ? { timeoutMs: canaryWorkerTimeoutMs } : {}),
+    }),
     applySession: (endpoint, bundle, urls) =>
-      applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
+      applySessionToEndpoint(endpoint, bundle, urls, {
+        log: (m) => console.log(`[aliasmode] ${m}`),
+        ...(canaryWorkerTimeoutMs ? { writeTimeoutMs: canaryWorkerTimeoutMs } : {}),
+      }),
     heartbeatMs: 0,
   });
 
@@ -942,7 +955,7 @@ async function main() {
           hub: new HubClient(hubUrl, password, owner),
           launcher,
           store,
-          readSession: readSessionInSubprocess,
+          readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
           writeSession,
         });
         // Re-claim the lock + resume heartbeats for browsers that survived a
