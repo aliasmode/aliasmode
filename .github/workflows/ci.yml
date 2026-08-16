@@ -127,6 +127,7 @@ jobs:
           }
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
           $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = (Resolve-Path ".\src-tauri\resources\playwright").Path
           $env:ALIASMODE_LIVE_BROWSER = $browserPath.Path
           $env:ALIASMODE_LIVE_BROWSER_SHA256 = $metadata.sha256
           $env:ALIASMODE_LIVE_HEADFUL = "1"
