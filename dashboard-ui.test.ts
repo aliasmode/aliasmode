@@ -25,6 +25,16 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain(">Stay Local</button>");
 });
 
+test("Account settings offers fenced Cloud sign-out and clears account state", () => {
+  expect(app).toContain('"Sign out / Switch account"');
+  expect(app).toContain("await signOutCloud();");
+  expect(app).toContain("authGeneration.current++;");
+  expect(app).toContain("setCloudAuth({ authenticated: false });");
+  expect(app).toContain("setProfiles([]);");
+  expect(app).toContain("setTeam(null);");
+  expect(app).toContain("generation !== authGeneration.current");
+});
+
 test("Account settings exposes fixed Cloud diagnostics without raw server messages", () => {
   expect(app).toContain("fetchCloudEvents");
   expect(app).toContain("Recent diagnostics");
@@ -75,8 +85,8 @@ test("Admin invitations are read-only for Admin viewers", () => {
   expect(app).toContain("Revoke");
 });
 
-test("Cloud restores workspace access and hides unsupported Delete actions", () => {
-  expect(app).toContain("workspace: result.workspace");
-  expect(app).toContain('{!isCloudMode && <button title="Delete group"');
-  expect(app).toContain('{!isCloudMode && <button className="abtn danger"');
+test("Cloud Delete requires edit permission for every selected profile", () => {
+  expect(app).toContain('const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");');
+  expect(app).toContain('{(!isCloudMode || selectedEditable) && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}');
+  expect(app).toContain('r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`');
 });

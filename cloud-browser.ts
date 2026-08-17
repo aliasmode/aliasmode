@@ -1,3 +1,4 @@
+import { watch } from "node:fs";
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
 import {
   CloudDiagnostics,
@@ -20,6 +21,10 @@ import { decodePortableProfile, encodePortableProfile } from "./portable-profile
 import {
   bundleHasRestorableLogin,
   bundleTelegramClient,
+  parseCapturedSessionBundle,
+  sessionBundleSignature,
+  sessionCaptureSeed,
+  type SessionCaptureSeed,
   SessionRestoreError,
 } from "./session.ts";
 import type { ProfileStore } from "./store.ts";
@@ -72,7 +77,8 @@ type CloudBrowserClient = Pick<
 
 type CloudBrowserLauncher = Pick<
   Launcher,
-  "start" | "stop" | "active" | "hasPageTargets" | "verifyRunningIdentity" | "reconcileOrphans"
+  "start" | "stop" | "active" | "hasPageTargets" | "verifyRunningIdentity" | "reconcileOrphan" |
+  "pageTargetFingerprint" | "browserStorageWatchPaths"
 >;
 
 export interface CloudBrowserOptions {
@@ -82,16 +88,46 @@ export interface CloudBrowserOptions {
   queue: () => PendingSyncQueue | undefined;
   accountId: () => string | undefined;
   deviceId: () => string | undefined;
-  readSession: (endpoint: string) => Promise<string>;
+  readSession: (endpoint: string, captureSeed: SessionCaptureSeed) => Promise<string>;
   /** Restore the bundle and open startup pages over ONE CDP attach, then detach. */
   applySession: (endpoint: string, bundle: string, urls: readonly string[]) => Promise<void>;
   heartbeatMs?: number;
+  /** Target/storage dirty polling interval; 0 disables event-driven checkpoints. */
+  dirtyMonitorMs?: number;
+  checkpointDebounceMs?: number;
+  checkpointMinIntervalMs?: number;
+  watchPath?: (path: string, onDirty: () => void) => { close(): void };
+  observeTargets?: (endpoint: string, onTarget: (origin: string | null) => void) => { close(): void };
   setIntervalFn?: (fn: () => void, ms: number) => unknown;
   clearIntervalFn?: (handle: unknown) => void;
   log?: (message: string) => void;
 }
 
 const PENDING_SESSION_BASE_VERSION = -1;
+const DEFAULT_DIRTY_MONITOR_MS = 2_500;
+const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 1_200;
+const DEFAULT_CHECKPOINT_MIN_INTERVAL_MS = 3_000;
+
+interface CloudCheckpointState {
+  registrationId: string;
+  signature: string;
+  origins: Set<string>;
+  telegramClient?: "a" | "k";
+}
+
+interface CloudDirtyMonitor {
+  registrationId: string;
+  debugPort: number;
+  startedAt: number;
+  pollTimer?: unknown;
+  debounceTimer?: ReturnType<typeof setTimeout>;
+  watchers: Array<{ close(): void }>;
+  targetObserver?: { close(): void };
+  targetFingerprint?: string;
+  dirty: boolean;
+  captureInFlight: boolean;
+  lastCaptureAt: number;
+}
 const TERMINAL_HEARTBEAT_ERRORS = new Set([
   "device_revoked",
   "membership_revoked",
@@ -99,6 +135,59 @@ const TERMINAL_HEARTBEAT_ERRORS = new Set([
   "profile_not_found",
   "profile_trashed",
 ]);
+
+function canonicalTargetOrigin(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function targetFingerprintOrigins(fingerprint: string): string[] {
+  try {
+    const targets = JSON.parse(fingerprint);
+    if (!Array.isArray(targets)) return [];
+    return [...new Set(targets.flatMap((target) => {
+      const origin = typeof target?.url === "string" ? canonicalTargetOrigin(target.url) : null;
+      return origin ? [origin] : [];
+    }))];
+  } catch {
+    return [];
+  }
+}
+
+function observeBrowserTargets(
+  endpoint: string,
+  onTarget: (origin: string | null) => void,
+): { close(): void } {
+  const socket = new WebSocket(endpoint);
+  const onOpen = () => {
+    try {
+      socket.send(JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }));
+    } catch {}
+  };
+  const onMessage = (event: MessageEvent) => {
+    if (typeof event.data !== "string") return;
+    try {
+      const message = JSON.parse(event.data);
+      if (message?.method !== "Target.targetCreated" && message?.method !== "Target.targetInfoChanged") return;
+      const info = message?.params?.targetInfo;
+      if (info?.type !== "page" || typeof info.url !== "string") return;
+      onTarget(canonicalTargetOrigin(info.url));
+    } catch {}
+  };
+  socket.addEventListener("open", onOpen);
+  socket.addEventListener("message", onMessage);
+  return {
+    close() {
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("message", onMessage);
+      try { socket.close(); } catch {}
+    },
+  };
+}
 
 function errorCode(error: unknown): string {
   if (error instanceof CloudApiError) return error.code;
@@ -145,9 +234,14 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private readonly closing = new Map<string, Promise<boolean>>();
   private readonly timers = new Map<string, unknown>();
   private readonly heartbeatInFlight = new Map<string, Promise<void>>();
+  private readonly checkpointSignatures = new Map<string, CloudCheckpointState>();
+  private readonly dirtyMonitors = new Map<string, CloudDirtyMonitor>();
   private pendingRetryTimer: unknown;
   private pendingRetryInFlight: Promise<void> | null = null;
   private readonly heartbeatMs: number;
+  private readonly dirtyMonitorMs: number;
+  private readonly checkpointDebounceMs: number;
+  private readonly checkpointMinIntervalMs: number;
   private readonly log: (message: string) => void;
   private readonly diagnosticEvents = new CloudDiagnostics();
   private shuttingDown = false;
@@ -155,6 +249,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
   constructor(private readonly options: CloudBrowserOptions) {
     this.heartbeatMs = Math.max(0, options.heartbeatMs ?? 60_000);
+    this.dirtyMonitorMs = Math.max(0, options.dirtyMonitorMs ?? DEFAULT_DIRTY_MONITOR_MS);
+    this.checkpointDebounceMs = Math.max(0, options.checkpointDebounceMs ?? DEFAULT_CHECKPOINT_DEBOUNCE_MS);
+    this.checkpointMinIntervalMs = Math.max(0, options.checkpointMinIntervalMs ?? DEFAULT_CHECKPOINT_MIN_INTERVAL_MS);
     this.log = options.log ?? (() => {});
   }
 
@@ -198,19 +295,37 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   private async reconcileClosedBrowsers(queue: PendingSyncQueue, accountId: string): Promise<void> {
-    await this.options.launcher.reconcileOrphans();
     for (const candidate of queue.listOpens(accountId)) {
-      const launch = this.options.store.getLaunch(candidate.profileId);
-      if (launch && this.isExactRunningLaunch(candidate, launch)) {
-        const hasPageTargets = await this.options.launcher.hasPageTargets(candidate.profileId).catch(() => true);
-        if (!hasPageTargets) await this.close(candidate.profileId).catch(() => false);
-        continue;
-      }
-      if (launch) continue;
       await this.withProfileTransition(candidate.profileId, async () => {
-        const current = queue.getOpen(candidate.profileId, accountId);
+        let current = queue.getOpen(candidate.profileId, accountId);
         if (!current || current.registrationId !== candidate.registrationId) return;
+        if (current.cleanupMode) {
+          await this.retryCleanup(current, queue);
+          return;
+        }
+
+        let launch = this.options.store.getLaunch(candidate.profileId);
+        if (launch && this.isExactRunningLaunch(current, launch)) {
+          const reconciled = await this.options.launcher.reconcileOrphan(candidate.profileId, {
+            debugPort: launch.debugPort,
+            startedAt: launch.startedAt,
+          });
+          current = queue.getOpen(candidate.profileId, accountId);
+          launch = this.options.store.getLaunch(candidate.profileId);
+          if (!current || current.registrationId !== candidate.registrationId
+            || reconciled === "generation_changed") return;
+          if (reconciled === "alive") {
+            if (!launch || !this.isExactRunningLaunch(current, launch)) return;
+            const hasPageTargets = await this.options.launcher.hasPageTargets(candidate.profileId).catch(() => true);
+            if (!hasPageTargets) await this.doClose(candidate.profileId).catch(() => false);
+            return;
+          }
+        } else if (launch) {
+          return;
+        }
+
         if (this.options.store.getLaunch(candidate.profileId)) return;
+        this.diagnosticEvents.record("manual_stop_detected");
         await this.stopHeartbeat(candidate.profileId);
         const finished = await this.finishStoppedOpen(current, queue);
         if (!finished) this.startHeartbeat(candidate.profileId);
@@ -272,10 +387,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
     try {
       await retryPendingSync(queue, this.options.cloud, accountId);
-      if (queue.list(accountId).some((pending) =>
-        pending.profileId === profileId && pending.status !== "conflict"
-      )) {
-        return { ok: false, error: "Pending Cloud synchronization must finish before reopening" };
+      if (queue.list(accountId).some((pending) => pending.profileId === profileId)) {
+        return { ok: false, error: "Pending Cloud synchronization must be resolved before reopening" };
       }
       if (queue.getOpen(profileId, accountId)) {
         return { ok: false, error: "Cloud profile recovery must finish before opening" };
@@ -407,6 +520,21 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       })) {
         throw new Error("Cloud open lifecycle state disappeared after restore");
       }
+      queue.enqueue({
+        accountId,
+        profileId,
+        registrationId,
+        expectedVersion: opened.baseVersion,
+        payload: encodePortableProfile(profile, sessionBundle),
+        readyToSubmit: false,
+      });
+      const captureSeed = sessionCaptureSeed(sessionBundle);
+      this.checkpointSignatures.set(profileId, {
+        registrationId,
+        signature: sessionBundleSignature(sessionBundle),
+        origins: new Set(captureSeed.origins),
+        ...(captureSeed.telegramClient ? { telegramClient: captureSeed.telegramClient } : {}),
+      });
 
       // Startup navigation already happened inside the single restore attach above.
       this.diagnosticEvents.record("open_running");
@@ -459,18 +587,25 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const stopped = registrationId
         ? await this.options.launcher.stop(profileId).catch(() => false)
         : false;
-      if (!stopped && registrationId) this.diagnosticEvents.record("cleanup_retained");
+      if (!stopped && registrationId) {
+        if (registrationRecorded) {
+          queue.setOpenCleanup(profileId, accountId, registrationId, "abandon");
+        }
+        this.diagnosticEvents.record("cleanup_retained");
+      }
       if (stopped && registrationId) {
         try {
           await this.options.cloud.abandon(registrationId);
-          if (registrationRecorded) queue.removeOpen(profileId, accountId);
+          if (registrationRecorded) {
+            queue.removeOpenRegistration(profileId, accountId, registrationId);
+          }
         } catch (abandonError) {
           if (
             registrationRecorded &&
             abandonError instanceof CloudApiError &&
             abandonError.code === "profile_not_found"
           ) {
-            queue.removeOpen(profileId, accountId);
+            queue.removeOpenRegistration(profileId, accountId, registrationId);
           } else {
             this.diagnosticEvents.record("cleanup_retained");
           }
@@ -499,9 +634,20 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private async doClose(profileId: string): Promise<boolean> {
     this.diagnosticEvents.record("close_started");
     const { queue, accountId } = this.requireContext(false);
-    await this.options.launcher.reconcileOrphans();
-    const open = queue.getOpen(profileId, accountId);
-    const launch = this.options.store.getLaunch(profileId);
+    let open = queue.getOpen(profileId, accountId);
+    let launch = this.options.store.getLaunch(profileId);
+    if (open && launch && open.debugPort !== null && open.startedAt !== null
+      && launch.debugPort === open.debugPort && launch.startedAt === open.startedAt) {
+      const registrationId = open.registrationId;
+      const reconciled = await this.options.launcher.reconcileOrphan(profileId, {
+        debugPort: launch.debugPort,
+        startedAt: launch.startedAt,
+      });
+      if (reconciled === "generation_changed") return false;
+      open = queue.getOpen(profileId, accountId);
+      launch = this.options.store.getLaunch(profileId);
+      if (!open || open.registrationId !== registrationId) return false;
+    }
     if (!open) {
       if (launch) {
         this.diagnosticEvents.record("cleanup_retained");
@@ -556,21 +702,25 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) {
         throw new Error("Cloud browser identity changed before session capture");
       }
-      const sessionBundle = await this.options.readSession(verifiedLaunch.ws);
+      const sessionBundle = await this.captureSession(open, queue, verifiedLaunch.ws);
       await this.options.launcher.verifyRunningIdentity(profileId);
       const capturedLaunch = this.options.store.getLaunch(profileId);
       if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) {
         throw new Error("Cloud browser identity changed during session capture");
       }
-      pendingId = queue.enqueue({
-        accountId,
-        profileId,
-        registrationId: open.registrationId,
-        expectedVersion: open.expectedVersion,
-        payload: encodePortableProfile(profile, sessionBundle),
-        readyToSubmit: false,
-      });
+      if (!this.checkpointOpen(open, queue, sessionBundle)) {
+        throw new Error("Cloud checkpoint state changed during session capture");
+      }
+      const pending = this.pendingCapturesForOpen(open, queue)
+        .find((capture) => !capture.readyToSubmit && capture.status !== "conflict");
+      if (!pending) throw new Error("Cloud checkpoint is missing after session capture");
+      pendingId = pending.id;
       this.diagnosticEvents.record("session_captured");
+      if (!queue.setOpenCleanup(profileId, accountId, open.registrationId, "sync")) {
+        this.diagnosticEvents.record("cleanup_retained");
+        this.startHeartbeat(profileId);
+        return false;
+      }
     } catch (error) {
       this.diagnosticEvents.record("cleanup_retained");
       this.startHeartbeat(profileId);
@@ -585,13 +735,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     this.diagnosticEvents.record("browser_stopped");
 
-    queue.markReady(pendingId, accountId);
-    queue.removeOpen(profileId, accountId);
+    if (!queue.finalizeOpenCheckpoint(profileId, accountId, open.registrationId)) {
+      this.diagnosticEvents.record("cleanup_retained");
+      return false;
+    }
+    this.clearCheckpointSignature(open);
     await retryPendingSync(queue, this.options.cloud, accountId);
-    this.diagnosticEvents.record(
-      queue.get(pendingId, accountId) ? "cleanup_retained" : "session_synced",
-    );
-    return true;
+    const retained = !!queue.get(pendingId, accountId);
+    if (retained) this.diagnosticEvents.record("session_sync_pending");
+    this.diagnosticEvents.record(retained ? "cleanup_retained" : "session_synced");
+    return !retained;
   }
 
   private pendingCapturesForOpen(open: PendingOpenSession, queue: PendingSyncQueue): PendingClose[] {
@@ -601,40 +754,210 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       .filter((item): item is PendingClose => !!item && item.registrationId === open.registrationId);
   }
 
+  private checkpointState(open: PendingOpenSession, queue: PendingSyncQueue): CloudCheckpointState {
+    const current = this.checkpointSignatures.get(open.profileId);
+    if (current?.registrationId === open.registrationId) return current;
+    const checkpoint = this.pendingCapturesForOpen(open, queue)
+      .find((capture) => !capture.readyToSubmit && capture.status !== "conflict");
+    const bundle = checkpoint ? JSON.stringify(checkpoint.payload.session) : null;
+    const captureSeed: SessionCaptureSeed = bundle ? sessionCaptureSeed(bundle) : { origins: [] };
+    const state: CloudCheckpointState = {
+      registrationId: open.registrationId,
+      signature: bundle ? sessionBundleSignature(bundle) : "",
+      origins: new Set(captureSeed.origins),
+      ...(captureSeed.telegramClient ? { telegramClient: captureSeed.telegramClient } : {}),
+    };
+    this.checkpointSignatures.set(open.profileId, state);
+    return state;
+  }
+
   private async abandonStoppedOpen(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
     try {
       await this.options.cloud.abandon(open.registrationId);
       queue.removeOpenRegistration(open.profileId, open.accountId, open.registrationId);
+      this.clearCheckpointSignature(open);
       return true;
     } catch (error) {
       if (error instanceof CloudApiError && error.code === "profile_not_found") {
         queue.removeOpenRegistration(open.profileId, open.accountId, open.registrationId);
+        this.clearCheckpointSignature(open);
         return true;
       }
       return false;
     }
   }
 
+  private async retryCleanup(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
+    const current = queue.getOpen(open.profileId, open.accountId);
+    if (!current || current.registrationId !== open.registrationId) return true;
+    const launch = this.options.store.getLaunch(open.profileId);
+    if (launch) {
+      const exact = current.debugPort !== null && current.startedAt !== null &&
+        launch.debugPort === current.debugPort && launch.startedAt === current.startedAt;
+      if (!exact || !await this.options.launcher.stop(open.profileId).catch(() => false)) {
+        this.diagnosticEvents.record("cleanup_retained");
+        return false;
+      }
+    }
+
+    if (current.cleanupMode === "discard") {
+      queue.removeUnreadyCaptures(current.profileId, current.accountId, current.registrationId);
+      const removed = queue.removeOpenRegistration(
+        current.profileId,
+        current.accountId,
+        current.registrationId,
+      );
+      if (removed) this.clearCheckpointSignature(current);
+      return removed;
+    }
+    if (current.cleanupMode === "abandon" || current.phase !== "running") {
+      return this.abandonStoppedOpen(current, queue);
+    }
+    return this.finishStoppedOpen(current, queue);
+  }
+
   private async finishStoppedOpen(open: PendingOpenSession, queue: PendingSyncQueue): Promise<boolean> {
     const captures = this.pendingCapturesForOpen(open, queue);
     if (captures.length > 0) {
-      for (const capture of captures) {
-        if (!capture.readyToSubmit && capture.status !== "conflict") {
-          queue.markReady(capture.id, open.accountId);
-        }
-      }
-      queue.removeOpen(open.profileId, open.accountId);
+      if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
+      this.clearCheckpointSignature(open);
       await retryPendingSync(queue, this.options.cloud, open.accountId);
-      return true;
+      const retained = this.pendingCapturesForOpen(open, queue).length > 0;
+      if (retained) this.diagnosticEvents.record("session_sync_pending");
+      return !retained;
     }
 
     return this.abandonStoppedOpen(open, queue);
   }
 
+  private clearCheckpointSignature(open: PendingOpenSession): void {
+    if (this.checkpointSignatures.get(open.profileId)?.registrationId === open.registrationId) {
+      this.checkpointSignatures.delete(open.profileId);
+    }
+  }
+
+  private async captureSession(
+    open: PendingOpenSession,
+    queue: PendingSyncQueue,
+    endpoint: string,
+  ): Promise<string> {
+    const state = this.checkpointState(open, queue);
+    const captureSeed: SessionCaptureSeed = {
+      origins: [...state.origins].sort(),
+      ...(state.telegramClient ? { telegramClient: state.telegramClient } : {}),
+    };
+    let bundle: string;
+    try {
+      bundle = await this.options.readSession(endpoint, captureSeed);
+    } catch (error) {
+      this.diagnosticEvents.record("checkpoint_capture_failed");
+      throw error;
+    }
+    try {
+      const captured = parseCapturedSessionBundle(bundle);
+      for (const origin of captured.origins) state.origins.add(origin.origin);
+      if (captured.telegramClient) state.telegramClient = captured.telegramClient;
+    } catch (error) {
+      this.diagnosticEvents.record("checkpoint_invalid");
+      throw error;
+    }
+    return bundle;
+  }
+
+  private checkpointOpen(
+    open: PendingOpenSession,
+    queue: PendingSyncQueue,
+    sessionBundle: string,
+  ): "saved" | "unchanged" | false {
+    const current = queue.getOpen(open.profileId, open.accountId);
+    const profile = this.options.store.getProfile(open.profileId);
+    if (
+      !current ||
+      !profile ||
+      current.registrationId !== open.registrationId ||
+      current.phase !== "running" ||
+      current.cleanupMode
+    ) return false;
+    const signature = sessionBundleSignature(sessionBundle);
+    const prior = this.checkpointSignatures.get(open.profileId);
+    if (prior?.registrationId === open.registrationId && prior.signature === signature) {
+      this.diagnosticEvents.record("checkpoint_unchanged");
+      return "unchanged";
+    }
+    queue.enqueue({
+      accountId: open.accountId,
+      profileId: open.profileId,
+      registrationId: open.registrationId,
+      expectedVersion: open.expectedVersion,
+      payload: encodePortableProfile(profile, sessionBundle),
+      readyToSubmit: false,
+    });
+    const state = this.checkpointState(open, queue);
+    state.signature = signature;
+    this.checkpointSignatures.set(open.profileId, state);
+    this.diagnosticEvents.record("checkpoint_saved");
+    return "saved";
+  }
+
+  private async refreshCheckpoint(open: PendingOpenSession, queue: PendingSyncQueue): Promise<void> {
+    const launch = this.options.store.getLaunch(open.profileId);
+    if (!launch || !this.isExactRunningLaunch(open, launch)) return;
+    try {
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const verified = this.options.store.getLaunch(open.profileId);
+      const current = queue.getOpen(open.profileId, open.accountId);
+      if (
+        !verified ||
+        !current ||
+        current.registrationId !== open.registrationId ||
+        current.cleanupMode ||
+        !this.isExactRunningLaunch(current, verified)
+      ) return;
+      const sessionBundle = await this.captureSession(current, queue, verified.ws);
+      await this.options.launcher.verifyRunningIdentity(open.profileId);
+      const captured = this.options.store.getLaunch(open.profileId);
+      const latest = queue.getOpen(open.profileId, open.accountId);
+      if (
+        !captured ||
+        !latest ||
+        latest.registrationId !== open.registrationId ||
+        latest.cleanupMode ||
+        !this.isExactRunningLaunch(latest, captured)
+      ) return;
+      this.checkpointOpen(latest, queue, sessionBundle);
+    } catch {
+      // Keep the last durable checkpoint when a background capture is inconclusive.
+    }
+  }
+
+  private async cleanupRestoringOpen(
+    open: PendingOpenSession,
+    queue: PendingSyncQueue,
+  ): Promise<boolean> {
+    this.stopHeartbeat(open.profileId);
+    if (!queue.setOpenCleanup(
+      open.profileId,
+      open.accountId,
+      open.registrationId,
+      "abandon",
+    )) {
+      this.diagnosticEvents.record("cleanup_retained");
+      this.startHeartbeat(open.profileId);
+      return false;
+    }
+    const retained = queue.getOpen(open.profileId, open.accountId);
+    const finished = !!retained && await this.retryCleanup(retained, queue);
+    if (!finished) this.startHeartbeat(open.profileId);
+    return finished;
+  }
+
   async heartbeatOnce(profileId: string): Promise<void> {
     const existing = this.heartbeatInFlight.get(profileId);
     if (existing) return existing;
-    const promise = this.doHeartbeat(profileId).finally(() => {
+    const promise = this.withProfileTransition(
+      profileId,
+      () => this.doHeartbeat(profileId),
+    ).finally(() => {
       if (this.heartbeatInFlight.get(profileId) === promise) {
         this.heartbeatInFlight.delete(profileId);
       }
@@ -652,21 +975,41 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     const open = context.queue.getOpen(profileId, context.accountId);
     if (!open || (open.phase !== "running" && open.phase !== "restoring")) return;
+    if (open.cleanupMode) {
+      if (await this.retryCleanup(open, context.queue)) this.stopHeartbeat(profileId);
+      return;
+    }
     if (open.phase === "restoring") {
+      const launch = this.options.store.getLaunch(profileId);
+      if (!launch || this.isExactRestoringLaunch(open, launch)) {
+        let dead = !launch;
+        if (launch) {
+          try {
+            dead = await this.options.launcher.reconcileOrphan(profileId, {
+              debugPort: launch.debugPort,
+              startedAt: launch.startedAt,
+            }) === "dead";
+          } catch {
+            // An uncertain local probe must not release or stop the retained browser.
+          }
+        }
+        const current = context.queue.getOpen(profileId, context.accountId);
+        if (!current || current.registrationId !== open.registrationId) return;
+        if (dead && !this.options.store.getLaunch(profileId)) {
+          this.diagnosticEvents.record("manual_stop_detected");
+          await this.cleanupRestoringOpen(current, context.queue);
+          return;
+        }
+      }
       try {
         await this.options.cloud.heartbeat(open.registrationId);
       } catch (error) {
         if (error instanceof CloudApiError && TERMINAL_HEARTBEAT_ERRORS.has(error.code)) {
           this.diagnosticEvents.record("access_ended");
-          this.stopHeartbeat(profileId);
-          const launch = this.options.store.getLaunch(profileId);
-          const exact = !!launch && open.debugPort !== null && open.startedAt !== null &&
-            launch.debugPort === open.debugPort && launch.startedAt === open.startedAt;
-          const stopped = exact
-            ? await this.options.launcher.stop(profileId).catch(() => false)
-            : false;
-          if (stopped) await this.abandonStoppedOpen(open, context.queue);
-          else this.diagnosticEvents.record("cleanup_retained");
+          const finished = await this.cleanupRestoringOpen(open, context.queue);
+          this.log(finished
+            ? `${profileId}: Cloud access ended (${error.code}); browser stopped`
+            : `${profileId}: Cloud access ended (${error.code}); browser was retained`);
         } else {
           this.diagnosticEvents.record("heartbeat_failed");
           this.log(`${profileId}: Cloud heartbeat failed (${errorCode(error)})`);
@@ -686,18 +1029,34 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     if (!active) {
       this.stopHeartbeat(profileId);
-      const stopped = await this.options.launcher.stop(profileId).catch(() => false);
-      if (stopped) await this.finishStoppedOpen(open, context.queue);
+      context.queue.setOpenCleanup(
+        profileId,
+        context.accountId,
+        open.registrationId,
+        open.phase === "running" ? "sync" : "abandon",
+      );
+      const retained = context.queue.getOpen(profileId, context.accountId);
+      if (retained && !await this.retryCleanup(retained, context.queue)) {
+        this.startHeartbeat(profileId);
+      }
       return;
     }
     try {
       await this.options.cloud.heartbeat(open.registrationId);
+      await this.refreshCheckpoint(open, context.queue);
     } catch (error) {
       if (error instanceof CloudApiError && error.code === "folder_access_denied") {
         this.diagnosticEvents.record("access_ended");
         this.stopHeartbeat(profileId);
-        const stopped = await this.options.launcher.stop(profileId).catch(() => false);
-        if (stopped) context.queue.removeOpen(profileId, context.accountId);
+        context.queue.setOpenCleanup(
+          profileId,
+          context.accountId,
+          open.registrationId,
+          "discard",
+        );
+        const retained = context.queue.getOpen(profileId, context.accountId);
+        const stopped = !!retained && await this.retryCleanup(retained, context.queue);
+        if (!stopped) this.startHeartbeat(profileId);
         this.log(stopped
           ? `${profileId}: Cloud access ended (${error.code}); browser stopped`
           : `${profileId}: Cloud access ended (${error.code}); browser was retained`);
@@ -714,6 +1073,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       this.diagnosticEvents.record("heartbeat_failed");
       this.log(`${profileId}: Cloud heartbeat failed (${errorCode(error)})`);
+      await this.refreshCheckpoint(open, context.queue);
     }
   }
 
@@ -780,14 +1140,38 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     accountId: string,
   ): Promise<void> {
     for (const foreign of queue.listAllOpens().filter((open) => open.accountId !== accountId)) {
+      const heartbeat = this.stopHeartbeat(foreign.profileId);
+      if (heartbeat) await heartbeat.catch(() => {});
+      this.stopHeartbeat(foreign.profileId);
       const launch = this.options.store.getLaunch(foreign.profileId);
-      if (!launch) continue;
+      if (!launch) {
+        if (foreign.phase === "running") continue;
+        const abandoned = await this.withProfileTransition(
+          foreign.profileId,
+          () => this.abandonStoppedOpen(foreign, queue),
+        );
+        if (!abandoned) {
+          throw new Error("a browser from another Cloud account could not be stopped");
+        }
+        continue;
+      }
       if (this.isExactRunningLaunch(foreign, launch)) {
-        if (!await this.captureAndStopOpen(foreign, queue, false)) {
+        const secured = await this.withProfileTransition(
+          foreign.profileId,
+          () => this.captureAndStopOpen(foreign, queue, false),
+        );
+        if (!secured) {
           throw new Error("a browser from another Cloud account could not be secured");
         }
       } else if (this.isExactRestoringLaunch(foreign, launch)) {
-        if (!await this.options.launcher.stop(foreign.profileId).catch(() => false)) {
+        const stopped = await this.withProfileTransition(
+          foreign.profileId,
+          async () => {
+            if (!await this.options.launcher.stop(foreign.profileId).catch(() => false)) return false;
+            return this.abandonStoppedOpen(foreign, queue);
+          },
+        );
+        if (!stopped) {
           throw new Error("a browser from another Cloud account could not be stopped");
         }
       }
@@ -825,26 +1209,29 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       await this.options.launcher.verifyRunningIdentity(open.profileId);
       const verifiedLaunch = this.options.store.getLaunch(open.profileId);
       if (!verifiedLaunch || !this.isExactRunningLaunch(open, verifiedLaunch)) return false;
-      const sessionBundle = await this.options.readSession(verifiedLaunch.ws);
+      const sessionBundle = await this.captureSession(open, queue, verifiedLaunch.ws);
       await this.options.launcher.verifyRunningIdentity(open.profileId);
       const capturedLaunch = this.options.store.getLaunch(open.profileId);
       if (!capturedLaunch || !this.isExactRunningLaunch(open, capturedLaunch)) return false;
-      pendingId = queue.enqueue({
-        accountId: open.accountId,
-        profileId: open.profileId,
-        registrationId: open.registrationId,
-        expectedVersion: open.expectedVersion,
-        payload: encodePortableProfile(profile, sessionBundle),
-        readyToSubmit: false,
-      });
+      if (!this.checkpointOpen(open, queue, sessionBundle)) return false;
+      const pending = this.pendingCapturesForOpen(open, queue)
+        .find((capture) => !capture.readyToSubmit && capture.status !== "conflict");
+      if (!pending) return false;
+      pendingId = pending.id;
+      if (!queue.setOpenCleanup(open.profileId, open.accountId, open.registrationId, "sync")) {
+        return false;
+      }
     } catch {
       return false;
     }
     if (!await this.options.launcher.stop(open.profileId).catch(() => false)) return false;
-    queue.markReady(pendingId, open.accountId);
-    queue.removeOpen(open.profileId, open.accountId);
+    if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
+    this.clearCheckpointSignature(open);
     if (submitAfterStop) {
       await retryPendingSync(queue, this.options.cloud, open.accountId);
+      const retained = !!queue.get(pendingId, open.accountId);
+      if (retained) this.diagnosticEvents.record("session_sync_pending");
+      return !retained;
     }
     return true;
   }
@@ -853,6 +1240,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (this.pendingRetryInFlight) return this.pendingRetryInFlight;
     const pending = (async () => {
       const { queue, accountId } = this.requireContext(false);
+      await this.reconcileClosedBrowsers(queue, accountId);
       await retryPendingSync(queue, this.options.cloud, accountId);
     })().finally(() => {
       if (this.pendingRetryInFlight === pending) this.pendingRetryInFlight = null;
@@ -864,12 +1252,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   async releaseAll(permanent = false): Promise<boolean> {
     if (permanent) this.shuttingDown = true;
     this.draining = true;
+    let released = false;
     try {
       await this.stopPendingRetry();
       await Promise.allSettled([...this.opening.values()]);
       const queue = this.options.queue();
       const accountId = this.options.accountId();
-      if (!queue || !accountId) return true;
+      if (!queue || !accountId) {
+        released = true;
+        return true;
+      }
 
       let complete = true;
       while (true) {
@@ -886,10 +1278,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }
         if (closedThisPass === 0) break;
       }
-      return complete && queue.listOpens(accountId).length === 0;
+      released = complete && queue.listOpens(accountId).length === 0;
+      return released;
     } finally {
-      // Keep lifecycle admission closed through credential teardown. A successful
-      // authentication recovery reopens it in resumeAfterAuthentication().
+      if (!permanent && !this.shuttingDown && !released) {
+        this.draining = false;
+        this.startPendingRetry();
+      }
+      // Permanent shutdown and successful sign-out keep lifecycle admission closed.
+      // Authentication recovery reopens it in resumeAfterAuthentication().
     }
   }
 
@@ -914,7 +1311,127 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     await this.pendingRetryInFlight?.catch(() => {});
   }
 
+  private startDirtyMonitor(profileId: string): void {
+    if (this.dirtyMonitorMs === 0 || this.dirtyMonitors.has(profileId)) return;
+    let context: { queue: PendingSyncQueue; accountId: string };
+    try {
+      context = this.requireContext(false);
+    } catch {
+      return;
+    }
+    const open = context.queue.getOpen(profileId, context.accountId);
+    const launch = this.options.store.getLaunch(profileId);
+    if (!open || open.phase !== "running" || open.cleanupMode || !launch
+      || !this.isExactRunningLaunch(open, launch)) return;
+    const checkpoint = this.checkpointState(open, context.queue);
+
+    const monitor: CloudDirtyMonitor = {
+      registrationId: open.registrationId,
+      debugPort: launch.debugPort,
+      startedAt: launch.startedAt,
+      watchers: [],
+      dirty: false,
+      captureInFlight: false,
+      lastCaptureAt: 0,
+    };
+    this.dirtyMonitors.set(profileId, monitor);
+    const onDirty = () => this.markCheckpointDirty(profileId, monitor);
+    const onTarget = (origin: string | null) => {
+      if (this.dirtyMonitors.get(profileId) !== monitor) return;
+      if (origin) checkpoint.origins.add(origin);
+      onDirty();
+    };
+    try {
+      monitor.targetObserver = (this.options.observeTargets ?? observeBrowserTargets)(launch.ws, onTarget);
+    } catch {
+      // Filesystem watching and target polling remain active when observation is unavailable.
+    }
+    const watchPath = this.options.watchPath ?? ((path: string, dirty: () => void) =>
+      watch(path, { recursive: true }, () => dirty())
+    );
+    for (const path of this.options.launcher.browserStorageWatchPaths(profileId)) {
+      try {
+        monitor.watchers.push(watchPath(path, onDirty));
+      } catch {
+        // Target polling remains active when a browser storage directory is unavailable.
+      }
+    }
+    if (monitor.watchers.length === 0) this.diagnosticEvents.record("dirty_monitor_unavailable");
+
+    const poll = () => {
+      void this.options.launcher.pageTargetFingerprint(profileId, {
+        debugPort: monitor.debugPort,
+        startedAt: monitor.startedAt,
+      }).then((fingerprint) => {
+        if (this.dirtyMonitors.get(profileId) !== monitor || fingerprint === null) return;
+        for (const origin of targetFingerprintOrigins(fingerprint)) checkpoint.origins.add(origin);
+        if (monitor.targetFingerprint === undefined) {
+          monitor.targetFingerprint = fingerprint;
+        } else if (monitor.targetFingerprint !== fingerprint) {
+          monitor.targetFingerprint = fingerprint;
+          onDirty();
+        }
+      }).catch(() => {});
+    };
+    poll();
+    const set = this.options.setIntervalFn ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
+    monitor.pollTimer = set(poll, this.dirtyMonitorMs);
+    const timer = monitor.pollTimer;
+    if (timer && typeof timer === "object" && "unref" in timer) {
+      (timer as { unref?: () => void }).unref?.();
+    }
+  }
+
+  private markCheckpointDirty(profileId: string, monitor: CloudDirtyMonitor): void {
+    if (this.dirtyMonitors.get(profileId) !== monitor) return;
+    monitor.dirty = true;
+    if (monitor.captureInFlight || monitor.debounceTimer) return;
+    const elapsed = Date.now() - monitor.lastCaptureAt;
+    const delay = Math.max(this.checkpointDebounceMs, this.checkpointMinIntervalMs - elapsed, 0);
+    monitor.debounceTimer = setTimeout(() => {
+      monitor.debounceTimer = undefined;
+      this.flushDirtyCheckpoint(profileId, monitor);
+    }, delay);
+    monitor.debounceTimer.unref?.();
+  }
+
+  private flushDirtyCheckpoint(profileId: string, monitor: CloudDirtyMonitor): void {
+    if (this.dirtyMonitors.get(profileId) !== monitor || monitor.captureInFlight || !monitor.dirty) return;
+    monitor.dirty = false;
+    monitor.captureInFlight = true;
+    void this.withProfileTransition(profileId, async () => {
+      if (this.dirtyMonitors.get(profileId) !== monitor) return;
+      const { queue, accountId } = this.requireContext(false);
+      const open = queue.getOpen(profileId, accountId);
+      const launch = this.options.store.getLaunch(profileId);
+      if (!open || open.registrationId !== monitor.registrationId || open.cleanupMode || !launch
+        || launch.debugPort !== monitor.debugPort || launch.startedAt !== monitor.startedAt) return;
+      await this.refreshCheckpoint(open, queue);
+    }).catch(() => {}).finally(() => {
+      if (this.dirtyMonitors.get(profileId) !== monitor) return;
+      monitor.lastCaptureAt = Date.now();
+      monitor.captureInFlight = false;
+      if (monitor.dirty) this.markCheckpointDirty(profileId, monitor);
+    });
+  }
+
+  private stopDirtyMonitor(profileId: string): void {
+    const monitor = this.dirtyMonitors.get(profileId);
+    if (!monitor) return;
+    this.dirtyMonitors.delete(profileId);
+    if (monitor.pollTimer !== undefined) {
+      const clear = this.options.clearIntervalFn ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>));
+      clear(monitor.pollTimer);
+    }
+    if (monitor.debounceTimer) clearTimeout(monitor.debounceTimer);
+    try { monitor.targetObserver?.close(); } catch {}
+    for (const watcher of monitor.watchers) {
+      try { watcher.close(); } catch {}
+    }
+  }
+
   private startHeartbeat(profileId: string): void {
+    this.startDirtyMonitor(profileId);
     if (this.heartbeatMs === 0 || this.timers.has(profileId)) return;
     const set = this.options.setIntervalFn ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
     const timer = set(() => {
@@ -927,6 +1444,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   private stopHeartbeat(profileId: string): Promise<void> | null {
+    this.stopDirtyMonitor(profileId);
     const timer = this.timers.get(profileId);
     if (timer !== undefined) {
       const clear = this.options.clearIntervalFn ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>));

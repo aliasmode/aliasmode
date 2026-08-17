@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { readFileSync } from "node:fs";
 import { profileDataPaths, resolveStateRoot, statePaths } from "./paths.ts";
 
@@ -29,10 +29,10 @@ describe("state paths", () => {
 
     const explicitLocal = profileDataPaths(paths, false, "/tmp/custom.sqlite", "/tmp/custom-profiles");
     const explicitCloud = profileDataPaths(paths, true, "/tmp/custom.sqlite", "/tmp/custom-profiles");
-    expect(explicitLocal).toEqual({ database: "/tmp/custom.sqlite", profiles: "/tmp/custom-profiles" });
+    expect(explicitLocal).toEqual({ database: resolve("/tmp/custom.sqlite"), profiles: resolve("/tmp/custom-profiles") });
     expect(explicitCloud).toEqual({
-      database: "/tmp/custom.sqlite.cloud-cache",
-      profiles: "/tmp/custom-profiles/cloud-cache",
+      database: `${resolve("/tmp/custom.sqlite")}.cloud-cache`,
+      profiles: resolve("/tmp/custom-profiles", "cloud-cache"),
     });
   });
 
@@ -48,7 +48,7 @@ describe("state paths", () => {
     expect(paths.root).toBe(root);
     for (const [name, path] of Object.entries(paths)) {
       if (name === "root") continue;
-      expect(path.startsWith(`${root}/`)).toBe(true);
+      expect(path.startsWith(`${root}${sep}`)).toBe(true);
     }
   });
 });

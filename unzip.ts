@@ -5,10 +5,11 @@
  * (a zip with a signing header). We extract to a directory and load it unpacked
  * with --load-extension. We parse the central directory (authoritative sizes +
  * offsets even when the local headers use streaming data descriptors) and
- * inflate entries with the platform DecompressionStream — no external `unzip`.
+ * inflate entries with Node's built-in zlib — no external `unzip`.
  */
 
 import { join, normalize } from "node:path";
+import { inflateRawSync } from "node:zlib";
 
 const u16 = (b: Uint8Array, o: number) => b[o]! | (b[o + 1]! << 8);
 const u32 = (b: Uint8Array, o: number) => (b[o]! | (b[o + 1]! << 8) | (b[o + 2]! << 16) | (b[o + 3]! << 24)) >>> 0;
@@ -29,8 +30,7 @@ function stripCrx(data: Uint8Array): Uint8Array {
 }
 
 async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const stream = new Response(data as unknown as BodyInit).body!.pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  return new Uint8Array(inflateRawSync(data));
 }
 
 /** True if a zip entry name would escape destDir (path traversal / absolute). */

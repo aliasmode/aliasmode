@@ -155,6 +155,22 @@ test("Cloud close rejects malformed conflicts without a current version", async 
     .rejects.toThrow("missing currentVersion");
 });
 
+test("Cloud profile roster reuses its per-client ETag cache", async () => {
+  const requests: Array<string | null> = [];
+  const roster = { ok: true as const, profiles: [] };
+  let calls = 0;
+  const cloud = client(async (_url, init) => {
+    requests.push(new Headers(init?.headers).get("if-none-match"));
+    calls++;
+    if (calls === 1) return Response.json(roster, { headers: { etag: '"roster-1"' } });
+    return new Response(null, { status: 304, headers: { etag: '"roster-1"' } });
+  });
+
+  expect(await cloud.listProfiles()).toEqual(roster);
+  expect(await cloud.listProfiles()).toEqual(roster);
+  expect(requests).toEqual([null, '"roster-1"']);
+});
+
 test("Cloud client reports non-JSON responses with endpoint context", async () => {
   const cloud = client(async () => new Response("<html>failure</html>", {
     status: 502,

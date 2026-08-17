@@ -22,6 +22,8 @@ export class CloudAuthRuntime {
   private expiresAtValue: number | undefined;
   private userValue: SupabaseAuthUser | undefined;
   private refreshInFlight: Promise<string | undefined> | undefined;
+  private credentialMutation = Promise.resolve();
+  private signOutInFlight: Promise<void> | undefined;
   private generation = 0;
 
   constructor(
@@ -59,7 +61,8 @@ export class CloudAuthRuntime {
       const session = await this.auth.refresh(refreshToken);
       if (generation !== this.generation) return undefined;
       const result = this.accept(session);
-      await this.onRefreshToken?.(result.refreshToken);
+      await this.persistRefreshToken(result.refreshToken);
+      if (generation !== this.generation) return undefined;
       return this.accessToken();
     })().finally(() => {
       if (this.refreshInFlight === pending) this.refreshInFlight = undefined;
@@ -77,21 +80,34 @@ export class CloudAuthRuntime {
   }
 
   async signIn(email: string, password: string): Promise<CloudAuthResult> {
-    return this.acceptAndPersist(await this.auth.signIn(email, password));
+    const generation = this.generation;
+    return this.acceptAndPersist(await this.auth.signIn(email, password), generation);
   }
 
   async restore(refreshToken: string): Promise<CloudAuthResult> {
-    return this.acceptAndPersist(await this.auth.refresh(refreshToken));
+    const generation = this.generation;
+    return this.acceptAndPersist(await this.auth.refresh(refreshToken), generation);
   }
 
-  async signOut(): Promise<void> {
+  signOut(): Promise<void> {
+    if (this.signOutInFlight) return this.signOutInFlight;
     const accessToken = this.accessTokenValue;
     this.clear();
-    try {
-      if (accessToken) await this.auth.signOut(accessToken);
-    } finally {
-      await this.onSignOut?.();
-    }
+    const pending = (async () => {
+      try {
+        if (accessToken) await this.auth.signOut(accessToken);
+      } finally {
+        try {
+          await this.mutateCredentials(async () => { await this.onSignOut?.(); });
+        } finally {
+          this.clear();
+        }
+      }
+    })().finally(() => {
+      if (this.signOutInFlight === pending) this.signOutInFlight = undefined;
+    });
+    this.signOutInFlight = pending;
+    return pending;
   }
 
   clear(): void {
@@ -102,10 +118,22 @@ export class CloudAuthRuntime {
     this.userValue = undefined;
   }
 
-  private async acceptAndPersist(session: SupabaseAuthSession): Promise<CloudAuthResult> {
+  private async acceptAndPersist(session: SupabaseAuthSession, generation: number): Promise<CloudAuthResult> {
+    if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
     const result = this.accept(session);
-    await this.onRefreshToken?.(result.refreshToken);
+    await this.persistRefreshToken(result.refreshToken);
+    if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
     return result;
+  }
+
+  private persistRefreshToken(refreshToken: string): Promise<void> {
+    return this.mutateCredentials(async () => { await this.onRefreshToken?.(refreshToken); });
+  }
+
+  private mutateCredentials(mutation: () => Promise<void>): Promise<void> {
+    const pending = this.credentialMutation.then(mutation, mutation);
+    this.credentialMutation = pending.catch(() => {});
+    return pending;
   }
 
   private accept(session: SupabaseAuthSession): CloudAuthResult {

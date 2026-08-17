@@ -15,8 +15,7 @@
  *   bun cli.ts serve   [--port 50400] [--headless]
  *   bun cli.ts list
  *
- * Common flags: --db <path>  --state-root <dir>  --migrate-from <legacy-dir>
- *               --data-root <dir>  --port <n>
+ * Common flags: --db <path>  --state-root <dir>  --data-root <dir>  --port <n>
  */
 
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
@@ -42,7 +41,7 @@ import {
 } from "./session.ts";
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
 import { ensureStateDirectories, profileDataPaths, resolveStateRoot, statePaths, type StatePaths } from "./paths.ts";
-import { migrateLegacyState } from "./migration.ts";
+import { migrateLegacyState, type LegacyMigrationResult, type MigrationOptions } from "./migration.ts";
 import {
   AppConfigStore,
   legacyHubUrl,
@@ -57,7 +56,7 @@ import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
-import { appendFileSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import net from "node:net";
@@ -82,6 +81,32 @@ function flag(args: string[], name: string): string | undefined {
 }
 function has(args: string[], name: string): boolean {
   return args.includes(`--${name}`);
+}
+
+export const CLOAKPIT_IMPORT_COMMAND = "__import-cloakpit";
+const IMPORT_RESTRICTION = "Windows DPAPI protects persisted browser secrets, so this import works only for the same Windows machine and account. Persisted persona fields are preserved, but runtime or browser differences can change the account-visible fingerprint.";
+
+export async function runCloakpitImportCommand(
+  args: string[],
+  migrate: (source: string, destination: StatePaths, options?: MigrationOptions) => Promise<LegacyMigrationResult> = migrateLegacyState,
+): Promise<{ ok: boolean; message: string }> {
+  const source = flag(args, "source") ?? (existsSync(join("C:\\Cloakpit", "profiles.sqlite")) ? "C:\\Cloakpit" : undefined);
+  if (!source) return { ok: false, message: `No Cloakpit source was selected. Pass an explicit source path. ${IMPORT_RESTRICTION}` };
+  try {
+    const result = await migrate(source, statePaths(resolveStateRoot(args)), {
+      profileRoot: flag(args, "cloakpit-profile-root"),
+    });
+    if (result.status === "not_found") {
+      return { ok: false, message: `No profiles.sqlite was found in ${resolve(source)}. ${IMPORT_RESTRICTION}` };
+    }
+    return {
+      ok: true,
+      message: `Imported ${result.profileCount} Cloakpit profile(s). ${IMPORT_RESTRICTION}`,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: `${detail}. ${IMPORT_RESTRICTION}` };
+  }
 }
 
 export const OFFICIAL_CLOUD_URL = "https://cloud.aliasmode.com";
@@ -327,19 +352,23 @@ function attachDesktopControl(
   process.stdout.write(`${JSON.stringify(desktopReadyRecord(health.instance, port))}\n`);
 }
 
+const UNSAFE_CANARY_TIMEOUT_MS = 600_000;
+
 function makeLauncher(
   store: ProfileStore,
   rest: string[],
   remoteMode = false,
   defaultDataRoot = "profiles",
 ): Launcher {
+  const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
   return new Launcher({
     store,
     dataRoot: defaultDataRoot,
     headless: has(rest, "headless"),
     // Explicit canary-only escape hatch for constrained test hosts where a
     // full browser identity probe cannot complete. Never enable in production.
-    unsafeDisableIdentityGates: has(rest, "unsafe-disable-identity-gates"),
+    unsafeDisableIdentityGates: unsafeCanary,
+    ...(unsafeCanary ? { cdpReadyTimeoutMs: UNSAFE_CANARY_TIMEOUT_MS } : {}),
     // AliasMode owns the browser process, but it is not the external campaign
     // client that requested it. Keep the ownership namespaces distinct so that
     // client can identify a dead browser while AliasMode stays up.
@@ -350,7 +379,7 @@ function makeLauncher(
       `--aliasmode-launcher-pid=${process.pid}`,
       ...(has(rest, "no-sandbox") ? ["--no-sandbox"] : []),
     ],
-    ensureSearchProvider: ensureDuckDuckGoDefault,
+    ...(unsafeCanary ? {} : { ensureSearchProvider: ensureDuckDuckGoDefault }),
     // In remote mode the coordinator injects the roamed session over CDP, so the launcher's own
     // bootstrap cookie injection is turned off — and because the login is re-injected from the hub,
     // it's safe to reset a crash-corrupted profile's volatile storage on launch (auto-heals the
@@ -373,7 +402,7 @@ function makeCloudBrowser(
     queue: () => pendingSync.queue(),
     accountId: () => connection.accountId(),
     deviceId: () => connection.deviceId(),
-    readSession: readSessionInSubprocess,
+    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
     applySession: (endpoint, bundle, urls) =>
       applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
   });
@@ -657,6 +686,9 @@ function cloudLauncherSmokeProxy(
 
 async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
   const profileId = "aliasmode-cloud-smoke";
+  const canaryWorkerTimeoutMs = has(rest, "unsafe-disable-identity-gates")
+    ? UNSAFE_CANARY_TIMEOUT_MS
+    : undefined;
   const store = new ProfileStore(paths.cloudDatabase);
   const queue = new PendingSyncQueue(paths.pendingSync, new Uint8Array(32).fill(1));
   const smokeProxy = has(rest, "proxy-mismatch")
@@ -747,9 +779,15 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     queue: () => queue,
     accountId: () => "smoke-account",
     deviceId: () => "smoke-device",
-    readSession: readSessionInSubprocess,
+    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, {
+      captureSeed,
+      ...(canaryWorkerTimeoutMs ? { timeoutMs: canaryWorkerTimeoutMs } : {}),
+    }),
     applySession: (endpoint, bundle, urls) =>
-      applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
+      applySessionToEndpoint(endpoint, bundle, urls, {
+        log: (m) => console.log(`[aliasmode] ${m}`),
+        ...(canaryWorkerTimeoutMs ? { writeTimeoutMs: canaryWorkerTimeoutMs } : {}),
+      }),
     heartbeatMs: 0,
   });
 
@@ -796,6 +834,14 @@ function installFileLogging(root: string): void {
 }
 
 async function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === CLOAKPIT_IMPORT_COMMAND) {
+    const result = await runCloakpitImportCommand(argv.slice(1));
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
   // Playwright-over-CDP on Bun emits occasional stray websocket rejections
   // ("ws.WebSocket 'upgrade' event is not implemented in bun"). Left unhandled,
   // Bun exits the process — which would crash the long-running manager or cut a
@@ -814,7 +860,6 @@ async function main() {
     process.exit(1);
   });
 
-  const argv = process.argv.slice(2);
   if (typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true) {
     const runtime = process.env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim() || defaultPlaywrightRuntimeRoot();
     process.env.ALIASMODE_PLAYWRIGHT_RUNTIME = runtime;
@@ -836,13 +881,6 @@ async function main() {
   const desktopCredentials = desktopHealth
     ? new DesktopCredentialBridge(desktopHealth.instance)
     : null;
-  const migrationSource = flag(rest, "migrate-from") ?? process.env.ALIASMODE_LEGACY_ROOT;
-  if (migrationSource && (cmd === "start" || cmd === "serve")) {
-    const migration = migrateLegacyState(migrationSource, paths);
-    if (migration.status === "migrated") {
-      console.log(`migrated ${migration.profileCount} legacy profile(s) into ${paths.root}`);
-    }
-  }
   ensureStateDirectories(paths);
   if (cmd === "__cloud-launcher-smoke") {
     await runCloudLauncherSmoke(paths, rest);
@@ -942,7 +980,7 @@ async function main() {
           hub: new HubClient(hubUrl, password, owner),
           launcher,
           store,
-          readSession: readSessionInSubprocess,
+          readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
           writeSession,
         });
         // Re-claim the lock + resume heartbeats for browsers that survived a

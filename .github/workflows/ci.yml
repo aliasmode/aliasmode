@@ -30,6 +30,7 @@ jobs:
     name: Windows NSIS installer
     runs-on: windows-latest
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
@@ -37,8 +38,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.89
+          components: rustfmt
       - run: bun install --frozen-lockfile
-      - run: bun run desktop:prepare
+      - name: Prepare bundle with official baseline Bun
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+          $root = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
+          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $zip
+          Expand-Archive $zip $root -Force
+          $baselineBun = (Get-ChildItem $root -Recurse -File -Filter "bun.exe" | Select-Object -First 1).FullName
+          if (-not $baselineBun) { throw "official baseline Bun executable is missing" }
+          & $baselineBun scripts/prepare-windows-bundle.ts
+          if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
+      - run: bun test
+      - run: bun run typecheck
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: bun run desktop:check
+      - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
         shell: pwsh
         run: |
@@ -109,12 +127,22 @@ jobs:
           }
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
           $browserPath = Resolve-Path (Join-Path ".\src-tauri\resources\cloakbrowser" $metadata.executable)
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = (Resolve-Path ".\src-tauri\resources\playwright").Path
           $env:ALIASMODE_LIVE_BROWSER = $browserPath.Path
           $env:ALIASMODE_LIVE_BROWSER_SHA256 = $metadata.sha256
           $env:ALIASMODE_LIVE_HEADFUL = "1"
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
       - run: bunx tauri build --bundles nsis
+      - name: Select NSIS installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($installers.Count)"
+          }
+          "ALIASMODE_NSIS_INSTALLER=$($installers[0].FullName)" | Add-Content $env:GITHUB_ENV
       - name: Smoke-test installed desktop and headful Cloud proxies
         shell: pwsh
         env:
@@ -125,14 +153,10 @@ jobs:
           ALIASMODE_LIVE_PROXY_IP: ${{ secrets.ALIASMODE_LIVE_PROXY_IP }}
         run: |
           $ErrorActionPreference = "Stop"
-          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
-          if ($installers.Count -ne 1) {
-            throw "expected exactly one NSIS installer, found $($installers.Count)"
-          }
-
           $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode installed"
-          $install = Start-Process -Wait -PassThru $installers[0].FullName -ArgumentList @(
+          Remove-Item $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+          if (Test-Path $installRoot) { throw "installed acceptance root was not clean" }
+          $install = Start-Process -Wait -PassThru $env:ALIASMODE_NSIS_INSTALLER -ArgumentList @(
             "/S",
             "/D=$installRoot"
           )
@@ -240,7 +264,8 @@ jobs:
           }
 
           $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
-          $browserPath = Join-Path $installRoot (Join-Path "cloakbrowser" $metadata.executable)
+          if ($metadata.executable -ne "chrome.exe") { throw "Windows browser metadata does not target chrome.exe" }
+          $browserPath = Join-Path $installRoot "cloakbrowser\chrome.exe"
           if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
           $playwrightRuntime = Join-Path $installRoot "playwright"
           if (-not (Test-Path (Join-Path $playwrightRuntime "node\node.exe") -PathType Leaf)) {
@@ -293,7 +318,7 @@ jobs:
           $worker.WaitForExit()
           if ($worker.ExitCode -ne 1) { throw "installed Playwright worker exited with code $($worker.ExitCode)" }
           try { $workerResponse = $workerOutput | ConvertFrom-Json } catch { throw "installed Playwright worker returned malformed JSON" }
-          if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "operation_failed") {
+          if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "invalid_request") {
             throw "installed Playwright worker returned an unexpected protocol response"
           }
           if (-not [string]::IsNullOrEmpty($workerError)) { throw "installed Playwright worker wrote to stderr" }
@@ -321,22 +346,18 @@ jobs:
       - name: Stage unsigned installer and checksum
         shell: pwsh
         run: |
-          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
-          if ($installers.Count -ne 1) {
-            throw "expected exactly one NSIS installer, found $($installers.Count)"
-          }
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $installerName = Split-Path $env:ALIASMODE_NSIS_INSTALLER -Leaf
           $versionMarker = "_$($bundleVersion)_"
-          if (-not $installers[0].Name.Contains($versionMarker)) {
-            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $($installers[0].Name)"
+          if (-not $installerName.Contains($versionMarker)) {
+            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $installerName"
           }
           $artifact = ".\artifacts\windows"
           New-Item -ItemType Directory -Force $artifact | Out-Null
-          Copy-Item $installers[0].FullName $artifact
-          $installer = Join-Path $artifact $installers[0].Name
+          $installer = Join-Path $artifact $installerName
+          Copy-Item $env:ALIASMODE_NSIS_INSTALLER $installer
           $sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $($installers[0].Name)" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+          "$sha256  $installerName" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
       - uses: actions/upload-artifact@v4
         with:
           name: aliasmode-windows-unsigned

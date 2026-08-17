@@ -23,6 +23,7 @@ import {
   fetchCloudTeam,
   cloudWorkspaceAction,
   signInCloud,
+  signOutCloud,
   signUpCloud,
   restoreCloudSession,
   resendCloudSignUp,
@@ -169,6 +170,7 @@ function downloadText(name: string, text: string, type: string): void {
 }
 
 const REFRESH_MS = 3000;
+const PROFILE_PAGE_SIZE = 200;
 
 const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   open_started: "Cloud open started",
@@ -187,8 +189,8 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   session_restore_connect_timeout: "Browser connection timed out",
   session_restore_context_failed: "Persistent browser context was unavailable",
   session_restore_context_timeout: "Persistent browser context timed out",
-  session_restore_origin_storage_failed: "Telegram storage restore failed",
-  session_restore_origin_storage_timeout: "Telegram storage restore timed out",
+  session_restore_origin_storage_failed: "Website storage restore failed",
+  session_restore_origin_storage_timeout: "Website storage restore timed out",
   session_restore_cookie_clear_failed: "Cookie clear failed",
   session_restore_cookie_clear_timeout: "Cookie clear timed out",
   session_restore_cookie_add_failed: "Cookie restore failed",
@@ -203,6 +205,13 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   session_captured: "Session captured",
   browser_stopped: "CloakBrowser stopped",
   session_synced: "Session synchronized",
+  checkpoint_saved: "Session checkpoint saved",
+  checkpoint_unchanged: "Session checkpoint unchanged",
+  checkpoint_capture_failed: "Session checkpoint capture failed",
+  checkpoint_invalid: "Session checkpoint was invalid",
+  manual_stop_detected: "Manual browser close detected",
+  session_sync_pending: "Session synchronization is pending",
+  dirty_monitor_unavailable: "Fast session monitoring is unavailable",
   cloud_registration_released: "Cloud session registration released",
   cleanup_retained: "Browser or recovery state was retained",
   heartbeat_failed: "Cloud heartbeat failed",
@@ -210,7 +219,8 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
 };
 
 function cloudDiagnosticFailed(type: CloudDiagnosticEvent["type"]): boolean {
-  return type.includes("failed") || type.includes("timeout") || type === "cleanup_retained" || type === "access_ended";
+  return type.includes("failed") || type.includes("timeout") || type === "checkpoint_invalid"
+    || type === "session_sync_pending" || type === "cleanup_retained" || type === "access_ended";
 }
 
 function StatusDot({ running }: { running: boolean }) {
@@ -467,6 +477,7 @@ function App() {
   const [showDiag, setShowDiag] = useState(false);
   const [q, setQ] = useState("");
   const [group, setGroup] = useState("all");
+  const [profilePage, setProfilePage] = useState(0);
   const [groupsOpen, setGroupsOpen] = useState(true);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   // Two error slots so an auto-refresh can't silently wipe why an action failed:
@@ -523,6 +534,7 @@ function App() {
   const [bulkErr, setBulkErr] = useState<string | null>(null);
   const [bulkOver, setBulkOver] = useState(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
+  const authGeneration = useRef(0);
   const isCloudMode = appMode?.mode === "cloud";
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
@@ -610,6 +622,7 @@ function App() {
   };
 
   const submitCloudAuth = async () => {
+    const generation = authGeneration.current;
     setAuthBusy(true);
     setAuthErr(null);
     setAuthNotice(null);
@@ -624,6 +637,7 @@ function App() {
       } else {
         const stored = await readDesktopCloudCredentials();
         const result = await signInCloud(authEmail, authPassword, stored?.queueKey);
+        if (generation !== authGeneration.current) return;
         if (typeof result.refreshToken !== "string" || !result.refreshToken) {
           throw new Error("Cloud did not return a refresh token");
         }
@@ -638,6 +652,7 @@ function App() {
           result.deviceCredential,
           typeof result.queueKey === "string" ? result.queueKey : undefined,
         );
+        if (generation !== authGeneration.current) return;
         setCloudAuth({
           authenticated: true,
           expiresAt: result.expiresAt,
@@ -648,6 +663,30 @@ function App() {
         setAuthPassword("");
         if (!persisted) setAuthNotice("Signed in for this run; desktop credential storage is unavailable.");
       }
+    } catch (error) {
+      if (generation === authGeneration.current) {
+        setAuthErr(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (generation === authGeneration.current) setAuthBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      await signOutCloud();
+      authGeneration.current++;
+      setCloudAuth({ authenticated: false });
+      setProfiles([]);
+      setHealthSources([]);
+      setSelected(new Set());
+      setTeam(null);
+      setCloudEvents([]);
+      setAuthPassword("");
+      setAuthNotice(null);
+      setShowAccount(false);
     } catch (error) {
       setAuthErr(error instanceof Error ? error.message : String(error));
     } finally {
@@ -710,16 +749,17 @@ function App() {
   useEffect(() => {
     if (appMode?.mode !== "cloud" || restartRequired) return;
     let active = true;
+    const generation = authGeneration.current;
     const restore = async () => {
       try {
         const state = await fetchCloudAuth();
         if (state.authenticated) {
-          if (active) setCloudAuth(state);
+          if (active && generation === authGeneration.current) setCloudAuth(state);
           return;
         }
         const stored = await readDesktopCloudCredentials();
         if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
-          if (active) setCloudAuth(state);
+          if (active && generation === authGeneration.current) setCloudAuth(state);
           return;
         }
         const result = await restoreCloudSession(
@@ -727,8 +767,9 @@ function App() {
           stored.deviceCredential,
           stored.queueKey,
         );
+        if (!active || generation !== authGeneration.current) return;
         await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
-        if (active) {
+        if (active && generation === authGeneration.current) {
           setCloudAuth({
             authenticated: true,
             expiresAt: result.expiresAt,
@@ -739,7 +780,7 @@ function App() {
           setAuthErr(null);
         }
       } catch (error) {
-        if (active) {
+        if (active && generation === authGeneration.current) {
           setCloudAuth({ authenticated: false });
           setAuthErr(error instanceof Error ? error.message : String(error));
         }
@@ -758,6 +799,7 @@ function App() {
     ) return;
     const delay = Math.max(1_000, cloudAuth.expiresAt - Date.now() - 60_000);
     const timer = window.setTimeout(async () => {
+      const generation = authGeneration.current;
       try {
         const stored = await readDesktopCloudCredentials();
         if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
@@ -768,7 +810,9 @@ function App() {
           stored.deviceCredential,
           stored.queueKey,
         );
+        if (generation !== authGeneration.current) return;
         await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
+        if (generation !== authGeneration.current) return;
         setCloudAuth({
           authenticated: true,
           expiresAt: result.expiresAt,
@@ -777,6 +821,7 @@ function App() {
           legal: result.legal,
         });
       } catch (error) {
+        if (generation !== authGeneration.current) return;
         setCloudAuth({ authenticated: false });
         setAuthErr(error instanceof Error ? error.message : String(error));
       }
@@ -842,6 +887,17 @@ function App() {
     return true;
   });
 
+  const profilePageCount = Math.max(1, Math.ceil(filtered.length / PROFILE_PAGE_SIZE));
+  const visibleProfilePage = Math.min(profilePage, profilePageCount - 1);
+  const visibleProfiles = filtered.slice(
+    visibleProfilePage * PROFILE_PAGE_SIZE,
+    (visibleProfilePage + 1) * PROFILE_PAGE_SIZE,
+  );
+  useEffect(() => setProfilePage(0), [q, group, healthFilter]);
+  useEffect(() => {
+    if (profilePage !== visibleProfilePage) setProfilePage(visibleProfilePage);
+  }, [profilePage, visibleProfilePage]);
+
   const runningCount = profiles.filter((p) => p.running).length;
   const selectedMobileCount = profiles.filter((p) => selected.has(p.id) && p.mobilePersona).length;
   const existingGroups = groups.slice(1); // drop the "all" pseudo-group
@@ -849,7 +905,7 @@ function App() {
     ? (team?.folders.filter((folder) => folder.permission === "edit" && !folder.archivedAt).map((folder) => folder.name) ??
       existingGroups.filter((name) => profiles.some((profile) => profile.group === name && profile.permission === "edit")))
     : existingGroups;
-  const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission !== "view");
+  const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");
   const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
 
   const toggle = (id: string) =>
@@ -859,12 +915,12 @@ function App() {
       else n.add(id);
       return n;
     });
-  const allFilteredSelected = filtered.length > 0 && filtered.every((p) => selected.has(p.id));
+  const allVisibleSelected = visibleProfiles.length > 0 && visibleProfiles.every((p) => selected.has(p.id));
   const toggleAll = () =>
     setSelected((s) => {
       const n = new Set(s);
-      if (allFilteredSelected) filtered.forEach((p) => n.delete(p.id));
-      else filtered.forEach((p) => n.add(p.id));
+      if (allVisibleSelected) visibleProfiles.forEach((p) => n.delete(p.id));
+      else visibleProfiles.forEach((p) => n.add(p.id));
       return n;
     });
 
@@ -901,8 +957,11 @@ function App() {
         setActionErr(r.error || "delete failed");
         return;
       }
-      // Any that were open elsewhere are refused, not deleted — surface that.
-      if (r.locked && r.locked.length) setActionErr(`${r.locked.length} in use, not deleted: ${r.locked.join(", ")}`);
+      const problems = [
+        r.locked?.length && `${r.locked.length} in use, not deleted: ${r.locked.join(", ")}`,
+        r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`,
+      ].filter(Boolean);
+      if (problems.length) setActionErr(problems.join("; "));
       setSelected(new Set());
       await load();
     } catch (e) {
@@ -1540,7 +1599,7 @@ function App() {
           </>
         )}
         <span className="spacer" />
-        {!isCloudMode && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}
+        {(!isCloudMode || selectedEditable) && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}
         </>}
       </div>
 
@@ -1548,7 +1607,7 @@ function App() {
         <table>
           <thead>
             <tr>
-              <th className="chk"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAll} /></th>
+              <th className="chk"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} /></th>
               <th></th>
               <th>id</th>
               <th>name</th>
@@ -1561,7 +1620,7 @@ function App() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((p) => (
+            {visibleProfiles.map((p) => (
               <tr key={p.id} className={p.running ? "running" : ""}>
                 <td className="chk"><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} /></td>
                 <td><StatusDot running={p.running} /></td>
@@ -1631,6 +1690,15 @@ function App() {
 
       <footer className="statusbar">
         <span>{profiles.length} profiles · {runningCount} running</span>
+        {filtered.length > PROFILE_PAGE_SIZE && (
+          <span className="profile-pages">
+            <button disabled={visibleProfilePage === 0} onClick={() => setProfilePage(visibleProfilePage - 1)}>Previous</button>
+            <span>
+              {visibleProfilePage * PROFILE_PAGE_SIZE + 1}–{Math.min((visibleProfilePage + 1) * PROFILE_PAGE_SIZE, filtered.length)} of {filtered.length}
+            </span>
+            <button disabled={visibleProfilePage + 1 >= profilePageCount} onClick={() => setProfilePage(visibleProfilePage + 1)}>Next</button>
+          </span>
+        )}
         {diag && (
           <span className="diag" onClick={() => setShowDiag((s) => !s)}>
             Diagnose · last {diagWhen} {showDiag ? "▾" : "▸"}
@@ -1649,6 +1717,11 @@ function App() {
                 <div className="settings-row"><span>Signed in as</span><strong>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local · no account"}</strong></div>
                 <div className="settings-row"><span>Mode</span><strong>{isCloudMode ? "AliasMode Cloud" : "AliasMode Local"}</strong></div>
                 <div className="settings-row"><span>App version</span><strong className="mono">{appVersion || "—"}</strong></div>
+                {isCloudMode && cloudAuth?.authenticated && (
+                  <button type="button" disabled={authBusy} onClick={() => void signOut()}>
+                    {authBusy ? "Signing out…" : "Sign out / Switch account"}
+                  </button>
+                )}
               </section>
               <section className="settings-section">
                 <h2>{isCloudMode ? "Team" : "Workspace"}</h2>

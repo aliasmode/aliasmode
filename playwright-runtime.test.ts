@@ -10,12 +10,15 @@ import {
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
 
+const bunAsNodeTest = process.platform === "win32" ? test.skip : test;
+
 test("uses packaged Node bootstrap and keeps requests off argv", () => {
-  const command = playwrightWorkerCommand("C:\\AliasMode\\playwright");
-  expect(command[0]).toBe("C:\\AliasMode\\playwright/node/node.exe");
+  const runtime = "C:\\AliasMode\\playwright";
+  const command = playwrightWorkerCommand(runtime);
+  expect(command[0]).toBe(join(runtime, "node", "node.exe"));
   expect(command.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
   expect(command[3]).toContain("await import");
-  expect(command[4]).toBe("C:\\AliasMode\\playwright/worker.mjs");
+  expect(command[4]).toBe(join(runtime, "worker.mjs"));
 });
 
 test("worker inherits normal environment without Node hooks or app secrets", () => {
@@ -53,8 +56,14 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
   const endpoint = "ws://user:secret@127.0.0.1/browser";
   let argv: string[] = [];
   let input = "";
-  await runPlaywrightWorker("session-capture", { endpoint, token: "private" }, {
-    runtimeRoot: "/fake/runtime",
+  const runtime = "/fake/runtime";
+  const payload = {
+    endpoint,
+    token: "private",
+    captureSeed: { origins: ["https://private-origin.example"] },
+  };
+  await runPlaywrightWorker("session-capture", payload, {
+    runtimeRoot: runtime,
     spawn(command) {
       argv = command;
       const worker = fakeWorker(success("bundle"));
@@ -62,12 +71,13 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
       return worker;
     },
   });
-  expect(argv[0]).toBe("/fake/runtime/node/node.exe");
+  expect(argv[0]).toBe(join(runtime, "node", "node.exe"));
   expect(argv.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
-  expect(argv[4]).toBe("/fake/runtime/worker.mjs");
+  expect(argv[4]).toBe(join(runtime, "worker.mjs"));
   expect(argv.join(" ")).not.toContain("secret");
   expect(argv.join(" ")).not.toContain("private");
-  expect(JSON.parse(input).payload).toEqual({ endpoint, token: "private" });
+  expect(argv.join(" ")).not.toContain("private-origin");
+  expect(JSON.parse(input).payload).toEqual(payload);
 });
 
 test("worker timeout kills only the worker and waits for its exit", async () => {
@@ -88,6 +98,25 @@ test("worker timeout kills only the worker and waits for its exit", async () => 
   expect(killed).toBe(true);
   resolveExit(137);
   expect(await result).toMatchObject({ code: "timeout" });
+});
+
+test("worker timeout returns when kill and exit confirmation fail", async () => {
+  let killed = false;
+  const hangingStream = () => new ReadableStream<Uint8Array>({ start() {} });
+  const result = runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    timeoutMs: 5,
+    spawn: () => ({
+      stdin: { write() {}, end() {} },
+      stdout: hangingStream(),
+      stderr: hangingStream(),
+      exited: new Promise<number>(() => {}),
+      kill() { killed = true; throw new Error("failed"); },
+    }),
+  }).then(() => null, (error) => error);
+  const outcome = await Promise.race([result, Bun.sleep(100).then(() => "hung")]);
+  expect(killed).toBe(true);
+  expect(outcome).not.toBe("hung");
+  expect(outcome).toMatchObject({ code: "timeout" });
 });
 
 test("worker reports secret-safe response diagnostics without affecting the parent", async () => {
@@ -155,7 +184,7 @@ test("worker distinguishes success output with a nonzero exit", async () => {
   expect(JSON.stringify(error)).not.toContain("sentinel");
 });
 
-test("bootstrap returns a structured error when the worker cannot load", async () => {
+bunAsNodeTest("bootstrap returns a structured error when the worker cannot load", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-bootstrap-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -183,7 +212,7 @@ test("installed Playwright storage source uses the supported direct export shape
   expect(() => new (StorageScript())(false)).not.toThrow();
 });
 
-test("installed worker loads its packaged ESM dependency", async () => {
+bunAsNodeTest("installed worker loads its packaged ESM dependency", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-layout-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -204,7 +233,7 @@ test("installed worker loads its packaged ESM dependency", async () => {
   }
 });
 
-test("worker retries until the persistent context appears without creating an incognito context", async () => {
+bunAsNodeTest("worker retries until the persistent context appears without creating an incognito context", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-delayed-context-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -236,7 +265,7 @@ test("worker retries until the persistent context appears without creating an in
   }
 });
 
-test("worker restore failures preserve operation and outcome details", async () => {
+bunAsNodeTest("worker restore failures preserve operation and outcome details", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-error-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -255,6 +284,298 @@ test("worker restore failures preserve operation and outcome details", async () 
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
     expect(error).toMatchObject({ code: "operation_failed", details: { operation: "cookie_clear", outcome: "failed" } });
     expect(error.message).not.toContain("secret");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed captures, and restores safely", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-web-session-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/" };
+      let captureMode = "valid";
+      let bypassServiceWorker = false;
+      let liveUrl = "https://example.com/dashboard";
+      const livePage = {
+        url() { return liveUrl; },
+        async goto(url) { liveUrl = url; },
+      };
+      const routes = new Map();
+      const context = {
+        async storageState() {
+          return {
+            cookies: captureMode === "malformed-cookie" ? [{ name: "broken" }] : [cookie],
+            origins: [],
+          };
+        },
+        pages() { return [livePage]; },
+        async newPage() {
+          return {
+            currentUrl: "about:blank",
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("route missing");
+              this.currentUrl = url;
+              if (captureMode !== "service-worker" || bypassServiceWorker) await handler({ fulfill: async () => {} });
+            },
+            url() { return this.currentUrl; },
+            async evaluate(_fn, input) {
+              if (input) {
+                if (input.entries?.length !== 1 || input.entries[0].name !== "session" || input.entries[0].value !== "active") throw new Error("wrong localStorage");
+                if (input.databases?.length) throw new Error("unexpected IndexedDB");
+                return true;
+              }
+              return { localStorage: [{ name: "session", value: captureMode === "malformed-storage" ? 42 : "active" }] };
+            },
+            async close() {},
+          };
+        },
+        async newCDPSession() {
+          return {
+            async send(method, params) {
+              if (method === "Network.setBypassServiceWorker" && params?.bypass === true) bypassServiceWorker = true;
+            },
+            async detach() {},
+          };
+        },
+        async route(url, handler) {
+          if (!url.startsWith("https://example.com/?__aliasmode_session_")) throw new Error("wrong session URL");
+          routes.set(url, handler);
+        },
+        async unroute(url) { routes.delete(url); },
+        async clearCookies() { if (liveUrl !== "about:blank") throw new Error("live target page was not blanked"); },
+        async addCookies(cookies) { if (JSON.stringify(cookies) !== JSON.stringify([cookie])) throw new Error("wrong cookies"); },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        bypassServiceWorker = false;
+        if (endpoint.includes("malformed-cookie")) captureMode = "malformed-cookie";
+        else if (endpoint.includes("malformed-storage")) captureMode = "malformed-storage";
+        else if (endpoint.includes("internal-origin")) captureMode = "internal-origin";
+        else if (endpoint.includes("service-worker")) captureMode = "service-worker";
+        else captureMode = "valid";
+        return { contexts: () => [context], async close() {} };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }));
+    expect(captured).toEqual({
+      cookies: [{ name: "custom_auth", value: "value", domain: ".example.com", path: "/" }],
+      origins: [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
+    });
+    const malformedCookie = await runPlaywrightWorker("session-capture", {
+      endpoint: "ws://malformed-cookie",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+
+    for (const endpoint of ["ws://malformed-storage", "ws://internal-origin"]) {
+      const invalidOrigin = await runPlaywrightWorker("session-capture", {
+        endpoint,
+        ...(endpoint.endsWith("internal-origin")
+          ? { captureSeed: { origins: ["chrome-extension://abc"] } }
+          : {}),
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(invalidOrigin).toMatchObject({ code: "operation_failed" });
+    }
+
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://service-worker",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual(captured);
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({
+        cookies: captured.cookies,
+        origins: [
+          ...captured.origins,
+          { origin: "chrome-extension://abc", localStorage: [{ name: "private", value: "drop" }] },
+        ],
+      }),
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker fails closed on Telegram IndexedDB reads and applies empty tombstones", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-telegram-tombstone-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let mode = "capture";
+      const routes = new Map();
+      const livePage = { url: () => "https://web.telegram.org/a/" };
+      const context = {
+        pages: () => mode === "capture" ? [livePage] : [],
+        async newPage() {
+          return {
+            currentUrl: "about:blank",
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("route missing");
+              this.currentUrl = url;
+              await handler({ fulfill: async () => {} });
+            },
+            url() { return this.currentUrl; },
+            async evaluate(fn, input) {
+              if (mode === "capture") {
+                if (Array.isArray(input)) throw new Error("IndexedDB request failed");
+                return { localStorage: [{ name: "dc2_auth_key", value: "live" }] };
+              }
+              const databases = new Set(["tt-passcode", "tweb-common", "tweb-account-2", "cache-db"]);
+              const deleted = [];
+              const values = new Map([["dc2_auth_key", "stale"]]);
+              globalThis.indexedDB = {
+                async databases() { return [...databases].map((name) => ({ name })); },
+                deleteDatabase(name) {
+                  const request = {};
+                  queueMicrotask(() => { databases.delete(name); deleted.push(name); request.onsuccess?.(); });
+                  return request;
+                },
+              };
+              globalThis.localStorage = {};
+              Object.defineProperties(globalThis.localStorage, {
+                getItem: { value: (name) => values.get(name) ?? null },
+                setItem: { value: (name, value) => values.set(name, value) },
+                clear: { value: () => values.clear() },
+              });
+              await fn(input);
+              if (JSON.stringify(deleted.sort()) !== JSON.stringify(["tt-passcode", "tweb-account-2", "tweb-common"])) throw new Error("wrong databases deleted");
+              if (databases.size !== 1 || !databases.has("cache-db")) throw new Error("unrelated database deleted");
+              if (values.size !== 0) throw new Error("localStorage not cleared");
+              return true;
+            },
+            async close() {},
+          };
+        },
+        async route(url, handler) { routes.set(url, handler); },
+        async unroute(url) { routes.delete(url); },
+        async storageState() { return { cookies: [], origins: [] }; },
+        async clearCookies() {},
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        mode = endpoint.includes("restore") ? "restore" : "capture";
+        return { contexts: () => [context], async close() {} };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captureError = await runPlaywrightWorker("session-capture", {
+      endpoint: "ws://capture",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(captureError).toMatchObject({ code: "operation_failed" });
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://restore",
+      bundle: JSON.stringify({ cookies: [], origins: [{ origin: "https://web.telegram.org" }] }),
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://restore",
+      bundle: JSON.stringify({ cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [] }] }),
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker captures current localStorage for a closed known origin", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-closed-origin-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const storage = {
+        "https://closed.example": [{ name: "token", value: "fresh-closed-value" }],
+        "https://live.example": [{ name: "live", value: "current-value" }],
+      };
+      const livePage = { url: () => "https://live.example/dashboard" };
+      const pages = [];
+      const routes = new Map();
+      const context = {
+        pages: () => [livePage],
+        async newPage() {
+          const page = {
+            currentUrl: "about:blank",
+            closed: false,
+            url() { return this.currentUrl; },
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("network request was not intercepted");
+              await handler({ fulfill: async () => {} });
+              this.currentUrl = url;
+            },
+            async evaluate() { return { localStorage: storage[new URL(this.currentUrl).origin] ?? [] }; },
+            async close() { this.closed = true; },
+          };
+          pages.push(page);
+          return page;
+        },
+        async route(url, handler) { routes.set(url, handler); },
+        async unroute(url) { routes.delete(url); },
+        async storageState() {
+          if (pages.some((page) => page.closed)) throw new Error("capture page closed before storage snapshot");
+          return { cookies: [], origins: [] };
+        },
+      };
+      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+      captureSeed: { origins: ["https://closed.example", "https://empty.example"] },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }));
+    expect(captured).toEqual({
+      cookies: [],
+      origins: [
+        { origin: "https://closed.example", localStorage: [{ name: "token", value: "fresh-closed-value" }] },
+        { origin: "https://empty.example", localStorage: [] },
+        { origin: "https://live.example", localStorage: [{ name: "live", value: "current-value" }] },
+      ],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker rejects capture when an attached Telegram page cannot be read", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-telegram-capture-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const page = { url: () => "https://web.telegram.org/a/", async evaluate() { throw new Error("unavailable"); } };
+      const context = { async storageState() { return { cookies: [], origins: [] }; }, pages: () => [page] };
+      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const error = await runPlaywrightWorker("session-capture", {
+      endpoint: "ws://browser",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ code: "operation_failed" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

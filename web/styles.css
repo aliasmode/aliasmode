@@ -239,6 +239,9 @@ th.chk input, td.chk input { cursor: pointer; }
   display: flex; align-items: center; gap: 12px;
   padding: 9px 16px; border-top: 1px solid var(--line); color: var(--muted); background: #fbfcfe;
 }
+.statusbar .profile-pages { display: flex; align-items: center; gap: 8px; }
+.statusbar .profile-pages button { padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); cursor: pointer; }
+.statusbar .profile-pages button:disabled { opacity: .45; cursor: default; }
 .statusbar .diag { margin-left: auto; cursor: pointer; user-select: none; }
 .statusbar .diag:hover { color: var(--ink); }
 

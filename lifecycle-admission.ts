@@ -87,7 +87,6 @@ export class LifecycleAdmissionController {
           new LifecycleAdmissionError(`lifecycle ${operation.kind} queue wait exceeded ${waitMs}ms before dispatch`, "timeout"),
         );
       }, waitMs);
-      if (typeof operation.timer.unref === "function") operation.timer.unref();
 
       if (request.signal) {
         operation.abort = () => {

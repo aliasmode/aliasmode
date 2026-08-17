@@ -76,7 +76,7 @@ function fakeHub(seed = true) {
 
 function harness(
   hub = fakeHub(),
-  readSession: () => Promise<string> = async () => '{"cookies":[{"name":"auth_token","value":"rotated","domain":".x.com","path":"/"}]}',
+  readSession: () => Promise<string> = async () => '{"cookies":[{"name":"auth_token","value":"rotated","domain":".x.com","path":"/"}],"origins":[]}',
   writeSession?: (ws: string, bundle: string) => Promise<void>,
 ) {
   const store = new ProfileStore(":memory:");
@@ -214,7 +214,7 @@ test("open failure keeps the hub lock when launcher retains an unconfirmed local
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     setIntervalFn: () => 1,
@@ -254,7 +254,7 @@ test("failed open transfers one stalled stop into retained cleanup", async () =>
       async diagnoseCdp() { return never; },
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     retainedCleanupAttemptMs: 5,
@@ -306,7 +306,7 @@ test("failed open keeps cleanup unconfirmed when browser stop succeeds but hub r
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     retainedCleanupRetryMs: 1,
@@ -380,7 +380,7 @@ test("failed close renews beyond the lease and retries stop single-flight until 
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[]}',
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     leaseMs: 90,
@@ -454,7 +454,7 @@ test("retained cleanup blocks reopen until its owner-scoped hub release settles"
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[]}',
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     retainedCleanupRetryMs: 1,
@@ -803,7 +803,7 @@ test("fast session checkpoint timer is armed only for Telegram profiles", async 
         async navigate() {},
       },
       store,
-      readSession: async () => '{"cookies":[]}',
+      readSession: async () => '{"cookies":[],"origins":[]}',
       writeSession: async () => {},
       heartbeatMs: 120_000,
       sessionSyncMs: 3_000,
@@ -837,7 +837,7 @@ test("a failed launch attempts stop even without a durable row before releasing"
       async diagnoseCdp() { return "no launch record"; },
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -890,7 +890,7 @@ test("restore failure with unconfirmed stop retains the browser and hub lock", a
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => { throw new Error("origin restore failed"); },
     heartbeatMs: 0,
     setIntervalFn: () => 1,
@@ -930,7 +930,7 @@ test("heartbeat downgrades to advisory after the last confirmed writer lease exp
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     leaseMs: 300_000,
@@ -1024,7 +1024,7 @@ test("scheduled heartbeats are single-flight when a prior tick stalls", async ()
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[]}',
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 1_000,
     setIntervalFn: (fn) => { tick = fn; return 1; },
@@ -1074,7 +1074,7 @@ test("a timed-out session read cannot permanently stall lease heartbeats or mult
     readSession: async () => {
       readCalls++;
       if (readCalls === 1) return firstRead;
-      return '{"cookies":[{"name":"auth_token","value":"RECOVERED"}]}';
+      return '{"cookies":[{"name":"auth_token","value":"RECOVERED","domain":".x.com","path":"/"}],"origins":[]}';
     },
     writeSession: async () => {},
     heartbeatMs: 0,
@@ -1095,7 +1095,7 @@ test("a timed-out session read cannot permanently stall lease heartbeats or mult
     pendingSessionReads: 1,
   });
 
-  finishFirstRead('{"cookies":[]}');
+  finishFirstRead('{"cookies":[],"origins":[]}');
   await new Promise((resolve) => setTimeout(resolve, 0));
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
   expect(readCalls).toBe(2);
@@ -1192,7 +1192,7 @@ test("a stuck reader blocks live-browser reopen but not a new generation after c
       readCalls++;
       if (readCalls === 1) return oldRead;
       if (readCalls === 2) return newRead;
-      return '{"cookies":[{"name":"auth_token","value":"NEW_GENERATION"}]}';
+      return '{"cookies":[{"name":"auth_token","value":"NEW_GENERATION","domain":".x.com","path":"/"}],"origins":[]}';
     },
     writeSession: async () => {},
     heartbeatMs: 0,
@@ -1213,11 +1213,11 @@ test("a stuck reader blocks live-browser reopen but not a new generation after c
   expect(reopened.ok).toBe(true);
   expect(starts).toBe(2);
   await coord.heartbeatOnce("k1d0cd11", reopened.ws!);
-  finishOldRead('{"cookies":[{"name":"auth_token","value":"STALE_OLD"}]}');
+  finishOldRead('{"cookies":[{"name":"auth_token","value":"STALE_OLD","domain":".x.com","path":"/"}],"origins":[]}');
   await new Promise((resolve) => setTimeout(resolve, 0));
   await coord.heartbeatOnce("k1d0cd11", reopened.ws!);
   expect(readCalls).toBe(2);
-  finishNewRead('{"cookies":[{"name":"auth_token","value":"TIMED_OUT_NEW"}]}');
+  finishNewRead('{"cookies":[{"name":"auth_token","value":"TIMED_OUT_NEW","domain":".x.com","path":"/"}],"origins":[]}');
   await new Promise((resolve) => setTimeout(resolve, 0));
   await coord.heartbeatOnce("k1d0cd11", reopened.ws!);
   expect(readCalls).toBe(3);
@@ -1267,7 +1267,7 @@ test("reopen drains an old heartbeat put before reading and injecting the author
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[{"name":"auth_token","value":"OLD_TICK"}]}',
+    readSession: async () => '{"cookies":[{"name":"auth_token","value":"OLD_TICK","domain":".x.com","path":"/"}],"origins":[]}',
     writeSession: async (_ws, bundle) => { injected.push(bundle); events.push(`inject:${injected.length}`); },
     heartbeatMs: 1_000,
     heartbeatDrainMs: 1_000,
@@ -1328,7 +1328,7 @@ test("reopen becomes advisory when a fresh writer claim fails after heartbeat dr
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[{"name":"auth_token","value":"OLD_TICK"}]}',
+    readSession: async () => '{"cookies":[{"name":"auth_token","value":"OLD_TICK","domain":".x.com","path":"/"}],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 1_000,
     heartbeatDrainMs: 1_000,
@@ -1386,7 +1386,7 @@ test("reopen fails closed on heartbeat-drain timeout and keeps the lock behind t
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[]}',
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => { injections++; },
     heartbeatMs: 1_000,
     heartbeatDrainMs: 5,
@@ -1445,7 +1445,7 @@ test("listProfiles does not release my lock while open is still launching", asyn
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -1485,7 +1485,7 @@ test("close waits for an in-flight open() before touching the lock", async () =>
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -1532,7 +1532,7 @@ test("open waits for an in-flight close before claiming and launching the replac
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -1586,7 +1586,7 @@ test("heartbeat teardown remains visible as stopping until a deferred stop settl
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -1622,7 +1622,7 @@ test("reclaimSurvivors stops and releases a survivor when the hub advanced past 
   const coord = new RemoteCoordinator({
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop(id: string) { stopped = true; store.clearLaunch(id); return true; }, async active() { return true; }, async navigate() {} },
-    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE"}]}', writeSession: async () => {}, heartbeatMs: 0,
+    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE","domain":".x.com","path":"/"}],"origins":[]}', writeSession: async () => {}, heartbeatMs: 0,
   });
   await coord.reclaimSurvivors();
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
@@ -1673,7 +1673,7 @@ test("reclaimSurvivors does not infer staleness from updatedBy when the persiste
   const coord = new RemoteCoordinator({
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop() { return true; }, async active() { return true; }, async navigate() {} },
-    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"ROTATED"}]}', writeSession: async () => {}, heartbeatMs: 0,
+    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"ROTATED","domain":".x.com","path":"/"}],"origins":[]}', writeSession: async () => {}, heartbeatMs: 0,
   });
   await coord.reclaimSurvivors();
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
@@ -1688,7 +1688,7 @@ test("reclaimSurvivors stops an old launch row with no base when the hub already
   const coord = new RemoteCoordinator({
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop(id: string) { store.clearLaunch(id); return true; }, async active() { return true; }, async navigate() {} },
-    store, readSession: async () => '{"cookies":[]}', writeSession: async () => {}, heartbeatMs: 0,
+    store, readSession: async () => '{"cookies":[],"origins":[]}', writeSession: async () => {}, heartbeatMs: 0,
   });
   await coord.reclaimSurvivors();
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
@@ -1707,7 +1707,7 @@ test("reclaimSurvivors seeds the CAS base and DOES push when the reattached surv
   const coord = new RemoteCoordinator({
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop() { return true; }, async active() { return true; }, async navigate() {} },
-    store, readSession: async () => '{"cookies":[]}', writeSession: async () => {}, heartbeatMs: 0,
+    store, readSession: async () => '{"cookies":[],"origins":[]}', writeSession: async () => {}, heartbeatMs: 0,
   });
   await coord.reclaimSurvivors();
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
@@ -1736,7 +1736,7 @@ test("reclaimSurvivors arms heartbeat only after survivor session state is seede
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop() { return true; }, async active() { return true; }, async navigate() {} },
     store,
-    readSession: async () => '{"cookies":[]}',
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 1,
     setIntervalFn: (fn) => {
@@ -1765,7 +1765,7 @@ test("reclaimSurvivors treats a hub version BELOW the persisted base (regression
   const coord = new RemoteCoordinator({
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop(id: string) { store.clearLaunch(id); return true; }, async active() { return true; }, async navigate() {} },
-    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE"}]}', writeSession: async () => {}, heartbeatMs: 0,
+    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE","domain":".x.com","path":"/"}],"origins":[]}', writeSession: async () => {}, heartbeatMs: 0,
   });
   await coord.reclaimSurvivors();
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
@@ -1782,7 +1782,7 @@ test("reclaimSurvivors blocks pushes when the hub session version read throws (t
   const coord = new RemoteCoordinator({
     hub,
     launcher: { async start() { return { ws: "ws", port: 1 }; }, async stop() { return true; }, async active() { return true; }, async navigate() {} },
-    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE"}]}', writeSession: async () => {}, heartbeatMs: 0,
+    store, readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE","domain":".x.com","path":"/"}],"origins":[]}', writeSession: async () => {}, heartbeatMs: 0,
   });
   await coord.reclaimSurvivors(); // couldn't read the version → base unknown → must not push
   await coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
@@ -1805,7 +1805,7 @@ test("a stale survivor is stopped and released before explicit open restores the
       async stop(id: string) { events.push("stop"); store.clearLaunch(id); return true; }, async active() { return true; }, async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE1","domain":".x.com","path":"/"}]}',
+    readSession: async () => '{"cookies":[{"name":"auth_token","value":"STALE1","domain":".x.com","path":"/"}],"origins":[]}',
     writeSession: async () => { events.push("writeSession"); },
     heartbeatMs: 0,
   });
@@ -1837,7 +1837,7 @@ test("reclaimSurvivors keeps a verified browser advisory when the hub is unreach
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -1922,7 +1922,7 @@ test("heartbeatOnce yields to a concurrent close that starts while renew is in f
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -1970,7 +1970,7 @@ test("open downgrades to advisory on writer renew transport failure", async () =
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     log: (m: string) => logs.push(m),
@@ -2009,7 +2009,7 @@ test("releaseAll reports unconfirmed shutdown cleanup", async () => {
       async navigate() {},
     },
     store,
-    readSession: async () => '{"cookies":[]}',
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     setIntervalFn: () => 1,
@@ -2176,7 +2176,7 @@ test("repeated renew transport errors downgrade after the last confirmed writer 
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     leaseMs: 1_000,
@@ -2224,7 +2224,7 @@ test("open behind close creates a new generation and concurrent closes coalesce"
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -2285,7 +2285,7 @@ test("a close admitted after a queued reopen tears down that reopened generation
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -2331,7 +2331,7 @@ test("cleared heartbeat callback cannot run under the reopened generation", asyn
     hub,
     launcher,
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 1_000,
     setIntervalFn: (fn) => { callbacks.push(fn); return callbacks.length; },
@@ -2388,7 +2388,7 @@ test("provisional survivor is stopped before claim and certified survivor uses r
       },
     },
     store,
-    readSession: async (ws) => { readFrom.push(ws); return "{}"; },
+    readSession: async (ws) => { readFrom.push(ws); return '{"cookies":[],"origins":[]}'; },
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -2457,7 +2457,7 @@ test("releaseAll waits for an admitted open and closes its late launch", async (
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -2509,7 +2509,7 @@ test("releaseAll queues a final close behind an admitted reopen", async () => {
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
   });
@@ -2553,7 +2553,7 @@ test("releaseAll failure propagates and a later cleanup pass is retryable", asyn
       async navigate() {},
     },
     store,
-    readSession: async () => "{}",
+    readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 0,
     retainedCleanupRetryMs: 1,

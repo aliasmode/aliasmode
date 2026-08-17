@@ -7,12 +7,16 @@ const root = import.meta.dir;
 
 test("release version stays aligned across the desktop bundle", () => {
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
-  const tauriConfig = JSON.parse(readFileSync(join(root, "src-tauri", "tauri.conf.json"), "utf8")) as { version: string };
+  const tauriConfig = JSON.parse(readFileSync(join(root, "src-tauri", "tauri.conf.json"), "utf8")) as {
+    version: string;
+    bundle: { windows: { webviewInstallMode: { type: string } } };
+  };
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
 
-  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.25");
+  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.33");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
   expect(tauriConfig.version).toBe(ALIASMODE_VERSION);
+  expect(tauriConfig.bundle.windows.webviewInstallMode.type).toBe("offlineInstaller");
   expect(cargoVersion).toBe(ALIASMODE_VERSION);
 });

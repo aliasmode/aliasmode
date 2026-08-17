@@ -6,7 +6,7 @@ use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
 const RELEASES_API: &str = "https://api.github.com/repos/aliasmode/aliasmode/releases?per_page=10";
-const RELEASES_PAGE: &str = "https://github.com/aliasmode/aliasmode/releases";
+const DOWNLOAD_PAGE: &str = "https://aliasmode.com/download/";
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +74,7 @@ async fn check_for_release_inner(app: &AppHandle) -> Result<(), String> {
             .builder()
             .title("AliasMode update available")
             .body(format!(
-                "AliasMode {tag} is available. Get it only from {RELEASES_PAGE}"
+                "AliasMode {tag} is available. Get it only from {DOWNLOAD_PAGE}"
             ))
             .show()
             .map_err(|error| error.to_string())?;

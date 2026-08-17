@@ -96,6 +96,63 @@ test("Cloud restore persists its rotated refresh token before returning", async 
   expect(persisted).toEqual(["rotated-refresh"]);
 });
 
+test("Cloud sign-out fences a late restore and clears credentials last", async () => {
+  let finishRestore!: (session: any) => void;
+  const restore = new Promise<any>((resolve) => { finishRestore = resolve; });
+  const credentialEvents: string[] = [];
+  const runtime = new CloudAuthRuntime(
+    auth({ async refresh() { return restore; } }),
+    () => 1_000,
+    async (token) => { credentialEvents.push(`persist:${token}`); },
+    async () => { credentialEvents.push("clear"); },
+  );
+
+  const pending = runtime.restore("stored-refresh");
+  const signedOut = runtime.signOut();
+  finishRestore({
+    accessToken: "late-access",
+    refreshToken: "late-refresh",
+    expiresIn: 60,
+    expiresAt: 61_000,
+    user: { id: "account1", email_confirmed_at: "verified" },
+  });
+
+  await expect(pending).rejects.toThrow("cancelled");
+  await signedOut;
+  expect(runtime.state()).toEqual({ authenticated: false });
+  expect(credentialEvents).toEqual(["clear"]);
+});
+
+test("Cloud sign-out waits for an accepted refresh write before clearing credentials", async () => {
+  let finishPersist!: () => void;
+  const persisted = new Promise<void>((resolve) => { finishPersist = resolve; });
+  const credentialEvents: string[] = [];
+  const runtime = new CloudAuthRuntime(
+    auth(),
+    () => 1_000,
+    async (token) => {
+      credentialEvents.push(`persist:${token}:start`);
+      await persisted;
+      credentialEvents.push(`persist:${token}:done`);
+    },
+    async () => { credentialEvents.push("clear"); },
+  );
+
+  const restoring = runtime.restore("stored-refresh");
+  await Promise.resolve();
+  const signedOut = runtime.signOut();
+  finishPersist();
+
+  await expect(restoring).rejects.toThrow("cancelled");
+  await signedOut;
+  expect(runtime.state()).toEqual({ authenticated: false });
+  expect(credentialEvents).toEqual([
+    "persist:rotated-refresh:start",
+    "persist:rotated-refresh:done",
+    "clear",
+  ]);
+});
+
 test("Cloud sign-out clears memory and durable credentials even when remote logout fails", async () => {
   let cleared = 0;
   const runtime = new CloudAuthRuntime(auth({
