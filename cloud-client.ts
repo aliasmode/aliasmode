@@ -64,10 +64,16 @@ export interface CloudClientOptions {
   requestTimeoutMs?: number;
 }
 
+interface CallResponseOptions<T> {
+  notModified?: () => T;
+  received?: (response: Response, body: T) => void;
+}
+
 export class CloudClient {
   private readonly baseUrl: string;
   private readonly fetchFn: CloudFetch;
   private readonly requestTimeoutMs: number;
+  private profileRoster?: { etag: string; response: ListProfilesResponse };
 
   constructor(private readonly options: CloudClientOptions) {
     this.baseUrl = normalizeSecureServiceUrl(options.baseUrl, "AliasMode Cloud");
@@ -75,7 +81,11 @@ export class CloudClient {
     this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? DEFAULT_CLOUD_REQUEST_TIMEOUT_MS);
   }
 
-  private async call<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async call<T>(
+    path: string,
+    init: RequestInit = {},
+    responseOptions: CallResponseOptions<T> = {},
+  ): Promise<T> {
     const accessToken = await this.options.accessToken();
     if (!accessToken) {
       throw new CloudApiError("AliasMode Cloud authentication is required", "authentication_required", 401);
@@ -109,6 +119,12 @@ export class CloudClient {
           headers,
           signal: controller.signal,
         });
+        if (response.status === 304) {
+          if (!responseOptions.notModified) {
+            throw new Error(`AliasMode Cloud ${path} returned an unexpected not-modified response`);
+          }
+          return responseOptions.notModified();
+        }
         const text = await response.text();
         let body: any = {};
         if (text.trim()) {
@@ -122,7 +138,9 @@ export class CloudClient {
           }
         }
         if (!response.ok || body?.ok === false) this.throwApiError(response.status, body);
-        return body as T;
+        const result = body as T;
+        responseOptions.received?.(response, result);
+        return result;
       });
       return await Promise.race([request, timeout]);
     } finally {
@@ -222,7 +240,18 @@ export class CloudClient {
   }
 
   listProfiles(): Promise<ListProfilesResponse> {
-    return this.call("/profiles");
+    const headers = new Headers();
+    if (this.profileRoster) headers.set("if-none-match", this.profileRoster.etag);
+    return this.call("/profiles", { headers }, {
+      notModified: () => {
+        if (!this.profileRoster) throw new Error("AliasMode Cloud profile roster cache is empty");
+        return this.profileRoster.response;
+      },
+      received: (response, body) => {
+        const etag = response.headers.get("etag");
+        this.profileRoster = etag ? { etag, response: body } : undefined;
+      },
+    });
   }
 
   getProfile(profileId: string): Promise<GetProfileResponse> {

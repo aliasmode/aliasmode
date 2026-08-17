@@ -170,6 +170,7 @@ function downloadText(name: string, text: string, type: string): void {
 }
 
 const REFRESH_MS = 3000;
+const PROFILE_PAGE_SIZE = 200;
 
 const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   open_started: "Cloud open started",
@@ -476,6 +477,7 @@ function App() {
   const [showDiag, setShowDiag] = useState(false);
   const [q, setQ] = useState("");
   const [group, setGroup] = useState("all");
+  const [profilePage, setProfilePage] = useState(0);
   const [groupsOpen, setGroupsOpen] = useState(true);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   // Two error slots so an auto-refresh can't silently wipe why an action failed:
@@ -885,6 +887,17 @@ function App() {
     return true;
   });
 
+  const profilePageCount = Math.max(1, Math.ceil(filtered.length / PROFILE_PAGE_SIZE));
+  const visibleProfilePage = Math.min(profilePage, profilePageCount - 1);
+  const visibleProfiles = filtered.slice(
+    visibleProfilePage * PROFILE_PAGE_SIZE,
+    (visibleProfilePage + 1) * PROFILE_PAGE_SIZE,
+  );
+  useEffect(() => setProfilePage(0), [q, group, healthFilter]);
+  useEffect(() => {
+    if (profilePage !== visibleProfilePage) setProfilePage(visibleProfilePage);
+  }, [profilePage, visibleProfilePage]);
+
   const runningCount = profiles.filter((p) => p.running).length;
   const selectedMobileCount = profiles.filter((p) => selected.has(p.id) && p.mobilePersona).length;
   const existingGroups = groups.slice(1); // drop the "all" pseudo-group
@@ -902,12 +915,12 @@ function App() {
       else n.add(id);
       return n;
     });
-  const allFilteredSelected = filtered.length > 0 && filtered.every((p) => selected.has(p.id));
+  const allVisibleSelected = visibleProfiles.length > 0 && visibleProfiles.every((p) => selected.has(p.id));
   const toggleAll = () =>
     setSelected((s) => {
       const n = new Set(s);
-      if (allFilteredSelected) filtered.forEach((p) => n.delete(p.id));
-      else filtered.forEach((p) => n.add(p.id));
+      if (allVisibleSelected) visibleProfiles.forEach((p) => n.delete(p.id));
+      else visibleProfiles.forEach((p) => n.add(p.id));
       return n;
     });
 
@@ -1594,7 +1607,7 @@ function App() {
         <table>
           <thead>
             <tr>
-              <th className="chk"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAll} /></th>
+              <th className="chk"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} /></th>
               <th></th>
               <th>id</th>
               <th>name</th>
@@ -1607,7 +1620,7 @@ function App() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((p) => (
+            {visibleProfiles.map((p) => (
               <tr key={p.id} className={p.running ? "running" : ""}>
                 <td className="chk"><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} /></td>
                 <td><StatusDot running={p.running} /></td>
@@ -1677,6 +1690,15 @@ function App() {
 
       <footer className="statusbar">
         <span>{profiles.length} profiles · {runningCount} running</span>
+        {filtered.length > PROFILE_PAGE_SIZE && (
+          <span className="profile-pages">
+            <button disabled={visibleProfilePage === 0} onClick={() => setProfilePage(visibleProfilePage - 1)}>Previous</button>
+            <span>
+              {visibleProfilePage * PROFILE_PAGE_SIZE + 1}–{Math.min((visibleProfilePage + 1) * PROFILE_PAGE_SIZE, filtered.length)} of {filtered.length}
+            </span>
+            <button disabled={visibleProfilePage + 1 >= profilePageCount} onClick={() => setProfilePage(visibleProfilePage + 1)}>Next</button>
+          </span>
+        )}
         {diag && (
           <span className="diag" onClick={() => setShowDiag((s) => !s)}>
             Diagnose · last {diagWhen} {showDiag ? "▾" : "▸"}
