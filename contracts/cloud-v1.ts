@@ -105,6 +105,8 @@ export interface CloudCookie {
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: "Strict" | "Lax" | "None";
+  partitionKey?: string;
+  _crHasCrossSiteAncestor?: boolean;
 }
 
 export interface CloudOriginStorage {

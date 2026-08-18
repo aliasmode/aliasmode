@@ -305,6 +305,8 @@ export function parseCapturedSessionBundle(bundle: string): CapturedSessionBundl
       || (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires)))
       || (cookie.httpOnly !== undefined && typeof cookie.httpOnly !== "boolean")
       || (cookie.secure !== undefined && typeof cookie.secure !== "boolean")
+      || (cookie.partitionKey !== undefined && typeof cookie.partitionKey !== "string")
+      || (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean")
       || (cookie.sameSite !== undefined && cookie.sameSite !== "Strict" && cookie.sameSite !== "Lax" && cookie.sameSite !== "None")) invalid();
   }
 

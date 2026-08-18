@@ -298,7 +298,7 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
     await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
     await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
-      const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/" };
+      const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/", partitionKey: "https://example.com", _crHasCrossSiteAncestor: false };
       let captureMode = "valid";
       let bypassServiceWorker = false;
       let liveUrl = "https://example.com/dashboard";
@@ -310,7 +310,10 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       const context = {
         async storageState() {
           return {
-            cookies: captureMode === "malformed-cookie" ? [{ name: "broken" }] : [cookie],
+            cookies: captureMode === "malformed-cookie" ? [{ name: "broken" }]
+              : captureMode === "bad-partition-key" ? [{ ...cookie, partitionKey: true }]
+              : captureMode === "bad-cross-site-ancestor" ? [{ ...cookie, _crHasCrossSiteAncestor: "false" }]
+              : [cookie],
             origins: [],
           };
         },
@@ -355,6 +358,8 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       export const chromium = { async connectOverCDP(endpoint) {
         bypassServiceWorker = false;
         if (endpoint.includes("malformed-cookie")) captureMode = "malformed-cookie";
+        else if (endpoint.includes("bad-partition-key")) captureMode = "bad-partition-key";
+        else if (endpoint.includes("bad-cross-site-ancestor")) captureMode = "bad-cross-site-ancestor";
         else if (endpoint.includes("malformed-storage")) captureMode = "malformed-storage";
         else if (endpoint.includes("internal-origin")) captureMode = "internal-origin";
         else if (endpoint.includes("service-worker")) captureMode = "service-worker";
@@ -368,13 +373,18 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       endpoint: "ws://browser",
     }, { runtimeRoot: root, timeoutMs: 5_000 }));
     expect(captured).toEqual({
-      cookies: [{ name: "custom_auth", value: "value", domain: ".example.com", path: "/" }],
+      cookies: [{
+        name: "custom_auth", value: "value", domain: ".example.com", path: "/",
+        partitionKey: "https://example.com", _crHasCrossSiteAncestor: false,
+      }],
       origins: [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
     });
-    const malformedCookie = await runPlaywrightWorker("session-capture", {
-      endpoint: "ws://malformed-cookie",
-    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
-    expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+    for (const endpoint of ["ws://malformed-cookie", "ws://bad-partition-key", "ws://bad-cross-site-ancestor"]) {
+      const malformedCookie = await runPlaywrightWorker("session-capture", {
+        endpoint,
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+    }
 
     for (const endpoint of ["ws://malformed-storage", "ws://internal-origin"]) {
       const invalidOrigin = await runPlaywrightWorker("session-capture", {
