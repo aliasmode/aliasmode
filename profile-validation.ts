@@ -34,6 +34,12 @@ function assertCookie(value: unknown, index: number): asserts value is CookieRec
       throw new Error(`profile cookie ${index} ${field} must be boolean`);
     }
   }
+  if (cookie.partitionKey !== undefined && typeof cookie.partitionKey !== "string") {
+    throw new Error(`profile cookie ${index} partitionKey must be a string`);
+  }
+  if (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean") {
+    throw new Error(`profile cookie ${index} _crHasCrossSiteAncestor must be boolean`);
+  }
   if (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires))) {
     throw new Error(`profile cookie ${index} expires must be a finite number`);
   }

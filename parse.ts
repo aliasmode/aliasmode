@@ -125,6 +125,8 @@ export function normalizeCookies(raw: unknown): { cookies: CookieRecord[]; strip
       secure: sameSite === "None" ? true : secureRaw,
     };
     if (sameSite) rec.sameSite = sameSite;
+    if (typeof (c as any).partitionKey === "string") rec.partitionKey = (c as any).partitionKey;
+    if (typeof (c as any)._crHasCrossSiteAncestor === "boolean") rec._crHasCrossSiteAncestor = (c as any)._crHasCrossSiteAncestor;
     // Session cookies carry no expiry; persisted cookies keep their unix-seconds expiry.
     const isSession = (c as any).session === true;
     const expires = Number((c as any).expires);

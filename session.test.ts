@@ -566,6 +566,8 @@ test("parseCapturedSessionBundle accepts only complete fresh-capture shapes", ()
       httpOnly: true,
       secure: true,
       sameSite: "Lax" as const,
+      partitionKey: "https://example.com",
+      _crHasCrossSiteAncestor: false,
     }],
     origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: "value" }] }],
   };
@@ -584,6 +586,8 @@ test("parseCapturedSessionBundle accepts only complete fresh-capture shapes", ()
     { cookies: [], origins: "wrong" },
     { cookies: [{ name: "session", value: "active", domain: ".example.com" }], origins: [] },
     { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", secure: "yes" }], origins: [] },
+    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", partitionKey: true }], origins: [] },
+    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", _crHasCrossSiteAncestor: "false" }], origins: [] },
     { cookies: [], origins: [{ origin: "https://example.com/path", localStorage: [] }] },
     { cookies: [], origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: 1 }] }] },
     { cookies: [], origins: [{ origin: "https://example.com", localStorage: [], indexedDB: [] }] },

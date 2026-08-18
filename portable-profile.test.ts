@@ -68,6 +68,25 @@ test("portable profile codec uses stored cookies when no captured bundle exists"
   });
 });
 
+test("portable profile codec preserves partitioned stored cookies", () => {
+  const source = profile();
+  source.cookies[0]!.partitionKey = "https://example.com";
+  source.cookies[0]!._crHasCrossSiteAncestor = false;
+  const decoded = decodePortableProfile(encodePortableProfile(source));
+  expect(decoded.profile.cookies[0]).toMatchObject({
+    name: "fallback", value: "cookie", partitionKey: "https://example.com", _crHasCrossSiteAncestor: false,
+  });
+});
+
+test("portable profile codec rejects wrongly typed partitioned cookie metadata", () => {
+  for (const cookie of [
+    { ...profile().cookies[0]!, partitionKey: true },
+    { ...profile().cookies[0]!, _crHasCrossSiteAncestor: "false" },
+  ]) {
+    expect(() => encodePortableProfile({ ...profile(), cookies: [cookie] } as unknown as Profile)).toThrow();
+  }
+});
+
 test("portable profile codec rejects malformed session JSON", () => {
   expect(() => encodePortableProfile(profile(), "not-json")).toThrow("invalid session bundle");
 });

@@ -348,6 +348,8 @@ async function captureSession(browser, payload) {
       (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires))) ||
       (cookie.httpOnly !== undefined && typeof cookie.httpOnly !== "boolean") ||
       (cookie.secure !== undefined && typeof cookie.secure !== "boolean") ||
+      (cookie.partitionKey !== undefined && typeof cookie.partitionKey !== "string") ||
+      (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean") ||
       (cookie.sameSite !== undefined && !["Strict", "Lax", "None"].includes(cookie.sameSite))
     )) throw new Error("Invalid captured cookies");
     return JSON.stringify({ cookies: state.cookies, origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });

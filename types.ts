@@ -18,6 +18,8 @@ export interface CookieRecord {
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: "Strict" | "Lax" | "None";
+  partitionKey?: string;
+  _crHasCrossSiteAncestor?: boolean;
 }
 
 export type ProxyType = "http" | "https" | "socks5";
