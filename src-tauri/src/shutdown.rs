@@ -52,7 +52,18 @@ async fn active_browser_count(origin: &str) -> Result<usize, String> {
         .count())
 }
 
-fn exit_after_cleanup(app: AppHandle, window: WebviewWindow, sidecar: SidecarSupervisor) {
+#[derive(Clone, Copy)]
+enum CleanupAction {
+    Exit,
+    Restart,
+}
+
+fn finish_after_cleanup(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: SidecarSupervisor,
+    action: CleanupAction,
+) {
     let _ = window.hide();
     tauri::async_runtime::spawn(async move {
         let result = match sidecar.request_shutdown() {
@@ -60,7 +71,10 @@ fn exit_after_cleanup(app: AppHandle, window: WebviewWindow, sidecar: SidecarSup
             Err(error) => Err(error),
         };
         match result {
-            Ok(()) => app.exit(0),
+            Ok(()) => match action {
+                CleanupAction::Exit => app.exit(0),
+                CleanupAction::Restart => app.request_restart(),
+            },
             Err(error) => {
                 let _ = sidecar.kill_owned();
                 app.dialog()
@@ -74,6 +88,15 @@ fn exit_after_cleanup(app: AppHandle, window: WebviewWindow, sidecar: SidecarSup
             }
         }
     });
+}
+
+#[tauri::command]
+pub fn restart_after_mode_change(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: tauri::State<'_, SidecarSupervisor>,
+) {
+    finish_after_cleanup(app, window, sidecar.inner().clone(), CleanupAction::Restart);
 }
 
 fn ask_to_close(
@@ -98,7 +121,7 @@ fn ask_to_close(
         .buttons(MessageDialogButtons::YesNo)
         .show(move |confirmed| {
             if confirmed {
-                exit_after_cleanup(app, window, sidecar);
+                finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
             } else {
                 state.in_progress.store(false, Ordering::Release);
             }
@@ -126,7 +149,7 @@ pub fn install_close_handler(
             tauri::async_runtime::spawn(async move {
                 let active = active_browser_count(&origin).await;
                 if matches!(active, Ok(0)) {
-                    exit_after_cleanup(app, window, sidecar);
+                    finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
                 } else {
                     ask_to_close(app, window, sidecar, state, active);
                 }
