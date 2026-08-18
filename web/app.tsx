@@ -348,7 +348,7 @@ function ModeSwitchConfirmation({
               ? "Cloud profiles will not appear until you switch back. Local mode does not contact AliasMode Cloud."
               : "Your Local profiles stay on this computer. AliasMode does not upload them to Cloud automatically."}
           </p>
-          <p className="hint">AliasMode must restart after this change.</p>
+          <p className="hint">AliasMode saves and closes active browsers, then restarts automatically.</p>
           {error && <div className="modal-err" role="alert">{error}</div>}
         </div>
         <div className="modal-foot">
@@ -598,7 +598,10 @@ function App() {
     try {
       const result = await selectAppMode(mode);
       setAppMode(result.config);
-      setRestartRequired(result.restartRequired === true);
+      const needsRestart = result.restartRequired === true;
+      setRestartRequired(needsRestart);
+      const invoke = desktopInvoke();
+      if (needsRestart && invoke) await invoke("restart_after_mode_change");
       return true;
     } catch (error) {
       setModeErr(error instanceof Error ? error.message : String(error));
@@ -1334,6 +1337,7 @@ function App() {
             <>
               <h1 id="onboarding-title">Your mode is ready</h1>
               <p>Quit and reopen AliasMode to start in {appMode?.mode === "cloud" ? "Cloud" : "Local"} mode.</p>
+              {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               <button className="mode-primary" type="button" onClick={() => window.close()}>Quit AliasMode</button>
             </>
           ) : appMode?.mode === "cloud" ? (
@@ -1355,7 +1359,6 @@ function App() {
                 >
                   {authBusy ? "Working…" : cloudAuth.legal ? "Accept and continue to Cloud" : "Checking workspace…"}
                 </button>
-                <button className="mode-secondary" type="button" disabled={modeBusy} onClick={() => requestModeSwitch("local")}>Stay Local</button>
                 {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               </>
             ) : (
@@ -1378,7 +1381,6 @@ function App() {
                   <button type="button" onClick={() => { setAuthErr(null); setAuthNotice(null); setAuthView(authView === "signin" ? "signup" : "signin"); }}>
                     {authView === "signin" ? "Create an account" : "Back to sign in"}
                   </button>
-                  <button type="button" disabled={modeBusy} onClick={() => requestModeSwitch("local")}>Stay Local</button>
                 </div>
                 {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               </>
@@ -1476,7 +1478,7 @@ function App() {
                 />
               ) : (
                 <>
-                  <span className="fname">{g}</span>
+                  <span className="fname" title={g}>{g}</span>
                   {(!isCloudMode || profiles.some((profile) => profile.group === g && profile.permission === "edit")) && (
                     <span className="gactions">
                       <button title="Rename group" onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>
@@ -1567,6 +1569,8 @@ function App() {
           <input className="moveinput" autoFocus placeholder="new group name" value={newGroup} onChange={(e) => setNewGroup(e.target.value)} />
         ) : (
           <select
+            className="move-group"
+            title={moveTarget || "Choose group"}
             disabled={!selected.size}
             value={moveTarget}
             onChange={(e) => (e.target.value === "__new__" ? setNewMode(true) : setMoveTarget(e.target.value))}
@@ -1604,7 +1608,7 @@ function App() {
       </div>
 
       <div className="tablewrap">
-        <table>
+        <table className="profile-table">
           <thead>
             <tr>
               <th className="chk"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} /></th>
@@ -1625,8 +1629,8 @@ function App() {
                 <td className="chk"><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} /></td>
                 <td><StatusDot running={p.running} /></td>
                 <td className="mono">{p.id}</td>
-                <td>{p.name}</td>
-                <td>{p.group ? <span className="chip">{p.group}</span> : <span className="muted">—</span>}</td>
+                <td className="profile-name" title={p.name}>{p.name}</td>
+                <td className="profile-group" title={p.group}>{p.group ? <span className="chip">{p.group}</span> : <span className="muted">—</span>}</td>
                 <td><PlatformPill platform={p.platform} /></td>
                 <td className="tags">{p.tags?.length ? p.tags.map((t) => <span key={t} className="chip">{t}</span>) : <span className="muted">—</span>}</td>
                 <td className="mono" title={p.proxyError}>{p.proxyError ? "⚠ invalid — edit" : p.proxy ?? "—"}</td>

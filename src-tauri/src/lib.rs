@@ -211,6 +211,7 @@ pub fn run() {
             credential_get,
             credential_set,
             credential_delete,
+            shutdown::restart_after_mode_change,
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;

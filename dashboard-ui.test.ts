@@ -22,7 +22,19 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain("Cloud profiles will not appear until you switch back");
   expect(app).toContain("does not upload them to Cloud automatically");
   expect(app).toContain("Accept and continue to Cloud");
-  expect(app).toContain(">Stay Local</button>");
+  expect(app).not.toContain(">Stay Local</button>");
+  expect(app).toContain('Switch to {isCloudMode ? "Local" : "Cloud"}');
+  expect(app).toContain('invoke("restart_after_mode_change")');
+});
+
+test("dashboard contains long roster labels inside the window", () => {
+  expect(app).toContain('className="profile-table"');
+  expect(app).toContain('className="profile-name" title={p.name}');
+  expect(app).toContain('className="profile-group" title={p.group}');
+  expect(app).toContain('className="move-group"');
+  expect(styles).toContain("table-layout: fixed");
+  expect(styles).toContain("overflow-x: hidden");
+  expect(styles).toContain("text-overflow: ellipsis");
 });
 
 test("Account settings offers fenced Cloud sign-out and clears account state", () => {
