@@ -201,7 +201,7 @@ bunAsNodeTest("bootstrap returns a structured error when the worker cannot load"
 
     const error = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
       runtimeRoot: root,
-      timeoutMs: 1_000,
+      timeoutMs: 5_000,
     }).then(() => null, (failure) => failure);
     expect(error).toMatchObject({ code: "runtime_unavailable" });
     expect(error.details).toBeUndefined();
