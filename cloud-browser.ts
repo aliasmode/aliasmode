@@ -7,6 +7,7 @@ import {
 } from "./cloud-diagnostics.ts";
 import {
   BrowserLaunchError,
+  canonicalUserPageUrl,
   platformHomeUrl,
   splitLaunchUrls,
   type Launcher,
@@ -137,12 +138,8 @@ const TERMINAL_HEARTBEAT_ERRORS = new Set([
 ]);
 
 function canonicalTargetOrigin(raw: string): string | null {
-  try {
-    const url = new URL(raw);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
-  } catch {
-    return null;
-  }
+  const canonical = canonicalUserPageUrl(raw);
+  return canonical ? new URL(canonical).origin : null;
 }
 
 function targetFingerprintOrigins(fingerprint: string): string[] {
@@ -175,7 +172,8 @@ function observeBrowserTargets(
       if (message?.method !== "Target.targetCreated" && message?.method !== "Target.targetInfoChanged") return;
       const info = message?.params?.targetInfo;
       if (info?.type !== "page" || typeof info.url !== "string") return;
-      onTarget(canonicalTargetOrigin(info.url));
+      const origin = canonicalTargetOrigin(info.url);
+      if (origin) onTarget(origin);
     } catch {}
   };
   socket.addEventListener("open", onOpen);
@@ -1337,8 +1335,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     this.dirtyMonitors.set(profileId, monitor);
     const onDirty = () => this.markCheckpointDirty(profileId, monitor);
     const onTarget = (origin: string | null) => {
-      if (this.dirtyMonitors.get(profileId) !== monitor) return;
-      if (origin) checkpoint.origins.add(origin);
+      if (this.dirtyMonitors.get(profileId) !== monitor || !origin) return;
+      checkpoint.origins.add(origin);
       onDirty();
     };
     try {

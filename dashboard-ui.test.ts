@@ -85,10 +85,23 @@ test("Cloud profile pickers use only editable folders", () => {
   expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />');
 });
 
-test("Cloud workspace loading does not depend on Account Settings", () => {
+test("Cloud workspace loads independently and refreshes with Account Settings", () => {
   expect(app).toContain("if (!isCloudMode || !workspaceReady || restartRequired) return;\n    void loadTeam();");
-  expect(app).not.toContain("void loadCloudEvents();\n    void loadTeam();");
+  expect(app).toContain("void loadCloudEvents();\n    void loadTeam();");
   expect(app).toContain("await Promise.all([load(), loadTeam()]);");
+});
+
+test("Team settings guide invitations and explicit folder access", () => {
+  for (const heading of ["Your folder access", "Members", "Invitations", "Join another workspace"]) expect(app).toContain(`>${heading}</h3>`);
+  expect(app).toContain("New members see no folders until you grant access here.");
+  expect(app).toContain("It works only for the email you signed in with.");
+  expect(app).toContain('invite.expiresAt <= Date.now() ? "Expired" : "Pending"');
+  expect(app).toContain('aria-label={`${folder.name} access for ${member.email}`}');
+  expect(app).toContain('aria-label={`Resend invitation to ${invite.email}`}');
+  expect(app).toContain('if (ok) setTeamEmail("")');
+  expect(app).toContain('className="notice" role="status"');
+  expect(styles).toContain(".team-tag");
+  expect(styles).toContain(".team-code input:focus");
 });
 
 test("Admin invitations are read-only for Admin viewers", () => {

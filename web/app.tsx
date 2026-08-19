@@ -579,17 +579,32 @@ function App() {
     finally { setTeamBusy(false); }
   };
 
-  const runTeamAction = async (action: string, input: Record<string, string>) => {
+  const runTeamAction = async (action: string, input: Record<string, string>, done?: string): Promise<boolean> => {
     setTeamBusy(true);
     setTeamErr(null);
-    try { await cloudWorkspaceAction(action, input); await loadTeam(); }
-    catch (error) { setTeamErr(error instanceof Error ? error.message : String(error)); setTeamBusy(false); }
+    try {
+      await cloudWorkspaceAction(action, input);
+      await loadTeam();
+      if (done) flash(done);
+      return true;
+    } catch (error) {
+      setTeamErr(error instanceof Error ? error.message : String(error));
+      setTeamBusy(false);
+      return false;
+    }
+  };
+
+  const inviteTeamMember = async () => {
+    const email = teamEmail.trim();
+    const ok = await runTeamAction("invite", { email, role: teamRole }, `Invitation sent to ${email}`);
+    if (ok) setTeamEmail("");
   };
 
   const openAccountSettings = () => {
     setModeErr(null);
     setShowAccount(true);
     void loadCloudEvents();
+    void loadTeam();
   };
 
   const chooseMode = async (mode: "local" | "cloud"): Promise<boolean> => {
@@ -1543,7 +1558,7 @@ function App() {
           <button className="dismiss" onClick={() => { setActionErr(null); setConnErr(null); }}>×</button>
         </div>
       )}
-      {notice && <div className="notice" onClick={() => setNotice(null)}>{notice}</div>}
+      {notice && <div className="notice" role="status" onClick={() => setNotice(null)}>{notice}</div>}
 
       <div className={`actionbar${selected.size ? " active" : ""}`}>
         <span className="count">{selected.size ? `${selected.size} selected` : "No selection"}</span>
@@ -1733,18 +1748,20 @@ function App() {
                   <>
                     <div className="settings-row"><span>Workspace</span><strong>{cloudAuth?.workspace?.name ?? "Cloud workspace"}</strong></div>
                     <div className="settings-row"><span>Role</span><strong>{cloudAuth?.workspace?.role ?? "member"}</strong></div>
-                    {teamBusy && !team && <p className="hint">Loading team…</p>}
+                    {teamBusy && !team && <p className="hint" role="status">Loading team…</p>}
+                    <h3 className="settings-subhead">Your folder access</h3>
                     {team?.folders.map((folder) => (
                       <div className="settings-row" key={folder.name}>
                         <span>{folder.name}</span><strong>{folder.permission}</strong>
                       </div>
                     ))}
+                    <h3 className="settings-subhead">Members</h3>
                     {team?.members.map((member) => (
                       <div className="team-member" key={member.accountId}>
                         <div className="settings-row">
-                          <span>{member.email}<small> · {member.grants.map((grant) => `${grant.folderName}: ${grant.permission}`).join(", ") || "no grants"}</small></span>
+                          <span>{member.email}<small> · {member.grants.map((grant) => `${grant.folderName}: ${grant.permission}`).join(", ") || "No folder access"}</small></span>
                           {member.role === "owner" || cloudAuth?.workspace?.role !== "owner" ? <strong>{member.role}</strong> : (
-                            <select value={member.role} disabled={teamBusy} onChange={(event) => void runTeamAction("role", { accountId: member.accountId, role: event.target.value })}>
+                            <select aria-label={`Role for ${member.email}`} value={member.role} disabled={teamBusy} onChange={(event) => void runTeamAction("role", { accountId: member.accountId, role: event.target.value })}>
                               <option value="member">member</option><option value="admin">admin</option>
                             </select>
                           )}
@@ -1753,33 +1770,41 @@ function App() {
                           <div className="team-grants">
                             {team.folders.filter((folder) => !folder.archivedAt).map((folder) => {
                               const permission = member.grants.find((grant) => grant.folderName === folder.name)?.permission ?? "";
-                              return <label key={folder.name}>{folder.name}<select value={permission} disabled={teamBusy} onChange={(event) => void runTeamAction(event.target.value ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission: event.target.value })}><option value="">None</option><option value="view">View</option><option value="edit">Edit</option></select></label>;
+                              return <label key={folder.name}>{folder.name}<select aria-label={`${folder.name} access for ${member.email}`} value={permission} disabled={teamBusy} onChange={(event) => void runTeamAction(event.target.value ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission: event.target.value })}><option value="">No access</option><option value="view">View</option><option value="edit">Edit</option></select></label>;
                             })}
-                            <button type="button" disabled={teamBusy} onClick={() => void runTeamAction("remove-member", { accountId: member.accountId })}>Remove</button>
+                            <button type="button" aria-label={`Remove ${member.email}`} disabled={teamBusy} onClick={() => void runTeamAction("remove-member", { accountId: member.accountId }, `Removed ${member.email}`)}>Remove</button>
                           </div>
                         )}
                       </div>
                     ))}
                     {(cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin") && (
-                      <form className="team-code" onSubmit={(event) => { event.preventDefault(); void runTeamAction("invite", { email: teamEmail, role: teamRole }); setTeamEmail(""); }}>
-                        <input type="email" aria-label="Invite email" placeholder="Invite by email" value={teamEmail} onChange={(event) => setTeamEmail(event.target.value)} />
-                        {cloudAuth?.workspace?.role === "owner" && <select aria-label="Invitation role" value={teamRole} onChange={(event) => setTeamRole(event.target.value as "admin" | "member")}><option value="member">Member</option><option value="admin">Admin</option></select>}
-                        <button type="submit" disabled={teamBusy || !teamEmail.trim()}>Invite</button>
-                      </form>
+                      <>
+                        <h3 className="settings-subhead">Invitations</h3>
+                        <form className="team-code" onSubmit={(event) => { event.preventDefault(); void inviteTeamMember(); }}>
+                          <input type="email" aria-label="Invite email" aria-describedby="invite-team-help" placeholder="Staff email address" value={teamEmail} disabled={teamBusy} onChange={(event) => setTeamEmail(event.target.value)} />
+                          {cloudAuth?.workspace?.role === "owner" && <select aria-label="Invitation role" value={teamRole} disabled={teamBusy} onChange={(event) => setTeamRole(event.target.value as "admin" | "member")}><option value="member">Member</option><option value="admin">Admin</option></select>}
+                          <button type="submit" disabled={teamBusy || !teamEmail.trim()}>Send invite</button>
+                        </form>
+                        <p className="hint" id="invite-team-help">Invitations go to that exact verified email. New members see no folders until you grant access here.</p>
+                        {team?.invitations.filter((invite) => !invite.acceptedAt && !invite.revokedAt).map((invite) => {
+                          const status = invite.expiresAt <= Date.now() ? "Expired" : "Pending";
+                          return <div className="settings-row" key={invite.id}>
+                            <span>{invite.email}<small>{invite.role}</small></span>
+                            <span>
+                              <span className={`team-tag ${status.toLowerCase()}`}>{status}</span>
+                              {(cloudAuth?.workspace?.role === "owner" || invite.role === "member") && <> <button type="button" aria-label={`Resend invitation to ${invite.email}`} disabled={teamBusy} onClick={() => void runTeamAction("resend", { id: invite.id }, "Invitation resent")}>Resend</button> <button type="button" aria-label={`Revoke invitation to ${invite.email}`} disabled={teamBusy} onClick={() => void runTeamAction("revoke", { id: invite.id }, "Invitation revoked")}>Revoke</button></>}
+                            </span>
+                          </div>;
+                        })}
+                      </>
                     )}
-                    {team?.invitations.filter((invite) => !invite.acceptedAt && !invite.revokedAt).map((invite) => (
-                      <div className="settings-row" key={invite.id}>
-                        <span>{invite.email}<small> · pending {invite.role}</small></span>
-                        {(cloudAuth?.workspace?.role === "owner" || invite.role === "member") && (
-                          <span><button type="button" disabled={teamBusy} onClick={() => void runTeamAction("resend", { id: invite.id })}>Resend</button> <button type="button" disabled={teamBusy} onClick={() => void runTeamAction("revoke", { id: invite.id })}>Revoke</button></span>
-                        )}
-                      </div>
-                    ))}
+                    {teamErr && <p className="modal-err" role="alert">{teamErr}</p>}
+                    <h3 className="settings-subhead">Join another workspace</h3>
                     <form className="team-code" onSubmit={(event) => { event.preventDefault(); void acceptInvitation(); }}>
                       <input aria-label="Invitation code" placeholder="Paste invitation code" value={invitationCode} onChange={(event) => setInvitationCode(event.target.value)} />
                       <button type="submit" disabled={authBusy || !invitationCode.trim()}>Accept</button>
                     </form>
-                    {teamErr && <p className="modal-err" role="alert">{teamErr}</p>}
+                    <p className="hint">Paste the code from your invitation email. It works only for the email you signed in with.</p>
                     {authNotice && <p className="hint" role="status">{authNotice}</p>}
                     {authErr && <p className="modal-err" role="alert">{authErr}</p>}
                   </>

@@ -791,6 +791,10 @@ test("Cloud target observation retains a new origin after its tab closes", async
   });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
 
+  onTarget(null);
+  await Bun.sleep(10);
+  expect(state.captureSeeds).toEqual([]);
+
   onTarget("https://new.example");
   for (let attempt = 0; attempt < 20; attempt++) {
     if (state.captureSeeds.length) break;

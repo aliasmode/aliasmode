@@ -2528,7 +2528,12 @@ test("pageTargetFingerprint is generation-fenced and stable across target order"
   });
 
   const first = await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 });
-  targets = [targets[1]!, targets[0]!];
+  targets = [
+    targets[1]!,
+    targets[0]!,
+    { id: "blank", type: "page", url: "about:blank" },
+    { id: "capture", type: "page", url: "https://example.com/?__aliasmode_session_capture__=1" },
+  ];
   expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 })).toBe(first);
   targets[0] = { ...targets[0]!, url: "https://example.com/changed" };
   expect(await launcher.pageTargetFingerprint("k1d0cd11", { debugPort: 9333, startedAt: 1 })).not.toBe(first);
