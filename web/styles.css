@@ -460,6 +460,7 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .settings-section { display: flex; flex-direction: column; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .settings-section:last-of-type { padding-bottom: 0; border-bottom: 0; }
 .settings-section h2 { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.2; text-transform: uppercase; letter-spacing: .6px; }
+.settings-subhead { margin: 5px 0 0; color: var(--ink); font-size: 12px; font-weight: 650; }
 .settings-section p, .settings-mode p { margin: 0; color: var(--muted); font-size: 12px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .settings-row > span { color: var(--muted); }
@@ -473,6 +474,10 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .team-grants { display: flex; flex-wrap: wrap; gap: 5px; }
 .team-grants label { display: flex; align-items: center; gap: 3px; color: var(--muted); font-size: 10px; }
 .team-grants select { padding: 3px; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
+.team-tag { display: inline-block; padding: 2px 7px; border: 1px solid; border-radius: 999px; font-size: 10px; font-weight: 650; }
+.team-tag.pending { color: #92610a; background: #fdf3dc; border-color: #f0dcae; }
+.team-tag.expired { color: #9b1c1c; background: #fdecec; border-color: #f6cfcf; }
+.team-code input:focus, .team-code select:focus, .team-grants select:focus, .settings-row select:focus, .settings-row button:focus { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 .diagnostics-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .diagnostics-head button { padding: 0; color: var(--accent); background: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; }
 .diagnostics-head button:hover:not(:disabled) { text-decoration: underline; }
