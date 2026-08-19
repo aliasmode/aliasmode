@@ -172,6 +172,7 @@ function localStorageHasTelegramAuth(entries) {
 
 async function passcodeDatabasePresent(page) {
   return page.evaluate(async (rules) => {
+    if (globalThis.location.origin !== "https://web.telegram.org") throw new Error("Wrong capture origin");
     const ruleFor = (name) => rules.find((rule) => rule.databaseName ? name === rule.databaseName : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
     const resultOf = (request) => new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -211,6 +212,7 @@ async function storageScriptSource() {
 async function collectPasscodeStorage(page) {
   const source = await storageScriptSource();
   return page.evaluate(async ({ rules, source }) => {
+    if (globalThis.location.origin !== "https://web.telegram.org") throw new Error("Wrong capture origin");
     const module = { exports: {} };
     Function("module", "exports", source)(module, module.exports);
     const script = new (module.exports.StorageScript())(false);
@@ -278,6 +280,40 @@ function capturedWebOriginStorage(origin, storage) {
   return normalizeWebOriginStorage(origin, storage);
 }
 
+async function captureLiveOrigin(context, origin) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const page = context.pages().find((candidate) => {
+      try {
+        const url = new URL(candidate.url());
+        return canonicalWebOrigin(url.origin) === origin
+          && !url.searchParams.has("__aliasmode_session_capture__");
+      } catch {
+        return false;
+      }
+    });
+    if (!page) return null;
+    try {
+      const live = await page.evaluate((expectedOrigin) => {
+        const currentOrigin = globalThis.location.origin;
+        if (currentOrigin !== expectedOrigin) return { origin: currentOrigin };
+        return {
+          origin: currentOrigin,
+          localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
+        };
+      }, origin);
+      if (live?.origin !== origin) continue;
+      let storage = { localStorage: live.localStorage };
+      if (origin === TELEGRAM_ORIGIN) {
+        let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
+        if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
+        if (capturePasscode) storage = await collectPasscodeStorage(page);
+      }
+      return storage;
+    } catch {}
+  }
+  return null;
+}
+
 async function captureSession(browser, payload) {
   const context = contextOf(browser);
   const seed = payload.captureSeed;
@@ -310,32 +346,35 @@ async function captureSession(browser, payload) {
     const byOrigin = new Map();
     let ordinal = 0;
     for (const origin of [...origins].sort()) {
-      const page = await context.newPage();
-      captures.push(page);
-      if (typeof context.newCDPSession === "function") {
-        const cdp = await context.newCDPSession(page);
-        cdpSessions.push(cdp);
-        await cdp.send("Network.enable");
-        await cdp.send("Network.setBypassServiceWorker", { bypass: true });
-      }
-      const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
-      let intercepted = false;
-      const handler = (route) => {
-        intercepted = true;
-        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
-      };
-      routes.push({ url, handler });
-      await context.route(url, handler);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
-      if (!intercepted) throw new Error("Capture navigation was not intercepted");
-      if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
-      let storage = await page.evaluate(() => ({
-        localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
-      }));
-      if (origin === TELEGRAM_ORIGIN) {
-        let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
-        if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
-        if (capturePasscode) storage = await collectPasscodeStorage(page);
+      let storage = await captureLiveOrigin(context, origin);
+      if (!storage) {
+        const page = await context.newPage();
+        captures.push(page);
+        if (typeof context.newCDPSession === "function") {
+          const cdp = await context.newCDPSession(page);
+          cdpSessions.push(cdp);
+          await cdp.send("Network.enable");
+          await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+        }
+        const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
+        let intercepted = false;
+        const handler = (route) => {
+          intercepted = true;
+          return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
+        };
+        routes.push({ url, handler });
+        await context.route(url, handler);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        if (!intercepted) throw new Error("Capture navigation was not intercepted");
+        if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
+        storage = await page.evaluate(() => ({
+          localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
+        }));
+        if (origin === TELEGRAM_ORIGIN) {
+          let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
+          if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
+          if (capturePasscode) storage = await collectPasscodeStorage(page);
+        }
       }
       const captured = capturedWebOriginStorage(origin, storage);
       if (captured) byOrigin.set(origin, captured);

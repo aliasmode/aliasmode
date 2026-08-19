@@ -517,7 +517,12 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
         "https://closed.example": [{ name: "token", value: "fresh-closed-value" }],
         "https://live.example": [{ name: "live", value: "current-value" }],
       };
-      const livePage = { url: () => "https://live.example/dashboard" };
+      const livePage = {
+        url: () => "https://live.example/dashboard",
+        async evaluate() {
+          return { origin: "https://live.example", localStorage: storage["https://live.example"] };
+        },
+      };
       const pages = [];
       const routes = new Map();
       const context = {
@@ -542,6 +547,7 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
         async route(url, handler) { routes.set(url, handler); },
         async unroute(url) { routes.delete(url); },
         async storageState() {
+          if (pages.length !== 2) throw new Error("live origin created a capture page");
           if (pages.some((page) => page.closed)) throw new Error("capture page closed before storage snapshot");
           return { cookies: [], origins: [] };
         },
@@ -561,6 +567,62 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
         { origin: "https://empty.example", localStorage: [] },
         { origin: "https://live.example", localStorage: [{ name: "live", value: "current-value" }] },
       ],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker falls back safely when a live page changes origin during capture", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-origin-race-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let scratchPages = 0;
+      const routes = new Map();
+      const livePage = {
+        url: () => "https://race.example/start",
+        async evaluate() {
+          return { origin: "https://elsewhere.example", localStorage: [{ name: "wrong", value: "origin" }] };
+        },
+      };
+      const context = {
+        pages: () => [livePage],
+        async newPage() {
+          scratchPages++;
+          return {
+            currentUrl: "about:blank",
+            url() { return this.currentUrl; },
+            async goto(url) {
+              const handler = routes.get(url);
+              if (!handler) throw new Error("route missing");
+              await handler({ fulfill: async () => {} });
+              this.currentUrl = url;
+            },
+            async evaluate() { return { localStorage: [{ name: "safe", value: "fallback" }] }; },
+            async close() {},
+          };
+        },
+        async route(url, handler) { routes.set(url, handler); },
+        async unroute(url) { routes.delete(url); },
+        async storageState() {
+          if (scratchPages !== 1) throw new Error("expected one safe fallback page");
+          return { cookies: [], origins: [] };
+        },
+      };
+      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
+      cookies: [],
+      origins: [{ origin: "https://race.example", localStorage: [{ name: "safe", value: "fallback" }] }],
     });
   } finally {
     await rm(root, { recursive: true, force: true });

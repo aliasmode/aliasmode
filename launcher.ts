@@ -62,6 +62,17 @@ export class BrowserLaunchError extends Error {
   }
 }
 
+export function canonicalUserPageUrl(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if ((url.protocol !== "http:" && url.protocol !== "https:")
+      || url.searchParams.has("__aliasmode_session_capture__")) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 export interface SpawnedProcess {
   pid: number;
   kill(): void;
@@ -2224,11 +2235,11 @@ export class Launcher {
       if (!response.ok) return null;
       const raw = await response.json();
       if (!Array.isArray(raw)) return null;
-      const targets = raw.flatMap((target) =>
-        target?.type === "page" && typeof target.id === "string" && typeof target.url === "string"
-          ? [{ id: target.id, url: target.url }]
-          : []
-      ).sort((left, right) => left.id.localeCompare(right.id) || left.url.localeCompare(right.url));
+      const targets = raw.flatMap((target) => {
+        if (target?.type !== "page" || typeof target.id !== "string" || typeof target.url !== "string") return [];
+        const url = canonicalUserPageUrl(target.url);
+        return url ? [{ id: target.id, url }] : [];
+      }).sort((left, right) => left.id.localeCompare(right.id) || left.url.localeCompare(right.url));
       const current = this.store.getLaunch(profileId);
       if (!current || current.debugPort !== expected.debugPort || current.startedAt !== expected.startedAt) return null;
       return JSON.stringify(targets);
