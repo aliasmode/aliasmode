@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -198,7 +198,6 @@ bunAsNodeTest("bootstrap returns a structured error when the worker cannot load"
   try {
     await mkdir(join(root, "node"), { recursive: true });
     await symlink(nodeExecutable, join(root, "node", nodeName));
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const error = await runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
       runtimeRoot: root,
@@ -230,7 +229,6 @@ bunAsNodeTest("installed worker loads its packaged ESM dependency", async () => 
     await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
     await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), "export const chromium = {};\n");
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const error = await runPlaywrightWorker("page", { endpoint: "ws://browser", connectTimeoutMs: 10 }, {
       runtimeRoot: root,
@@ -263,7 +261,6 @@ bunAsNodeTest("worker retries until the persistent context appears without creat
         };
       } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     expect(await runPlaywrightWorker<string>("page", { endpoint: "ws://browser", kind: "user-agent", connectTimeoutMs: 2_000 }, {
       runtimeRoot: root,
@@ -286,7 +283,6 @@ bunAsNodeTest("worker restore failures preserve operation and outcome details", 
       const context = { pages: () => [], async clearCookies() { throw new Error("secret"); } };
       export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const error = await runPlaywrightWorker("session-restore", {
       endpoint: "ws://browser", bundle: JSON.stringify({ cookies: [{ name: "a" }], origins: [] }), urls: [],
@@ -376,7 +372,6 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
         return { contexts: () => [context], async close() {} };
       } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
       endpoint: "ws://browser",
@@ -490,7 +485,6 @@ bunAsNodeTest("worker fails closed on Telegram IndexedDB reads and applies empty
         return { contexts: () => [context], async close() {} };
       } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const captureError = await runPlaywrightWorker("session-capture", {
       endpoint: "ws://capture",
@@ -563,7 +557,6 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
       };
       export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
       endpoint: "ws://browser",
@@ -625,7 +618,6 @@ bunAsNodeTest("worker falls back safely when a live page changes origin during c
       };
       export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
       endpoint: "ws://browser",
@@ -651,7 +643,6 @@ bunAsNodeTest("worker rejects capture when an attached Telegram page cannot be r
       const context = { async storageState() { return { cookies: [], origins: [] }; }, pages: () => [page] };
       export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
     `);
-    await chmod(join(root, "node", nodeName), 0o755);
 
     const error = await runPlaywrightWorker("session-capture", {
       endpoint: "ws://browser",
