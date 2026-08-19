@@ -590,6 +590,7 @@ function App() {
     setModeErr(null);
     setShowAccount(true);
     void loadCloudEvents();
+    void loadTeam();
   };
 
   const chooseMode = async (mode: "local" | "cloud"): Promise<boolean> => {

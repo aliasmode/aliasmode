@@ -85,9 +85,9 @@ test("Cloud profile pickers use only editable folders", () => {
   expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />');
 });
 
-test("Cloud workspace loading does not depend on Account Settings", () => {
+test("Cloud workspace loads independently and refreshes with Account Settings", () => {
   expect(app).toContain("if (!isCloudMode || !workspaceReady || restartRequired) return;\n    void loadTeam();");
-  expect(app).not.toContain("void loadCloudEvents();\n    void loadTeam();");
+  expect(app).toContain("void loadCloudEvents();\n    void loadTeam();");
   expect(app).toContain("await Promise.all([load(), loadTeam()]);");
 });
 
