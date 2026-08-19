@@ -93,9 +93,19 @@ export function playwrightWorkerEnvironment(env: NodeJS.ProcessEnv = process.env
   )) as Record<string, string>;
 }
 
-export function playwrightWorkerCommand(root = runtimeRoot()): string[] {
+export function playwrightNodeExecutable(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return join(root, "node", platform === "win32" ? "node.exe" : "node");
+}
+
+export function playwrightWorkerCommand(
+  root = runtimeRoot(),
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   return [
-    join(root, "node", "node.exe"),
+    playwrightNodeExecutable(root, platform),
     "--input-type=module",
     "--eval",
     PLAYWRIGHT_WORKER_BOOTSTRAP,
@@ -233,14 +243,17 @@ export async function runPlaywrightWorker<T>(
   return response.result;
 }
 
-export async function verifyPlaywrightRuntime(root: string): Promise<void> {
+export async function verifyPlaywrightRuntime(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
   const playwright = JSON.parse(await readFile(join(root, "node_modules", "playwright-core", "package.json"), "utf8"));
   const ws = JSON.parse(await readFile(join(root, "node_modules", "ws", "package.json"), "utf8"));
   if (playwright?.name !== "playwright-core" || playwright?.version !== "1.58.2"
       || ws?.name !== "ws" || ws?.version !== "8.21.0") {
     throw new Error("packaged Playwright runtime has unexpected dependencies");
   }
-  for (const path of [join(root, "worker.mjs"), join(root, "node", "node.exe")]) {
+  for (const path of [join(root, "worker.mjs"), playwrightNodeExecutable(root, platform)]) {
     try { await readFile(path); } catch { throw new Error("packaged Playwright runtime is incomplete"); }
   }
 }

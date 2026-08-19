@@ -26,6 +26,96 @@ jobs:
       - run: bun run typecheck
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
+  macos-arm64:
+    name: Apple Silicon DMG
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+          components: rustfmt
+      - name: Require Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - run: bun install --frozen-lockfile
+      - run: bun run desktop:prepare:macos
+      - run: bun test
+      - run: bun run typecheck
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - run: bun run desktop:check:macos
+      - run: bun run rust:test
+      - name: Verify bundled executable architectures
+        run: |
+          set -euo pipefail
+          metadata_executable=$(node -p 'require("./src-tauri/generated/browser.json").executable')
+          executables=(
+            "src-tauri/binaries/aliasmode-sidecar-aarch64-apple-darwin"
+            "src-tauri/resources/playwright/node/node"
+            "src-tauri/resources/cloakbrowser/$metadata_executable"
+          )
+          for executable in "${executables[@]}"; do
+            test -x "$executable"
+            file "$executable" | grep -q 'Mach-O.*arm64'
+          done
+          while IFS= read -r executable; do
+            description=$(file "$executable")
+            if [[ $description == *Mach-O* ]]; then
+              grep -q arm64 <<<"$description"
+            fi
+          done < <(find src-tauri/resources/cloakbrowser -type f -perm -111)
+      - name: Smoke-test compiled sidecar CDP runtime
+        run: |
+          set -euo pipefail
+          smoke=$(mktemp -d)
+          metadata_executable=$(node -p 'require("./src-tauri/generated/browser.json").executable')
+          browser_path="$PWD/src-tauri/resources/cloakbrowser/$metadata_executable"
+          sidecar="$PWD/src-tauri/binaries/aliasmode-sidecar-aarch64-apple-darwin"
+          export ALIASMODE_PLAYWRIGHT_RUNTIME="$PWD/src-tauri/resources/playwright"
+          "$browser_path" \
+            --headless=new \
+            --disable-gpu \
+            --no-first-run \
+            --remote-debugging-port=9222 \
+            --user-data-dir="$smoke/browser-profile" >/dev/null 2>&1 &
+          browser_pid=$!
+          trap 'kill "$browser_pid" 2>/dev/null || true; rm -rf "$smoke"' EXIT
+          ready=false
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:9222/json/version >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          (cd "$smoke" && "$sidecar" __sidecar-smoke --cdp-endpoint http://127.0.0.1:9222 --state-root "$smoke/state")
+          export CLOAKBROWSER_BINARY_PATH="$browser_path"
+          export CLOAKBROWSER_BINARY_SHA256=$(node -p 'require("./src-tauri/generated/browser.json").sha256')
+          export ALIASMODE_SESSION_LAUNCH=0
+          (cd "$smoke" && "$sidecar" __cloud-launcher-smoke --headless --state-root "$smoke/cloud-state")
+          (cd "$smoke" && "$sidecar" __cloud-launcher-smoke --proxy-mismatch --headless --state-root "$smoke/proxy-mismatch-state")
+      - run: bunx tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
+      - name: Stage unsigned DMG and checksum
+        run: |
+          set -euo pipefail
+          dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
+          test "$dmg_count" -eq 1
+          dmg=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f)
+          artifact=artifacts/macos-arm64
+          mkdir -p "$artifact"
+          cp "$dmg" "$artifact/"
+          (cd "$artifact" && shasum -a 256 "$(basename "$dmg")" > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-macos-arm64-unsigned
+          path: |
+            artifacts/macos-arm64/*.dmg
+            artifacts/macos-arm64/SHA256SUMS.txt
+          if-no-files-found: error
+
   windows:
     name: Windows NSIS installer
     runs-on: windows-latest
