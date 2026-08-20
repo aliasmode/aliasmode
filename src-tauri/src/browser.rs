@@ -105,6 +105,7 @@ mod tests {
     fn rejects_resource_path_escape() {
         assert!(safe_relative_executable("chrome.exe").is_ok());
         assert!(safe_relative_executable("bin/chrome.exe").is_ok());
+        assert!(safe_relative_executable("Chromium.app/Contents/MacOS/Chromium").is_ok());
         assert!(safe_relative_executable("../chrome.exe").is_err());
         assert!(safe_relative_executable("/chrome.exe").is_err());
     }

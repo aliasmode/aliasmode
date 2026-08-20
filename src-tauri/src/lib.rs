@@ -43,6 +43,14 @@ fn boxed(error: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(error.into()).into()
 }
 
+fn playwright_node_name() -> &'static str {
+    if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    }
+}
+
 fn cli_compatible_windows_path(path: &Path) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     text.strip_prefix(r"\\?\UNC\")
@@ -118,7 +126,7 @@ fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
 mod tests {
     use super::{
         allowed_legal_url, cli_compatible_windows_path, parse_cloakpit_import_args,
-        CloakpitImportRequest,
+        playwright_node_name, CloakpitImportRequest,
     };
     use std::{
         ffi::OsString,
@@ -143,6 +151,14 @@ mod tests {
         ] {
             assert!(!allowed_legal_url(url));
         }
+    }
+
+    #[test]
+    fn uses_the_native_node_executable_name() {
+        assert_eq!(
+            playwright_node_name(),
+            if cfg!(windows) { "node.exe" } else { "node" }
+        );
     }
 
     #[test]
@@ -269,7 +285,7 @@ pub fn run() {
                 .join("node_modules")
                 .join("playwright-core")
                 .join("package.json");
-            let node_executable = playwright_runtime.join("node").join("node.exe");
+            let node_executable = playwright_runtime.join("node").join(playwright_node_name());
             let worker_script = playwright_runtime.join("worker.mjs");
             if !playwright_manifest.is_file()
                 || !node_executable.is_file()
