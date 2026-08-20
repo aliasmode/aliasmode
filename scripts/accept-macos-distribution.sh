@@ -9,7 +9,7 @@ fi
 readonly dmg=$1
 readonly expected=$2
 readonly installed="/Applications/AliasMode.app"
-for command in codesign ditto file hdiutil open osascript pgrep spctl syspolicy_check uuidgen xattr xcrun; do
+for command in codesign ditto file hdiutil open osascript pgrep security spctl syspolicy_check uuidgen xattr xcrun; do
   command -v "$command" >/dev/null || { echo "required command is missing: $command" >&2; exit 1; }
 done
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || { echo "Apple Silicon macOS is required" >&2; exit 1; }
@@ -84,7 +84,20 @@ set -e
 if [[ -n ${ALIASMODE_MACOS_DIAGNOSTICS:-} ]]; then
   mkdir -p "$ALIASMODE_MACOS_DIAGNOSTICS"
   cp "$work"/*-policy.txt "$ALIASMODE_MACOS_DIAGNOSTICS/"
+  set +e
+  syspolicy_check distribution "$installed" --verbose --json >"$ALIASMODE_MACOS_DIAGNOSTICS/distribution-policy-second.json" 2>&1
+  second_distribution_policy=$?
+  syspolicy_check distribution "$installed/Contents/Resources/cloakbrowser/Chromium.app" --verbose --json >"$ALIASMODE_MACOS_DIAGNOSTICS/chromium-policy.json" 2>&1
+  chromium_policy=$?
+  spctl --assess --type execute --verbose=4 "$installed/Contents/MacOS/aliasmode-sidecar" >"$ALIASMODE_MACOS_DIAGNOSTICS/sidecar-policy.txt" 2>&1
+  sidecar_policy=$?
+  set -e
+  printf 'second_distribution=%s\nchromium=%s\nsidecar=%s\n' \
+    "$second_distribution_policy" "$chromium_policy" "$sidecar_policy" \
+    >"$ALIASMODE_MACOS_DIAGNOSTICS/diagnostic-status.txt"
   {
+    security error -67018
+    security error -67062
     command -v xprotect >/dev/null && xprotect version
     /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist
   } >"$ALIASMODE_MACOS_DIAGNOSTICS/xprotect-version.txt" 2>&1 || true

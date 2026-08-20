@@ -15,6 +15,8 @@ test("macOS delivery acceptance preserves quarantine and uses Gatekeeper", () =>
   expect(script).toContain("Notary Ticket Missing");
   expect(script).toContain("unexpected pre-distribution fatal errors");
   expect(script).toContain("/usr/bin/log show");
+  expect(script).toContain('distribution "$installed" --verbose --json');
+  expect(script).toContain("cloakbrowser/Chromium.app");
   expect(script).toContain("failed one or more pre-distribution checks");
 });
 
