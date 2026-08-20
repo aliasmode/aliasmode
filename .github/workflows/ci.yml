@@ -81,7 +81,7 @@ jobs:
             --remote-debugging-port=9222 \
             --user-data-dir="$smoke/browser-profile" >/dev/null 2>&1 &
           browser_pid=$!
-          trap 'kill "$browser_pid" 2>/dev/null || true; rm -rf "$smoke"' EXIT
+          trap 'kill "$browser_pid" 2>/dev/null || true; wait "$browser_pid" 2>/dev/null || true; rm -rf "$smoke"' EXIT
           ready=false
           for _ in {1..30}; do
             if curl --fail --silent http://127.0.0.1:9222/json/version >/dev/null; then
