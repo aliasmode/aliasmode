@@ -75,18 +75,22 @@ done < <(find "$installed" -type f \( -perm -111 -o -name '*.dylib' -o -name '*.
 set +e
 spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
 dmg_policy=$?
-syspolicy_check distribution "$installed"
-distribution_policy=$?
+syspolicy_check distribution "$installed" 2>&1 | tee "$work/distribution-policy.txt"
+distribution_policy=${PIPESTATUS[0]}
 spctl --assess --type execute --verbose=4 "$installed"
 execute_policy=$?
 set -e
 
 if [[ $expected == blocked ]]; then
-  [[ $distribution_policy -ne 0 && $execute_policy -ne 0 ]] || {
-    echo "ad-hoc app unexpectedly passed Gatekeeper" >&2
+  [[ $distribution_policy -ne 0 ]] && grep -q 'failed one or more pre-distribution checks' "$work/distribution-policy.txt" || {
+    echo "syspolicy_check failed without a policy rejection (status: $distribution_policy)" >&2
     exit 1
   }
-  echo "Gatekeeper rejected the quarantined ad-hoc DMG as expected (DMG policy: $dmg_policy)"
+  [[ $execute_policy -eq 3 ]] || {
+    echo "spctl did not report a policy rejection (status: $execute_policy)" >&2
+    exit 1
+  }
+  echo "Gatekeeper rejected the quarantined ad-hoc app as expected (DMG policy: $dmg_policy)"
   exit 0
 fi
 

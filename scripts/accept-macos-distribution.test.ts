@@ -10,6 +10,8 @@ test("macOS delivery acceptance preserves quarantine and uses Gatekeeper", () =>
   expect(script).not.toMatch(/xattr\s+-(?:c|d)\b/);
   expect(script).toContain("syspolicy_check distribution");
   expect(script).toContain("spctl --assess --type execute");
+  expect(script).toContain("execute_policy -eq 3");
+  expect(script).toContain("failed one or more pre-distribution checks");
 });
 
 test("trusted macOS acceptance uses LaunchServices and confirms cleanup", () => {

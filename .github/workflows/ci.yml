@@ -101,7 +101,7 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: "-"
         run: bunx tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
-      - name: Confirm ad-hoc DMG is blocked by Gatekeeper
+      - name: Confirm ad-hoc app is blocked by Gatekeeper
         run: |
           set -euo pipefail
           dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
