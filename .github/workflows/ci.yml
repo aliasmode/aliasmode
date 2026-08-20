@@ -101,20 +101,14 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: "-"
         run: bunx tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
-      - name: Verify ad-hoc app signature
+      - name: Confirm ad-hoc DMG is blocked by Gatekeeper
         run: |
           set -euo pipefail
           dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
           test "$dmg_count" -eq 1
           dmg=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f)
-          mount=$(mktemp -d)
-          trap 'hdiutil detach "$mount" -quiet 2>/dev/null || true; rmdir "$mount" 2>/dev/null || true' EXIT
-          hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly -quiet
-          app="$mount/AliasMode.app"
-          test -d "$app"
-          codesign --verify --deep --strict --verbose=4 "$app"
-          codesign --display --verbose=4 "$app" 2>&1 | grep -q 'Signature=adhoc'
-      - name: Stage ad-hoc-signed DMG and checksum
+          scripts/accept-macos-distribution.sh "$dmg" blocked
+      - name: Stage diagnostic DMG and checksum
         run: |
           set -euo pipefail
           dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
@@ -126,7 +120,7 @@ jobs:
           (cd "$artifact" && shasum -a 256 "$(basename "$dmg")" > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
-          name: aliasmode-macos-arm64-ad-hoc-signed
+          name: aliasmode-macos-arm64-not-for-distribution
           path: |
             artifacts/macos-arm64/*.dmg
             artifacts/macos-arm64/SHA256SUMS.txt
