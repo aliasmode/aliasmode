@@ -11,6 +11,10 @@ test("macOS delivery acceptance preserves quarantine and uses Gatekeeper", () =>
   expect(script).toContain("syspolicy_check distribution");
   expect(script).toContain("spctl --assess --type execute");
   expect(script).toContain("execute_policy -eq 3");
+  expect(script).toContain("source=no usable signature");
+  expect(script).toContain("Notary Ticket Missing");
+  expect(script).toContain("unexpected pre-distribution fatal errors");
+  expect(script).toContain("/usr/bin/log show");
   expect(script).toContain("failed one or more pre-distribution checks");
 });
 

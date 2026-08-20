@@ -102,12 +102,21 @@ jobs:
           APPLE_SIGNING_IDENTITY: "-"
         run: bunx tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
       - name: Confirm ad-hoc app is blocked by Gatekeeper
+        env:
+          ALIASMODE_MACOS_DIAGNOSTICS: artifacts/macos-policy-diagnostics
         run: |
           set -euo pipefail
           dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
           test "$dmg_count" -eq 1
           dmg=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f)
           scripts/accept-macos-distribution.sh "$dmg" blocked
+      - name: Upload macOS policy diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-macos-policy-diagnostics
+          path: artifacts/macos-policy-diagnostics/
+          if-no-files-found: warn
       - name: Stage diagnostic DMG and checksum
         run: |
           set -euo pipefail

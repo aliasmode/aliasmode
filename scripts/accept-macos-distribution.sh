@@ -73,24 +73,45 @@ done < <(find "$installed" -type f \( -perm -111 -o -name '*.dylib' -o -name '*.
 [[ $mach_o_count -gt 0 && $unsigned_count -eq 0 ]] || { echo "nested code inventory found unsigned Mach-O files" >&2; exit 1; }
 
 set +e
-spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
-dmg_policy=$?
+spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" 2>&1 | tee "$work/dmg-policy.txt"
+dmg_policy=${PIPESTATUS[0]}
 syspolicy_check distribution "$installed" 2>&1 | tee "$work/distribution-policy.txt"
 distribution_policy=${PIPESTATUS[0]}
-spctl --assess --type execute --verbose=4 "$installed"
-execute_policy=$?
+spctl --assess --type execute --verbose=4 "$installed" 2>&1 | tee "$work/execute-policy.txt"
+execute_policy=${PIPESTATUS[0]}
 set -e
 
+if [[ -n ${ALIASMODE_MACOS_DIAGNOSTICS:-} ]]; then
+  mkdir -p "$ALIASMODE_MACOS_DIAGNOSTICS"
+  cp "$work"/*-policy.txt "$ALIASMODE_MACOS_DIAGNOSTICS/"
+  {
+    command -v xprotect >/dev/null && xprotect version
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist
+  } >"$ALIASMODE_MACOS_DIAGNOSTICS/xprotect-version.txt" 2>&1 || true
+  /usr/bin/log show --last 10m --style compact --info --debug \
+    --predicate 'subsystem == "com.apple.syspolicy" OR process == "syspolicyd" OR process CONTAINS[c] "xprotect"' \
+    >"$ALIASMODE_MACOS_DIAGNOSTICS/security-policy.log" 2>&1 || true
+fi
+
 if [[ $expected == blocked ]]; then
+  [[ $dmg_policy -eq 3 ]] && grep -q 'source=no usable signature' "$work/dmg-policy.txt" || {
+    echo "DMG assessment failed without the expected policy rejection (status: $dmg_policy)" >&2
+    exit 1
+  }
   [[ $distribution_policy -ne 0 ]] && grep -q 'failed one or more pre-distribution checks' "$work/distribution-policy.txt" || {
     echo "syspolicy_check failed without a policy rejection (status: $distribution_policy)" >&2
     exit 1
   }
-  [[ $execute_policy -eq 3 ]] || {
-    echo "spctl did not report a policy rejection (status: $execute_policy)" >&2
+  fatal_count=$(grep -c 'Severity: Fatal' "$work/distribution-policy.txt" || true)
+  [[ $fatal_count -eq 1 ]] && grep -q 'Notary Ticket Missing' "$work/distribution-policy.txt" || {
+    echo "unexpected pre-distribution fatal errors" >&2
     exit 1
   }
-  echo "Gatekeeper rejected the quarantined ad-hoc app as expected (DMG policy: $dmg_policy)"
+  [[ $execute_policy -eq 3 ]] && grep -q 'source=no usable signature' "$work/execute-policy.txt" || {
+    echo "app assessment failed without the expected policy rejection (status: $execute_policy)" >&2
+    exit 1
+  }
+  echo "Gatekeeper rejected only the missing signature and notarization ticket as expected"
   exit 0
 fi
 
