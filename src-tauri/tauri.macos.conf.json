@@ -4,7 +4,8 @@
     "targets": ["app", "dmg"],
     "icon": ["icons/icon.icns"],
     "macOS": {
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
     }
   }
 }

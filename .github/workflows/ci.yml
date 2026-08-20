@@ -97,8 +97,19 @@ jobs:
           export ALIASMODE_SESSION_LAUNCH=0
           (cd "$smoke" && "$sidecar" __cloud-launcher-smoke --headless --state-root "$smoke/cloud-state")
           (cd "$smoke" && "$sidecar" __cloud-launcher-smoke --proxy-mismatch --headless --state-root "$smoke/proxy-mismatch-state")
-      - run: bunx tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
-      - name: Stage unsigned DMG and checksum
+      - name: Build ad-hoc-signed DMG
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: bunx tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json
+      - name: Verify ad-hoc app signature
+        run: |
+          set -euo pipefail
+          app_count=$(find src-tauri/target -path '*/bundle/macos/AliasMode.app' -type d | wc -l | tr -d ' ')
+          test "$app_count" -eq 1
+          app=$(find src-tauri/target -path '*/bundle/macos/AliasMode.app' -type d)
+          codesign --verify --deep --strict --verbose=4 "$app"
+          codesign --display --verbose=4 "$app" 2>&1 | grep -q 'Signature=adhoc'
+      - name: Stage ad-hoc-signed DMG and checksum
         run: |
           set -euo pipefail
           dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
@@ -110,7 +121,7 @@ jobs:
           (cd "$artifact" && shasum -a 256 "$(basename "$dmg")" > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
-          name: aliasmode-macos-arm64-unsigned
+          name: aliasmode-macos-arm64-ad-hoc-signed
           path: |
             artifacts/macos-arm64/*.dmg
             artifacts/macos-arm64/SHA256SUMS.txt
