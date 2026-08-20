@@ -104,9 +104,14 @@ jobs:
       - name: Verify ad-hoc app signature
         run: |
           set -euo pipefail
-          app_count=$(find src-tauri/target -path '*/bundle/macos/AliasMode.app' -type d | wc -l | tr -d ' ')
-          test "$app_count" -eq 1
-          app=$(find src-tauri/target -path '*/bundle/macos/AliasMode.app' -type d)
+          dmg_count=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f | wc -l | tr -d ' ')
+          test "$dmg_count" -eq 1
+          dmg=$(find src-tauri/target -path '*/bundle/dmg/*.dmg' -type f)
+          mount=$(mktemp -d)
+          trap 'hdiutil detach "$mount" -quiet 2>/dev/null || true; rmdir "$mount" 2>/dev/null || true' EXIT
+          hdiutil attach "$dmg" -mountpoint "$mount" -nobrowse -readonly -quiet
+          app="$mount/AliasMode.app"
+          test -d "$app"
           codesign --verify --deep --strict --verbose=4 "$app"
           codesign --display --verbose=4 "$app" 2>&1 | grep -q 'Signature=adhoc'
       - name: Stage ad-hoc-signed DMG and checksum
