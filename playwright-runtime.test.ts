@@ -265,6 +265,78 @@ bunAsNodeTest("worker retries until the persistent context appears without creat
   }
 });
 
+bunAsNodeTest("profile card setup preserves a minimized browser window", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-profile-card-window-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let mode = "normal";
+      let created = false;
+      let raised = false;
+      let detached = false;
+      const automation = {
+        async bringToFront() {
+          if (mode !== "normal") throw new Error("minimized window was raised");
+          raised = true;
+        },
+      };
+      const context = {
+        pages: () => mode === "missing-page" ? [] : [automation],
+        async newCDPSession(page) {
+          if (page !== automation) throw new Error("wrong CDP target");
+          return {
+            async send(method) {
+              if (method !== "Browser.getWindowForTarget") throw new Error("wrong CDP command");
+              if (mode === "query-failed") throw new Error("window state unavailable");
+              return { bounds: { windowState: mode } };
+            },
+            async detach() { detached = true; },
+          };
+        },
+        async newPage() {
+          if (mode !== "normal") throw new Error("card created without known visible state");
+          created = true;
+          return { async goto() {} };
+        },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        mode = endpoint.split("//")[1];
+        created = false;
+        raised = false;
+        detached = false;
+        return {
+          contexts: () => [context],
+          async close() {
+            if (mode !== "missing-page" && !detached) throw new Error("CDP session was not detached");
+            if (mode === "normal" && (!created || !raised)) throw new Error("visible profile card setup was incomplete");
+            if (mode !== "normal" && (created || raised)) throw new Error("browser with unknown or minimized state was changed");
+          },
+        };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://normal", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://minimized", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://query-failed", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://missing-page", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 bunAsNodeTest("worker restore failures preserve operation and outcome details", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-error-"));
   try {

@@ -18,7 +18,8 @@ import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
-import { CloudApiError } from "./cloud-client.ts";
+import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
+import { EmailVerificationRequiredError, SupabaseAuthRequestError } from "./supabase-auth.ts";
 import {
   CloudProfileEditor,
   CloudProfileEditorError,
@@ -27,7 +28,7 @@ import {
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import type { Profile } from "./types.ts";
-import { importInbox, importBuffers, type ImportOverrides } from "./inbox.ts";
+import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones } from "./geoip.ts";
 import { parseUpdateFile, serializeCsv, serializeAdsTxt, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
@@ -112,6 +113,107 @@ async function readLatestDiagnose(reportsRoot = "reports"): Promise<unknown | nu
 }
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+type CloudRestoreStage = "auth_refresh" | "cloud_status" | "lifecycle_resume";
+type CloudRestoreCategory = "network" | "service" | "authentication";
+
+interface CloudRestoreFailure {
+  ok: false;
+  error: string;
+  stage: CloudRestoreStage;
+  retryable: boolean;
+  category: CloudRestoreCategory;
+  code: string;
+}
+
+const PERMANENT_CLOUD_SESSION_ERRORS = new Set([
+  "authentication_required",
+  "email_not_verified",
+  "device_revoked",
+  "membership_revoked",
+]);
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status < 600);
+}
+
+function cloudRestoreFailure(error: unknown, stage: CloudRestoreStage): CloudRestoreFailure {
+  if (error instanceof EmailVerificationRequiredError) {
+    return {
+      ok: false,
+      error: "Saved Cloud session is no longer valid. Sign in again.",
+      stage,
+      retryable: false,
+      category: "authentication",
+      code: "email_not_verified",
+    };
+  }
+  if (error instanceof SupabaseAuthRequestError) {
+    if (!error.failure.retryable) {
+      return {
+        ok: false,
+        error: "Saved Cloud session is no longer valid. Sign in again.",
+        stage,
+        retryable: false,
+        category: "authentication",
+        code: "authentication_invalid",
+      };
+    }
+    const network = error.failure.kind !== "http";
+    return {
+      ok: false,
+      error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+      stage,
+      retryable: true,
+      category: network ? "network" : "service",
+      code: network ? "network_unavailable" : "service_unavailable",
+    };
+  }
+  if (error instanceof CloudRequestError) {
+    return {
+      ok: false,
+      error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+      stage,
+      retryable: true,
+      category: "network",
+      code: "network_unavailable",
+    };
+  }
+  if (
+    error instanceof CloudApiError
+    && (error.status === 401 || PERMANENT_CLOUD_SESSION_ERRORS.has(error.code))
+  ) {
+    return {
+      ok: false,
+      error: "Saved Cloud session is no longer valid. Sign in again.",
+      stage,
+      retryable: false,
+      category: "authentication",
+      code: PERMANENT_CLOUD_SESSION_ERRORS.has(error.code) ? error.code : "authentication_invalid",
+    };
+  }
+  if (
+    error instanceof CloudApiError
+    && (retryableHttpStatus(error.status) || error.code === "rate_limited" || error.code === "internal_error")
+  ) {
+    return {
+      ok: false,
+      error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+      stage,
+      retryable: true,
+      category: "service",
+      code: "service_unavailable",
+    };
+  }
+  return {
+    ok: false,
+    error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+    stage,
+    retryable: true,
+    category: "service",
+    code: "response_invalid",
+  };
+}
 
 function rejectUntrustedJsonMutation(req: Request): Response | null {
   if (!req.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
@@ -340,6 +442,7 @@ export async function handleUiRequest(
         deviceId?: unknown;
         deviceCredential?: unknown;
         queueKey?: unknown;
+        resumeLifecycle?: unknown;
         code?: unknown;
       };
       if (pathname === "/ui/api/cloud-auth/signup") {
@@ -414,18 +517,24 @@ export async function handleUiRequest(
         if (!options.pendingSync || typeof body.queueKey !== "string" || !body.queueKey) {
           return Response.json({ ok: false, error: "stored queue encryption key is required" }, { status: 400 });
         }
+        if (body.resumeLifecycle !== undefined && typeof body.resumeLifecycle !== "boolean") {
+          return Response.json({ ok: false, error: "resumeLifecycle must be boolean" }, { status: 400 });
+        }
+        let stage: CloudRestoreStage = "auth_refresh";
         try {
           const queueWasInitialized = !!options.pendingSync.queue();
           if (!queueWasInitialized) options.pendingSync.initialize(body.queueKey);
           const priorAccountId = options.cloudConnection.accountId();
           const result = await options.cloudAuth.restore(body.refreshToken);
+          stage = "cloud_status";
           options.cloudConnection.restoreCredential(body.deviceCredential);
           const status = await options.cloudConnection.client.status();
           options.cloudConnection.restoreAccount(status.account.id);
           options.cloudConnection.restoreDevice(status.device.id, body.deviceCredential);
+          stage = "lifecycle_resume";
           if (
             legalAcceptanceIsCurrent(status.legal) &&
-            (!queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
+            (body.resumeLifecycle === true || !queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
           ) {
             await options.cloudBrowser?.resumeAfterAuthentication();
           } else {
@@ -442,10 +551,13 @@ export async function handleUiRequest(
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
-          options.pendingSync.close();
-          options.cloudAuth.clear();
-          options.cloudConnection.clearDevice();
-          throw error;
+          const failure = cloudRestoreFailure(error, stage);
+          if (!failure.retryable) {
+            options.pendingSync.close();
+            options.cloudConnection.clearDevice();
+            await options.cloudAuth.clearStoredSession().catch(() => {});
+          }
+          return Response.json(failure, { status: failure.retryable ? 503 : 401 });
         }
       }
       if (pathname === "/ui/api/cloud-auth/accept-invitation") {
@@ -465,6 +577,18 @@ export async function handleUiRequest(
           ok: true,
           legal: { current: status.legal.current, accepted: accepted.accepted },
         });
+      }
+      if (pathname === "/ui/api/cloud-auth/forget") {
+        if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          return Response.json(
+            { ok: false, error: "Cloud browsers could not be closed safely" },
+            { status: 409 },
+          );
+        }
+        options.pendingSync?.close();
+        options.cloudConnection?.clearDevice();
+        await options.cloudAuth.clearStoredSession();
+        return Response.json({ ok: true });
       }
       if (pathname === "/ui/api/cloud-auth/signout") {
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
@@ -526,8 +650,9 @@ export async function handleUiRequest(
     (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
     (pathname === "/ui/api/profiles/move" && req.method === "POST") ||
     (pathname === "/ui/api/profiles/delete" && req.method === "POST") ||
+    (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
-    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache)$/.test(pathname));
+    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise)$/.test(pathname));
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
@@ -695,10 +820,18 @@ export async function handleUiRequest(
       const form = await req.formData();
       const uploads: { name: string; bytes: Uint8Array }[] = [];
       const override = importOverridesFromForm(form);
+      if (options.cloudBrowser && !override.group) {
+        return Response.json({ ok: false, error: "a Cloud destination folder is required" }, { status: 400 });
+      }
       for (const [, value] of form) {
         if (value instanceof File) uploads.push({ name: value.name, bytes: new Uint8Array(await value.arrayBuffer()) });
       }
       if (uploads.length === 0) return Response.json({ ok: false, error: "no files uploaded" }, { status: 400 });
+      if (options.cloudBrowser) {
+        const prepared = await prepareImportBuffers(uploads, console.log, override);
+        await options.cloudBrowser.importProfiles(override.group!, prepared.profiles);
+        return Response.json({ ok: true, ...prepared.result });
+      }
       const r = remote ? await remote.importToHub(uploads, override) : await importBuffers(store, uploads, console.log, override);
       return Response.json({ ok: true, ...r });
     } catch (e) {

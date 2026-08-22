@@ -90,6 +90,7 @@ function setup(options: {
     payload: openedPayload,
     activeOpens: [],
   };
+  const imports: Array<{ destination: string; profiles: PortableProfileV1[] }> = [];
   const cloud = {
     async listProfiles() {
       events.push("cloud-list");
@@ -117,6 +118,15 @@ function setup(options: {
         ok: true as const,
         profile: { id: request.payload.profile.id },
         payloadDigest: "digest",
+      };
+    },
+    async importProfiles(request: { destination: string; profiles: PortableProfileV1[] }) {
+      events.push("cloud-import");
+      imports.push(structuredClone(request));
+      return {
+        ok: true as const,
+        imported: request.profiles.length,
+        ids: request.profiles.map((item) => item.profile.id),
       };
     },
     async openProfile() {
@@ -233,6 +243,7 @@ function setup(options: {
   return {
     coordinator,
     events,
+    imports,
     logs,
     navigatedUrls,
     navigateEndpoints,
@@ -260,6 +271,28 @@ test("Cloud browser creates a portable profile without a local-only fallback", a
   expect(await state.coordinator.create(profile)).toEqual({ id: "profile1" });
   expect(state.events).toEqual(["cloud-create"]);
   expect(state.store.getProfile("profile1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+test("Cloud browser imports one encoded batch without populating the Local store", async () => {
+  const state = setup();
+  const first = decodePortableProfile(payload()).profile;
+  first.group = "Sales";
+  const second = structuredClone(first);
+  second.id = "profile2";
+  second.name = "Second";
+
+  expect(await state.coordinator.importProfiles("Sales", [first, second])).toEqual({
+    ok: true,
+    imported: 2,
+    ids: ["profile1", "profile2"],
+  });
+  expect(state.events).toEqual(["cloud-import"]);
+  expect(state.imports).toHaveLength(1);
+  expect(state.imports[0]!.destination).toBe("Sales");
+  expect(state.imports[0]!.profiles.map((item) => decodePortableProfile(item).profile)).toEqual([first, second]);
+  expect(state.store.getProfile("profile1")).toBeNull();
+  expect(state.store.getProfile("profile2")).toBeNull();
   state.queue.close();
   state.store.close();
 });
@@ -1172,6 +1205,22 @@ test("Cloud authentication replaces checkpoint monitors after an account switch"
   }
   expect(state.events.filter((event) => event === "capture")).toHaveLength(capturesBeforeDirtySignal + 1);
 
+  await state.coordinator.releaseAll(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll refuses to forget running browsers without restored account context", async () => {
+  let accountId: string | undefined = "account1";
+  const state = setup({ accountId: () => accountId as string });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  accountId = undefined;
+
+  expect(await state.coordinator.releaseAll()).toBe(false);
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.queue.listOpens("account1")).toHaveLength(1);
+
+  accountId = "account1";
   await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();

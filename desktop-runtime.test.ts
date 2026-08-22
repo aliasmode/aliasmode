@@ -111,6 +111,8 @@ test("desktop credential bridge clears refresh and device credentials", async ()
     ok: true,
   }));
   await cleared;
+  expect(output.map((line) => JSON.parse(line).key)).toEqual(["refresh_token", "device_credential"]);
+  expect(output.join("\n")).not.toContain("queue_encryption_key");
 });
 
 test("desktop shutdown coalesces and closes authoritative local launches", async () => {

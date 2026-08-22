@@ -278,7 +278,7 @@ td.act .btn.close { background: #c0392b; color: #fff; border: 1px solid #c0392b;
 td.act .btn.close:hover { background: #a93226; }
 td.act .btn.edit { background: #fff; color: #344054; border: 1px solid var(--line); margin-right: 6px; }
 td.act .btn.edit:hover { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
-td.act .btn.raise { background: #fff; color: #344054; border: 1px solid var(--line); margin-right: 6px; padding: 5px 9px; font-size: 14px; line-height: 1; }
+td.act .btn.raise { background: #fff; color: #344054; border: 1px solid var(--line); margin-right: 6px; }
 td.act .btn.raise:hover { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
 td.act .btn.convert { background: #a16207; color: #fff; border: 1px solid #854d0e; }
 td.act .btn.convert:hover { background: #854d0e; }

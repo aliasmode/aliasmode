@@ -21,6 +21,22 @@ export interface SignUpResult {
   verificationRequired: boolean;
 }
 
+export type SupabaseAuthFailure =
+  | { kind: "transport"; retryable: true }
+  | { kind: "timeout"; retryable: true }
+  | { kind: "http"; status: number; retryable: boolean };
+
+export class SupabaseAuthRequestError extends Error {
+  constructor(
+    message: string,
+    readonly failure: SupabaseAuthFailure,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "SupabaseAuthRequestError";
+  }
+}
+
 export class EmailVerificationRequiredError extends Error {
   constructor() {
     super("Verify your email before signing in to AliasMode Cloud");
@@ -38,6 +54,10 @@ export interface SupabaseAuthClientOptions {
 
 const DEFAULT_AUTH_TIMEOUT_MS = 30_000;
 const EMAIL_CONFIRMATION_REDIRECT = "https://aliasmode.com/auth/email-confirmation";
+
+function isRetryableAuthStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status < 600);
+}
 
 export class SupabaseAuthClient {
   private readonly baseUrl: string;
@@ -129,7 +149,10 @@ export class SupabaseAuthClient {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        const error = new Error(`AliasMode Auth request timed out after ${this.requestTimeoutMs}ms`);
+        const error = new SupabaseAuthRequestError(
+          `AliasMode Auth request timed out after ${this.requestTimeoutMs}ms`,
+          { kind: "timeout", retryable: true },
+        );
         controller.abort(error);
         reject(error);
       }, this.requestTimeoutMs);
@@ -137,22 +160,44 @@ export class SupabaseAuthClient {
     });
     try {
       const request = Promise.resolve().then(async () => {
-        const response = await this.fetchFn(`${this.baseUrl}/auth/v1${path}`, {
-          ...init,
-          headers,
-          signal: controller.signal,
-        });
-        const text = await response.text();
+        let response: Response;
+        try {
+          response = await this.fetchFn(`${this.baseUrl}/auth/v1${path}`, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          });
+        } catch (error) {
+          throw new SupabaseAuthRequestError(
+            "AliasMode Auth could not be reached",
+            { kind: "transport", retryable: true },
+            { cause: error },
+          );
+        }
+
+        let text: string;
+        try {
+          text = await response.text();
+        } catch (error) {
+          throw new SupabaseAuthRequestError(
+            "AliasMode Auth response could not be read",
+            { kind: "transport", retryable: true },
+            { cause: error },
+          );
+        }
         let body: any = {};
         if (text.trim()) {
           try {
             body = JSON.parse(text);
           } catch {
-            throw new Error(`AliasMode Auth returned non-JSON (${response.status})`);
+            if (response.ok) throw new Error(`AliasMode Auth returned non-JSON (${response.status})`);
           }
         }
         if (!response.ok) {
-          throw new Error(body?.msg ?? body?.message ?? body?.error_description ?? `AliasMode Auth failed (${response.status})`);
+          throw new SupabaseAuthRequestError(
+            body?.msg ?? body?.message ?? body?.error_description ?? `AliasMode Auth failed (${response.status})`,
+            { kind: "http", status: response.status, retryable: isRetryableAuthStatus(response.status) },
+          );
         }
         return body;
       });

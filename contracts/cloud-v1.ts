@@ -297,6 +297,17 @@ export interface CreateProfileResponse {
   payloadDigest: string;
 }
 
+export interface ImportProfilesRequest {
+  destination: string;
+  profiles: PortableProfileV1[];
+}
+
+export interface ImportProfilesResponse {
+  ok: true;
+  imported: number;
+  ids: string[];
+}
+
 export interface GetProfileResponse {
   ok: true;
   profile: CloudProfileSummary;
