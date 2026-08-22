@@ -20,10 +20,16 @@ fn main() {
             "browser metadata is missing {key}"
         );
     }
+    let target = env::var("TARGET").expect("build target");
+    let expected_executable = if target == "aarch64-apple-darwin" {
+        "Chromium.app/Contents/MacOS/Chromium"
+    } else {
+        "chrome.exe"
+    };
     assert_eq!(
         parsed.get("executable").and_then(|value| value.as_str()),
-        Some("chrome.exe"),
-        "browser metadata must target Windows chrome.exe"
+        Some(expected_executable),
+        "browser metadata does not match build target {target}"
     );
     let sha256 = parsed
         .get("sha256")

@@ -12,8 +12,11 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "desktop:prepare": "bun scripts/prepare-windows-bundle.ts",
+    "desktop:prepare:macos": "bun scripts/prepare-darwin-arm64-bundle.ts",
     "desktop:build:nsis": "bun run desktop:prepare && tauri build --bundles nsis",
+    "desktop:build:dmg": "bun run desktop:prepare:macos && tauri build --target aarch64-apple-darwin --bundles dmg --config src-tauri/tauri.macos.conf.json",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc",
+    "desktop:check:macos": "cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "devDependencies": {
