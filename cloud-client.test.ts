@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CloudApiError, CloudClient, type CloudFetch } from "./cloud-client.ts";
+import { CloudApiError, CloudClient, CloudRequestError, type CloudFetch } from "./cloud-client.ts";
 import type { PortableProfileV1 } from "./contracts/cloud-v1.ts";
 
 const payload: PortableProfileV1 = {
@@ -155,6 +155,36 @@ test("Cloud close rejects malformed conflicts without a current version", async 
     .rejects.toThrow("missing currentVersion");
 });
 
+test("Cloud client imports one profile batch and invalidates its roster cache", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const rosterRequests: Array<string | null> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/profiles/import")) {
+      return Response.json({ ok: true, imported: 2, ids: ["profile1", "profile2"] }, { status: 201 });
+    }
+    rosterRequests.push(new Headers(init?.headers).get("if-none-match"));
+    return Response.json({ ok: true, profiles: [] }, { headers: { etag: `"roster-${rosterRequests.length}"` } });
+  });
+  const first = structuredClone(payload);
+  first.profile.id = "profile1";
+  const second = structuredClone(payload);
+  second.profile.id = "profile2";
+
+  await cloud.listProfiles();
+  expect(await cloud.importProfiles({ destination: "Sales", profiles: [first, second] })).toEqual({
+    ok: true,
+    imported: 2,
+    ids: ["profile1", "profile2"],
+  });
+  await cloud.listProfiles();
+
+  expect(calls[1]!.url).toBe("https://cloud.aliasmode.test/v1/profiles/import");
+  expect(calls[1]!.init?.method).toBe("POST");
+  expect(JSON.parse(String(calls[1]!.init?.body))).toEqual({ destination: "Sales", profiles: [first, second] });
+  expect(rosterRequests).toEqual([null, null]);
+});
+
 test("Cloud profile roster reuses its per-client ETag cache", async () => {
   const requests: Array<string | null> = [];
   const roster = { ok: true as const, profiles: [] };
@@ -171,17 +201,35 @@ test("Cloud profile roster reuses its per-client ETag cache", async () => {
   expect(requests).toEqual([null, '"roster-1"']);
 });
 
-test("Cloud client reports non-JSON responses with endpoint context", async () => {
+test("Cloud client preserves HTTP status for non-JSON failures", async () => {
   const cloud = client(async () => new Response("<html>failure</html>", {
     status: 502,
     headers: { "content-type": "text/html" },
   }));
-  await expect(cloud.listProfiles()).rejects.toThrow(
-    "AliasMode Cloud /profiles returned non-JSON (502, text/html)",
-  );
+  await expect(cloud.listProfiles()).rejects.toMatchObject({
+    name: "CloudApiError",
+    code: "internal_error",
+    status: 502,
+    message: "AliasMode Cloud /profiles returned non-JSON (502, text/html)",
+  });
+});
+
+test("Cloud client classifies fetch failures without losing their cause", async () => {
+  const failure = new TypeError("fetch failed");
+  const cloud = client(async () => { throw failure; });
+  try {
+    await cloud.status();
+    throw new Error("expected status to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(CloudRequestError);
+    expect(error).toMatchObject({ failure: { kind: "transport", retryable: true }, cause: failure });
+  }
 });
 
 test("Cloud client bounds fetch implementations that ignore abort", async () => {
   const cloud = client(() => new Promise<Response>(() => {}), 5);
-  await expect(cloud.status()).rejects.toThrow("timed out after 5ms");
+  await expect(cloud.status()).rejects.toMatchObject({
+    message: expect.stringContaining("timed out after 5ms"),
+    failure: { kind: "timeout", retryable: true },
+  });
 });

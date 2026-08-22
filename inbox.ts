@@ -114,19 +114,18 @@ function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
   return out;
 }
 
-/**
- * Import AdsPower exports from in-memory buffers — the shared core used by both
- * the inbox folder and UI uploads. Decodes each (UTF-8/UTF-16), parses, resolves
- * proxy timezones via geoip (one batched call), and upserts.
- */
-export async function importBuffers(
-  store: ProfileStore,
+export interface PreparedImportBatch {
+  imports: SourcedImport[];
+  profiles: Profile[];
+  result: InboxResult;
+}
+
+/** Decode, parse, validate, override, and enrich uploaded profile exports. */
+export async function prepareImportBuffers(
   files: { name: string; bytes: Uint8Array }[],
   log: (msg: string) => void = console.log,
   overrides: ImportOverrides = {},
-  /** Optional hub-side lock/CAS guard, called synchronously immediately before the atomic write. */
-  beforeCommit?: (profiles: readonly Profile[]) => void,
-): Promise<InboxResult> {
+): Promise<PreparedImportBatch> {
   let cookiesStripped = 0;
   let skipped = 0;
   const errors: InboxResult["errors"] = [];
@@ -139,9 +138,7 @@ export async function importBuffers(
     collected.push(...summary.imports.map((entry) => ({ ...applyOverrides(entry, overrides), source: name })));
     cookiesStripped += summary.cookiesStripped;
     skipped += summary.skipped;
-    for (const error of summary.errors) {
-      errors.push({ file: name, ...error });
-    }
+    for (const error of summary.errors) errors.push({ file: name, ...error });
   }
 
   const problems: string[] = [];
@@ -153,12 +150,35 @@ export async function importBuffers(
   }
   if (problems.length) throw unsafeImportError(problems);
 
-  // Resolve only proxies explicitly supplied by the upload. A sparse re-import
-  // must not refresh or mutate the stored proxy persona as a side effect.
   const toResolve = collected
     .filter((entry) => entry.presentFields.includes("proxy") && entry.profile.proxy)
     .map((entry) => entry.profile);
   const { resolved } = await attachTimezones(toResolve);
+  if (toResolve.length) log(`import: resolved timezone for ${resolved}/${toResolve.length} supplied proxy/proxies`);
+
+  return {
+    imports: collected,
+    profiles: collected.map((entry) => entry.profile),
+    result: { files: files.length, profiles: collected.length, cookiesStripped, skipped, errors },
+  };
+}
+
+/**
+ * Import AdsPower exports from in-memory buffers — the shared core used by both
+ * the inbox folder and UI uploads. Local re-imports merge sparse fields before
+ * one atomic store write.
+ */
+export async function importBuffers(
+  store: ProfileStore,
+  files: { name: string; bytes: Uint8Array }[],
+  log: (msg: string) => void = console.log,
+  overrides: ImportOverrides = {},
+  /** Optional hub-side lock/CAS guard, called synchronously immediately before the atomic write. */
+  beforeCommit?: (profiles: readonly Profile[]) => void,
+): Promise<InboxResult> {
+  const batch = await prepareImportBuffers(files, log, overrides);
+  const collected = batch.imports;
+  const problems: string[] = [];
 
   // Merge after the asynchronous lookup so the database snapshot cannot go
   // stale while awaiting the network. No await occurs between here and commit.
@@ -193,7 +213,6 @@ export async function importBuffers(
   }
   if (problems.length) throw unsafeImportError(problems);
 
-  if (toResolve.length) log(`import: resolved timezone for ${resolved}/${toResolve.length} supplied proxy/proxies`);
   const liveIds = prepared.map((profile) => profile.id).filter((id) => !!store.getLaunch(id));
   if (liveIds.length > 0) {
     throw unsafeImportError([
@@ -204,7 +223,7 @@ export async function importBuffers(
   // the claim-vs-import race after all parsing/timezone I/O has completed.
   beforeCommit?.(prepared);
   store.upsertProfiles(prepared);
-  return { files: files.length, profiles: collected.length, cookiesStripped, skipped, errors };
+  return batch.result;
 }
 
 /** Import every `*.txt` in `dir` into the store. Creates `dir` if missing. */

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   EmailVerificationRequiredError,
   SupabaseAuthClient,
+  SupabaseAuthRequestError,
   type AuthFetch,
 } from "./supabase-auth.ts";
 
@@ -103,7 +104,47 @@ test("Supabase auth refresh uses only the supplied refresh token", async () => {
   expect(body).toEqual({ refresh_token: "stored-refresh" });
 });
 
+test("Supabase auth preserves permanent refresh failure status", async () => {
+  const auth = client(async () => Response.json({ message: "invalid refresh token" }, { status: 401 }));
+  await expect(auth.refresh("stored-refresh")).rejects.toMatchObject({
+    name: "SupabaseAuthRequestError",
+    failure: { kind: "http", status: 401, retryable: false },
+  });
+});
+
+test("Supabase auth classifies retryable HTTP failures", async () => {
+  for (const status of [408, 425, 429, 500, 503]) {
+    const auth = client(async () => Response.json({ message: "temporarily unavailable" }, { status }));
+    await expect(auth.refresh("stored-refresh")).rejects.toMatchObject({
+      name: "SupabaseAuthRequestError",
+      failure: { kind: "http", status, retryable: true },
+    });
+  }
+});
+
+test("Supabase auth classifies fetch failures without losing their cause", async () => {
+  const failure = new TypeError("fetch failed");
+  const auth = client(async () => { throw failure; });
+  try {
+    await auth.refresh("stored-refresh");
+    throw new Error("expected refresh to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(SupabaseAuthRequestError);
+    expect(error).toMatchObject({ failure: { kind: "transport", retryable: true }, cause: failure });
+  }
+});
+
+test("Supabase auth keeps HTTP status for non-JSON error responses", async () => {
+  const auth = client(async () => new Response("gateway unavailable", { status: 502 }));
+  await expect(auth.refresh("stored-refresh")).rejects.toMatchObject({
+    failure: { kind: "http", status: 502, retryable: true },
+  });
+});
+
 test("Supabase auth bounds fetch implementations that ignore abort", async () => {
   const auth = client(() => new Promise<Response>(() => {}), 5);
-  await expect(auth.signIn("user@example.com", "password")).rejects.toThrow("timed out after 5ms");
+  await expect(auth.signIn("user@example.com", "password")).rejects.toMatchObject({
+    message: expect.stringContaining("timed out after 5ms"),
+    failure: { kind: "timeout", retryable: true },
+  });
 });

@@ -10,8 +10,8 @@ import { AppConfigStore } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { PendingSyncRuntime } from "./pending-sync.ts";
-import type { SupabaseAuthClient } from "./supabase-auth.ts";
-import { CloudApiError } from "./cloud-client.ts";
+import { EmailVerificationRequiredError, SupabaseAuthRequestError, type SupabaseAuthClient } from "./supabase-auth.ts";
+import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 
 const SAMPLE = `id=k1d0cd11
@@ -128,6 +128,37 @@ test("open/close routes call the launcher", async () => {
   const close = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/close", { method: "POST" }), launcher, s);
   expect((await close!.json()).ok).toBe(true);
   expect(calls).toEqual(["start:k1d0cd11", "stop:k1d0cd11"]);
+  s.close();
+});
+
+test("raise route brings Local and Cloud browsers to the front", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const launcher = {
+    async bringToFront(id: string) { calls.push(id); },
+  } as any;
+
+  const local = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/raise", { method: "POST" }),
+    launcher,
+    s,
+  );
+  expect(local!.status).toBe(200);
+  expect(await local!.json()).toEqual({ ok: true });
+
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-raise-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const cloud = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/cloud1/raise", { method: "POST" }),
+    launcher,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any },
+  );
+  expect(cloud!.status).toBe(200);
+  expect(await cloud!.json()).toEqual({ ok: true });
+  expect(calls).toEqual(["k1d0cd11", "cloud1"]);
   s.close();
 });
 
@@ -337,6 +368,64 @@ test("upload route applies group override in local mode", async () => {
   );
   expect((await res!.json()).ok).toBe(true);
   expect(s.getProfile("k1up0001")!.group).toBe("selected");
+  s.close();
+});
+
+test("upload route sends one parsed batch to Cloud without writing the Local store", async () => {
+  const s = new ProfileStore(":memory:");
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-import-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const batches: Array<{ destination: string; profiles: any[] }> = [];
+  const cloudBrowser = {
+    async importProfiles(destination: string, profiles: any[]) {
+      batches.push({ destination, profiles: structuredClone(profiles) });
+      return { ok: true, imported: profiles.length, ids: profiles.map((profile) => profile.id) };
+    },
+  } as any;
+  const form = new FormData();
+  form.append("group", "Sales");
+  form.append("platform", "telegram.org");
+  form.append("files", new File([
+    `id=cloudimp1\nname=First\ngroup=from-file\ncookie=[]\nresolution=1280*720\n******************\n` +
+    `id=cloudimp2\nname=Second\ngroup=from-file\ncookie=[]\nresolution=1280*720\n******************`,
+  ], "export.txt", { type: "text/plain" }));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toMatchObject({ ok: true, files: 1, profiles: 2 });
+  expect(batches).toHaveLength(1);
+  expect(batches[0]!.destination).toBe("Sales");
+  expect(batches[0]!.profiles.map((profile) => ({ id: profile.id, group: profile.group, platform: profile.platform }))).toEqual([
+    { id: "cloudimp1", group: "Sales", platform: "telegram.org" },
+    { id: "cloudimp2", group: "Sales", platform: "telegram.org" },
+  ]);
+  expect(s.getProfile("cloudimp1")).toBeNull();
+  expect(s.getProfile("cloudimp2")).toBeNull();
+  s.close();
+});
+
+test("Cloud upload requires an explicit destination before parsing files", async () => {
+  const s = new ProfileStore(":memory:");
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-import-group-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const form = new FormData();
+  form.append("files", new File(["not parsed"], "export.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: { importProfiles: async () => { throw new Error("must not import"); } } as any },
+  );
+  expect(res!.status).toBe(400);
+  expect((await res!.json()).error).toContain("destination");
   s.close();
 });
 
@@ -1389,6 +1478,276 @@ test("Cloud auth API restores rotated credentials with the stored queue key", as
   s.close();
 });
 
+test("Cloud restore retains rotated auth, device, and queue state after a retryable status failure", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-retryable-restore-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  const queueKey = pendingSync.initialize().createdKey!;
+  const persisted: string[] = [];
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      return {
+        accessToken: "rotated-access-token",
+        refreshToken: "rotated-refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000, (token) => { persisted.push(token); });
+  let cleared = 0;
+  let restoredCredential = "";
+  const cloudConnection = {
+    accountId() { return "account1"; },
+    restoreCredential(value: string) { restoredCredential = value; },
+    client: {
+      async status() {
+        throw new CloudRequestError("offline", { kind: "transport", retryable: true });
+      },
+    },
+    clearDevice() { cleared++; },
+  } as unknown as CloudConnectionRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "stored-refresh-token",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(response!.status).toBe(503);
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+    stage: "cloud_status",
+    retryable: true,
+    category: "network",
+    code: "network_unavailable",
+  });
+  expect(persisted).toEqual(["rotated-refresh-token"]);
+  expect(cloudAuth.state().authenticated).toBe(true);
+  expect(restoredCredential).toBe("stored-device-credential");
+  expect(cleared).toBe(0);
+  expect(pendingSync.queue()).toBeDefined();
+  expect(JSON.stringify(body)).not.toContain("stored-refresh-token");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  expect(body.queueKey).toBeUndefined();
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud restore clears only invalid session state after an unstructured 401 status failure", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-unauthorized-restore-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  const queueKey = pendingSync.initialize().createdKey!;
+  let durableSessionClears = 0;
+  let remoteSignOuts = 0;
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      return {
+        accessToken: "rotated-access-token",
+        refreshToken: "rotated-refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+    async signOut() { remoteSignOuts++; },
+  } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => { durableSessionClears++; });
+  let deviceClears = 0;
+  const cloudConnection = {
+    accountId() { return "account1"; },
+    restoreCredential() {},
+    client: {
+      async status() {
+        throw new CloudApiError("AliasMode Cloud /status returned non-JSON (401, text/html)", "internal_error", 401);
+      },
+    },
+    clearDevice() { deviceClears++; },
+  } as unknown as CloudConnectionRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "stored-refresh-token",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(response!.status).toBe(401);
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session is no longer valid. Sign in again.",
+    stage: "cloud_status",
+    retryable: false,
+    category: "authentication",
+    code: "authentication_invalid",
+  });
+  expect(durableSessionClears).toBe(1);
+  expect(remoteSignOuts).toBe(0);
+  expect(deviceClears).toBe(1);
+  expect(cloudAuth.state()).toEqual({ authenticated: false });
+  expect(pendingSync.queue()).toBeUndefined();
+  expect(pendingSync.initialize(queueKey).createdKey).toBeUndefined();
+  expect(JSON.stringify(body)).not.toContain("stored-refresh-token");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud restore clears only invalid session state after a permanent refresh failure", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-permanent-restore-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  const queueKey = pendingSync.initialize().createdKey!;
+  let durableSessionClears = 0;
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      throw new SupabaseAuthRequestError(
+        "invalid refresh token",
+        { kind: "http", status: 401, retryable: false },
+      );
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => { durableSessionClears++; });
+  let deviceClears = 0;
+  const cloudConnection = {
+    accountId() { return undefined; },
+    clearDevice() { deviceClears++; },
+  } as unknown as CloudConnectionRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "invalid-stored-refresh",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session is no longer valid. Sign in again.",
+    stage: "auth_refresh",
+    retryable: false,
+    category: "authentication",
+    code: "authentication_invalid",
+  });
+  expect(response!.status).toBe(401);
+  expect(durableSessionClears).toBe(1);
+  expect(deviceClears).toBe(1);
+  expect(cloudAuth.state()).toEqual({ authenticated: false });
+  expect(pendingSync.queue()).toBeUndefined();
+  expect(pendingSync.initialize(queueKey).createdKey).toBeUndefined();
+  expect(JSON.stringify(body)).not.toContain("invalid-stored-refresh");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud restore treats unverified email as permanent and clears credentials locally", async () => {
+  const s = store();
+  let localClears = 0;
+  let remoteSignOuts = 0;
+  const cloudAuth = {
+    async restore() { throw new EmailVerificationRequiredError(); },
+    async clearStoredSession() { localClears++; },
+    async signOut() { remoteSignOuts++; },
+  } as unknown as CloudAuthRuntime;
+  let deviceClears = 0;
+  const cloudConnection = {
+    accountId() { return undefined; },
+    clearDevice() { deviceClears++; },
+  } as unknown as CloudConnectionRuntime;
+  let queueCloses = 0;
+  const pendingSync = {
+    queue() { return {}; },
+    close() { queueCloses++; },
+  } as unknown as PendingSyncRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "unverified-refresh",
+      deviceCredential: "stored-device-credential",
+      queueKey: "stored-queue-key",
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(response!.status).toBe(401);
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session is no longer valid. Sign in again.",
+    stage: "auth_refresh",
+    retryable: false,
+    category: "authentication",
+    code: "email_not_verified",
+  });
+  expect([localClears, remoteSignOuts, deviceClears, queueCloses]).toEqual([1, 0, 1, 1]);
+  expect(JSON.stringify(body)).not.toContain("unverified-refresh");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  expect(JSON.stringify(body)).not.toContain("stored-queue-key");
+  s.close();
+});
+
+test("Cloud restore treats device and membership revocation as permanent", async () => {
+  for (const code of ["device_revoked", "membership_revoked"] as const) {
+    const s = store();
+    let credentialClears = 0;
+    let deviceClears = 0;
+    let queueCloses = 0;
+    const cloudAuth = new CloudAuthRuntime({
+      async refresh() {
+        return {
+          accessToken: "access-token",
+          refreshToken: "rotated-refresh-token",
+          expiresIn: 60,
+          expiresAt: 61_000,
+          user: { id: "account1", email_confirmed_at: "verified" },
+        };
+      },
+      async signOut() {},
+    } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => { credentialClears++; });
+    const cloudConnection = {
+      accountId() { return "account1"; },
+      restoreCredential() {},
+      client: { async status() { throw new CloudApiError("revoked", code, 403); } },
+      clearDevice() { deviceClears++; },
+    } as unknown as CloudConnectionRuntime;
+    const pendingSync = {
+      queue() { return {}; },
+      close() { queueCloses++; },
+    } as unknown as PendingSyncRuntime;
+
+    const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: "refresh", deviceCredential: "device", queueKey: "queue" }),
+    }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+
+    expect(response!.status).toBe(401);
+    expect(await response!.json()).toMatchObject({
+      stage: "cloud_status",
+      retryable: false,
+      category: "authentication",
+      code,
+    });
+    expect([credentialClears, deviceClears, queueCloses]).toEqual([1, 1, 1]);
+    s.close();
+  }
+});
+
 test("Cloud diagnostics route returns only sanitized current-process events", async () => {
   const s = store();
   const cloudBrowser = {
@@ -1421,6 +1780,28 @@ test("Cloud diagnostics route returns only sanitized current-process events", as
     s,
   );
   expect(await empty!.json()).toEqual({ events: [] });
+  s.close();
+});
+
+test("Cloud forget releases browsers and clears only stored session state", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const cloudAuth = {
+    async clearStoredSession() { calls.push("clearStoredSession"); },
+    async signOut() { throw new Error("remote sign-out must not run"); },
+  } as unknown as CloudAuthRuntime;
+  const cloudConnection = {
+    clearDevice() { calls.push("clearDevice"); },
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
+  const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return true; } } as any;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/forget", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+
+  expect(response!.status).toBe(200);
+  expect(calls).toEqual(["releaseAll", "closeQueue", "clearDevice", "clearStoredSession"]);
   s.close();
 });
 

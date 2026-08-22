@@ -12,16 +12,19 @@ import {
   type Extension,
   type AppModeConfig,
   type CloudAuthState,
+  CloudSessionRestoreError,
   type CloudDiagnosticEvent,
   type CloudTeamState,
   acceptCloudInvitation,
   acceptCloudLegal,
+  cloudSessionContextReady,
   cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
   fetchCloudEvents,
   fetchCloudTeam,
   cloudWorkspaceAction,
+  forgetCloudSession,
   signInCloud,
   signOutCloud,
   signUpCloud,
@@ -401,6 +404,7 @@ function CopyField({ label, value, onChange }: { label: string; value: string; o
 }
 
 type DesktopInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";
 
 function desktopInvoke(): DesktopInvoke | undefined {
   return (window as any).__TAURI_INTERNALS__?.invoke as DesktopInvoke | undefined;
@@ -454,6 +458,8 @@ function App() {
   const [cloudEventsErr, setCloudEventsErr] = useState<string | null>(null);
   const [pendingMode, setPendingMode] = useState<"local" | "cloud" | null>(null);
   const [cloudAuth, setCloudAuth] = useState<CloudAuthState | null>(null);
+  const [savedSessionPhase, setSavedSessionPhase] = useState<SavedSessionPhase>("restoring");
+  const [scheduledRefreshPending, setScheduledRefreshPending] = useState(false);
   const [authView, setAuthView] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -528,6 +534,7 @@ function App() {
   // Bulk add accounts (CSV / AdsPower .txt with group + platform assignment)
   const [showBulk, setShowBulk] = useState(false);
   const [bulkFiles, setBulkFiles] = useState<File[]>([]);
+  const [bulkText, setBulkText] = useState("");
   const [bulkGroup, setBulkGroup] = useState("");
   const [bulkPlatform, setBulkPlatform] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -535,6 +542,8 @@ function App() {
   const [bulkOver, setBulkOver] = useState(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const authGeneration = useRef(0);
+  const restoreInFlight = useRef(false);
+  const savedSessionRestoreEnabled = useRef(true);
   const isCloudMode = appMode?.mode === "cloud";
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
@@ -639,6 +648,101 @@ function App() {
     }
   };
 
+  const restoreSavedSession = async (startup: boolean) => {
+    if (!savedSessionRestoreEnabled.current || restoreInFlight.current) return;
+    restoreInFlight.current = true;
+    const generation = authGeneration.current;
+    if (startup) {
+      setSavedSessionPhase("restoring");
+      setAuthBusy(true);
+    }
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const stored = await readDesktopCloudCredentials();
+          if (generation !== authGeneration.current || !savedSessionRestoreEnabled.current) return;
+          if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
+            setCloudAuth({ authenticated: false });
+            setSavedSessionPhase("manual-signin");
+            setScheduledRefreshPending(false);
+            setAuthErr(null);
+            return;
+          }
+          const result = await restoreCloudSession(
+            stored.refreshToken,
+            stored.deviceCredential,
+            stored.queueKey,
+            startup,
+          );
+          if (generation !== authGeneration.current || !savedSessionRestoreEnabled.current) return;
+          if (typeof result.refreshToken !== "string" || !result.refreshToken) {
+            throw new Error("Cloud did not return a refresh token");
+          }
+          await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
+          if (generation !== authGeneration.current || !savedSessionRestoreEnabled.current) return;
+          setCloudAuth({
+            authenticated: true,
+            expiresAt: result.expiresAt,
+            user: result.user,
+            workspace: result.workspace,
+            legal: result.legal,
+          });
+          setSavedSessionPhase("manual-signin");
+          setScheduledRefreshPending(false);
+          setAuthErr(null);
+          return;
+        } catch (error) {
+          if (generation !== authGeneration.current || !savedSessionRestoreEnabled.current) return;
+          if (error instanceof CloudSessionRestoreError && !error.retryable) {
+            setCloudAuth({ authenticated: false });
+            setSavedSessionPhase("manual-signin");
+            setScheduledRefreshPending(false);
+            setAuthErr(error.message);
+            return;
+          }
+          if (attempt === 0) continue;
+          const message = error instanceof CloudSessionRestoreError
+            ? error.message
+            : "Saved Cloud session could not be restored. Try again when the connection is available.";
+          setAuthErr(message);
+          if (startup) setSavedSessionPhase("retryable-failure");
+          else setScheduledRefreshPending(true);
+        }
+      }
+    } finally {
+      restoreInFlight.current = false;
+      if (startup && generation === authGeneration.current) setAuthBusy(false);
+    }
+  };
+
+  const signInInstead = async () => {
+    savedSessionRestoreEnabled.current = false;
+    const generation = ++authGeneration.current;
+    setAuthBusy(true);
+    setAuthErr(null);
+    try {
+      await forgetCloudSession();
+      if (generation !== authGeneration.current) return;
+      setCloudAuth({ authenticated: false });
+      setSavedSessionPhase("manual-signin");
+      setScheduledRefreshPending(false);
+      setProfiles([]);
+      setHealthSources([]);
+      setSelected(new Set());
+      setTeam(null);
+      setCloudEvents([]);
+      setAuthPassword("");
+      setAuthNotice(null);
+    } catch (error) {
+      if (generation === authGeneration.current) {
+        savedSessionRestoreEnabled.current = true;
+        setAuthErr(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (generation === authGeneration.current) setAuthBusy(false);
+    }
+  };
+
   const submitCloudAuth = async () => {
     const generation = authGeneration.current;
     setAuthBusy(true);
@@ -671,6 +775,7 @@ function App() {
           typeof result.queueKey === "string" ? result.queueKey : undefined,
         );
         if (generation !== authGeneration.current) return;
+        savedSessionRestoreEnabled.current = true;
         setCloudAuth({
           authenticated: true,
           expiresAt: result.expiresAt,
@@ -678,6 +783,8 @@ function App() {
           workspace: result.workspace,
           legal: result.legal,
         });
+        setSavedSessionPhase("manual-signin");
+        setScheduledRefreshPending(false);
         setAuthPassword("");
         if (!persisted) setAuthNotice("Signed in for this run; desktop credential storage is unavailable.");
       }
@@ -697,6 +804,8 @@ function App() {
       await signOutCloud();
       authGeneration.current++;
       setCloudAuth({ authenticated: false });
+      setSavedSessionPhase("manual-signin");
+      setScheduledRefreshPending(false);
       setProfiles([]);
       setHealthSources([]);
       setSelected(new Set());
@@ -768,41 +877,22 @@ function App() {
     if (appMode?.mode !== "cloud" || restartRequired) return;
     let active = true;
     const generation = authGeneration.current;
+    setSavedSessionPhase("restoring");
     const restore = async () => {
       try {
         const state = await fetchCloudAuth();
-        if (state.authenticated) {
-          if (active && generation === authGeneration.current) setCloudAuth(state);
+        if (cloudSessionContextReady(state)) {
+          if (active && generation === authGeneration.current) {
+            setCloudAuth(state);
+            setSavedSessionPhase("manual-signin");
+            setAuthErr(null);
+          }
           return;
         }
-        const stored = await readDesktopCloudCredentials();
-        if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
-          if (active && generation === authGeneration.current) setCloudAuth(state);
-          return;
-        }
-        const result = await restoreCloudSession(
-          stored.refreshToken,
-          stored.deviceCredential,
-          stored.queueKey,
-        );
-        if (!active || generation !== authGeneration.current) return;
-        await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
-        if (active && generation === authGeneration.current) {
-          setCloudAuth({
-            authenticated: true,
-            expiresAt: result.expiresAt,
-            user: result.user,
-            workspace: result.workspace,
-            legal: result.legal,
-          });
-          setAuthErr(null);
-        }
-      } catch (error) {
-        if (active && generation === authGeneration.current) {
-          setCloudAuth({ authenticated: false });
-          setAuthErr(error instanceof Error ? error.message : String(error));
-        }
+      } catch {
+        // A saved session can still recover when the first status probe fails.
       }
+      if (active && generation === authGeneration.current) await restoreSavedSession(true);
     };
     void restore();
     return () => { active = false; };
@@ -816,36 +906,19 @@ function App() {
       !cloudAuth.expiresAt
     ) return;
     const delay = Math.max(1_000, cloudAuth.expiresAt - Date.now() - 60_000);
-    const timer = window.setTimeout(async () => {
-      const generation = authGeneration.current;
-      try {
-        const stored = await readDesktopCloudCredentials();
-        if (!stored?.refreshToken || !stored.deviceCredential || !stored.queueKey) {
-          throw new Error("stored Cloud credentials are incomplete");
-        }
-        const result = await restoreCloudSession(
-          stored.refreshToken,
-          stored.deviceCredential,
-          stored.queueKey,
-        );
-        if (generation !== authGeneration.current) return;
-        await storeDesktopCloudCredentials(result.refreshToken, stored.deviceCredential);
-        if (generation !== authGeneration.current) return;
-        setCloudAuth({
-          authenticated: true,
-          expiresAt: result.expiresAt,
-          user: result.user,
-          workspace: result.workspace,
-          legal: result.legal,
-        });
-      } catch (error) {
-        if (generation !== authGeneration.current) return;
-        setCloudAuth({ authenticated: false });
-        setAuthErr(error instanceof Error ? error.message : String(error));
-      }
-    }, delay);
+    const timer = window.setTimeout(() => { void restoreSavedSession(false); }, delay);
     return () => window.clearTimeout(timer);
   }, [appMode?.mode, restartRequired, cloudAuth?.authenticated, cloudAuth?.expiresAt]);
+
+  useEffect(() => {
+    if (appMode?.mode !== "cloud" || restartRequired) return;
+    const retryWhenOnline = () => {
+      if (savedSessionPhase === "retryable-failure") void restoreSavedSession(true);
+      else if (scheduledRefreshPending) void restoreSavedSession(false);
+    };
+    window.addEventListener("online", retryWhenOnline);
+    return () => window.removeEventListener("online", retryWhenOnline);
+  }, [appMode?.mode, restartRequired, savedSessionPhase, scheduledRefreshPending]);
 
   useEffect(() => {
     if (!isCloudMode || !workspaceReady || restartRequired) return;
@@ -1023,21 +1096,27 @@ function App() {
   // ---- Bulk add accounts (CSV / .txt with group + platform assignment) ----
   const openBulk = () => {
     setBulkFiles([]);
-    setBulkGroup(group !== "all" ? group : "");
+    setBulkText("");
+    setBulkGroup(group !== "all" && (!isCloudMode || editableGroups.includes(group)) ? group : "");
     setBulkPlatform("");
     setBulkErr(null);
     setShowBulk(true);
   };
-  const closeBulk = () => { setShowBulk(false); setBulkFiles([]); setBulkErr(null); };
+  const closeBulk = () => {
+    setShowBulk(false);
+    setBulkFiles([]);
+    setBulkText("");
+    setBulkErr(null);
+  };
   const submitBulk = async () => {
-    if (!bulkFiles.length) return;
+    if ((!bulkFiles.length && !bulkText.trim()) || (isCloudMode && !bulkGroup.trim())) return;
     setBulkBusy(true);
     setBulkErr(null);
     try {
-      const list = await prepUploads(bulkFiles, bulkGroup.trim(), bulkPlatform);
+      const uploads = [...bulkFiles];
+      if (bulkText.trim()) uploads.push(new File([bulkText], "pasted-adspower.txt", { type: "text/plain" }));
+      const list = await prepUploads(uploads, bulkGroup.trim(), bulkPlatform);
       if (!list.length) throw new Error("no rows found in the file(s)");
-      // Apply the chosen group/platform to every imported profile (works for
-      // AdsPower .txt too, where the group otherwise comes from the file).
       const r = await uploadExports(list, { group: bulkGroup.trim(), platform: bulkPlatform });
       if (r.ok) {
         closeBulk();
@@ -1376,6 +1455,21 @@ function App() {
                 </button>
                 {modeErr && <div className="mode-error" role="alert">{modeErr}</div>}
               </>
+            ) : savedSessionPhase === "restoring" ? (
+              <>
+                <h1 id="onboarding-title">Restoring saved session</h1>
+                <p role="status">Checking the saved Cloud session on this device…</p>
+              </>
+            ) : savedSessionPhase === "retryable-failure" ? (
+              <>
+                <h1 id="onboarding-title">Restoring saved session</h1>
+                <p>The saved session is still on this device. Reconnect and try again.</p>
+                {authErr && <div className="mode-error" role="alert">{authErr}</div>}
+                <div className="auth-actions">
+                  <button className="mode-primary" type="button" disabled={authBusy} onClick={() => void restoreSavedSession(true)}>Try again</button>
+                  <button className="mode-secondary" type="button" disabled={authBusy} onClick={() => void signInInstead()}>Sign in instead</button>
+                </div>
+              </>
             ) : (
               <>
                 <h1 id="onboarding-title">{authView === "signin" ? "Sign in to AliasMode Cloud" : "Create your Cloud account"}</h1>
@@ -1461,7 +1555,7 @@ function App() {
         </div>
         <div className="newrow">
           <button className="newbtn" disabled={!canEditCloud} onClick={openCreate}>+ New Profile</button>
-          {!isCloudMode && <button className="importbtn" title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>}
+          <button className="importbtn" disabled={!canEditCloud} title="Import / bulk-add accounts from CSV or AdsPower .txt" onClick={openBulk}>⤓</button>
         </div>
         <div className={`folder${group === "all" ? " active" : ""}`} onClick={() => setGroup("all")}>
           <span>All profiles</span><span className="cnt">{profiles.length}</span>
@@ -1663,7 +1757,7 @@ function App() {
                   {(!isCloudMode || (p.permission === "edit" && !p.running && !p.lockedBy)) && <button className="btn edit" onClick={() => openEdit(p.id)}>Edit</button>}
                   {p.running ? (
                     <>
-                      {!isCloudMode && <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>⧉</button>}
+                      <button className="btn raise" title="Bring this browser window to the front" disabled={busy[p.id]} onClick={() => act(p.id, raiseProfile)}>Bring to front</button>
                       <button className="btn close" disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>Close</button>
                     </>
                   ) : p.mobilePersona ? (
@@ -2068,6 +2162,15 @@ function App() {
             <div className="modal-head">Import accounts</div>
             <div className="modal-body">
               {bulkErr && <div className="modal-err">{bulkErr}</div>}
+              <label className="fld">
+                <span>Paste AdsPower TXT records</span>
+                <textarea
+                  rows={8}
+                  value={bulkText}
+                  placeholder="Paste one or more AdsPower key=value profile records"
+                  onChange={(event) => setBulkText(event.target.value)}
+                />
+              </label>
               <div
                 className={`bulkdrop${bulkOver ? " over" : ""}`}
                 onClick={() => bulkFileRef.current?.click()}
@@ -2076,8 +2179,8 @@ function App() {
                 onDrop={(e) => { e.preventDefault(); setBulkOver(false); if (e.dataTransfer.files?.length) setBulkFiles(Array.from(e.dataTransfer.files)); }}
               >
                 <div className="big">⤓</div>
-                <div>Drag &amp; drop, or <b>click to choose</b></div>
-                <div className="sub">CSV (template columns) or an AdsPower <code>.txt</code> export · max 1000</div>
+                <div>Or drag &amp; drop files, or <b>click to choose</b></div>
+                <div className="sub">CSV (template columns) or an AdsPower <code>.txt</code> export</div>
               </div>
               <input
                 ref={bulkFileRef}
@@ -2089,8 +2192,8 @@ function App() {
               />
               {bulkFiles.length > 0 && <div className="bulkfiles">Selected: <b>{bulkFiles.map((f) => f.name).join(", ")}</b></div>}
               <label className="fld">
-                <span>Assign to group</span>
-                <GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />
+                <span>{isCloudMode ? "Destination folder" : "Assign to group"}</span>
+                <GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={isCloudMode ? editableGroups : existingGroups} allowCreate={!isCloudMode} />
               </label>
               <label className="fld">
                 <span>Platform</span>
@@ -2099,7 +2202,7 @@ function App() {
                 </select>
               </label>
               <div className="hint">
-                Defaults for CSV rows that leave group/platform blank; an AdsPower <code>.txt</code> keeps whatever's in the file.
+                A chosen group or platform overrides every imported record, including AdsPower TXT records.
                 <div className="tlinks">
                   <button className="tlink" onClick={() => downloadText("aliasmode-template.csv", CSV_TEMPLATE, "text/csv")}>⤓ CSV template</button>
                   <button className="tlink" onClick={() => downloadText("aliasmode-example.txt", TXT_EXAMPLE, "text/plain")}>⤓ AdsPower .txt example</button>
@@ -2108,7 +2211,7 @@ function App() {
             </div>
             <div className="modal-foot">
               <button className="link" onClick={closeBulk}>Cancel</button>
-              <button className="primary" disabled={bulkBusy || !bulkFiles.length} onClick={submitBulk}>{bulkBusy ? "Importing…" : "Import"}</button>
+              <button className="primary" disabled={bulkBusy || (!bulkFiles.length && !bulkText.trim()) || (isCloudMode && !bulkGroup)} onClick={submitBulk}>{bulkBusy ? "Importing…" : "Import"}</button>
             </div>
           </div>
         </div>

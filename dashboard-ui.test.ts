@@ -47,6 +47,23 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("generation !== authGeneration.current");
 });
 
+test("dashboard recovers saved Cloud sessions without false sign-out", () => {
+  expect(app).toContain('type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";');
+  expect(app).toContain('useState<SavedSessionPhase>("restoring")');
+  expect(app).toContain("Restoring saved session");
+  expect(app).toContain(">Try again</button>");
+  expect(app).toContain(">Sign in instead</button>");
+  expect(app).toContain("error instanceof CloudSessionRestoreError && !error.retryable");
+  expect(app).toContain("setScheduledRefreshPending(true)");
+  expect(app).toContain('window.addEventListener("online", retryWhenOnline)');
+  expect(app).toContain("await forgetCloudSession()");
+  expect(app).toContain("const savedSessionRestoreEnabled = useRef(true)");
+  expect(app).toContain("if (!savedSessionRestoreEnabled.current || restoreInFlight.current) return;");
+  expect(app).toContain("generation !== authGeneration.current || !savedSessionRestoreEnabled.current");
+  expect(app).toContain("savedSessionRestoreEnabled.current = false");
+  expect(app).toContain("cloudSessionContextReady(state)");
+});
+
 test("Account settings exposes fixed Cloud diagnostics without raw server messages", () => {
   expect(app).toContain("fetchCloudEvents");
   expect(app).toContain("Recent diagnostics");
@@ -69,6 +86,13 @@ test("dashboard lists the supported profile platforms", () => {
   }
 });
 
+test("running profile rows expose Bring to front in Local and Cloud mode", () => {
+  expect(app).toContain('p.running ? (');
+  expect(app).toContain('className="btn raise"');
+  expect(app).toContain('onClick={() => act(p.id, raiseProfile)}>Bring to front</button>');
+  expect(app).not.toContain('!isCloudMode && <button className="btn raise"');
+});
+
 test("Cloud rows expose Edit and Convert device only with effective Edit permission", () => {
   expect(app).toContain('(p.permission === "edit" && !p.running && !p.lockedBy)');
   expect(app).toContain('(!isCloudMode || p.permission === "edit") ? <button className="btn convert"');
@@ -82,7 +106,17 @@ test("Cloud profile pickers use only editable folders", () => {
   expect(app).toContain('<GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />');
   expect(app).toContain('<GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />');
   expect(app).toContain('group !== "all" && (!isCloudMode || editableGroups.includes(group))');
-  expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />');
+  expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={isCloudMode ? editableGroups : existingGroups} allowCreate={!isCloudMode} />');
+});
+
+test("bulk import accepts pasted AdsPower text in Local and Cloud mode", () => {
+  expect(app).toContain('<button className="importbtn" disabled={!canEditCloud}');
+  expect(app).toContain('value={bulkText}');
+  expect(app).toContain('onChange={(event) => setBulkText(event.target.value)}');
+  expect(app).toContain('new File([bulkText], "pasted-adspower.txt", { type: "text/plain" })');
+  expect(app).toContain('setBulkText("")');
+  expect(app).toContain('bulkBusy || (!bulkFiles.length && !bulkText.trim()) || (isCloudMode && !bulkGroup)');
+  expect(app).not.toContain('max 1000');
 });
 
 test("Cloud workspace loads independently and refreshes with Account Settings", () => {

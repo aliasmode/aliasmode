@@ -555,9 +555,19 @@ async function operate(chromium, operation, payload) {
     }
     if (operation === "profile-card") {
       const automation = context.pages()[0];
+      if (!automation || typeof context.newCDPSession !== "function") return null;
+      const cdp = await context.newCDPSession(automation);
+      try {
+        const { bounds } = await cdp.send("Browser.getWindowForTarget");
+        if (bounds?.windowState === "minimized") return null;
+      } catch {
+        return null;
+      } finally {
+        await cdp.detach().catch(() => {});
+      }
       const page = await context.newPage();
       await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
-      if (automation && automation !== page) await automation.bringToFront().catch(() => {});
+      if (automation !== page) await automation.bringToFront().catch(() => {});
       return null;
     }
     if (operation === "label-window") {

@@ -1,5 +1,6 @@
 import { watch } from "node:fs";
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
+import type { ImportProfilesResponse } from "./contracts/cloud-v1.ts";
 import {
   CloudDiagnostics,
   type CloudDiagnosticEvent,
@@ -62,6 +63,7 @@ export interface CloudBrowserProfile {
 export interface CloudBrowserLifecycle {
   listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }>;
   create(profile: Profile): Promise<{ id: string }>;
+  importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[]): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<boolean>;
   secureAfterAuthentication(): Promise<void>;
@@ -73,7 +75,7 @@ export interface CloudBrowserLifecycle {
 
 type CloudBrowserClient = Pick<
   CloudClient,
-  "listProfiles" | "createProfile" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
+  "listProfiles" | "createProfile" | "importProfiles" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
 >;
 
 type CloudBrowserLauncher = Pick<
@@ -340,6 +342,23 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       throw new Error("Cloud returned a mismatched created profile");
     }
     return { id: profile.id };
+  }
+
+  async importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse> {
+    this.requireContext(false);
+    const ids = profiles.map((profile) => profile.id);
+    const imported = await this.options.cloud.importProfiles({
+      destination,
+      profiles: profiles.map((profile) => encodePortableProfile(profile)),
+    });
+    if (
+      imported.imported !== ids.length
+      || imported.ids.length !== ids.length
+      || imported.ids.some((id, index) => id !== ids[index])
+    ) {
+      throw new Error("Cloud returned a mismatched profile import result");
+    }
+    return imported;
   }
 
   async open(profileId: string, launchArgs: string[] = []): Promise<CloudBrowserOpenResult> {
@@ -1256,9 +1275,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       await Promise.allSettled([...this.opening.values()]);
       const queue = this.options.queue();
       const accountId = this.options.accountId();
-      if (!queue || !accountId) {
+      if (!queue) {
         released = true;
         return true;
+      }
+      if (!accountId) {
+        released = queue.listAllOpens().length === 0;
+        return released;
       }
 
       let complete = true;

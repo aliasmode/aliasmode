@@ -21,6 +21,8 @@ import {
   type CreateProfileRequest,
   type CreateProfileResponse,
   type GetProfileResponse,
+  type ImportProfilesRequest,
+  type ImportProfilesResponse,
   type SetFolderGrantResponse,
   type ListFoldersResponse,
   type ListInvitationsResponse,
@@ -43,6 +45,21 @@ export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
 export type CloudCredentialProvider = () => string | undefined | Promise<string | undefined>;
 
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 30_000;
+
+export type CloudRequestFailure =
+  | { kind: "transport"; retryable: true }
+  | { kind: "timeout"; retryable: true };
+
+export class CloudRequestError extends Error {
+  constructor(
+    message: string,
+    readonly failure: CloudRequestFailure,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "CloudRequestError";
+  }
+}
 
 export class CloudApiError extends Error {
   constructor(
@@ -105,7 +122,10 @@ export class CloudClient {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        const error = new Error(`AliasMode Cloud request ${path} timed out after ${this.requestTimeoutMs}ms`);
+        const error = new CloudRequestError(
+          `AliasMode Cloud request ${path} timed out after ${this.requestTimeoutMs}ms`,
+          { kind: "timeout", retryable: true },
+        );
         controller.abort(error);
         reject(error);
       }, this.requestTimeoutMs);
@@ -114,27 +134,45 @@ export class CloudClient {
 
     try {
       const request = Promise.resolve().then(async () => {
-        const response = await this.fetchFn(`${this.baseUrl}${CLOUD_API_BASE_PATH}${path}`, {
-          ...init,
-          headers,
-          signal: controller.signal,
-        });
+        let response: Response;
+        try {
+          response = await this.fetchFn(`${this.baseUrl}${CLOUD_API_BASE_PATH}${path}`, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          });
+        } catch (error) {
+          throw new CloudRequestError(
+            `AliasMode Cloud request ${path} could not be sent`,
+            { kind: "transport", retryable: true },
+            { cause: error },
+          );
+        }
         if (response.status === 304) {
           if (!responseOptions.notModified) {
             throw new Error(`AliasMode Cloud ${path} returned an unexpected not-modified response`);
           }
           return responseOptions.notModified();
         }
-        const text = await response.text();
+        let text: string;
+        try {
+          text = await response.text();
+        } catch (error) {
+          throw new CloudRequestError(
+            `AliasMode Cloud response ${path} could not be read`,
+            { kind: "transport", retryable: true },
+            { cause: error },
+          );
+        }
         let body: any = {};
         if (text.trim()) {
           try {
             body = JSON.parse(text);
           } catch {
             const contentType = response.headers.get("content-type") ?? "unknown content type";
-            throw new Error(
-              `AliasMode Cloud ${path} returned non-JSON (${response.status}, ${contentType})`,
-            );
+            const message = `AliasMode Cloud ${path} returned non-JSON (${response.status}, ${contentType})`;
+            if (!response.ok) throw new CloudApiError(message, "internal_error", response.status);
+            throw new Error(message);
           }
         }
         if (!response.ok || body?.ok === false) this.throwApiError(response.status, body);
@@ -295,6 +333,15 @@ export class CloudClient {
 
   createProfile(request: CreateProfileRequest): Promise<CreateProfileResponse> {
     return this.call("/profiles", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  async importProfiles(request: ImportProfilesRequest): Promise<ImportProfilesResponse> {
+    const response = await this.call<ImportProfilesResponse>("/profiles/import", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    this.profileRoster = undefined;
+    return response;
   }
 
   openProfile(profileId: string, request: OpenProfileRequest): Promise<OpenProfileResponse> {
