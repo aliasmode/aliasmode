@@ -227,6 +227,8 @@ test("Windows window acceptance preserves native minimize state and selects only
   expect(events).toEqual([
     "open:first",
     "open:second",
+    "targets:first:page-1",
+    "targets:second:page-1",
     "minimize:first",
     "targets:first:page-1",
     "profile-card:first",
@@ -237,6 +239,36 @@ test("Windows window acceptance preserves native minimize state and selects only
     "close:first",
   ]);
   expect(pageTargets).toEqual(["page-1"]);
+});
+
+test("Windows window acceptance rejects a missing initial page before native polling", async () => {
+  const events: string[] = [];
+  await expect(exerciseWindowsWindowAcceptance({
+    profileIds: ["first", "second"],
+    async open(profileId) { events.push(`open:${profileId}`); },
+    async close(profileId) { events.push(`close:${profileId}`); },
+    async nativeWindows() {
+      events.push("native-windows");
+      return { foregroundHwnd: 0, windows: {} };
+    },
+    async minimize() {},
+    async pageTargetIds(profileId) {
+      events.push(`targets:${profileId}`);
+      return profileId === "first" ? ["page-1"] : [];
+    },
+    async runProfileCardObserved() {
+      return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
+    },
+    async bringToFront() {},
+  })).rejects.toThrow("managed CloakBrowser did not expose initial page targets");
+  expect(events).toEqual([
+    "open:first",
+    "open:second",
+    "targets:first",
+    "targets:second",
+    "close:second",
+    "close:first",
+  ]);
 });
 
 test("Windows window acceptance rejects a profile-card page target and still closes both browsers", async () => {

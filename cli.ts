@@ -754,6 +754,14 @@ export interface WindowsProfileCardObservation {
   nativeWindowStayedMinimized: boolean;
 }
 
+export type WindowsWindowAcceptanceStage =
+  | "page_targets_ready"
+  | "windows_distinct"
+  | "window_minimized"
+  | "profile_card_observed"
+  | "first_window_raised"
+  | "second_window_raised";
+
 export interface WindowsWindowAcceptanceRuntime {
   profileIds: readonly [string, string];
   open(profileId: string): Promise<void>;
@@ -763,6 +771,7 @@ export interface WindowsWindowAcceptanceRuntime {
   pageTargetIds(profileId: string): Promise<string[]>;
   runProfileCardObserved(profileId: string, hwnd: number): Promise<WindowsProfileCardObservation>;
   bringToFront(profileId: string): Promise<void>;
+  reportStage?(stage: WindowsWindowAcceptanceStage): void;
 }
 
 async function waitForNativeWindowState(
@@ -794,6 +803,15 @@ export async function exerciseWindowsWindowAcceptance(
     await runtime.open(secondId);
     opened.push(secondId);
 
+    const [firstTargets, secondTargets] = await Promise.all([
+      runtime.pageTargetIds(firstId),
+      runtime.pageTargetIds(secondId),
+    ]);
+    if (!firstTargets.length || !secondTargets.length) {
+      throw new Error("managed CloakBrowser did not expose initial page targets");
+    }
+    runtime.reportStage?.("page_targets_ready");
+
     const initial = await waitForNativeWindowState(
       runtime.nativeWindows,
       (snapshot) => {
@@ -803,6 +821,7 @@ export async function exerciseWindowsWindowAcceptance(
       },
       "managed CloakBrowser windows did not expose distinct native HWNDs",
     );
+    runtime.reportStage?.("windows_distinct");
     const firstHwnd = initial.windows[firstId]!.hwnd;
     const secondHwnd = initial.windows[secondId]!.hwnd;
 
@@ -814,6 +833,7 @@ export async function exerciseWindowsWindowAcceptance(
         && snapshot.windows[secondId]?.hwnd === secondHwnd,
       "native CloakBrowser window did not remain distinct and minimized",
     );
+    runtime.reportStage?.("window_minimized");
     const targetsBefore = (await runtime.pageTargetIds(firstId)).slice().sort();
     const observation = await runtime.runProfileCardObserved(firstId, firstHwnd);
     const targetsAfter = (await runtime.pageTargetIds(firstId)).slice().sort();
@@ -833,6 +853,7 @@ export async function exerciseWindowsWindowAcceptance(
     if (!observation.nativeWindowStayedMinimized) {
       throw new Error("profile-card operation transiently restored the minimized native window");
     }
+    runtime.reportStage?.("profile_card_observed");
 
     await runtime.bringToFront(firstId);
     await waitForNativeWindowState(
@@ -844,6 +865,7 @@ export async function exerciseWindowsWindowAcceptance(
         && snapshot.foregroundHwnd !== secondHwnd,
       "Bring to front did not select only the first managed window",
     );
+    runtime.reportStage?.("first_window_raised");
 
     await runtime.bringToFront(secondId);
     await waitForNativeWindowState(
@@ -855,6 +877,7 @@ export async function exerciseWindowsWindowAcceptance(
         && snapshot.foregroundHwnd !== firstHwnd,
       "Bring to front did not select only the second managed window",
     );
+    runtime.reportStage?.("second_window_raised");
   } catch (error) {
     failure = error;
   } finally {
@@ -1321,7 +1344,8 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
     await exerciseWindowsWindowAcceptance({
       profileIds: WINDOWS_ACCEPTANCE_PROFILE_IDS,
       async open(profileId) {
-        await launcher.start(profileId, [], { autoNavigate: false });
+        const opened = await launcher.start(profileId, [], { autoNavigate: false });
+        await launcher.navigate(opened.ws, ["about:blank"]);
       },
       async close(profileId) {
         if (!await launcher.stop(profileId)) {
@@ -1355,6 +1379,9 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
       },
       async bringToFront(profileId) {
         await launcher.bringToFront(profileId);
+      },
+      reportStage(stage) {
+        console.log(`[aliasmode] installed window acceptance stage ${stage}`);
       },
     });
   } finally {
