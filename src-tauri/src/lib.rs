@@ -27,6 +27,13 @@ const LEGAL_URLS: [&str; 3] = [
     "https://aliasmode.com/acceptable-use/",
 ];
 
+const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0";
+
+fn windows_acceptance_browser_args(enabled: bool) -> Option<&'static str> {
+    enabled.then_some(WINDOWS_ACCEPTANCE_BROWSER_ARGS)
+}
+
 fn allowed_legal_url(url: &str) -> bool {
     LEGAL_URLS.contains(&url)
 }
@@ -118,7 +125,7 @@ fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
 mod tests {
     use super::{
         allowed_legal_url, cli_compatible_windows_path, parse_cloakpit_import_args,
-        CloakpitImportRequest,
+        windows_acceptance_browser_args, CloakpitImportRequest,
     };
     use std::{
         ffi::OsString,
@@ -143,6 +150,15 @@ mod tests {
         ] {
             assert!(!allowed_legal_url(url));
         }
+    }
+
+    #[test]
+    fn enables_webview_debugging_only_for_acceptance() {
+        assert_eq!(windows_acceptance_browser_args(false), None);
+        assert_eq!(
+            windows_acceptance_browser_args(true),
+            Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"),
+        );
     }
 
     #[test]
@@ -307,10 +323,20 @@ pub fn run() {
             let url = format!("{origin}/")
                 .parse()
                 .map_err(|error| boxed(format!("invalid sidecar URL: {error}")))?;
-            let window = match WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let webview_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("AliasMode")
                 .inner_size(1280.0, 800.0)
-                .min_inner_size(960.0, 640.0)
+                .min_inner_size(960.0, 640.0);
+            #[cfg(windows)]
+            let webview_builder = if let Some(args) = windows_acceptance_browser_args(matches!(
+                std::env::var("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG").as_deref(),
+                Ok("1")
+            )) {
+                webview_builder.additional_browser_args(args)
+            } else {
+                webview_builder
+            };
+            let window = match webview_builder
                 .on_navigation(move |url| {
                     (url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")

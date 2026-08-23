@@ -448,7 +448,7 @@ jobs:
           New-Item -ItemType Directory -Force $cloudAcceptanceRoot | Out-Null
           $savedEnvironment = @{}
           $acceptanceEnvironmentNames = @(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",
             "WEBVIEW2_USER_DATA_FOLDER",
             "ALIASMODE_CLOUD_URL",
             "ALIASMODE_SUPABASE_URL",
@@ -457,14 +457,6 @@ jobs:
           foreach ($name in $acceptanceEnvironmentNames) {
             $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
           }
-          $webviewPolicyPath = "HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
-          $webviewPolicyName = "AliasMode.exe"
-          $webviewPolicyPathExisted = Test-Path $webviewPolicyPath
-          $existingWebviewPolicy = Get-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -ErrorAction SilentlyContinue
-          $hadWebviewPolicy = $null -ne $existingWebviewPolicy
-          $savedWebviewPolicy = if ($hadWebviewPolicy) {
-            [string]$existingWebviewPolicy.PSObject.Properties[$webviewPolicyName].Value
-          } else { $null }
 
           Add-Type @'
           using System.ComponentModel;
@@ -542,6 +534,7 @@ jobs:
             [Text.UTF8Encoding]::new($false)
           )
 
+          [Environment]::SetEnvironmentVariable("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "1", "Process")
           [Environment]::SetEnvironmentVariable("ALIASMODE_CLOUD_URL", $fixtureUrl, "Process")
           [Environment]::SetEnvironmentVariable("ALIASMODE_SUPABASE_URL", $fixtureUrl, "Process")
           [Environment]::SetEnvironmentVariable("ALIASMODE_SUPABASE_ANON_KEY", "aliasmode-fixture-anon", "Process")
@@ -613,11 +606,6 @@ jobs:
 
           function Start-InstalledCloudAcceptanceApp {
             $webviewRoot = Join-Path $cloudAcceptanceRoot "webview-$([Guid]::NewGuid().ToString('N'))"
-            [Environment]::SetEnvironmentVariable(
-              "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-              "--remote-debugging-port=0",
-              "Process"
-            )
             [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webviewRoot, "Process")
             $process = Start-Process -PassThru $appPath
             [void]$trackedPids.Add([int]$process.Id)
@@ -867,8 +855,6 @@ jobs:
 
           $cloudAcceptanceFailure = $null
           try {
-            New-Item -ItemType Directory -Path $webviewPolicyPath -Force | Out-Null
-            New-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -Value "--remote-debugging-port=0" -PropertyType String -Force | Out-Null
             Remove-AliasModeAcceptanceCredentials
             Assert-AliasModeAcceptanceCredentialsAbsent
 
@@ -960,29 +946,6 @@ jobs:
             }
             foreach ($name in $acceptanceEnvironmentNames) {
               [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
-            }
-            try {
-              if ($hadWebviewPolicy) {
-                New-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -Value $savedWebviewPolicy -PropertyType String -Force | Out-Null
-              } else {
-                Remove-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -Force -ErrorAction SilentlyContinue
-                if (-not $webviewPolicyPathExisted) {
-                  Remove-Item -LiteralPath $webviewPolicyPath -Force -ErrorAction SilentlyContinue
-                }
-              }
-              $restoredWebviewPolicy = Get-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -ErrorAction SilentlyContinue
-              if ($hadWebviewPolicy) {
-                $restoredWebviewPolicyValue = if ($restoredWebviewPolicy) {
-                  [string]$restoredWebviewPolicy.PSObject.Properties[$webviewPolicyName].Value
-                } else { $null }
-                if ($restoredWebviewPolicyValue -ne $savedWebviewPolicy) {
-                  throw "WebView2 acceptance policy was not restored"
-                }
-              } elseif ($null -ne $restoredWebviewPolicy) {
-                throw "WebView2 acceptance policy survived cleanup"
-              }
-            } catch {
-              if (-not $cleanupFailure) { $cleanupFailure = $_ }
             }
             foreach ($path in @($isolatedState, $cloudAcceptanceRoot)) {
               for ($attempt = 0; $attempt -lt 120; $attempt++) {
