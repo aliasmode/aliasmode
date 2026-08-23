@@ -744,9 +744,33 @@ async function runCloudRestoreFixture(args: string[]): Promise<void> {
   await server.stop(true);
 }
 
+export interface WindowsNativeWindowCandidate {
+  profileId: string;
+  hwnd: number;
+  minimized: boolean;
+  visible: boolean;
+}
+
 export interface WindowsNativeWindowSnapshot {
   foregroundHwnd: number;
-  windows: Record<string, { hwnd: number; minimized: boolean }>;
+  windows: Record<string, Omit<WindowsNativeWindowCandidate, "profileId">>;
+}
+
+export function mapWindowsNativeWindowCandidates(
+  profileIds: readonly string[],
+  candidates: readonly WindowsNativeWindowCandidate[],
+): WindowsNativeWindowSnapshot["windows"] {
+  const windows: WindowsNativeWindowSnapshot["windows"] = {};
+  const handles = new Set<number>();
+  for (const profileId of profileIds) {
+    const matches = candidates.filter((candidate) => candidate.profileId === profileId);
+    if (matches.length !== 1) return {};
+    const { hwnd, minimized, visible } = matches[0]!;
+    if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || handles.has(hwnd)) return {};
+    handles.add(hwnd);
+    windows[profileId] = { hwnd, minimized, visible };
+  }
+  return windows;
 }
 
 export interface WindowsProfileCardObservation {
@@ -817,7 +841,9 @@ export async function exerciseWindowsWindowAcceptance(
       (snapshot) => {
         const first = snapshot.windows[firstId];
         const second = snapshot.windows[secondId];
-        return !!first && !!second && first.hwnd > 0 && second.hwnd > 0 && first.hwnd !== second.hwnd;
+        return !!first && !!second
+          && first.visible && second.visible
+          && first.hwnd > 0 && second.hwnd > 0 && first.hwnd !== second.hwnd;
       },
       "managed CloakBrowser windows did not expose distinct native HWNDs",
     );
@@ -829,8 +855,10 @@ export async function exerciseWindowsWindowAcceptance(
     await waitForNativeWindowState(
       runtime.nativeWindows,
       (snapshot) => snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.visible === true
         && snapshot.windows[firstId]?.minimized === true
-        && snapshot.windows[secondId]?.hwnd === secondHwnd,
+        && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.visible === true,
       "native CloakBrowser window did not remain distinct and minimized",
     );
     runtime.reportStage?.("window_minimized");
@@ -843,8 +871,10 @@ export async function exerciseWindowsWindowAcceptance(
     await waitForNativeWindowState(
       runtime.nativeWindows,
       (snapshot) => snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.visible === true
         && snapshot.windows[firstId]?.minimized === true
-        && snapshot.windows[secondId]?.hwnd === secondHwnd,
+        && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.visible === true,
       "profile-card operation restored or replaced the minimized native window",
     );
     if (observation.createdPageTargetIds.length > 0) {
@@ -860,8 +890,10 @@ export async function exerciseWindowsWindowAcceptance(
       runtime.nativeWindows,
       (snapshot) => snapshot.foregroundHwnd === firstHwnd
         && snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.visible === true
         && snapshot.windows[firstId]?.minimized === false
         && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.visible === true
         && snapshot.foregroundHwnd !== secondHwnd,
       "Bring to front did not select only the first managed window",
     );
@@ -872,7 +904,9 @@ export async function exerciseWindowsWindowAcceptance(
       runtime.nativeWindows,
       (snapshot) => snapshot.foregroundHwnd === secondHwnd
         && snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.visible === true
         && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.visible === true
         && snapshot.windows[secondId]?.minimized === false
         && snapshot.foregroundHwnd !== firstHwnd,
       "Bring to front did not select only the second managed window",
@@ -1029,6 +1063,10 @@ const WINDOWS_ACCEPTANCE_PROFILE_IDS = [
   "aliasmode-window-smoke-two",
 ] as const;
 
+function windowsAcceptanceWindowMarker(profileId: string): string {
+  return `aliasmode-window-acceptance:${profileId}`;
+}
+
 function smokeProfile(
   id: string,
   name: string,
@@ -1077,11 +1115,13 @@ const WINDOWS_NATIVE_TYPE = String.raw`
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class AliasModeWindowAcceptanceNative {
   private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
   [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
-  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+  [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
@@ -1127,60 +1167,54 @@ public static class AliasModeWindowAcceptanceNative {
       UnhookWinEvent(hook);
     }
   }
-  public static long FindVisibleWindow(uint[] processIds) {
-    var owned = new HashSet<uint>(processIds);
-    var found = IntPtr.Zero;
+  public static long[] TopLevelWindows() {
+    var windows = new List<long>();
     EnumWindows(delegate(IntPtr hWnd, IntPtr _) {
-      uint processId;
-      GetWindowThreadProcessId(hWnd, out processId);
-      if (found == IntPtr.Zero && owned.Contains(processId) && IsWindowVisible(hWnd)) {
-        found = hWnd;
-        return false;
-      }
+      windows.Add(hWnd.ToInt64());
       return true;
     }, IntPtr.Zero);
-    return found.ToInt64();
+    return windows.ToArray();
+  }
+  public static string WindowTitle(long windowValue) {
+    var hWnd = new IntPtr(windowValue);
+    int length = GetWindowTextLength(hWnd);
+    if (length <= 0) return "";
+    var title = new StringBuilder(length + 1);
+    return GetWindowText(hWnd, title, title.Capacity) > 0 ? title.ToString() : "";
   }
 }`;
 
 async function readWindowsNativeWindows(
-  launches: Array<{ profileId: string; pid: number; debugPort: number }>,
+  profiles: Array<{ profileId: string; marker: string }>,
 ): Promise<WindowsNativeWindowSnapshot> {
-  const encoded = Buffer.from(JSON.stringify(launches), "utf8").toString("base64");
+  const encoded = Buffer.from(JSON.stringify(profiles), "utf8").toString("base64");
   const script = `
 Add-Type -TypeDefinition @'
 ${WINDOWS_NATIVE_TYPE}
 '@
 $entries = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
-$processSnapshot = @(Get-CimInstance -Query 'SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process' -OperationTimeoutSec 5 -ErrorAction SilentlyContinue)
+$topLevelWindows = @(
+  [AliasModeWindowAcceptanceNative]::TopLevelWindows() | ForEach-Object {
+    $handle = [long]$_
+    [pscustomobject]@{
+      hwnd = $handle
+      title = [AliasModeWindowAcceptanceNative]::WindowTitle($handle)
+      minimized = [AliasModeWindowAcceptanceNative]::IsIconic([IntPtr]$handle)
+      visible = [AliasModeWindowAcceptanceNative]::IsWindowVisible([IntPtr]$handle)
+    }
+  }
+)
 $rows = @(
   foreach ($entry in $entries) {
-    $owned = [Collections.Generic.HashSet[int]]::new()
-    if ([int]$entry.pid -gt 0) { [void]$owned.Add([int]$entry.pid) }
-    $needle = "--remote-debugging-port=$($entry.debugPort)"
-    foreach ($candidate in $processSnapshot) {
-      if ($candidate.CommandLine -and $candidate.CommandLine.Contains($needle)) {
-        [void]$owned.Add([int]$candidate.ProcessId)
-      }
-    }
-    $changed = $true
-    while ($changed) {
-      $changed = $false
-      foreach ($candidate in $processSnapshot) {
-        if (-not $owned.Contains([int]$candidate.ProcessId) -and $owned.Contains([int]$candidate.ParentProcessId)) {
-          [void]$owned.Add([int]$candidate.ProcessId)
-          $changed = $true
+    foreach ($window in $topLevelWindows) {
+      if ($window.title.IndexOf([string]$entry.marker, [StringComparison]::Ordinal) -ge 0) {
+        [pscustomobject]@{
+          profileId = [string]$entry.profileId
+          hwnd = [long]$window.hwnd
+          minimized = [bool]$window.minimized
+          visible = [bool]$window.visible
         }
       }
-    }
-    $nativeProcessIds = [uint[]]@($owned | ForEach-Object { [uint]$_ })
-    $handle = if ($nativeProcessIds.Count -gt 0) {
-      [AliasModeWindowAcceptanceNative]::FindVisibleWindow($nativeProcessIds)
-    } else { 0 }
-    [pscustomobject]@{
-      profileId = [string]$entry.profileId
-      hwnd = [long]$handle
-      minimized = if ($handle -gt 0) { [AliasModeWindowAcceptanceNative]::IsIconic([IntPtr]$handle) } else { $false }
     }
   }
 )
@@ -1192,21 +1226,35 @@ $rows = @(
   const raw = await runPowerShellAcceptance(script);
   const parsed = JSON.parse(raw) as {
     foregroundHwnd?: unknown;
-    windows?: Array<{ profileId?: unknown; hwnd?: unknown; minimized?: unknown }>;
+    windows?: Array<{
+      profileId?: unknown;
+      hwnd?: unknown;
+      minimized?: unknown;
+      visible?: unknown;
+    }>;
   };
-  const windows: WindowsNativeWindowSnapshot["windows"] = {};
+  const candidates: WindowsNativeWindowCandidate[] = [];
   for (const row of Array.isArray(parsed.windows) ? parsed.windows : []) {
     if (
       typeof row.profileId === "string"
       && Number.isSafeInteger(row.hwnd)
       && typeof row.minimized === "boolean"
+      && typeof row.visible === "boolean"
     ) {
-      windows[row.profileId] = { hwnd: Number(row.hwnd), minimized: row.minimized };
+      candidates.push({
+        profileId: row.profileId,
+        hwnd: Number(row.hwnd),
+        minimized: row.minimized,
+        visible: row.visible,
+      });
     }
   }
   return {
     foregroundHwnd: Number.isSafeInteger(parsed.foregroundHwnd) ? Number(parsed.foregroundHwnd) : 0,
-    windows,
+    windows: mapWindowsNativeWindowCandidates(
+      profiles.map(({ profileId }) => profileId),
+      candidates,
+    ),
   };
 }
 
@@ -1334,10 +1382,12 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
     if (!value) throw new Error(`managed CloakBrowser launch is missing for ${profileId}`);
     return value;
   };
-  const nativeWindows = () => readWindowsNativeWindows(WINDOWS_ACCEPTANCE_PROFILE_IDS.map((profileId) => {
-    const value = launch(profileId);
-    return { profileId, pid: value.pid, debugPort: value.debugPort };
-  }));
+  const nativeWindows = () => readWindowsNativeWindows(
+    WINDOWS_ACCEPTANCE_PROFILE_IDS.map((profileId) => ({
+      profileId,
+      marker: windowsAcceptanceWindowMarker(profileId),
+    })),
+  );
 
   try {
     await launcher.reconcileOrphans();
@@ -1345,7 +1395,11 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
       profileIds: WINDOWS_ACCEPTANCE_PROFILE_IDS,
       async open(profileId) {
         const opened = await launcher.start(profileId, [], { autoNavigate: false });
-        await launcher.navigate(opened.ws, ["about:blank"]);
+        const marker = windowsAcceptanceWindowMarker(profileId);
+        const document = `<!doctype html><title>${marker}</title>`;
+        await launcher.navigate(opened.ws, [
+          `data:text/html;charset=utf-8,${encodeURIComponent(document)}`,
+        ]);
       },
       async close(profileId) {
         if (!await launcher.stop(profileId)) {

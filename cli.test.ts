@@ -7,6 +7,7 @@ import {
   exerciseCloudLauncherSmoke,
   exerciseWindowsWindowAcceptance,
   lifecycleAdmissionOptionsFromEnv,
+  mapWindowsNativeWindowCandidates,
   OFFICIAL_CLOUD_ANON_KEY,
   OFFICIAL_CLOUD_URL,
   parseCloudRestoreFixtureOptions,
@@ -183,11 +184,37 @@ test("Cloud launcher smoke requires fresh and repeated cached opens to stay aliv
   ]);
 });
 
+test("Windows native window candidates map only one distinct HWND per profile", () => {
+  expect(mapWindowsNativeWindowCandidates(["first", "second"], [
+    { profileId: "unrelated", hwnd: 99, minimized: false, visible: true },
+    { profileId: "first", hwnd: 101, minimized: true, visible: true },
+    { profileId: "second", hwnd: 202, minimized: false, visible: true },
+  ])).toEqual({
+    first: { hwnd: 101, minimized: true, visible: true },
+    second: { hwnd: 202, minimized: false, visible: true },
+  });
+
+  for (const candidates of [
+    [{ profileId: "first", hwnd: 101, minimized: false, visible: true }],
+    [
+      { profileId: "first", hwnd: 101, minimized: false, visible: true },
+      { profileId: "first", hwnd: 102, minimized: false, visible: true },
+      { profileId: "second", hwnd: 202, minimized: false, visible: true },
+    ],
+    [
+      { profileId: "first", hwnd: 101, minimized: false, visible: true },
+      { profileId: "second", hwnd: 101, minimized: false, visible: true },
+    ],
+  ]) {
+    expect(mapWindowsNativeWindowCandidates(["first", "second"], candidates)).toEqual({});
+  }
+});
+
 test("Windows window acceptance preserves native minimize state and selects only one distinct HWND", async () => {
   const events: string[] = [];
   const windows = {
-    first: { hwnd: 101, minimized: false },
-    second: { hwnd: 202, minimized: false },
+    first: { hwnd: 101, minimized: false, visible: true },
+    second: { hwnd: 202, minimized: false, visible: true },
   };
   let foregroundHwnd = windows.second.hwnd;
   let pageTargets = ["page-1"];
@@ -282,8 +309,8 @@ test("Windows window acceptance rejects a profile-card page target and still clo
       return {
         foregroundHwnd: 202,
         windows: {
-          first: { hwnd: 101, minimized: true },
-          second: { hwnd: 202, minimized: false },
+          first: { hwnd: 101, minimized: true, visible: true },
+          second: { hwnd: 202, minimized: false, visible: true },
         },
       };
     },
@@ -320,8 +347,8 @@ for (const scenario of [
         return {
           foregroundHwnd: 202,
           windows: {
-            first: { hwnd: 101, minimized: true },
-            second: { hwnd: 202, minimized: false },
+            first: { hwnd: 101, minimized: true, visible: true },
+            second: { hwnd: 202, minimized: false, visible: true },
           },
         };
       },
