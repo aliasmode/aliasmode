@@ -26,8 +26,8 @@ jobs:
       - run: bun run typecheck
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
-  windows:
-    name: Windows NSIS installer
+  windows_build:
+    name: Windows NSIS build and checks
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -39,6 +39,9 @@ jobs:
         with:
           toolchain: 1.89
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - run: bun install --frozen-lockfile
       - name: Prepare bundle with official baseline Bun
         shell: pwsh
@@ -143,6 +146,57 @@ jobs:
             throw "expected exactly one NSIS installer, found $($installers.Count)"
           }
           "ALIASMODE_NSIS_INSTALLER=$($installers[0].FullName)" | Add-Content $env:GITHUB_ENV
+      - name: Stage Windows candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $installerName = Split-Path $env:ALIASMODE_NSIS_INSTALLER -Leaf
+          if (-not $installerName.Contains("_$($bundleVersion)_")) {
+            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $installerName"
+          }
+          $candidate = ".\artifacts\windows-candidate"
+          New-Item -ItemType Directory -Force $candidate | Out-Null
+          Copy-Item $env:ALIASMODE_NSIS_INSTALLER (Join-Path $candidate $installerName)
+          Copy-Item ".\src-tauri\generated\browser.json" (Join-Path $candidate "browser.json")
+          $sha256 = (Get-FileHash (Join-Path $candidate $installerName) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha256  $installerName" | Set-Content (Join-Path $candidate "SHA256SUMS.txt")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: artifacts/windows-candidate
+          if-no-files-found: error
+          retention-days: 1
+
+  windows:
+    name: Windows NSIS installer
+    needs: windows_build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: candidate
+      - name: Verify Windows candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installers = @(Get-ChildItem ".\candidate" -File -Filter "*.exe")
+          if ($installers.Count -ne 1) {
+            throw "expected exactly one candidate NSIS installer, found $($installers.Count)"
+          }
+          $checksum = (Get-Content ".\candidate\SHA256SUMS.txt" -Raw).Trim()
+          if ($checksum -notmatch '^([a-f0-9]{64})  (.+)$') {
+            throw "candidate checksum manifest is malformed"
+          }
+          if ($Matches[2] -ne $installers[0].Name) {
+            throw "candidate checksum manifest names a different installer"
+          }
+          $actual = (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $Matches[1]) { throw "candidate installer SHA-256 mismatch" }
+          $metadata = Resolve-Path ".\candidate\browser.json"
+          "ALIASMODE_NSIS_INSTALLER=$($installers[0].FullName)" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_BROWSER_METADATA=$($metadata.Path)" | Add-Content $env:GITHUB_ENV
       - name: Smoke-test installed desktop and headful Cloud proxies
         shell: pwsh
         env:
@@ -173,7 +227,9 @@ jobs:
               throw "installed sidecar embeds its source checkout path"
             }
           }
-          Remove-Item ".\node_modules" -Recurse -Force
+          if (Test-Path ".\node_modules") {
+            Remove-Item ".\node_modules" -Recurse -Force
+          }
           if (Test-Path ".\node_modules") { throw "checkout node_modules remained available to installed acceptance" }
 
           $app = Start-Process -PassThru $appPath
@@ -263,7 +319,7 @@ jobs:
             }
           }
 
-          $metadata = Get-Content ".\src-tauri\generated\browser.json" | ConvertFrom-Json
+          $metadata = Get-Content $env:ALIASMODE_BROWSER_METADATA | ConvertFrom-Json
           if ($metadata.executable -ne "chrome.exe") { throw "Windows browser metadata does not target chrome.exe" }
           $browserPath = Join-Path $installRoot "cloakbrowser\chrome.exe"
           if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
@@ -540,8 +596,10 @@ jobs:
             if (-not $process) { return }
             $process.Refresh()
             if (-not $process.HasExited) {
-              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-              $process.WaitForExit()
+              $process.Kill($true)
+              if (-not $process.WaitForExit(10000)) {
+                throw "Cloud acceptance process tree did not exit"
+              }
             }
           }
 
@@ -786,6 +844,7 @@ jobs:
             }
           }
 
+          $cloudAcceptanceFailure = $null
           try {
             Remove-AliasModeAcceptanceCredentials
             Assert-AliasModeAcceptanceCredentialsAbsent
@@ -795,6 +854,7 @@ jobs:
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "seed"
             Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
             $activeAcceptanceApp = $null
+            Write-Host "installed Cloud session acceptance stage credentials_seeded"
 
             $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "healthy"
@@ -802,10 +862,12 @@ jobs:
             $activeAcceptanceApp = $null
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = $null
+            Write-Host "installed Cloud session acceptance stage healthy_restart"
 
             $fixtureProcess = Start-CloudRestoreFixture "offline" "rotated"
             $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "offline"
+            Write-Host "installed Cloud session acceptance stage offline_recovery"
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = Start-CloudRestoreFixture "healthy" "rotated"
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "online"
@@ -813,26 +875,44 @@ jobs:
             $activeAcceptanceApp = $null
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = $null
+            Write-Host "installed Cloud session acceptance stage online_recovery"
 
             $fixtureProcess = Start-CloudRestoreFixture "membership-revoked" "rotated"
             $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "revoked"
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = $null
+            Write-Host "installed Cloud session acceptance stage membership_revoked"
+          } catch {
+            $cloudAcceptanceFailure = $_
           } finally {
             foreach ($record in @($activeAcceptanceApp, $fixtureProcess)) {
               if ($record) {
                 $process = if ($record.Process) { $record.Process } else { $record }
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                try { Stop-AcceptanceProcess $process } catch {}
               }
             }
             Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
               Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cloudAcceptanceRoot) } |
-              ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+              ForEach-Object {
+                $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+                if ($process) {
+                  try {
+                    $process.Kill($true)
+                    [void]$process.WaitForExit(10000)
+                  } catch {}
+                }
+              }
             foreach ($trackedPid in $trackedPids) {
-              Stop-Process -Id $trackedPid -Force -ErrorAction SilentlyContinue
+              $process = Get-Process -Id $trackedPid -ErrorAction SilentlyContinue
+              if ($process) {
+                try {
+                  $process.Kill($true)
+                  [void]$process.WaitForExit(10000)
+                } catch {}
+              }
             }
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
               $trackedRemaining = @($trackedPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
               $rootRemaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
                 Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cloudAcceptanceRoot) })
@@ -859,15 +939,20 @@ jobs:
               [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
             }
             foreach ($path in @($isolatedState, $cloudAcceptanceRoot)) {
-              for ($attempt = 0; $attempt -lt 20; $attempt++) {
-                Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
-                if (-not (Test-Path $path)) { break }
+              for ($attempt = 0; $attempt -lt 120; $attempt++) {
+                try { [IO.Directory]::Delete($path, $true) } catch {}
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path -LiteralPath $path)) { break }
                 Start-Sleep -Milliseconds 250
               }
-              if ((Test-Path $path) -and -not $cleanupFailure) {
-                $cleanupFailure = "Cloud acceptance state survived final cleanup"
+              if ((Test-Path -LiteralPath $path) -and -not $cleanupFailure) {
+                $cleanupFailure = "Cloud acceptance state survived final cleanup: $(Split-Path $path -Leaf)"
               }
             }
+            if ($cloudAcceptanceFailure -and $cleanupFailure) {
+              throw "$($cloudAcceptanceFailure.Exception.Message); cleanup also failed: $cleanupFailure"
+            }
+            if ($cloudAcceptanceFailure) { throw $cloudAcceptanceFailure }
             if ($cleanupFailure) { throw $cleanupFailure }
           }
 
@@ -887,25 +972,10 @@ jobs:
               throw "installed headful Cloud proxy smoke exited with code $LASTEXITCODE"
             }
           }
-      - name: Stage unsigned installer and checksum
-        shell: pwsh
-        run: |
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $installerName = Split-Path $env:ALIASMODE_NSIS_INSTALLER -Leaf
-          $versionMarker = "_$($bundleVersion)_"
-          if (-not $installerName.Contains($versionMarker)) {
-            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $installerName"
-          }
-          $artifact = ".\artifacts\windows"
-          New-Item -ItemType Directory -Force $artifact | Out-Null
-          $installer = Join-Path $artifact $installerName
-          Copy-Item $env:ALIASMODE_NSIS_INSTALLER $installer
-          $sha256 = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $installerName" | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
       - uses: actions/upload-artifact@v4
         with:
           name: aliasmode-windows-unsigned
           path: |
-            artifacts/windows/*.exe
-            artifacts/windows/SHA256SUMS.txt
+            candidate/*.exe
+            candidate/SHA256SUMS.txt
           if-no-files-found: error
