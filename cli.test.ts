@@ -1,12 +1,15 @@
 import { expect, test } from "bun:test";
 import {
   cloudRuntimeConfiguration,
+  createCloudRestoreFixtureHandler,
   dispatchReadSessionWorker,
   drainRemoteShutdown,
   exerciseCloudLauncherSmoke,
+  exerciseWindowsWindowAcceptance,
   lifecycleAdmissionOptionsFromEnv,
   OFFICIAL_CLOUD_ANON_KEY,
   OFFICIAL_CLOUD_URL,
+  parseCloudRestoreFixtureOptions,
   RemoteShutdownTimeoutError,
   runCompiledSidecarSmoke,
   runCloakpitImportCommand,
@@ -15,6 +18,7 @@ import {
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import net from "node:net";
 import { statePaths } from "./paths.ts";
 
 const cloudMode = {
@@ -28,6 +32,18 @@ const localMode = {
   mode: "local" as const,
   localAnalytics: false,
 };
+
+async function freeLoopbackPort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  if (!address || typeof address === "string") throw new Error("test loopback port is unavailable");
+  return address.port;
+}
 
 test("migration-only command dispatches directly and reports required restrictions", async () => {
   const root = mkdtempSync(join(tmpdir(), "aliasmode-cli-import-"));
@@ -165,6 +181,276 @@ test("Cloud launcher smoke requires fresh and repeated cached opens to stay aliv
     "close:3:profile-smoke",
     "active:3:profile-smoke:false",
   ]);
+});
+
+test("Windows window acceptance preserves native minimize state and selects only one distinct HWND", async () => {
+  const events: string[] = [];
+  const windows = {
+    first: { hwnd: 101, minimized: false },
+    second: { hwnd: 202, minimized: false },
+  };
+  let foregroundHwnd = windows.second.hwnd;
+  let pageTargets = ["page-1"];
+
+  await exerciseWindowsWindowAcceptance({
+    profileIds: ["first", "second"],
+    async open(profileId) { events.push(`open:${profileId}`); },
+    async close(profileId) { events.push(`close:${profileId}`); },
+    async nativeWindows() {
+      return {
+        foregroundHwnd,
+        windows: {
+          first: { ...windows.first },
+          second: { ...windows.second },
+        },
+      };
+    },
+    async minimize(profileId) {
+      events.push(`minimize:${profileId}`);
+      windows[profileId as keyof typeof windows].minimized = true;
+    },
+    async pageTargetIds(profileId) {
+      events.push(`targets:${profileId}:${pageTargets.join(",")}`);
+      return [...pageTargets];
+    },
+    async runProfileCardObserved(profileId) {
+      events.push(`profile-card:${profileId}`);
+      return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
+    },
+    async bringToFront(profileId) {
+      events.push(`raise:${profileId}`);
+      windows[profileId as keyof typeof windows].minimized = false;
+      foregroundHwnd = windows[profileId as keyof typeof windows].hwnd;
+    },
+  });
+
+  expect(events).toEqual([
+    "open:first",
+    "open:second",
+    "minimize:first",
+    "targets:first:page-1",
+    "profile-card:first",
+    "targets:first:page-1",
+    "raise:first",
+    "raise:second",
+    "close:second",
+    "close:first",
+  ]);
+  expect(pageTargets).toEqual(["page-1"]);
+});
+
+test("Windows window acceptance rejects a profile-card page target and still closes both browsers", async () => {
+  const closed: string[] = [];
+  let pageTargets = ["page-1"];
+  await expect(exerciseWindowsWindowAcceptance({
+    profileIds: ["first", "second"],
+    async open() {},
+    async close(profileId) { closed.push(profileId); },
+    async nativeWindows() {
+      return {
+        foregroundHwnd: 202,
+        windows: {
+          first: { hwnd: 101, minimized: true },
+          second: { hwnd: 202, minimized: false },
+        },
+      };
+    },
+    async minimize() {},
+    async pageTargetIds() { return [...pageTargets]; },
+    async runProfileCardObserved() {
+      pageTargets = ["page-2"];
+      return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
+    },
+    async bringToFront() {},
+  })).rejects.toThrow("profile-card operation changed the page targets");
+  expect(closed).toEqual(["second", "first"]);
+});
+
+for (const scenario of [
+  {
+    name: "transient page target",
+    observation: { createdPageTargetIds: ["transient-page"], nativeWindowStayedMinimized: true },
+    failure: "profile-card operation created a page target",
+  },
+  {
+    name: "transient native restore",
+    observation: { createdPageTargetIds: [], nativeWindowStayedMinimized: false },
+    failure: "profile-card operation transiently restored the minimized native window",
+  },
+]) {
+  test(`Windows window acceptance rejects a ${scenario.name} and still closes both browsers`, async () => {
+    const closed: string[] = [];
+    await expect(exerciseWindowsWindowAcceptance({
+      profileIds: ["first", "second"],
+      async open() {},
+      async close(profileId) { closed.push(profileId); },
+      async nativeWindows() {
+        return {
+          foregroundHwnd: 202,
+          windows: {
+            first: { hwnd: 101, minimized: true },
+            second: { hwnd: 202, minimized: false },
+          },
+        };
+      },
+      async minimize() {},
+      async pageTargetIds() { return ["page-1"]; },
+      async runProfileCardObserved() { return scenario.observation; },
+      async bringToFront() {},
+    })).rejects.toThrow(scenario.failure);
+    expect(closed).toEqual(["second", "first"]);
+  });
+}
+
+test("Cloud restore fixture parses only a loopback port and deterministic mode", () => {
+  expect(parseCloudRestoreFixtureOptions(["--port", "49152", "--mode", "healthy"]))
+    .toEqual({ port: 49152, mode: "healthy" });
+  expect(parseCloudRestoreFixtureOptions(["--port", "49154", "--mode", "offline"]))
+    .toEqual({ port: 49154, mode: "offline" });
+  expect(parseCloudRestoreFixtureOptions(["--port", "49153", "--mode", "membership-revoked"]))
+    .toEqual({ port: 49153, mode: "membership-revoked" });
+  expect(() => parseCloudRestoreFixtureOptions(["--port", "0", "--mode", "healthy"])).toThrow("loopback port");
+  expect(() => parseCloudRestoreFixtureOptions(["--port", "49152", "--mode", "production"])).toThrow("fixture mode");
+});
+
+test("Cloud restore fixture accepts only its exact refresh and device credentials", async () => {
+  const handler = createCloudRestoreFixtureHandler("healthy");
+  const refreshRequest = (refreshToken: string) => new Request(
+    "http://127.0.0.1:49152/auth/v1/token?grant_type=refresh_token",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    },
+  );
+  const statusWithoutWaiting = async (request: Request) => Promise.race([
+    handler(request).then((response) => response.status),
+    new Promise<"waiting">((resolve) => setTimeout(() => resolve("waiting"), 20)),
+  ]);
+  const wrongDevice = new Request("http://127.0.0.1:49152/v1/status", {
+    headers: {
+      authorization: "Bearer aliasmode-fixture-access",
+      "x-aliasmode-device": "wrong-device",
+    },
+  });
+
+  expect(await Promise.all([
+    statusWithoutWaiting(refreshRequest("wrong-refresh")),
+    statusWithoutWaiting(refreshRequest(" aliasmode-acceptance-refresh-seeded")),
+    handler(wrongDevice).then((response) => response.status),
+  ])).toEqual([401, 401, 401]);
+});
+
+test("Cloud restore fixture returns an invited member or deterministic membership revocation", async () => {
+  const healthy = createCloudRestoreFixtureHandler("healthy");
+  const offline = createCloudRestoreFixtureHandler("offline");
+  const releaseRequest = () => new Request("http://127.0.0.1:49152/control/release", { method: "POST" });
+  const releasePending = async (handler: (request: Request) => Promise<Response>) => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const response = await handler(releaseRequest());
+      if (response.status !== 409) return response;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    throw new Error("fixture request did not wait for release");
+  };
+  expect((await healthy(releaseRequest())).status).toBe(409);
+  const refreshRequest = (refreshToken = "aliasmode-acceptance-refresh-seeded") => new Request("http://127.0.0.1:49152/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const healthyPending = healthy(refreshRequest());
+  const offlinePending = offline(refreshRequest());
+  let refreshSettled = false;
+  void healthyPending.then(() => { refreshSettled = true; });
+  await Promise.resolve();
+  expect(refreshSettled).toBe(false);
+  const releases = await Promise.all([
+    releasePending(healthy),
+    releasePending(offline),
+  ]);
+  expect(releases.map((response) => response.status)).toEqual([200, 200]);
+  const [refreshed, offlineRefresh] = await Promise.all([healthyPending, offlinePending]);
+  expect(refreshed.status).toBe(200);
+  expect(offlineRefresh).toMatchObject({ status: 0, type: "error" });
+  expect((await healthy(releaseRequest())).status).toBe(409);
+  const rotatedPending = healthy(refreshRequest("aliasmode-fixture-refresh-rotated"));
+  expect((await releasePending(healthy)).status).toBe(200);
+  expect((await rotatedPending).status).toBe(200);
+  const session = await refreshed.json() as Record<string, unknown>;
+  expect(typeof session.access_token).toBe("string");
+  expect(typeof session.refresh_token).toBe("string");
+  expect(session.user).toMatchObject({ id: "fixture-account", email_confirmed_at: "fixture" });
+
+  const statusRequest = new Request("http://127.0.0.1:49152/v1/status", {
+    headers: {
+      authorization: `Bearer ${session.access_token}`,
+      "x-aliasmode-device": "aliasmode-acceptance-device",
+    },
+  });
+  const healthyStatus = await healthy(statusRequest);
+  expect(healthyStatus.status).toBe(200);
+  const healthyBody = await healthyStatus.json();
+  expect(healthyBody.workspace).toMatchObject({ role: "member", ownerAccountId: "fixture-owner" });
+  expect(healthyBody.legal.accepted).toMatchObject(healthyBody.legal.current);
+
+  const revoked = createCloudRestoreFixtureHandler("membership-revoked");
+  const revokedStatus = await revoked(statusRequest);
+  expect(revokedStatus.status).toBe(403);
+  expect(await revokedStatus.json()).toMatchObject({
+    ok: false,
+    error: { code: "membership_revoked" },
+  });
+});
+
+test("Cloud restore fixture command binds loopback before normal CLI state initialization", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "aliasmode-cloud-restore-fixture-"));
+  const stateRoot = join(parent, "must-not-be-created");
+  const port = await freeLoopbackPort();
+  const child = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, "cli.ts"),
+    "__cloud-restore-fixture",
+    "--port", String(port),
+    "--mode", "offline",
+    "--state-root", stateRoot,
+  ], { stdout: "pipe", stderr: "pipe" });
+  try {
+    let health: Response | undefined;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      try {
+        health = await fetch(`http://127.0.0.1:${port}/health`);
+        if (health.ok) break;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(health?.ok).toBe(true);
+    expect(await health!.json()).toEqual({ ok: true, mode: "offline" });
+    const offlineRequest = fetch(`http://127.0.0.1:${port}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh_token: "aliasmode-acceptance-refresh-seeded" }),
+    }).then(
+      () => { throw new Error("offline fixture unexpectedly returned an HTTP response"); },
+      () => undefined,
+    );
+    let released: Response | undefined;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const response = await fetch(`http://127.0.0.1:${port}/control/release`, { method: "POST" });
+      if (response.ok) {
+        released = response;
+        break;
+      }
+      expect(response.status).toBe(409);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(released?.ok).toBe(true);
+    await expect(offlineRequest).resolves.toBeUndefined();
+    expect(existsSync(stateRoot)).toBe(false);
+  } finally {
+    child.kill();
+    await child.exited;
+  }
 });
 
 test("CLI dispatches the session worker before normal command parsing", async () => {

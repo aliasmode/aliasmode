@@ -278,6 +278,28 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
       let created = false;
       let raised = false;
       let detached = false;
+      let browserDetached = false;
+      let targetCreated;
+      const browserCdp = {
+        on(method, listener) {
+          if (method !== "Target.targetCreated") throw new Error("wrong browser CDP event");
+          targetCreated = listener;
+        },
+        async send(method, params) {
+          if (method === "Target.getTargets") {
+            return { targetInfos: [{ targetId: "existing-page", type: "page" }] };
+          }
+          if (method === "Target.setDiscoverTargets") {
+            if (params?.discover && mode === "arming-race") {
+              targetCreated?.({ targetInfo: { targetId: "existing-page", type: "page" } });
+              targetCreated?.({ targetInfo: { targetId: "during-arm-page", type: "page" } });
+            }
+            return {};
+          }
+          throw new Error("wrong browser CDP command");
+        },
+        async detach() { browserDetached = true; },
+      };
       const automation = {
         async bringToFront() {
           if (mode !== "normal") throw new Error("minimized window was raised");
@@ -292,7 +314,10 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
             async send(method) {
               if (method !== "Browser.getWindowForTarget") throw new Error("wrong CDP command");
               if (mode === "query-failed") throw new Error("window state unavailable");
-              return { bounds: { windowState: mode } };
+              if (mode === "transient-target") {
+                targetCreated?.({ targetInfo: { targetId: "transient-page", type: "page" } });
+              }
+              return { bounds: { windowState: ["transient-target", "arming-race"].includes(mode) ? "minimized" : mode } };
             },
             async detach() { detached = true; },
           };
@@ -308,9 +333,13 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
         created = false;
         raised = false;
         detached = false;
+        browserDetached = false;
+        targetCreated = undefined;
         return {
           contexts: () => [context],
+          async newBrowserCDPSession() { return browserCdp; },
           async close() {
+            if (!browserDetached) throw new Error("browser CDP session was not detached");
             if (mode !== "missing-page" && !detached) throw new Error("CDP session was not detached");
             if (mode === "normal" && (!created || !raised)) throw new Error("visible profile card setup was incomplete");
             if (mode !== "normal" && (created || raised)) throw new Error("browser with unknown or minimized state was changed");
@@ -322,16 +351,22 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
 
     await expect(runPlaywrightWorker("profile-card", {
       endpoint: "ws://normal", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
-    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
     await expect(runPlaywrightWorker("profile-card", {
       endpoint: "ws://minimized", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
-    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
     await expect(runPlaywrightWorker("profile-card", {
       endpoint: "ws://query-failed", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
-    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
     await expect(runPlaywrightWorker("profile-card", {
       endpoint: "ws://missing-page", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
-    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://transient-target", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: ["transient-page"] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://arming-race", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: ["during-arm-page"] });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

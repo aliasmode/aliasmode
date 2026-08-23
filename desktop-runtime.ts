@@ -106,8 +106,13 @@ export class DesktopCredentialBridge {
   async clearCloudSessionCredentials(): Promise<void> {
     // Keep the queue key. Signed-out captures remain encrypted and must survive
     // until the same account authenticates and can retry them.
-    await this.send("credential-delete", "refresh_token");
-    await this.send("credential-delete", "device_credential");
+    const results = await Promise.allSettled([
+      this.send("credential-delete", "refresh_token"),
+      this.send("credential-delete", "device_credential"),
+    ]);
+    if (results.some((result) => result.status === "rejected")) {
+      throw new Error("Windows Credential Manager could not clear Cloud credentials");
+    }
   }
 
   private send(event: "credential-set" | "credential-delete", key: string, secret?: string): Promise<void> {

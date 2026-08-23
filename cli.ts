@@ -20,7 +20,7 @@
 
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
 import { ProfileStore } from "./store.ts";
-import { Launcher } from "./launcher.ts";
+import { Launcher, readSnapshotChildBounded } from "./launcher.ts";
 import {
   defaultPlaywrightRuntimeRoot,
   runPlaywrightWorker,
@@ -553,6 +553,317 @@ export async function runCompiledSidecarSmoke(
   await deps.assertAlive(endpoint);
 }
 
+export type CloudRestoreFixtureMode = "healthy" | "offline" | "membership-revoked";
+
+export function parseCloudRestoreFixtureOptions(args: string[]): {
+  port: number;
+  mode: CloudRestoreFixtureMode;
+} {
+  const port = Number(flag(args, "port"));
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("Cloud restore fixture requires a valid loopback port");
+  }
+  const mode = flag(args, "mode");
+  if (mode !== "healthy" && mode !== "offline" && mode !== "membership-revoked") {
+    throw new Error("Cloud restore fixture mode must be healthy, offline, or membership-revoked");
+  }
+  return { port, mode };
+}
+
+const CLOUD_RESTORE_FIXTURE_ACCESS_TOKEN = "aliasmode-fixture-access";
+const CLOUD_RESTORE_FIXTURE_SEEDED_REFRESH_TOKEN = "aliasmode-acceptance-refresh-seeded";
+const CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN = "aliasmode-fixture-refresh-rotated";
+const CLOUD_RESTORE_FIXTURE_DEVICE_CREDENTIAL = "aliasmode-acceptance-device";
+const CLOUD_RESTORE_FIXTURE_LEGAL = {
+  terms: "fixture-terms",
+  privacy: "fixture-privacy",
+  acceptableUse: "fixture-acceptable-use",
+};
+
+function cloudRestoreFixtureStatus() {
+  return {
+    ok: true as const,
+    account: {
+      id: "fixture-account",
+      email: "user@fixture.invalid",
+      emailVerified: true,
+    },
+    workspace: {
+      id: "fixture-workspace",
+      ownerAccountId: "fixture-owner",
+      name: "Fixture workspace",
+      role: "member" as const,
+    },
+    device: {
+      id: "fixture-device",
+      label: "Fixture Windows device",
+      platform: "windows" as const,
+      appVersion: ALIASMODE_VERSION,
+      createdAt: 1,
+      lastSeenAt: 1,
+      revokedAt: null,
+      current: true,
+    },
+    legal: {
+      current: CLOUD_RESTORE_FIXTURE_LEGAL,
+      accepted: { ...CLOUD_RESTORE_FIXTURE_LEGAL, acceptedAt: 1 },
+    },
+  };
+}
+
+function fixtureJson(body: unknown, status = 200): Response {
+  return Response.json(body, {
+    status,
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
+function fixtureAuthorized(request: Request): boolean {
+  return request.headers.get("authorization") === `Bearer ${CLOUD_RESTORE_FIXTURE_ACCESS_TOKEN}`
+    && request.headers.get("x-aliasmode-device") === CLOUD_RESTORE_FIXTURE_DEVICE_CREDENTIAL;
+}
+
+export function createCloudRestoreFixtureHandler(
+  mode: CloudRestoreFixtureMode,
+): (request: Request) => Promise<Response> {
+  const waiting: Array<() => void> = [];
+  const waitForRelease = () => new Promise<void>((resolve) => {
+    waiting.push(resolve);
+  });
+  const release = (count: number): boolean => {
+    if (waiting.length < count) return false;
+    for (let index = 0; index < count; index++) waiting.shift()!();
+    return true;
+  };
+
+  return async (request) => {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health") {
+      return fixtureJson({ ok: true, mode });
+    }
+    if (request.method === "POST" && url.pathname === "/control/release") {
+      const count = Number(url.searchParams.get("count") ?? "1");
+      if (!Number.isInteger(count) || count < 1 || count > 2) {
+        return fixtureJson({ ok: false, error: "fixture release count must be one or two" }, 400);
+      }
+      if (!release(count)) {
+        return fixtureJson({ ok: false, error: "fixture has no waiting refresh request" }, 409);
+      }
+      return fixtureJson({ ok: true, released: count });
+    }
+    if (
+      request.method === "POST"
+      && url.pathname === "/auth/v1/token"
+      && url.searchParams.get("grant_type") === "refresh_token"
+    ) {
+      const body = await request.json().catch(() => null) as { refresh_token?: unknown } | null;
+      if (
+        typeof body?.refresh_token !== "string"
+        || (body.refresh_token !== CLOUD_RESTORE_FIXTURE_SEEDED_REFRESH_TOKEN
+          && body.refresh_token !== CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN)
+      ) {
+        return fixtureJson({ message: "fixture refresh token is invalid" }, 401);
+      }
+      // Hold the response until installed automation has observed the restoring UI.
+      await waitForRelease();
+      if (mode === "offline") return Response.error();
+      return fixtureJson({
+        access_token: CLOUD_RESTORE_FIXTURE_ACCESS_TOKEN,
+        refresh_token: CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN,
+        expires_in: 3_600,
+        user: {
+          id: "fixture-account",
+          email: "user@fixture.invalid",
+          email_confirmed_at: "fixture",
+        },
+      });
+    }
+    if (!url.pathname.startsWith("/v1/") || !fixtureAuthorized(request)) {
+      return fixtureJson({
+        ok: false,
+        error: { code: "authentication_required", message: "fixture authentication is required" },
+      }, 401);
+    }
+    if (mode === "offline") return Response.error();
+    if (mode === "membership-revoked") {
+      return fixtureJson({
+        ok: false,
+        error: { code: "membership_revoked", message: "fixture membership was revoked" },
+      }, 403);
+    }
+    if (request.method === "GET" && url.pathname === "/v1/status") {
+      return fixtureJson(cloudRestoreFixtureStatus());
+    }
+    if (request.method === "GET" && url.pathname === "/v1/profiles") {
+      return fixtureJson({ ok: true, profiles: [] });
+    }
+    if (request.method === "GET" && url.pathname === "/v1/workspace/folders") {
+      return fixtureJson({ ok: true, folders: [] });
+    }
+    if (request.method === "GET" && url.pathname === "/v1/workspace/members") {
+      return fixtureJson({
+        ok: true,
+        members: [{
+          accountId: "fixture-account",
+          email: "user@fixture.invalid",
+          role: "member",
+          joinedAt: 1,
+          grants: [],
+        }],
+      });
+    }
+    return fixtureJson({
+      ok: false,
+      error: { code: "internal_error", message: "unknown fixture route" },
+    }, 404);
+  };
+}
+
+async function runCloudRestoreFixture(args: string[]): Promise<void> {
+  const { port, mode } = parseCloudRestoreFixtureOptions(args);
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port,
+    fetch: createCloudRestoreFixtureHandler(mode),
+  });
+  if (server.port !== port) {
+    server.stop(true);
+    throw new Error("Cloud restore fixture did not bind the requested loopback port");
+  }
+  console.log(`Cloud restore fixture ready on loopback port ${port} in ${mode} mode`);
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  await server.stop(true);
+}
+
+export interface WindowsNativeWindowSnapshot {
+  foregroundHwnd: number;
+  windows: Record<string, { hwnd: number; minimized: boolean }>;
+}
+
+export interface WindowsProfileCardObservation {
+  createdPageTargetIds: string[];
+  nativeWindowStayedMinimized: boolean;
+}
+
+export interface WindowsWindowAcceptanceRuntime {
+  profileIds: readonly [string, string];
+  open(profileId: string): Promise<void>;
+  close(profileId: string): Promise<void>;
+  nativeWindows(): Promise<WindowsNativeWindowSnapshot>;
+  minimize(profileId: string): Promise<void>;
+  pageTargetIds(profileId: string): Promise<string[]>;
+  runProfileCardObserved(profileId: string, hwnd: number): Promise<WindowsProfileCardObservation>;
+  bringToFront(profileId: string): Promise<void>;
+}
+
+async function waitForNativeWindowState(
+  read: () => Promise<WindowsNativeWindowSnapshot>,
+  accepted: (snapshot: WindowsNativeWindowSnapshot) => boolean,
+  failure: string,
+  timeoutMs = 20_000,
+): Promise<WindowsNativeWindowSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  let snapshot: WindowsNativeWindowSnapshot | undefined;
+  while (Date.now() < deadline) {
+    snapshot = await read();
+    if (accepted(snapshot)) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(failure);
+}
+
+export async function exerciseWindowsWindowAcceptance(
+  runtime: WindowsWindowAcceptanceRuntime,
+): Promise<void> {
+  const [firstId, secondId] = runtime.profileIds;
+  const opened: string[] = [];
+  let failure: unknown;
+  let cleanupFailure: unknown;
+  try {
+    await runtime.open(firstId);
+    opened.push(firstId);
+    await runtime.open(secondId);
+    opened.push(secondId);
+
+    const initial = await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => {
+        const first = snapshot.windows[firstId];
+        const second = snapshot.windows[secondId];
+        return !!first && !!second && first.hwnd > 0 && second.hwnd > 0 && first.hwnd !== second.hwnd;
+      },
+      "managed CloakBrowser windows did not expose distinct native HWNDs",
+    );
+    const firstHwnd = initial.windows[firstId]!.hwnd;
+    const secondHwnd = initial.windows[secondId]!.hwnd;
+
+    await runtime.minimize(firstId);
+    await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.minimized === true
+        && snapshot.windows[secondId]?.hwnd === secondHwnd,
+      "native CloakBrowser window did not remain distinct and minimized",
+    );
+    const targetsBefore = (await runtime.pageTargetIds(firstId)).slice().sort();
+    const observation = await runtime.runProfileCardObserved(firstId, firstHwnd);
+    const targetsAfter = (await runtime.pageTargetIds(firstId)).slice().sort();
+    if (JSON.stringify(targetsAfter) !== JSON.stringify(targetsBefore)) {
+      throw new Error("profile-card operation changed the page targets for a minimized window");
+    }
+    await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.minimized === true
+        && snapshot.windows[secondId]?.hwnd === secondHwnd,
+      "profile-card operation restored or replaced the minimized native window",
+    );
+    if (observation.createdPageTargetIds.length > 0) {
+      throw new Error("profile-card operation created a page target while the window was minimized");
+    }
+    if (!observation.nativeWindowStayedMinimized) {
+      throw new Error("profile-card operation transiently restored the minimized native window");
+    }
+
+    await runtime.bringToFront(firstId);
+    await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => snapshot.foregroundHwnd === firstHwnd
+        && snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.minimized === false
+        && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.foregroundHwnd !== secondHwnd,
+      "Bring to front did not select only the first managed window",
+    );
+
+    await runtime.bringToFront(secondId);
+    await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => snapshot.foregroundHwnd === secondHwnd
+        && snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.minimized === false
+        && snapshot.foregroundHwnd !== firstHwnd,
+      "Bring to front did not select only the second managed window",
+    );
+  } catch (error) {
+    failure = error;
+  } finally {
+    for (const profileId of opened.reverse()) {
+      try {
+        await runtime.close(profileId);
+      } catch (error) {
+        cleanupFailure ??= error;
+      }
+    }
+  }
+  if (failure !== undefined) throw failure;
+  if (cleanupFailure !== undefined) throw cleanupFailure;
+}
+
 export interface CloudLauncherSmokeRuntime {
   coordinator: Pick<CloudBrowserCoordinator, "open" | "close" | "releaseAll">;
   launcher: Pick<Launcher, "active" | "stop">;
@@ -684,7 +995,347 @@ function cloudLauncherSmokeProxy(
   };
 }
 
+const WINDOWS_ACCEPTANCE_PROFILE_IDS = [
+  "aliasmode-window-smoke-one",
+  "aliasmode-window-smoke-two",
+] as const;
+
+function smokeProfile(
+  id: string,
+  name: string,
+  fingerprintSeed: number,
+  proxy: Profile["proxy"] = null,
+): Profile {
+  return {
+    id,
+    accId: "",
+    name,
+    group: "",
+    platform: "",
+    username: "",
+    password: "",
+    email: "",
+    emailPassword: "",
+    twofa: "",
+    proxy,
+    extensions: [],
+    tags: [],
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
+    timezone: "UTC",
+    screenWidth: 1280,
+    screenHeight: 720,
+    fingerprintSeed,
+    cookies: [],
+    seeded: false,
+  };
+}
+
+async function runPowerShellAcceptance(script: string): Promise<string> {
+  const child = Bun.spawn(
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const result = await readSnapshotChildBounded(
+    child as unknown as { stdout: ReadableStream<Uint8Array>; exited: Promise<number>; kill(): unknown },
+    10_000,
+  );
+  if (!result) throw new Error("native Windows acceptance helper timed out");
+  if (result.exitCode !== 0) throw new Error("native Windows acceptance helper failed");
+  return result.raw;
+}
+
+const WINDOWS_NATIVE_TYPE = String.raw`
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class AliasModeWindowAcceptanceNative {
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  public static long FindVisibleWindow(uint[] processIds) {
+    var owned = new HashSet<uint>(processIds);
+    var found = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr hWnd, IntPtr _) {
+      uint processId;
+      GetWindowThreadProcessId(hWnd, out processId);
+      if (found == IntPtr.Zero && owned.Contains(processId) && IsWindowVisible(hWnd)) {
+        found = hWnd;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found.ToInt64();
+  }
+}`;
+
+async function readWindowsNativeWindows(
+  launches: Array<{ profileId: string; pid: number; debugPort: number }>,
+): Promise<WindowsNativeWindowSnapshot> {
+  const encoded = Buffer.from(JSON.stringify(launches), "utf8").toString("base64");
+  const script = `
+Add-Type -TypeDefinition @'
+${WINDOWS_NATIVE_TYPE}
+'@
+$entries = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
+$processSnapshot = @(Get-CimInstance -Query 'SELECT ProcessId, ParentProcessId, CommandLine FROM Win32_Process' -OperationTimeoutSec 5 -ErrorAction SilentlyContinue)
+$rows = @(
+  foreach ($entry in $entries) {
+    $owned = [Collections.Generic.HashSet[int]]::new()
+    if ([int]$entry.pid -gt 0) { [void]$owned.Add([int]$entry.pid) }
+    $needle = "--remote-debugging-port=$($entry.debugPort)"
+    foreach ($candidate in $processSnapshot) {
+      if ($candidate.CommandLine -and $candidate.CommandLine.Contains($needle)) {
+        [void]$owned.Add([int]$candidate.ProcessId)
+      }
+    }
+    $changed = $true
+    while ($changed) {
+      $changed = $false
+      foreach ($candidate in $processSnapshot) {
+        if (-not $owned.Contains([int]$candidate.ProcessId) -and $owned.Contains([int]$candidate.ParentProcessId)) {
+          [void]$owned.Add([int]$candidate.ProcessId)
+          $changed = $true
+        }
+      }
+    }
+    $nativeProcessIds = [uint[]]@($owned | ForEach-Object { [uint]$_ })
+    $handle = if ($nativeProcessIds.Count -gt 0) {
+      [AliasModeWindowAcceptanceNative]::FindVisibleWindow($nativeProcessIds)
+    } else { 0 }
+    [pscustomobject]@{
+      profileId = [string]$entry.profileId
+      hwnd = [long]$handle
+      minimized = if ($handle -gt 0) { [AliasModeWindowAcceptanceNative]::IsIconic([IntPtr]$handle) } else { $false }
+    }
+  }
+)
+[pscustomobject]@{
+  foregroundHwnd = [AliasModeWindowAcceptanceNative]::GetForegroundWindow().ToInt64()
+  windows = $rows
+} | ConvertTo-Json -Compress -Depth 4
+`;
+  const raw = await runPowerShellAcceptance(script);
+  const parsed = JSON.parse(raw) as {
+    foregroundHwnd?: unknown;
+    windows?: Array<{ profileId?: unknown; hwnd?: unknown; minimized?: unknown }>;
+  };
+  const windows: WindowsNativeWindowSnapshot["windows"] = {};
+  for (const row of Array.isArray(parsed.windows) ? parsed.windows : []) {
+    if (
+      typeof row.profileId === "string"
+      && Number.isSafeInteger(row.hwnd)
+      && typeof row.minimized === "boolean"
+    ) {
+      windows[row.profileId] = { hwnd: Number(row.hwnd), minimized: row.minimized };
+    }
+  }
+  return {
+    foregroundHwnd: Number.isSafeInteger(parsed.foregroundHwnd) ? Number(parsed.foregroundHwnd) : 0,
+    windows,
+  };
+}
+
+async function minimizeWindowsHwnd(hwnd: number): Promise<void> {
+  if (!Number.isSafeInteger(hwnd) || hwnd <= 0) throw new Error("native CloakBrowser HWND is unavailable");
+  const script = `
+Add-Type -TypeDefinition @'
+${WINDOWS_NATIVE_TYPE}
+'@
+[void][AliasModeWindowAcceptanceNative]::ShowWindowAsync([IntPtr]${hwnd}, 6)
+`;
+  await runPowerShellAcceptance(script);
+}
+
+async function observeNativeMinimized<T>(
+  hwnd: number,
+  operation: () => Promise<T>,
+): Promise<{ value: T; stayedMinimized: boolean }> {
+  if (!Number.isSafeInteger(hwnd) || hwnd <= 0) throw new Error("native CloakBrowser HWND is unavailable");
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+${WINDOWS_NATIVE_TYPE}
+'@
+$handle = [IntPtr]${hwnd}
+if (-not [AliasModeWindowAcceptanceNative]::IsIconic($handle)) {
+  [Console]::Out.WriteLine('restored')
+  exit 0
+}
+[Console]::Out.WriteLine('ready')
+[Console]::Out.Flush()
+while ($true) {
+  if (-not [AliasModeWindowAcceptanceNative]::IsIconic($handle)) {
+    [Console]::Out.WriteLine('restored')
+    [Console]::Out.Flush()
+    exit 0
+  }
+  Start-Sleep -Milliseconds 5
+}
+`;
+  const child = Bun.spawn(
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  let ready = false;
+  let stayedMinimized = true;
+  let stopRequested = false;
+  let watcherFailure: Error | undefined;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const monitor = (async () => {
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+        for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
+          const line = buffered.slice(0, newline).trim();
+          buffered = buffered.slice(newline + 1);
+          if (line === "ready" && !ready) {
+            ready = true;
+            resolveReady();
+          } else if (line === "restored") {
+            stayedMinimized = false;
+            if (!ready) rejectReady(new Error("native minimized-state observation could not be armed"));
+          }
+        }
+      }
+    } catch {
+      watcherFailure = new Error("native minimized-state observation failed");
+      if (!ready) rejectReady(watcherFailure);
+    } finally {
+      reader.releaseLock();
+      if (!stopRequested && stayedMinimized) {
+        watcherFailure = new Error("native minimized-state observer exited early");
+        if (!ready) rejectReady(watcherFailure);
+      }
+    }
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let value!: T;
+  try {
+    await Promise.race([
+      readyPromise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("native minimized-state observer did not become ready")), 10_000);
+      }),
+    ]);
+    value = await operation();
+  } finally {
+    if (timer) clearTimeout(timer);
+    stopRequested = true;
+    try { child.kill(); } catch {}
+    await child.exited.catch(() => undefined);
+    await monitor;
+  }
+  if (watcherFailure) throw watcherFailure;
+  return { value, stayedMinimized };
+}
+
+async function cdpPageTargetIds(port: number): Promise<string[]> {
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error("managed CloakBrowser target list is unavailable");
+  const targets = await response.json();
+  if (!Array.isArray(targets)) throw new Error("managed CloakBrowser target list is invalid");
+  const pages = targets.filter((target) => target?.type === "page");
+  const ids = pages
+    .map((target) => target?.id)
+    .filter((id): id is string => typeof id === "string" && !!id)
+    .sort();
+  if (ids.length !== pages.length) {
+    throw new Error("managed CloakBrowser page target identity is invalid");
+  }
+  return ids;
+}
+
+async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Promise<void> {
+  if (process.platform !== "win32") {
+    throw new Error("Windows window acceptance requires Windows");
+  }
+  const store = new ProfileStore(paths.cloudDatabase);
+  const launcher = makeLauncher(store, rest, true, paths.cloudProfiles);
+  const [firstId, secondId] = WINDOWS_ACCEPTANCE_PROFILE_IDS;
+  store.upsertProfiles([
+    smokeProfile(firstId, "Window smoke one", 101),
+    smokeProfile(secondId, "Window smoke two", 202),
+  ]);
+  const launch = (profileId: string) => {
+    const value = store.getLaunch(profileId);
+    if (!value) throw new Error(`managed CloakBrowser launch is missing for ${profileId}`);
+    return value;
+  };
+  const nativeWindows = () => readWindowsNativeWindows(WINDOWS_ACCEPTANCE_PROFILE_IDS.map((profileId) => {
+    const value = launch(profileId);
+    return { profileId, pid: value.pid, debugPort: value.debugPort };
+  }));
+
+  try {
+    await launcher.reconcileOrphans();
+    await exerciseWindowsWindowAcceptance({
+      profileIds: WINDOWS_ACCEPTANCE_PROFILE_IDS,
+      async open(profileId) {
+        await launcher.start(profileId, [], { autoNavigate: false });
+      },
+      async close(profileId) {
+        if (!await launcher.stop(profileId)) {
+          throw new Error(`managed CloakBrowser cleanup was not confirmed for ${profileId}`);
+        }
+      },
+      nativeWindows,
+      async minimize(profileId) {
+        const snapshot = await nativeWindows();
+        await minimizeWindowsHwnd(snapshot.windows[profileId]?.hwnd ?? 0);
+      },
+      async pageTargetIds(profileId) {
+        return cdpPageTargetIds(launch(profileId).debugPort);
+      },
+      async runProfileCardObserved(profileId, hwnd) {
+        const observed = await observeNativeMinimized(hwnd, () => runPlaywrightWorker<{
+          createdPageTargetIds?: unknown;
+        }>("profile-card", {
+          endpoint: launch(profileId).ws,
+          url: "http://127.0.0.1/aliasmode-window-acceptance",
+          connectTimeoutMs: 30_000,
+        }));
+        const created = observed.value?.createdPageTargetIds;
+        if (!Array.isArray(created) || created.some((targetId) => typeof targetId !== "string" || !targetId)) {
+          throw new Error("profile-card target observation returned an invalid result");
+        }
+        return {
+          createdPageTargetIds: created,
+          nativeWindowStayedMinimized: observed.stayedMinimized,
+        };
+      },
+      async bringToFront(profileId) {
+        await launcher.bringToFront(profileId);
+      },
+    });
+  } finally {
+    for (const profileId of [...WINDOWS_ACCEPTANCE_PROFILE_IDS].reverse()) {
+      await launcher.stop(profileId).catch(() => false);
+    }
+    store.close();
+  }
+}
+
 async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
+  if (has(rest, "windows-window-acceptance")) {
+    await runWindowsWindowAcceptance(paths, rest);
+    return;
+  }
   const profileId = "aliasmode-cloud-smoke";
   const canaryWorkerTimeoutMs = has(rest, "unsafe-disable-identity-gates")
     ? UNSAFE_CANARY_TIMEOUT_MS
@@ -706,28 +1357,12 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     true,
     paths.cloudProfiles,
   );
-  const profile: Profile = {
-    id: profileId,
-    accId: "",
-    name: "Cloud launcher smoke",
-    group: "",
-    platform: "",
-    username: "",
-    password: "",
-    email: "",
-    emailPassword: "",
-    twofa: "",
-    proxy: smokeProxy?.profileProxy ?? null,
-    extensions: [],
-    tags: [],
-    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
-    timezone: "UTC",
-    screenWidth: 1280,
-    screenHeight: 720,
-    fingerprintSeed: 1,
-    cookies: [],
-    seeded: false,
-  };
+  const profile = smokeProfile(
+    profileId,
+    "Cloud launcher smoke",
+    1,
+    smokeProxy?.profileProxy ?? null,
+  );
   let payload = encodePortableProfile(profile, JSON.stringify({
     cookies: [{
       name: "auth_token",
@@ -841,6 +1476,10 @@ async function main() {
     if (!result.ok) process.exitCode = 1;
     return;
   }
+  if (argv[0] === "__cloud-restore-fixture") {
+    await runCloudRestoreFixture(argv.slice(1));
+    return;
+  }
 
   // Playwright-over-CDP on Bun emits occasional stray websocket rejections
   // ("ws.WebSocket 'upgrade' event is not implemented in bun"). Left unhandled,
@@ -884,7 +1523,9 @@ async function main() {
   ensureStateDirectories(paths);
   if (cmd === "__cloud-launcher-smoke") {
     await runCloudLauncherSmoke(paths, rest);
-    console.log("compiled sidecar opened, restored, captured, and closed a fresh and repeated cached Cloud profile");
+    console.log(has(rest, "windows-window-acceptance")
+      ? "installed CloakBrowser native minimize, target, HWND, and foreground acceptance passed"
+      : "compiled sidecar opened, restored, captured, and closed a fresh and repeated cached Cloud profile");
     return;
   }
   const appConfig = new AppConfigStore(paths.config);
