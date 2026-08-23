@@ -457,6 +457,14 @@ jobs:
           foreach ($name in $acceptanceEnvironmentNames) {
             $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
           }
+          $webviewPolicyPath = "HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+          $webviewPolicyName = "AliasMode.exe"
+          $webviewPolicyPathExisted = Test-Path $webviewPolicyPath
+          $existingWebviewPolicy = Get-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -ErrorAction SilentlyContinue
+          $hadWebviewPolicy = $null -ne $existingWebviewPolicy
+          $savedWebviewPolicy = if ($hadWebviewPolicy) {
+            [string]$existingWebviewPolicy.PSObject.Properties[$webviewPolicyName].Value
+          } else { $null }
 
           Add-Type @'
           using System.ComponentModel;
@@ -859,6 +867,8 @@ jobs:
 
           $cloudAcceptanceFailure = $null
           try {
+            New-Item -ItemType Directory -Path $webviewPolicyPath -Force | Out-Null
+            New-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -Value "--remote-debugging-port=0" -PropertyType String -Force | Out-Null
             Remove-AliasModeAcceptanceCredentials
             Assert-AliasModeAcceptanceCredentialsAbsent
 
@@ -950,6 +960,29 @@ jobs:
             }
             foreach ($name in $acceptanceEnvironmentNames) {
               [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
+            }
+            try {
+              if ($hadWebviewPolicy) {
+                New-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -Value $savedWebviewPolicy -PropertyType String -Force | Out-Null
+              } else {
+                Remove-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -Force -ErrorAction SilentlyContinue
+                if (-not $webviewPolicyPathExisted) {
+                  Remove-Item -LiteralPath $webviewPolicyPath -Force -ErrorAction SilentlyContinue
+                }
+              }
+              $restoredWebviewPolicy = Get-ItemProperty -Path $webviewPolicyPath -Name $webviewPolicyName -ErrorAction SilentlyContinue
+              if ($hadWebviewPolicy) {
+                $restoredWebviewPolicyValue = if ($restoredWebviewPolicy) {
+                  [string]$restoredWebviewPolicy.PSObject.Properties[$webviewPolicyName].Value
+                } else { $null }
+                if ($restoredWebviewPolicyValue -ne $savedWebviewPolicy) {
+                  throw "WebView2 acceptance policy was not restored"
+                }
+              } elseif ($null -ne $restoredWebviewPolicy) {
+                throw "WebView2 acceptance policy survived cleanup"
+              }
+            } catch {
+              if (-not $cleanupFailure) { $cleanupFailure = $_ }
             }
             foreach ($path in @($isolatedState, $cloudAcceptanceRoot)) {
               for ($attempt = 0; $attempt -lt 120; $attempt++) {
