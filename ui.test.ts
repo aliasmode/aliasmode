@@ -355,6 +355,43 @@ test("upload route imports profiles from posted files", async () => {
   s.close();
 });
 
+test("upload route atomically imports two AdsPower profiles from one pasted file", async () => {
+  const s = new ProfileStore(":memory:");
+  const ADSPOWER = `id=k1up0002\nname=first\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************\nid=k1up0003\nname=second\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************`;
+  const form = new FormData();
+  form.append("files", new File([ADSPOWER], "pasted-adspower.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toMatchObject({ ok: true, files: 1, profiles: 2 });
+  expect(s.count()).toBe(2);
+  expect(s.getProfile("k1up0002")).not.toBeNull();
+  expect(s.getProfile("k1up0003")).not.toBeNull();
+  s.close();
+});
+
+test("upload route rejects a malformed AdsPower record without partial writes", async () => {
+  const s = store();
+  const beforeCount = s.count();
+  const ADSPOWER = `id=k1up0002\nname=first\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************\nid=k1up0003\nname=second\ngroup=ug\ncookie=[]\nresolution=0x0\n******************`;
+  const form = new FormData();
+  form.append("files", new File([ADSPOWER], "pasted-adspower.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(500);
+  expect((await res!.json()).error).toContain("invalid resolution");
+  expect(s.count()).toBe(beforeCount);
+  expect(s.getProfile("k1up0002")).toBeNull();
+  expect(s.getProfile("k1up0003")).toBeNull();
+  s.close();
+});
+
 test("upload route applies group override in local mode", async () => {
   const s = new ProfileStore(":memory:");
   const NOPROXY = `id=k1up0001\nname=uploaded\ngroup=fromfile\ncookie=[]\nresolution=1280*720\n******************`;

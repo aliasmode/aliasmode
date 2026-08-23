@@ -554,21 +554,50 @@ async function operate(chromium, operation, payload) {
       return null;
     }
     if (operation === "profile-card") {
-      const automation = context.pages()[0];
-      if (!automation || typeof context.newCDPSession !== "function") return null;
-      const cdp = await context.newCDPSession(automation);
+      if (typeof browser.newBrowserCDPSession !== "function") throw new Error("browser target observation is unavailable");
+      const targetCdp = await browser.newBrowserCDPSession();
+      const existingPageTargetIds = new Set();
+      const createdPageTargetIds = new Set();
+      let armed = false;
       try {
-        const { bounds } = await cdp.send("Browser.getWindowForTarget");
-        if (bounds?.windowState === "minimized") return null;
-      } catch {
-        return null;
+        const initialTargets = await targetCdp.send("Target.getTargets");
+        for (const target of initialTargets?.targetInfos || []) {
+          if (target?.type === "page" && typeof target.targetId === "string") existingPageTargetIds.add(target.targetId);
+        }
+        targetCdp.on("Target.targetCreated", (event) => {
+          const target = event?.targetInfo;
+          if (armed && target?.type === "page" && typeof target.targetId === "string" && !existingPageTargetIds.has(target.targetId)) {
+            createdPageTargetIds.add(target.targetId);
+          }
+        });
+        armed = true;
+        await targetCdp.send("Target.setDiscoverTargets", { discover: true });
+
+        const automation = context.pages()[0];
+        let canCreate = false;
+        if (automation && typeof context.newCDPSession === "function") {
+          const cdp = await context.newCDPSession(automation);
+          try {
+            const { bounds } = await cdp.send("Browser.getWindowForTarget");
+            canCreate = bounds?.windowState !== "minimized";
+          } catch {
+            canCreate = false;
+          } finally {
+            await cdp.detach().catch(() => {});
+          }
+        }
+        if (canCreate) {
+          const page = await context.newPage();
+          await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+          if (automation !== page) await automation.bringToFront().catch(() => {});
+        }
+        await targetCdp.send("Target.getTargets");
       } finally {
-        await cdp.detach().catch(() => {});
+        armed = false;
+        await targetCdp.send("Target.setDiscoverTargets", { discover: false }).catch(() => {});
+        await targetCdp.detach().catch(() => {});
       }
-      const page = await context.newPage();
-      await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
-      if (automation !== page) await automation.bringToFront().catch(() => {});
-      return null;
+      return { createdPageTargetIds: [...createdPageTargetIds].sort() };
     }
     if (operation === "label-window") {
       await context.addInitScript({ content: payload.script }).catch(() => {});

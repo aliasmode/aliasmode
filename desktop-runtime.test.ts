@@ -115,6 +115,26 @@ test("desktop credential bridge clears refresh and device credentials", async ()
   expect(output.join("\n")).not.toContain("queue_encryption_key");
 });
 
+test("desktop credential bridge attempts both Cloud credential deletes after one rejection", async () => {
+  const output: string[] = [];
+  const bridge = new DesktopCredentialBridge(NONCE, (line) => { output.push(line); });
+  const cleared = bridge.clearCloudSessionCredentials();
+  expect(output).toHaveLength(2);
+  const requests = output.map((line) => JSON.parse(line) as { request: number; key: string });
+  for (const request of requests) {
+    bridge.handleLine(JSON.stringify({
+      protocol: DESKTOP_PROTOCOL,
+      event: "credential-result",
+      nonce: NONCE,
+      request: request.request,
+      ok: request.key === "device_credential",
+    }));
+  }
+  await expect(cleared).rejects.toThrow("could not clear Cloud credentials");
+  expect(requests.map((request) => request.key)).toEqual(["refresh_token", "device_credential"]);
+  expect(output.join("\n")).not.toContain("queue_encryption_key");
+});
+
 test("desktop shutdown coalesces and closes authoritative local launches", async () => {
   const events: string[] = [];
   const runtime = new ManagedDesktopRuntime({
