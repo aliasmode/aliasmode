@@ -558,6 +558,7 @@ export type CloudRestoreFixtureMode = "healthy" | "offline" | "membership-revoke
 export function parseCloudRestoreFixtureOptions(args: string[]): {
   port: number;
   mode: CloudRestoreFixtureMode;
+  initialRefresh: "seeded" | "rotated";
 } {
   const port = Number(flag(args, "port"));
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -567,7 +568,11 @@ export function parseCloudRestoreFixtureOptions(args: string[]): {
   if (mode !== "healthy" && mode !== "offline" && mode !== "membership-revoked") {
     throw new Error("Cloud restore fixture mode must be healthy, offline, or membership-revoked");
   }
-  return { port, mode };
+  const initialRefresh = flag(args, "initial-refresh") ?? "seeded";
+  if (initialRefresh !== "seeded" && initialRefresh !== "rotated") {
+    throw new Error("Cloud restore fixture initial refresh must be seeded or rotated");
+  }
+  return { port, mode, initialRefresh };
 }
 
 const CLOUD_RESTORE_FIXTURE_ACCESS_TOKEN = "aliasmode-fixture-access";
@@ -625,7 +630,11 @@ function fixtureAuthorized(request: Request): boolean {
 
 export function createCloudRestoreFixtureHandler(
   mode: CloudRestoreFixtureMode,
+  initialRefresh: "seeded" | "rotated" = "seeded",
 ): (request: Request) => Promise<Response> {
+  let expectedRefreshToken = initialRefresh === "seeded"
+    ? CLOUD_RESTORE_FIXTURE_SEEDED_REFRESH_TOKEN
+    : CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN;
   const waiting: Array<() => void> = [];
   const waitForRelease = () => new Promise<void>((resolve) => {
     waiting.push(resolve);
@@ -657,13 +666,10 @@ export function createCloudRestoreFixtureHandler(
       && url.searchParams.get("grant_type") === "refresh_token"
     ) {
       const body = await request.json().catch(() => null) as { refresh_token?: unknown } | null;
-      if (
-        typeof body?.refresh_token !== "string"
-        || (body.refresh_token !== CLOUD_RESTORE_FIXTURE_SEEDED_REFRESH_TOKEN
-          && body.refresh_token !== CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN)
-      ) {
+      if (body?.refresh_token !== expectedRefreshToken) {
         return fixtureJson({ message: "fixture refresh token is invalid" }, 401);
       }
+      expectedRefreshToken = CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN;
       // Hold the response until installed automation has observed the restoring UI.
       await waitForRelease();
       if (mode === "offline") return Response.error();
@@ -720,11 +726,11 @@ export function createCloudRestoreFixtureHandler(
 }
 
 async function runCloudRestoreFixture(args: string[]): Promise<void> {
-  const { port, mode } = parseCloudRestoreFixtureOptions(args);
+  const { port, mode, initialRefresh } = parseCloudRestoreFixtureOptions(args);
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port,
-    fetch: createCloudRestoreFixtureHandler(mode),
+    fetch: createCloudRestoreFixtureHandler(mode, initialRefresh),
   });
   if (server.port !== port) {
     server.stop(true);
@@ -1056,6 +1062,48 @@ public static class AliasModeWindowAcceptanceNative {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  private delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hWnd, int objectId, int childId, uint threadId, uint eventTime);
+  [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int x; public int y; }
+  [StructLayout(LayoutKind.Sequential)] private struct NativeMessage {
+    public IntPtr hWnd;
+    public uint message;
+    public UIntPtr wParam;
+    public IntPtr lParam;
+    public uint time;
+    public NativePoint point;
+    public uint privateValue;
+  }
+  [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventProc callback, uint processId, uint threadId, uint flags);
+  [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool UnhookWinEvent(IntPtr hook);
+  [DllImport("user32.dll")] private static extern int GetMessage(out NativeMessage message, IntPtr hWnd, uint filterMin, uint filterMax);
+  [DllImport("user32.dll")] private static extern void PostQuitMessage(int exitCode);
+  private static IntPtr monitoredWindow;
+  private static WinEventProc monitorCallback;
+  public static void MonitorMinimized(long windowValue) {
+    monitoredWindow = new IntPtr(windowValue);
+    monitorCallback = delegate(IntPtr _, uint eventType, IntPtr hWnd, int _objectId, int _childId, uint _threadId, uint _eventTime) {
+      if (eventType == 0x0017 && hWnd == monitoredWindow) {
+        Console.WriteLine("restored");
+        Console.Out.Flush();
+        PostQuitMessage(0);
+      }
+    };
+    IntPtr hook = SetWinEventHook(0x0017, 0x0017, IntPtr.Zero, monitorCallback, 0, 0, 0);
+    if (hook == IntPtr.Zero) throw new InvalidOperationException("native minimized-state event hook failed");
+    try {
+      if (!IsIconic(monitoredWindow)) {
+        Console.WriteLine("restored");
+        Console.Out.Flush();
+        return;
+      }
+      Console.WriteLine("ready");
+      Console.Out.Flush();
+      NativeMessage message;
+      while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) {}
+    } finally {
+      UnhookWinEvent(hook);
+    }
+  }
   public static long FindVisibleWindow(uint[] processIds) {
     var owned = new HashSet<uint>(processIds);
     var found = IntPtr.Zero;
@@ -1160,21 +1208,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 ${WINDOWS_NATIVE_TYPE}
 '@
-$handle = [IntPtr]${hwnd}
-if (-not [AliasModeWindowAcceptanceNative]::IsIconic($handle)) {
-  [Console]::Out.WriteLine('restored')
-  exit 0
-}
-[Console]::Out.WriteLine('ready')
-[Console]::Out.Flush()
-while ($true) {
-  if (-not [AliasModeWindowAcceptanceNative]::IsIconic($handle)) {
-    [Console]::Out.WriteLine('restored')
-    [Console]::Out.Flush()
-    exit 0
-  }
-  Start-Sleep -Milliseconds 5
-}
+[AliasModeWindowAcceptanceNative]::MonitorMinimized(${hwnd})
 `;
   const child = Bun.spawn(
     ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],

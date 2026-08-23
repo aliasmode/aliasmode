@@ -504,11 +504,12 @@ jobs:
             }
           }
 
-          function Start-CloudRestoreFixture([string]$mode) {
+          function Start-CloudRestoreFixture([string]$mode, [string]$initialRefresh) {
             $process = Start-Process -PassThru $sidecars[0].FullName -ArgumentList @(
               "__cloud-restore-fixture",
               "--port", "$fixturePort",
-              "--mode", $mode
+              "--mode", $mode,
+              "--initial-refresh", $initialRefresh
             )
             [void]$trackedPids.Add([int]$process.Id)
             for ($attempt = 0; $attempt -lt 60; $attempt++) {
@@ -789,7 +790,7 @@ jobs:
             Remove-AliasModeAcceptanceCredentials
             Assert-AliasModeAcceptanceCredentialsAbsent
 
-            $fixtureProcess = Start-CloudRestoreFixture "healthy"
+            $fixtureProcess = Start-CloudRestoreFixture "healthy" "seeded"
             $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "seed"
             Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
@@ -802,18 +803,18 @@ jobs:
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = $null
 
-            $fixtureProcess = Start-CloudRestoreFixture "offline"
+            $fixtureProcess = Start-CloudRestoreFixture "offline" "rotated"
             $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "offline"
             Stop-CloudRestoreFixture $fixtureProcess
-            $fixtureProcess = Start-CloudRestoreFixture "healthy"
+            $fixtureProcess = Start-CloudRestoreFixture "healthy" "rotated"
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "online"
             Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
             $activeAcceptanceApp = $null
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = $null
 
-            $fixtureProcess = Start-CloudRestoreFixture "membership-revoked"
+            $fixtureProcess = Start-CloudRestoreFixture "membership-revoked" "rotated"
             $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
             Invoke-InstalledDesktopProbe $activeAcceptanceApp "revoked"
             Stop-CloudRestoreFixture $fixtureProcess

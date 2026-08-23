@@ -304,13 +304,17 @@ for (const scenario of [
 
 test("Cloud restore fixture parses only a loopback port and deterministic mode", () => {
   expect(parseCloudRestoreFixtureOptions(["--port", "49152", "--mode", "healthy"]))
-    .toEqual({ port: 49152, mode: "healthy" });
+    .toEqual({ port: 49152, mode: "healthy", initialRefresh: "seeded" });
   expect(parseCloudRestoreFixtureOptions(["--port", "49154", "--mode", "offline"]))
-    .toEqual({ port: 49154, mode: "offline" });
-  expect(parseCloudRestoreFixtureOptions(["--port", "49153", "--mode", "membership-revoked"]))
-    .toEqual({ port: 49153, mode: "membership-revoked" });
+    .toEqual({ port: 49154, mode: "offline", initialRefresh: "seeded" });
+  expect(parseCloudRestoreFixtureOptions([
+    "--port", "49153", "--mode", "membership-revoked", "--initial-refresh", "rotated",
+  ])).toEqual({ port: 49153, mode: "membership-revoked", initialRefresh: "rotated" });
   expect(() => parseCloudRestoreFixtureOptions(["--port", "0", "--mode", "healthy"])).toThrow("loopback port");
   expect(() => parseCloudRestoreFixtureOptions(["--port", "49152", "--mode", "production"])).toThrow("fixture mode");
+  expect(() => parseCloudRestoreFixtureOptions([
+    "--port", "49152", "--mode", "healthy", "--initial-refresh", "stale",
+  ])).toThrow("initial refresh");
 });
 
 test("Cloud restore fixture accepts only its exact refresh and device credentials", async () => {
@@ -374,6 +378,7 @@ test("Cloud restore fixture returns an invited member or deterministic membershi
   expect(refreshed.status).toBe(200);
   expect(offlineRefresh).toMatchObject({ status: 0, type: "error" });
   expect((await healthy(releaseRequest())).status).toBe(409);
+  expect((await healthy(refreshRequest())).status).toBe(401);
   const rotatedPending = healthy(refreshRequest("aliasmode-fixture-refresh-rotated"));
   expect((await releasePending(healthy)).status).toBe(200);
   expect((await rotatedPending).status).toBe(200);
