@@ -604,17 +604,17 @@ jobs:
           }
 
           function Start-InstalledCloudAcceptanceApp {
-            $debugPort = Get-FreeLoopbackPort
-            $webviewRoot = Join-Path $cloudAcceptanceRoot "webview-$debugPort"
+            $webviewRoot = Join-Path $cloudAcceptanceRoot "webview-$([Guid]::NewGuid().ToString('N'))"
             [Environment]::SetEnvironmentVariable(
               "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-              "--remote-debugging-port=$debugPort",
+              "--remote-debugging-port=0",
               "Process"
             )
             [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webviewRoot, "Process")
             $process = Start-Process -PassThru $appPath
             [void]$trackedPids.Add([int]$process.Id)
             $sidecarPid = 0
+            $debugPort = 0
             $debugReady = $false
             for ($attempt = 0; $attempt -lt 120; $attempt++) {
               $process.Refresh()
@@ -625,15 +625,28 @@ jobs:
                   Select-Object -First 1
                 if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
               }
-              try {
-                Invoke-RestMethod "http://127.0.0.1:$debugPort/json/version" -TimeoutSec 1 | Out-Null
-                $debugReady = $true
-              } catch {}
+              if ($debugPort -le 0) {
+                $activePortPath = Join-Path $webviewRoot "EBWebView\DevToolsActivePort"
+                if (Test-Path $activePortPath -PathType Leaf) {
+                  $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
+                  $parsedPort = 0
+                  if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
+                    $debugPort = $parsedPort
+                  }
+                }
+              }
+              if ($debugPort -gt 0) {
+                try {
+                  Invoke-RestMethod "http://127.0.0.1:$debugPort/json/version" -TimeoutSec 1 | Out-Null
+                  $debugReady = $true
+                } catch {}
+              }
               if ($sidecarPid -gt 0 -and $process.MainWindowHandle -ne 0 -and $debugReady) { break }
               Start-Sleep -Milliseconds 250
             }
             if ($sidecarPid -le 0) { throw "installed Cloud acceptance app did not start its packaged sidecar" }
             if ($process.MainWindowHandle -eq 0) { throw "installed Cloud acceptance app did not create its main window" }
+            if ($debugPort -le 0) { throw "installed Cloud acceptance WebView2 endpoint was not published" }
             if (-not $debugReady) { throw "installed Cloud acceptance WebView2 endpoint did not become ready" }
             [void]$trackedPids.Add($sidecarPid)
             return [pscustomobject]@{
