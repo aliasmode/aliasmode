@@ -291,7 +291,16 @@ jobs:
             }
             Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AliasModeWindow { [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr handle); }'
             $hiddenApp = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
-            if ([AliasModeWindow]::IsWindowVisible($hiddenApp.MainWindowHandle)) {
+            $backgroundHidden = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              $hiddenApp.Refresh()
+              if (-not [AliasModeWindow]::IsWindowVisible($hiddenApp.MainWindowHandle)) {
+                $backgroundHidden = $true
+                break
+              }
+              Start-Sleep -Milliseconds 100
+            }
+            if (-not $backgroundHidden) {
               throw "background AliasMode exposed its main window"
             }
           } finally {
