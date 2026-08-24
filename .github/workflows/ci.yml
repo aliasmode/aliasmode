@@ -301,7 +301,7 @@ jobs:
               Start-Sleep -Milliseconds 100
             }
             if (-not $backgroundHidden) {
-              throw "background AliasMode exposed its main window"
+              throw "background AliasMode exposed a visible window titled '$($hiddenApp.MainWindowTitle)'"
             }
           } finally {
             $mcp.StandardInput.Close()

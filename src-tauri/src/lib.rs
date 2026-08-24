@@ -262,7 +262,8 @@ pub fn run() {
                     if !matches!(payload.event(), PageLoadEvent::Finished) {
                         return;
                     }
-                    if background && window.hide().is_err() {
+                    if background && (window.hide().is_err() || window.is_visible().unwrap_or(true))
+                    {
                         window.app_handle().exit(1);
                         return;
                     }
