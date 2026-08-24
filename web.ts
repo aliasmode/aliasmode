@@ -174,7 +174,6 @@ export function serveDashboard(opts: DashboardServerOptions) {
         const session = agentHub.connect();
         const upgraded = server.upgrade(req, {
           data: { session },
-          headers: { "sec-websocket-protocol": AGENT_CONTROL_PROTOCOL },
         });
         if (!upgraded) {
           void session.disconnect();
