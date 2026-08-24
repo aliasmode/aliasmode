@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const app = readFileSync(join(import.meta.dir, "web", "app.tsx"), "utf8");
-const styles = readFileSync(join(import.meta.dir, "web", "styles.css"), "utf8");
-const logo = readFileSync(join(import.meta.dir, "web", "alias-loop.svg"), "utf8");
+const app = readFileSync(join(import.meta.dir, "web", "app.tsx"), "utf8").replaceAll("\r\n", "\n");
+const styles = readFileSync(join(import.meta.dir, "web", "styles.css"), "utf8").replaceAll("\r\n", "\n");
+const logo = readFileSync(join(import.meta.dir, "web", "alias-loop.svg"), "utf8").replaceAll("\r\n", "\n");
 
 test("dashboard packages the approved Alias Loop logo", () => {
   expect(app).toContain('import aliasLoopUrl from "./alias-loop.svg"');
