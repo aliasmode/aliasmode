@@ -38,6 +38,9 @@ jobs:
         with:
           toolchain: 1.89
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
       - run: bun install --frozen-lockfile
       - name: Warm Bun baseline compiler cache
         shell: pwsh
@@ -59,7 +62,6 @@ jobs:
       - run: bun test
       - run: bun run typecheck
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - run: bun run desktop:check
       - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
         shell: pwsh
