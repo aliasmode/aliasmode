@@ -1,0 +1,244 @@
+name: Windows update candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  candidate:
+    name: Sign and test private update candidate
+    needs: verify
+    runs-on: windows-latest
+    environment: windows-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: candidate
+      - name: Validate candidate version
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne "refs/heads/main") {
+            throw "update candidates must run from main"
+          }
+          bun test version.test.ts
+          if ($LASTEXITCODE -ne 0) { throw "version alignment test failed" }
+
+          $version = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $candidateVersion = [System.Management.Automation.SemanticVersion]::Parse($version)
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
+          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers)
+          foreach ($release in $releases) {
+            if ($release.draft -or -not $release.tag_name.StartsWith("v")) { continue }
+            try {
+              $published = [System.Management.Automation.SemanticVersion]::Parse($release.tag_name.Substring(1))
+            } catch {
+              continue
+            }
+            if ($candidateVersion -le $published) {
+              throw "candidate version $version must be newer than published release $($release.tag_name)"
+            }
+          }
+          "ALIASMODE_CANDIDATE_VERSION=$version" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_CANDIDATE_TAG=v$version" | Add-Content $env:GITHUB_ENV
+      - name: Sign updater and build manifest
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "protected Tauri updater signing secrets are unavailable"
+          }
+
+          $installers = @(Get-ChildItem ".\candidate" -File -Filter "*.exe")
+          if ($installers.Count -ne 1) { throw "expected exactly one candidate installer" }
+          $expectedName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
+          if ($installers[0].Name -ne $expectedName) {
+            throw "candidate installer name did not match its version: $($installers[0].Name)"
+          }
+
+          $artifact = ".\artifacts\windows-update-candidate"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          $installer = Join-Path $artifact $expectedName
+          Copy-Item $installers[0].FullName $installer
+          bunx tauri signer sign $installer
+          if ($LASTEXITCODE -ne 0) { throw "Tauri updater signing failed" }
+          $signaturePath = "$installer.sig"
+          if (-not (Test-Path $signaturePath -PathType Leaf)) { throw "updater signature is missing" }
+
+          $config = Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json
+          $publicKey = $config.plugins.updater.pubkey
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $installer $signaturePath $publicKey
+          if ($LASTEXITCODE -ne 0) { throw "updater signature verification failed" }
+
+          $corrupt = Join-Path $env:RUNNER_TEMP "corrupt-update.exe"
+          Copy-Item $installer $corrupt
+          $bytes = [IO.File]::ReadAllBytes($corrupt)
+          $bytes[[Math]::Floor($bytes.Length / 2)] = $bytes[[Math]::Floor($bytes.Length / 2)] -bxor 1
+          [IO.File]::WriteAllBytes($corrupt, $bytes)
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $corrupt $signaturePath $publicKey
+          if ($LASTEXITCODE -eq 0) { throw "corrupted updater unexpectedly passed signature verification" }
+          $global:LASTEXITCODE = 0
+
+          $signature = (Get-Content $signaturePath -Raw).Trim()
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$($env:ALIASMODE_CANDIDATE_TAG)/$expectedName"
+          $manifest = [ordered]@{
+            version = $env:ALIASMODE_CANDIDATE_VERSION
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                url = $downloadUrl
+                signature = $signature
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $artifact "latest.json") -Encoding utf8
+          $parsed = Get-Content (Join-Path $artifact "latest.json") | ConvertFrom-Json
+          if ($parsed.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
+              @($parsed.platforms.PSObject.Properties).Count -ne 1 -or
+              $parsed.platforms."windows-x86_64".url -ne $downloadUrl -or
+              $parsed.platforms."windows-x86_64".signature -ne $signature) {
+            throw "generated updater manifest is inconsistent"
+          }
+
+          $hashLines = Get-ChildItem $artifact -File |
+            Sort-Object Name |
+            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
+          $hashLines | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+      - name: Test previous-version upgrade and data preservation
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          function Wait-AliasModeReady([string]$appPath, [string]$expectedVersion) {
+            $app = Get-Process -Name "AliasMode" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Path -eq $appPath } |
+              Select-Object -First 1
+            if (-not $app) { $app = Start-Process -PassThru $appPath }
+            for ($attempt = 0; $attempt -lt 180; $attempt++) {
+              $app.Refresh()
+              if ($app.HasExited) { throw "AliasMode exited before readiness" }
+              $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
+                Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
+                Select-Object -First 1
+              if ($sidecar) {
+                $ports = Get-NetTCPConnection -State Listen -OwningProcess $sidecar.ProcessId -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty LocalPort -Unique
+                foreach ($port in $ports) {
+                  try {
+                    $origin = "http://127.0.0.1:$port"
+                    $health = Invoke-RestMethod "$origin/ui/api/health" -TimeoutSec 1
+                    if ($health.ok -eq $true -and $health.version -eq $expectedVersion) {
+                      return [pscustomobject]@{ App = $app; SidecarPid = [int]$sidecar.ProcessId; Origin = $origin; Health = $health }
+                    }
+                  } catch {}
+                }
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "AliasMode $expectedVersion did not become ready"
+          }
+
+          function Stop-AliasMode($record) {
+            if (-not $record.App.CloseMainWindow()) { throw "AliasMode rejected its close request" }
+            if (-not $record.App.WaitForExit(180000)) { throw "AliasMode did not exit after cleanup" }
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              if (-not (Get-Process -Id $record.SidecarPid -ErrorAction SilentlyContinue)) { return }
+              Start-Sleep -Milliseconds 500
+            }
+            throw "AliasMode sidecar survived shutdown"
+          }
+
+          $candidateVersion = [System.Management.Automation.SemanticVersion]::Parse($env:ALIASMODE_CANDIDATE_VERSION)
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
+          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers)
+          $previous = $releases |
+            Where-Object { -not $_.draft -and $_.tag_name.StartsWith("v") } |
+            ForEach-Object {
+              try {
+                $version = [System.Management.Automation.SemanticVersion]::Parse($_.tag_name.Substring(1))
+                if ($version -lt $candidateVersion) { [pscustomobject]@{ Release = $_; Version = $version } }
+              } catch {}
+            } |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+          if (-not $previous) { throw "no previous public release is available for upgrade acceptance" }
+          $oldInstallerAsset = @($previous.Release.assets | Where-Object { $_.name -like "AliasMode_*_x64-setup.exe" })
+          $oldChecksumAsset = @($previous.Release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" })
+          if ($oldInstallerAsset.Count -ne 1 -or $oldChecksumAsset.Count -ne 1) {
+            throw "previous release assets are incomplete"
+          }
+          $oldInstaller = Join-Path $env:RUNNER_TEMP $oldInstallerAsset[0].name
+          $oldChecksums = Join-Path $env:RUNNER_TEMP "old-SHA256SUMS.txt"
+          Invoke-WebRequest $oldInstallerAsset[0].browser_download_url -OutFile $oldInstaller
+          Invoke-WebRequest $oldChecksumAsset[0].browser_download_url -OutFile $oldChecksums
+          $checksumLine = Get-Content $oldChecksums | Where-Object { $_ -match [regex]::Escape($oldInstallerAsset[0].name) }
+          if ($checksumLine -notmatch '^([a-fA-F0-9]{64})  ') { throw "previous installer checksum is missing" }
+          if ((Get-FileHash $oldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Matches[1].ToLowerInvariant()) {
+            throw "previous installer checksum mismatch"
+          }
+
+          $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode update acceptance"
+          $install = Start-Process -Wait -PassThru $oldInstaller -ArgumentList @("/S", "/D=$installRoot")
+          if ($install.ExitCode -ne 0) { throw "previous installer exited with code $($install.ExitCode)" }
+          $appPath = Join-Path $installRoot "AliasMode.exe"
+          $old = Wait-AliasModeReady $appPath $previous.Version.ToString()
+          $mode = Invoke-RestMethod "$($old.Origin)/ui/api/app-mode"
+          if ($mode.mode -eq "unconfigured") {
+            Invoke-RestMethod "$($old.Origin)/ui/api/app-mode" -Method Post -ContentType "application/json" -Body '{"mode":"local"}' | Out-Null
+            Stop-AliasMode $old
+            $old = Wait-AliasModeReady $appPath $previous.Version.ToString()
+          }
+          $profile = Invoke-RestMethod "$($old.Origin)/ui/api/profiles" -Method Post -ContentType "application/json" -Body '{"name":"update-preservation-sentinel"}'
+          if ($profile.ok -ne $true -or [string]::IsNullOrWhiteSpace($profile.id)) { throw "could not create upgrade sentinel profile" }
+          $sentinel = Join-Path $old.Health.root "upgrade-sentinel.txt"
+          "preserve-me" | Set-Content $sentinel
+          $oldRoot = $old.Health.root
+          $oldInstance = $old.Health.instance
+          if ([string]::IsNullOrWhiteSpace($oldInstance)) { throw "previous version health response omitted its instance ID" }
+          Stop-AliasMode $old
+
+          $candidateInstaller = Resolve-Path ".\artifacts\windows-update-candidate\AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
+          $updater = Start-Process -PassThru $candidateInstaller.Path -ArgumentList @("/P", "/R", "/UPDATE", "/ARGS")
+          if (-not $updater.WaitForExit(300000)) { throw "candidate updater did not exit" }
+          if ($updater.ExitCode -ne 0) { throw "candidate updater exited with code $($updater.ExitCode)" }
+          $updated = Wait-AliasModeReady $appPath $env:ALIASMODE_CANDIDATE_VERSION
+          if ($updated.Health.root -ne $oldRoot) { throw "update changed the app-data root" }
+          $updatedInstance = $updated.Health.instance
+          if ([string]::IsNullOrWhiteSpace($updatedInstance) -or $updatedInstance -eq $oldInstance) {
+            throw "updated app did not start a new instance"
+          }
+          if ((Get-Content $sentinel -Raw).Trim() -ne "preserve-me") { throw "update changed app-data sentinel content" }
+          $roster = Invoke-RestMethod "$($updated.Origin)/ui/api/profiles"
+          if (-not ($roster.profiles | Where-Object { $_.id -eq $profile.id -and $_.name -eq "update-preservation-sentinel" })) {
+            throw "update did not preserve the sentinel profile"
+          }
+          Stop-AliasMode $updated
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-update-candidate
+          path: artifacts/windows-update-candidate
+          if-no-files-found: error
+          retention-days: 7

@@ -27,6 +27,21 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain('invoke("restart_after_mode_change")');
 });
 
+test("dashboard checks and installs desktop updates through argument-free native commands", () => {
+  expect(app).toContain('type DesktopUpdateStatus =');
+  expect(app).toContain('invoke("check_for_updates")');
+  expect(app).toContain('invoke("update_now")');
+  expect(app).not.toContain('invoke("check_for_updates",');
+  expect(app).not.toContain('invoke("update_now",');
+  expect(app).toContain("desktopUpdateCheckStarted.current = true");
+  expect(app).toContain("AliasMode checks for updates when it starts.");
+  expect(app).toContain("Downloading and verifying the update");
+  expect(app).toContain('disabled={modeBusy || desktopUpdateInstalling}');
+  expect(app).toContain('className="update-banner" role="status"');
+  expect(styles).toContain(".update-banner");
+  expect(styles).toContain(".update-actions");
+});
+
 test("dashboard contains long roster labels inside the window", () => {
   expect(app).toContain('className="profile-table"');
   expect(app).toContain('className="profile-name" title={p.name}');

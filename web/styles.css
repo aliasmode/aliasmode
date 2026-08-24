@@ -143,6 +143,16 @@ body {
   background: #fdecec; color: #9b1c1c; padding: 8px 16px; border-bottom: 1px solid #f6cfcf;
 }
 .error .dismiss { margin-left: auto; background: none; border: none; color: #9b1c1c; cursor: pointer; font-size: 16px; line-height: 1; }
+.update-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 9px 16px; color: #284a9e; background: var(--accent-soft); border-bottom: 1px solid var(--accent-line);
+}
+.update-banner span { min-width: 0; }
+.update-banner button {
+  flex: 0 0 auto; padding: 6px 12px; color: #fff; background: var(--accent);
+  border: 1px solid var(--accent); border-radius: 8px; font-weight: 600; cursor: pointer;
+}
+.update-banner button:disabled { opacity: .55; cursor: default; }
 /* Subtle, transient success pill (bottom-center) — not a full-width banner. */
 .notice {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 60;
@@ -466,6 +476,13 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .settings-row > span { color: var(--muted); }
 .settings-row > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
 .settings-row small { display: block; font-size: 10px; }
+.update-actions { display: flex; gap: 8px; }
+.update-actions button {
+  padding: 6px 10px; color: #344054; background: #fff; border: 1px solid var(--line);
+  border-radius: 7px; font: inherit; font-weight: 600; cursor: pointer;
+}
+.update-actions button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.update-actions button:disabled { opacity: .55; cursor: default; }
 .team-code { display: flex; gap: 6px; }
 .team-code input { min-width: 0; flex: 1; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; }
 .team-code select, .settings-row select { padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }

@@ -404,7 +404,22 @@ function CopyField({ label, value, onChange }: { label: string; value: string; o
 }
 
 type DesktopInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+type DesktopUpdateStatus =
+  | { state: "upToDate"; currentVersion: string }
+  | { state: "available"; currentVersion: string; version: string };
 type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";
+
+function parseDesktopUpdateStatus(value: unknown): DesktopUpdateStatus {
+  if (!value || typeof value !== "object") throw new Error("AliasMode returned an invalid update status.");
+  const status = value as Record<string, unknown>;
+  if (status.state === "upToDate" && typeof status.currentVersion === "string") {
+    return { state: "upToDate", currentVersion: status.currentVersion };
+  }
+  if (status.state === "available" && typeof status.currentVersion === "string" && typeof status.version === "string") {
+    return { state: "available", currentVersion: status.currentVersion, version: status.version };
+  }
+  throw new Error("AliasMode returned an invalid update status.");
+}
 
 function desktopInvoke(): DesktopInvoke | undefined {
   return (window as any).__TAURI_INTERNALS__?.invoke as DesktopInvoke | undefined;
@@ -476,6 +491,10 @@ function App() {
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
   const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus | null>(null);
+  const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
+  const [desktopUpdateInstalling, setDesktopUpdateInstalling] = useState(false);
+  const [desktopUpdateErr, setDesktopUpdateErr] = useState<string | null>(null);
   const [logDir, setLogDir] = useState<string | undefined>(undefined);
   const [logView, setLogView] = useState<{ file: string; content: string } | null>(null);
   const [logErr, setLogErr] = useState<string | null>(null);
@@ -544,6 +563,7 @@ function App() {
   const authGeneration = useRef(0);
   const restoreInFlight = useRef(false);
   const savedSessionRestoreEnabled = useRef(true);
+  const desktopUpdateCheckStarted = useRef(false);
   const isCloudMode = appMode?.mode === "cloud";
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
@@ -607,6 +627,37 @@ function App() {
     const email = teamEmail.trim();
     const ok = await runTeamAction("invite", { email, role: teamRole }, `Invitation sent to ${email}`);
     if (ok) setTeamEmail("");
+  };
+
+  const checkDesktopUpdate = async (manual: boolean) => {
+    const invoke = desktopInvoke();
+    if (!invoke) {
+      if (manual) setDesktopUpdateErr("Updates are available only in the Windows desktop app.");
+      return;
+    }
+    setDesktopUpdateChecking(true);
+    if (manual) setDesktopUpdateErr(null);
+    try {
+      setDesktopUpdate(parseDesktopUpdateStatus(await invoke("check_for_updates")));
+    } catch (error) {
+      if (manual) setDesktopUpdateErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDesktopUpdateChecking(false);
+    }
+  };
+
+  const installDesktopUpdate = async () => {
+    const invoke = desktopInvoke();
+    if (!invoke || desktopUpdate?.state !== "available") return;
+    setDesktopUpdateInstalling(true);
+    setDesktopUpdateErr(null);
+    try {
+      await invoke("update_now");
+      setDesktopUpdateInstalling(false);
+    } catch (error) {
+      setDesktopUpdateErr(error instanceof Error ? error.message : String(error));
+      setDesktopUpdateInstalling(false);
+    }
   };
 
   const openAccountSettings = () => {
@@ -872,6 +923,12 @@ function App() {
       setLoaded(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (!appMode || restartRequired || desktopUpdateCheckStarted.current) return;
+    desktopUpdateCheckStarted.current = true;
+    void checkDesktopUpdate(false);
+  }, [appMode?.mode, restartRequired]);
 
   useEffect(() => {
     if (appMode?.mode !== "cloud" || restartRequired) return;
@@ -1653,6 +1710,14 @@ function App() {
         </div>
       )}
       {notice && <div className="notice" role="status" onClick={() => setNotice(null)}>{notice}</div>}
+      {desktopUpdate?.state === "available" && (
+        <div className="update-banner" role="status">
+          <span><strong>AliasMode {desktopUpdate.version} is available.</strong> The update will save active browsers and restart the app.</span>
+          <button type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
+            {desktopUpdateInstalling ? "Downloading and verifying…" : "Update now"}
+          </button>
+        </div>
+      )}
 
       <div className={`actionbar${selected.size ? " active" : ""}`}>
         <span className="count">{selected.size ? `${selected.size} selected` : "No selection"}</span>
@@ -1829,12 +1894,32 @@ function App() {
                 <h2>Account</h2>
                 <div className="settings-row"><span>Signed in as</span><strong>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local · no account"}</strong></div>
                 <div className="settings-row"><span>Mode</span><strong>{isCloudMode ? "AliasMode Cloud" : "AliasMode Local"}</strong></div>
-                <div className="settings-row"><span>App version</span><strong className="mono">{appVersion || "—"}</strong></div>
                 {isCloudMode && cloudAuth?.authenticated && (
                   <button type="button" disabled={authBusy} onClick={() => void signOut()}>
                     {authBusy ? "Signing out…" : "Sign out / Switch account"}
                   </button>
                 )}
+              </section>
+              <section className="settings-section update-settings">
+                <h2>Updates</h2>
+                <div className="settings-row"><span>Installed version</span><strong className="mono">{appVersion || desktopUpdate?.currentVersion || "—"}</strong></div>
+                {desktopUpdate?.state === "upToDate" && <p role="status">AliasMode is up to date.</p>}
+                {desktopUpdate?.state === "available" && (
+                  <p role="status">Version {desktopUpdate.version} is ready. Active browsers will be saved and closed.</p>
+                )}
+                {!desktopUpdate && !desktopUpdateChecking && <p>AliasMode checks for updates when it starts.</p>}
+                {desktopUpdateInstalling && <p role="status">Downloading and verifying the update. AliasMode will save browsers and restart.</p>}
+                {desktopUpdateErr && <div className="modal-err" role="alert">{desktopUpdateErr}</div>}
+                <div className="update-actions">
+                  <button type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void checkDesktopUpdate(true)}>
+                    {desktopUpdateChecking ? "Checking…" : "Check for updates"}
+                  </button>
+                  {desktopUpdate?.state === "available" && (
+                    <button className="primary" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
+                      {desktopUpdateInstalling ? "Updating…" : "Update now"}
+                    </button>
+                  )}
+                </div>
               </section>
               <section className="settings-section">
                 <h2>{isCloudMode ? "Team" : "Workspace"}</h2>
@@ -1941,7 +2026,7 @@ function App() {
                 </section>
               )}
               <section className="settings-mode">
-                <button type="button" disabled={modeBusy} onClick={() => requestModeSwitch(isCloudMode ? "local" : "cloud")}>
+                <button type="button" disabled={modeBusy || desktopUpdateInstalling} onClick={() => requestModeSwitch(isCloudMode ? "local" : "cloud")}>
                   Switch to {isCloudMode ? "Local" : "Cloud"}
                 </button>
                 <p>{isCloudMode ? "Local mode keeps this installation offline from AliasMode Cloud." : "Cloud mode requires an account and does not upload Local profiles automatically."}</p>

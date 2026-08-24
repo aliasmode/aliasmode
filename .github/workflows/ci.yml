@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -136,7 +137,7 @@ jobs:
           $env:ALIASMODE_LIVE_HEADFUL = "1"
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
-      - run: bunx tauri build --bundles nsis
+      - run: bunx tauri build --bundles nsis --config src-tauri/tauri.unsigned.conf.json
       - name: Select NSIS installer
         shell: pwsh
         run: |

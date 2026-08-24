@@ -1,0 +1,10 @@
+[package]
+name = "aliasmode-updater-verify"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+base64 = "=0.22.1"
+minisign-verify = "=0.2.5"
