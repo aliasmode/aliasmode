@@ -280,6 +280,8 @@ pub fn run() {
             if app.state::<PendingFocus>().0.swap(false, Ordering::AcqRel) {
                 let _ = window.show();
                 let _ = window.set_focus();
+            } else if background {
+                window.hide()?;
             }
             tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
