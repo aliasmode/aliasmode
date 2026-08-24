@@ -2,7 +2,7 @@ name: Client CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/aliasmode-agent-integration]
   pull_request:
 
 permissions:
