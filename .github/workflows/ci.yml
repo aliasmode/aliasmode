@@ -328,6 +328,20 @@ jobs:
           $profileId = $profile.result.id
           $opened = & $helper browser open --profile $profileId --headless | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or -not $opened.ok -or -not $opened.result.headless -or $opened.result.alreadyOpen) {
+            $sidecarLog = Get-ChildItem (Join-Path $appData "logs\aliasmode-*.log") -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            if ($sidecarLog) {
+              Get-Content $sidecarLog.FullName |
+                Select-String -Pattern 'sidecar start|launching .* on port|launch stage' |
+                Select-Object -Last 12 |
+                ForEach-Object {
+                  $safeTrace = $_.Line -replace 'pid=\d+', 'pid=<pid>'
+                  $safeTrace = $safeTrace -replace 'launching [A-Za-z0-9_-]+ on port \d+.*', 'launching <profile> on port <port>'
+                  $safeTrace = $safeTrace -replace '[A-Za-z0-9_-]+: launch stage', '<profile>: launch stage'
+                  Write-Host "launch trace: $safeTrace"
+                }
+            }
             throw "installed JSON CLI could not open a headless browser: $($opened.error)"
           }
           $status = & $helper browser status --profile $profileId | ConvertFrom-Json
