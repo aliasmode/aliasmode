@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join, win32 } from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
-import WebSocket from "ws";
+import NodeWebSocket from "ws";
 
 export const RUNTIME_PROTOCOL = "aliasmode-runtime-v1";
 export const AGENT_PROTOCOL = "aliasmode-agent-v1";
@@ -113,15 +113,32 @@ async function verifyHealth(descriptor) {
   }
 }
 
+function listen(socket, event, handler, once = false) {
+  const method = once ? "once" : "on";
+  if (typeof socket[method] === "function") {
+    socket[method](event, handler);
+    return;
+  }
+  socket.addEventListener(event, (value) => {
+    handler(event === "message" ? value.data : value);
+  }, { once });
+}
+
+function terminate(socket) {
+  if (typeof socket.terminate === "function") socket.terminate();
+  else socket.close();
+}
+
 export class AgentRuntimeClient {
   constructor(socket) {
     this.socket = socket;
+    this.nativeSocket = typeof socket.on !== "function";
     this.nextId = 1;
     this.pending = new Map();
     this.closed = false;
-    socket.on("message", (data) => this.#onMessage(data));
-    socket.on("close", () => this.#onClose(new Error("AliasMode agent connection closed")));
-    socket.on("error", () => this.#onClose(new Error("AliasMode agent connection failed")));
+    listen(socket, "message", (data) => this.#onMessage(data));
+    listen(socket, "close", () => this.#onClose(new Error("AliasMode agent connection closed")));
+    listen(socket, "error", () => this.#onClose(new Error("AliasMode agent connection failed")));
   }
 
   call(method, params = {}) {
@@ -129,7 +146,17 @@ export class AgentRuntimeClient {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ protocol: AGENT_PROTOCOL, id, method, params }), (error) => {
+      const payload = JSON.stringify({ protocol: AGENT_PROTOCOL, id, method, params });
+      if (this.nativeSocket) {
+        try {
+          this.socket.send(payload);
+        } catch {
+          this.pending.delete(id);
+          reject(new Error("AliasMode agent request could not be sent"));
+        }
+        return;
+      }
+      this.socket.send(payload, (error) => {
         if (!error) return;
         this.pending.delete(id);
         reject(new Error("AliasMode agent request could not be sent"));
@@ -138,8 +165,8 @@ export class AgentRuntimeClient {
   }
 
   close() {
-    if (this.socket.readyState === WebSocket.OPEN) this.socket.close();
-    else if (this.socket.readyState === WebSocket.CONNECTING) this.socket.terminate();
+    if (this.socket.readyState === 1) this.socket.close();
+    else if (this.socket.readyState === 0) terminate(this.socket);
     if (this.closed) return;
     this.closed = true;
     this.#rejectPending(new Error("AliasMode agent connection closed"));
@@ -173,8 +200,8 @@ export class AgentRuntimeClient {
   }
 
   #onClose(error) {
-    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
-      this.socket.terminate();
+    if (this.socket.readyState === 1 || this.socket.readyState === 0) {
+      terminate(this.socket);
     }
     if (this.closed) return;
     this.closed = true;
@@ -189,37 +216,42 @@ export class AgentRuntimeClient {
 
 async function connectAgent(descriptor) {
   await verifyHealth(descriptor);
-  const socket = new WebSocket(
-    `ws://127.0.0.1:${descriptor.port}${AGENT_PATH}`,
-    AGENT_PROTOCOL,
-    {
-      headers: { Authorization: `Bearer ${descriptor.nonce}` },
-      maxPayload: 1024 * 1024,
-      handshakeTimeout: 5_000,
-      followRedirects: false,
-    },
-  );
+  const url = `ws://127.0.0.1:${descriptor.port}${AGENT_PATH}`;
+  const bunNative = typeof process.versions.bun === "string";
+  const socket = bunNative
+    ? new globalThis.WebSocket(url, {
+        protocol: AGENT_PROTOCOL,
+        headers: { Authorization: `Bearer ${descriptor.nonce}` },
+      })
+    : new NodeWebSocket(url, AGENT_PROTOCOL, {
+        headers: { Authorization: `Bearer ${descriptor.nonce}` },
+        maxPayload: 1024 * 1024,
+        handshakeTimeout: 5_000,
+        followRedirects: false,
+      });
   await new Promise((resolve, reject) => {
     let settled = false;
     const failed = (message) => {
       if (settled) return;
       settled = true;
-      socket.terminate();
+      terminate(socket);
       reject(new Error(message));
     };
-    socket.once("open", () => {
+    listen(socket, "open", () => {
       if (settled) return;
       settled = true;
       resolve();
-    });
-    socket.once("error", (error) => {
-      failed(`AliasMode agent handshake failed: ${error.message}`);
-    });
-    socket.once("unexpected-response", (_request, response) => {
-      failed(`AliasMode agent handshake was rejected with status ${response.statusCode}`);
-    });
+    }, true);
+    listen(socket, "error", (error) => {
+      failed(`AliasMode agent handshake failed: ${error?.message || "connection error"}`);
+    }, true);
+    if (!bunNative) {
+      listen(socket, "unexpected-response", (_request, response) => {
+        failed(`AliasMode agent handshake was rejected with status ${response.statusCode}`);
+      }, true);
+    }
   });
-  if (socket.protocol !== AGENT_PROTOCOL) {
+  if (!bunNative && socket.protocol !== AGENT_PROTOCOL) {
     socket.close();
     throw new Error("AliasMode agent protocol negotiation failed");
   }
