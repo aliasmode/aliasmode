@@ -128,9 +128,6 @@ export async function configureDuckDuckGo(
         };
       }
 
-      const usesModelIndex = initialEngines.some(
-        (engine) => typeof engine.modelIndex === "number",
-      );
       let duckDuckGo = findDuckDuckGo(initialEngines);
 
       if (!duckDuckGo) {
@@ -220,6 +217,7 @@ export async function configureDuckDuckGo(
         return { ok: false as const, error: "Chromium will not allow DuckDuckGo as default" };
       }
 
+      const usesModelIndex = typeof duckDuckGo.modelIndex === "number";
       (globalThis as any).chrome.send("setDefaultSearchEngine", [
         referenceFor(duckDuckGo),
         // Chromium changed from mutable model indexes to stable engine ids;

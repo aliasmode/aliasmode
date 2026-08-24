@@ -66,6 +66,7 @@ function fleet() {
   const aliveByPort = new Map<number, boolean>();
   const pidByPort = new Map<number, number>();
   const aliveByPid = new Map<number, boolean>();
+  const wsByPort = new Map<number, string>();
   const killed: number[] = [];
   let nextPid = 6000;
 
@@ -87,8 +88,10 @@ function fleet() {
   const fetchFn: FetchFn = async (url) => {
     const port = Number(url.match(/:(\d+)\//)?.[1] ?? "0");
     const ok = aliveByPort.get(port) ?? false;
-    return { ok, json: async () => ({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/x` }) };
+    const ws = wsByPort.get(port) ?? `ws://127.0.0.1:${port}/devtools/browser/x`;
+    return { ok, json: async () => ({ webSocketDebuggerUrl: ws }) };
   };
+  const setWs = (port: number, ws: string) => wsByPort.set(port, ws);
   const crash = (port: number) => {
     aliveByPort.set(port, false);
     const pid = pidByPort.get(port);
@@ -105,7 +108,7 @@ function fleet() {
     const pid = pidByPort.get(debugPort);
     return pid !== undefined && (aliveByPid.get(pid) ?? false) ? [pid] : [];
   };
-  return { aliveByPort, pidByPort, aliveByPid, killed, spawn, fetchFn, crash, killPid, isPidAlive, findOwnedBrowserPids };
+  return { aliveByPort, pidByPort, aliveByPid, killed, spawn, fetchFn, setWs, crash, killPid, isPidAlive, findOwnedBrowserPids };
 }
 
 function newLauncher(
@@ -176,7 +179,7 @@ function legacyProxyPersonaDigest(store: ProfileStore, profileId: string, binary
   })).digest("hex");
 }
 
-test("after a restart, start() reattaches to the still-live browser instead of spawning a duplicate", async () => {
+test("after a restart, start() reattaches and repairs search once per live browser generation", async () => {
   const store = seeded();
   const f = fleet();
 
@@ -191,20 +194,69 @@ test("after a restart, start() reattaches to the still-live browser instead of s
 
   // Manager "restarts": new Launcher, same on-disk store, empty in-memory procs.
   const argsB: string[][] = [];
-  let searchProviderCalls = 0;
-  const launcherB = newLauncher(store, f, argsB, undefined, async () => {
-    searchProviderCalls++;
+  const checked: string[] = [];
+  const launcherB = newLauncher(store, f, argsB, undefined, async (ws) => {
+    checked.push(ws);
     return { status: "configured", engine: "DuckDuckGo" };
   });
   await launcherB.reconcileOrphans(); // browser still alive → row kept
   expect((launcherB as any).relays.size).toBe(0); // discovery never restores account networking
   const b = await launcherB.start("k1d0cd11", [], { sessionBaseVersion: -1 });
+  const repeated = await launcherB.start("k1d0cd11", [], { sessionBaseVersion: -1 });
 
   expect(argsB.length).toBe(0); // did NOT spawn a second browser
   expect(b.port).toBe(a.port); // reused the same session/port
-  expect(searchProviderCalls).toBe(0); // an already-running window is never touched
+  expect(repeated).toEqual(b);
+  expect(checked).toEqual([b.ws]);
   expect(store.getLaunch("k1d0cd11")?.sessionBaseVersion).toBe(-1); // provisional before returning
   expect((launcherB as any).relays.has("k1d0cd11")).toBe(true); // restored only inside identity certification
+
+  const changedWs = `ws://127.0.0.1:${b.port}/devtools/browser/restarted`;
+  f.setWs(b.port, changedWs);
+  expect(await launcherB.start("k1d0cd11")).toEqual({ ws: changedWs, port: b.port });
+  expect(checked).toEqual([b.ws, changedWs]);
+  store.close();
+});
+
+test("reattach keeps a healthy browser open and retries failed search repair", async () => {
+  const store = seeded();
+  const f = fleet();
+  const first = newLauncher(store, f, []);
+  const opened = await first.start("k1d0cd11");
+  (first as any).closeRelay("k1d0cd11");
+
+  let attempts = 0;
+  const logs: string[] = [];
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true,
+    spawn: () => { throw new Error("reattach spawned a browser"); },
+    fetch: f.fetchFn,
+    ensureSearchProvider: async () => {
+      attempts++;
+      if (attempts === 1) throw new Error("settings unavailable");
+      return { status: "already-default", engine: "DuckDuckGo" };
+    },
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
+    ensureCookies: async () => { throw new Error("reattach injected cookies"); },
+    navigate: async () => { throw new Error("reattach navigated"); },
+    labelWindow: async () => { throw new Error("reattach labeled a window"); },
+    killPid: async () => {},
+    browserClose: async () => false,
+    cdpReadyTimeoutMs: 1000,
+    log: (message) => logs.push(message),
+  });
+
+  await launcher.reconcileOrphans();
+  expect(await launcher.start("k1d0cd11")).toEqual(opened);
+  expect(attempts).toBe(1);
+  expect(logs.some((message) => message.includes("search provider setup failed") && message.includes("continuing"))).toBe(true);
+  expect(await launcher.start("k1d0cd11")).toEqual(opened);
+  expect(attempts).toBe(2);
   store.close();
 });
 

@@ -606,6 +606,8 @@ export class Launcher {
   /** Full profile + launch generations certified by this manager process. */
   private certifiedLaunches = new Map<string, string>();
   private certificationsInFlight = new Map<string, Promise<boolean>>();
+  /** Successful search-provider checks keyed by profile and CDP websocket generation. */
+  private searchProviderWs = new Map<string, string>();
   /** Ports currently handed out, so the allocator never reuses a live one. */
   private liveReserved = new Set<number>();
   /**
@@ -1192,6 +1194,7 @@ export class Launcher {
               return await this.rejectUnsafeExistingLaunch(profileId, "live-browser relay restoration", error);
             }
           }
+          await this.ensureSearchProvider(profileId, currentWs);
           this.log(
             trackedProc
               ? `profile ${profileId} already running on port ${existing.debugPort}`
@@ -1370,20 +1373,7 @@ export class Launcher {
       // treats address-bar phrases as hostnames (https://<phrase>). Configure
       // a real provider before navigation, but never make search setup capable
       // of failing an otherwise healthy account launch.
-      if (this.ensureSearchProviderFn) {
-        try {
-          const result = await this.ensureSearchProviderFn(ws);
-          if (result.status === "configured") {
-            this.log(`${profileId}: configured ${result.engine} as the address-bar search provider`);
-          } else if (result.status === "already-default") {
-            this.log(`${profileId}: ${result.engine} is already the address-bar search provider`);
-          } else {
-            this.log(`${profileId}: kept existing address-bar search provider ${result.engine}`);
-          }
-        } catch (err) {
-          this.log(`search provider setup failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
-        }
-      }
+      await this.ensureSearchProvider(profileId, ws);
 
       // Label the window so the operator can tell which account this browser is
       // among many open profiles (the cue AdsPower's panel gave). Registered
@@ -1781,6 +1771,24 @@ export class Launcher {
     return adopted;
   }
 
+  private async ensureSearchProvider(profileId: string, ws: string): Promise<void> {
+    if (!this.ensureSearchProviderFn || this.searchProviderWs.get(profileId) === ws) return;
+
+    try {
+      const result = await this.ensureSearchProviderFn(ws);
+      this.searchProviderWs.set(profileId, ws);
+      if (result.status === "configured") {
+        this.log(`${profileId}: configured ${result.engine} as the address-bar search provider`);
+      } else if (result.status === "already-default") {
+        this.log(`${profileId}: ${result.engine} is already the address-bar search provider`);
+      } else {
+        this.log(`${profileId}: kept existing address-bar search provider ${result.engine}`);
+      }
+    } catch (err) {
+      this.log(`search provider setup failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
   /**
    * Release resources only if `launch` is still the profile's current launch
    * generation. PID, websocket and session-base fields may legitimately refresh
@@ -1804,6 +1812,7 @@ export class Launcher {
     this.procs.delete(profileId);
     this.verifiedExternal.delete(profileId);
     this.clearIdentityCertification(profileId);
+    this.searchProviderWs.delete(profileId);
     // Every successful call site has positively established that this exact
     // launch generation is dead. Cleaning here covers explicit stops, direct
     // window closes discovered by reconciliation, and failed-start rollback.
