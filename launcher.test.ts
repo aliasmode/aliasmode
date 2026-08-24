@@ -2828,7 +2828,7 @@ test("start() maps an unknown preparation failure to a fixed safe category", asy
     failure = error;
   }
 
-  expect(failure).toEqual(new BrowserLaunchError("preflight"));
+  expect(failure).toEqual(new BrowserLaunchError("profile_directory"));
   const publicOutput = `${failure}\n${logs.join("\n")}`;
   for (const secret of [rawFailure, dataRoot, "k1d0cd11"]) {
     expect(publicOutput).not.toContain(secret);
@@ -3266,7 +3266,7 @@ test("a fresh launch refuses to spawn while a leaked profile-dir holder survives
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("profile_directory"));
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
@@ -3337,7 +3337,7 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("profile_directory"));
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();

@@ -50,6 +50,7 @@ function needsProxyRelay(profile: Profile): boolean {
 export type BrowserLaunchFailure =
   | "preflight"
   | "mode_conflict"
+  | "profile_directory"
   | "relay_setup"
   | "process_spawn"
   | "cdp_readiness";
@@ -996,10 +997,10 @@ export class Launcher {
       try {
         holders = await this.findProfileDirHolderPidsFn(userDataDir);
       } catch {
-        throw new Error(`profile ${profileId}: profile directory holder scan failed; launch aborted`);
+        throw new BrowserLaunchError("profile_directory");
       }
       if (holders === null) {
-        throw new Error(`profile ${profileId}: profile directory holder scan was inconclusive; launch aborted`);
+        throw new BrowserLaunchError("profile_directory");
       }
       return holders;
     };
@@ -1023,7 +1024,7 @@ export class Launcher {
       const remaining = await scan();
       if (remaining.length === 0) return;
       if (Date.now() >= deadline) {
-        throw new Error(`profile ${profileId}: profile directory is still held after cleanup; launch aborted`);
+        throw new BrowserLaunchError("profile_directory");
       }
       await Bun.sleep(this.teardownPollMs);
     }
