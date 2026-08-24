@@ -314,6 +314,12 @@ jobs:
             }
           }
           if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
+          if (-not (Get-Process -Id $descriptor.desktopPid -ErrorAction SilentlyContinue)) {
+            throw "background desktop did not survive MCP disconnect"
+          }
+          if (-not (Test-Path $descriptorPath -PathType Leaf)) {
+            throw "runtime descriptor did not survive MCP disconnect"
+          }
 
           $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
           if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
