@@ -750,7 +750,9 @@ test("Cloud dirty monitor latches one follow-up capture while a capture is runni
   storageDirty[0]!();
   storageDirty[0]!();
   finishFirst();
-  await Bun.sleep(20);
+  for (let attempt = 0; attempt < 100 && captures < 2; attempt++) {
+    await Bun.sleep(5);
+  }
   expect(captures).toBe(2);
 
   await state.coordinator.close("profile1");
