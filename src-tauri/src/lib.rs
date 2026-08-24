@@ -58,6 +58,16 @@ fn packaged_node_package_version(root: &Path, package: &str) -> Result<String, B
         })
 }
 
+fn configured_local_mode(data_dir: &Path) -> bool {
+    fs::read(data_dir.join("config.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|config| {
+            config.get("version").and_then(|version| version.as_u64()) == Some(1)
+                && config.get("mode").and_then(|mode| mode.as_str()) == Some("local")
+        })
+}
+
 fn cli_compatible_windows_path(path: &Path) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     text.strip_prefix(r"\\?\UNC\")
@@ -68,8 +78,11 @@ fn cli_compatible_windows_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{background_requested, cli_compatible_windows_path};
-    use std::path::{Path, PathBuf};
+    use super::{background_requested, cli_compatible_windows_path, configured_local_mode};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn recognizes_only_the_explicit_background_switch() {
@@ -79,6 +92,26 @@ mod tests {
             "--background-worker"
         ]));
         assert!(!background_requested(["aliasmode.exe"]));
+    }
+
+    #[test]
+    fn recognizes_configured_local_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!configured_local_mode(dir.path()));
+        fs::write(
+            dir.path().join("config.json"),
+            br#"{"version":1,"mode":"local","localAnalytics":false}"#,
+        )
+        .unwrap();
+        assert!(configured_local_mode(dir.path()));
+        fs::write(dir.path().join("config.json"), br#"{"mode":"local"}"#).unwrap();
+        assert!(!configured_local_mode(dir.path()));
+        fs::write(
+            dir.path().join("config.json"),
+            br#"{"version":1,"mode":"cloud"}"#,
+        )
+        .unwrap();
+        assert!(!configured_local_mode(dir.path()));
     }
 
     #[test]
@@ -196,6 +229,9 @@ pub fn run() {
                 sidecar.pid(),
             )
             .map_err(boxed)?;
+            if configured_local_mode(&data_dir) {
+                runtime_descriptor.publish("local").map_err(boxed)?;
+            }
             app.manage(runtime_descriptor);
 
             let origin = format!("http://127.0.0.1:{port}");
