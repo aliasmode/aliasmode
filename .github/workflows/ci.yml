@@ -39,6 +39,22 @@ jobs:
           toolchain: 1.89
           components: rustfmt
       - run: bun install --frozen-lockfile
+      - name: Warm Bun baseline compiler cache
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $warm = Join-Path $env:USERPROFILE "aliasmode-bun-target"
+          Remove-Item $warm -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $warm | Out-Null
+          Set-Content (Join-Path $warm "entry.ts") "process.exit(0);"
+          Push-Location $warm
+          try {
+            bun build --compile --target=bun-windows-x64-baseline entry.ts --outfile warm.exe
+            if ($LASTEXITCODE -ne 0) { throw "Bun baseline compiler cache warm-up failed" }
+          } finally {
+            Pop-Location
+            Remove-Item $warm -Recurse -Force -ErrorAction SilentlyContinue
+          }
       - run: bun run desktop:prepare
       - run: bun test
       - run: bun run typecheck
