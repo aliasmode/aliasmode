@@ -218,6 +218,7 @@ function launchBackground(executable) {
     windowsHide: true,
   });
   child.unref();
+  return child;
 }
 
 async function readRuntimeDescriptor(path, version) {
@@ -239,7 +240,7 @@ export async function discoverRuntime(options = {}) {
   const descriptorPath = options.descriptorPath || defaultRuntimeDescriptorPath(options.env);
   const desktopExecutable = options.desktopExecutable || defaultDesktopExecutable(options.env);
   const deadline = Date.now() + (options.waitMs ?? STARTUP_WAIT_MS);
-  let launched = false;
+  let launched;
   let lastError = new Error("AliasMode runtime is not ready");
 
   while (Date.now() < deadline) {
@@ -252,10 +253,10 @@ export async function discoverRuntime(options = {}) {
       return { client, descriptor };
     } catch (error) {
       lastError = error instanceof Error ? error : lastError;
-      if (!launched) {
-        launchBackground(desktopExecutable);
-        launched = true;
+      if (launched?.exitCode !== null && launched?.exitCode !== undefined) {
+        throw new Error(`AliasMode desktop exited before runtime readiness with code ${launched.exitCode}`);
       }
+      if (!launched) launched = launchBackground(desktopExecutable);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
