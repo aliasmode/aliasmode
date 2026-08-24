@@ -229,9 +229,6 @@ pub fn run() {
                 sidecar.pid(),
             )
             .map_err(boxed)?;
-            if configured_local_mode(&data_dir) {
-                runtime_descriptor.publish("local").map_err(boxed)?;
-            }
             app.manage(runtime_descriptor);
 
             let origin = format!("http://127.0.0.1:{port}");
@@ -282,6 +279,11 @@ pub fn run() {
                 let _ = window.set_focus();
             } else if background {
                 window.hide()?;
+            }
+            if configured_local_mode(&data_dir) {
+                app.state::<runtime_descriptor::RuntimeDescriptorState>()
+                    .publish("local")
+                    .map_err(boxed)?;
             }
             tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
