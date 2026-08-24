@@ -18,7 +18,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
   const cargoLock = readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
-  const lockedVersion = cargoLock.match(/\[\[package\]\]\nname = "aliasmode-desktop"\nversion = "([^"]+)"/)?.[1];
+  const lockedVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "aliasmode-desktop"\r?\nversion = "([^"]+)"/)?.[1];
 
   expect(ALIASMODE_VERSION).toBe("0.1.0-beta.36");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
