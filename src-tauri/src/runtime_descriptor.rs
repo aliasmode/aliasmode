@@ -3,7 +3,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -28,6 +31,7 @@ pub struct RuntimeDescriptor {
 pub struct RuntimeDescriptorState {
     path: PathBuf,
     base: RuntimeDescriptor,
+    active: AtomicBool,
     write_lock: Mutex<()>,
 }
 
@@ -60,11 +64,19 @@ impl RuntimeDescriptorState {
                 readiness: String::new(),
                 created_at,
             },
+            active: AtomicBool::new(false),
             write_lock: Mutex::new(()),
         })
     }
 
+    pub fn activate(&self) {
+        self.active.store(true, Ordering::Release);
+    }
+
     pub fn publish(&self, readiness: &str) -> Result<(), String> {
+        if !self.active.load(Ordering::Acquire) {
+            return Err("runtime descriptor is not active".to_owned());
+        }
         if !matches!(
             readiness,
             "local" | "cloud_authenticated" | "sign_in_required"
@@ -199,6 +211,8 @@ mod tests {
         let first =
             RuntimeDescriptorState::new(dir.path(), "a".repeat(64), "c".repeat(64), 50400, 222)
                 .unwrap();
+        assert!(first.publish("local").is_err());
+        first.activate();
         first.publish("local").unwrap();
         let path = dir.path().join("agent-runtime.json");
         let local: RuntimeDescriptor =
@@ -215,6 +229,7 @@ mod tests {
         let replacement =
             RuntimeDescriptorState::new(dir.path(), "b".repeat(64), "d".repeat(64), 50401, 333)
                 .unwrap();
+        replacement.activate();
         replacement.publish("sign_in_required").unwrap();
         first.remove_owned().unwrap();
         assert!(path.is_file());
@@ -228,6 +243,7 @@ mod tests {
         let state =
             RuntimeDescriptorState::new(dir.path(), "c".repeat(64), "e".repeat(64), 50400, 222)
                 .unwrap();
+        state.activate();
         assert!(state.publish("starting").is_err());
         assert!(!dir.path().join("agent-runtime.json").exists());
     }

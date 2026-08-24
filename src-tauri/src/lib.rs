@@ -298,14 +298,13 @@ pub fn run() {
                     return;
                 }
             }
+            let runtime = app.state::<runtime_descriptor::RuntimeDescriptorState>();
+            runtime.activate();
             if app
                 .path()
                 .app_data_dir()
                 .is_ok_and(|data_dir| configured_local_mode(&data_dir))
-                && app
-                    .state::<runtime_descriptor::RuntimeDescriptorState>()
-                    .publish("local")
-                    .is_err()
+                && runtime.publish("local").is_err()
             {
                 app.exit(1);
             }
