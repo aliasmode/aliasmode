@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   cloudRuntimeConfiguration,
+  createCloudCrossDeviceFixtureHandler,
   createCloudRestoreFixtureHandler,
   dispatchReadSessionWorker,
   drainRemoteShutdown,
@@ -12,11 +13,12 @@ import {
   OFFICIAL_CLOUD_URL,
   parseCloudRestoreFixtureOptions,
   RemoteShutdownTimeoutError,
+  runCloudCrossDeviceAcceptance,
   runCompiledSidecarSmoke,
   runCloakpitImportCommand,
   selectedCloudUrl,
 } from "./cli.ts";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -33,6 +35,19 @@ const localMode = {
   mode: "local" as const,
   localAnalytics: false,
 };
+
+async function removeTemporaryRoot(path: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as { code?: string }).code !== "EBUSY" || attempt === 10) throw error;
+      Bun.gc(true);
+      await Bun.sleep(100);
+    }
+  }
+}
 
 async function freeLoopbackPort(): Promise<number> {
   const server = net.createServer();
@@ -509,6 +524,8 @@ test("Cloud restore fixture parses only a loopback port and deterministic mode",
     .toEqual({ port: 49152, mode: "healthy", initialRefresh: "seeded" });
   expect(parseCloudRestoreFixtureOptions(["--port", "49154", "--mode", "offline"]))
     .toEqual({ port: 49154, mode: "offline", initialRefresh: "seeded" });
+  expect(parseCloudRestoreFixtureOptions(["--port", "49155", "--mode", "cross-device"]))
+    .toEqual({ port: 49155, mode: "cross-device", initialRefresh: "seeded" });
   expect(parseCloudRestoreFixtureOptions([
     "--port", "49153", "--mode", "membership-revoked", "--initial-refresh", "rotated",
   ])).toEqual({ port: 49153, mode: "membership-revoked", initialRefresh: "rotated" });
@@ -517,6 +534,95 @@ test("Cloud restore fixture parses only a loopback port and deterministic mode",
   expect(() => parseCloudRestoreFixtureOptions([
     "--port", "49152", "--mode", "healthy", "--initial-refresh", "stale",
   ])).toThrow("initial refresh");
+});
+
+test("Cloud cross-device fixture requires exact device credential pairs and returns profile_open", async () => {
+  const handler = createCloudCrossDeviceFixtureHandler();
+  const open = (
+    accessToken: string,
+    deviceCredential: string,
+    deviceId: string,
+  ) => handler(new Request("http://127.0.0.1:49152/v1/profiles/aliasmode-cross-device-profile/open", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "x-aliasmode-device": deviceCredential,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ deviceId }),
+  }));
+
+  expect((await open(
+    "aliasmode-cross-device-access-a",
+    "aliasmode-cross-device-credential-b",
+    "fixture-cross-device-a",
+  )).status).toBe(401);
+  expect((await open(
+    "aliasmode-cross-device-access-b",
+    "aliasmode-cross-device-credential-a",
+    "fixture-cross-device-b",
+  )).status).toBe(401);
+  expect((await open(
+    "aliasmode-cross-device-access-a",
+    "aliasmode-cross-device-credential-a",
+    "fixture-cross-device-b",
+  )).status).toBe(400);
+
+  const openedA = await open(
+    "aliasmode-cross-device-access-a",
+    "aliasmode-cross-device-credential-a",
+    "fixture-cross-device-a",
+  );
+  expect(openedA.status).toBe(200);
+  expect(await openedA.json()).toMatchObject({ ok: true, baseVersion: 37, activeOpens: [] });
+
+  const rejectedB = await open(
+    "aliasmode-cross-device-access-b",
+    "aliasmode-cross-device-credential-b",
+    "fixture-cross-device-b",
+  );
+  expect(rejectedB.status).toBe(409);
+  expect(await rejectedB.json()).toMatchObject({ ok: false, error: { code: "profile_open" } });
+
+  const fixtureState = await handler(new Request("http://127.0.0.1:49152/control/state"));
+  expect(await fixtureState.json()).toMatchObject({
+    version: 37,
+    activeDevice: "a",
+    counters: { open: { a: 1, b: 1 }, profileOpen: 1 },
+  });
+});
+
+test("Cloud cross-device acceptance preserves conflicts and blocks ambiguous local reopen", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-cross-device-acceptance-"));
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: createCloudRestoreFixtureHandler("cross-device"),
+  });
+  try {
+    const state = await runCloudCrossDeviceAcceptance(
+      statePaths(root),
+      `http://127.0.0.1:${server.port}`,
+    );
+    expect(state).toEqual({
+      ok: true,
+      version: 42,
+      activeDevice: null,
+      counters: {
+        open: { a: 3, b: 3 },
+        close: { a: 4, b: 2 },
+        heartbeat: { a: 0, b: 0 },
+        abandon: { a: 0, b: 0 },
+        acceptedCloses: 4,
+        conflicts: 1,
+        profileOpen: 1,
+        droppedResponses: 2,
+      },
+    });
+  } finally {
+    await server.stop(true);
+    await removeTemporaryRoot(root);
+  }
 });
 
 test("Cloud restore fixture accepts only its exact refresh and device credentials", async () => {

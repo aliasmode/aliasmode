@@ -208,6 +208,18 @@ jobs:
           ALIASMODE_LIVE_PROXY_IP: ${{ secrets.ALIASMODE_LIVE_PROXY_IP }}
         run: |
           $ErrorActionPreference = "Stop"
+          $liveProxyEnvironmentNames = @(
+            "ALIASMODE_LIVE_PROXY_HOST",
+            "ALIASMODE_LIVE_PROXY_PORT",
+            "ALIASMODE_LIVE_PROXY_USER",
+            "ALIASMODE_LIVE_PROXY_PASS",
+            "ALIASMODE_LIVE_PROXY_IP"
+          )
+          $savedLiveProxyEnvironment = @{}
+          foreach ($name in $liveProxyEnvironmentNames) {
+            $savedLiveProxyEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+            [Environment]::SetEnvironmentVariable($name, $null, "Process")
+          }
           $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode installed"
           Remove-Item $installRoot -Recurse -Force -ErrorAction SilentlyContinue
           if (Test-Path $installRoot) { throw "installed acceptance root was not clean" }
@@ -625,11 +637,13 @@ jobs:
               if ($debugPort -le 0) {
                 $activePortPath = Join-Path $webviewRoot "EBWebView\DevToolsActivePort"
                 if (Test-Path $activePortPath -PathType Leaf) {
-                  $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
-                  $parsedPort = 0
-                  if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
-                    $debugPort = $parsedPort
-                  }
+                  try {
+                    $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
+                    $parsedPort = 0
+                    if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
+                      $debugPort = $parsedPort
+                    }
+                  } catch {}
                 }
               }
               if ($debugPort -gt 0) {
@@ -893,6 +907,38 @@ jobs:
             Stop-CloudRestoreFixture $fixtureProcess
             $fixtureProcess = $null
             Write-Host "installed Cloud session acceptance stage membership_revoked"
+
+            $fixtureProcess = Start-CloudRestoreFixture "cross-device" "seeded"
+            $crossDeviceRoot = Join-Path $cloudAcceptanceRoot "cross-device"
+            if (Test-Path $crossDeviceRoot) { throw "cross-device acceptance state root was not clean" }
+            & $sidecars[0].FullName __cloud-cross-device-acceptance `
+              --fixture-url $fixtureUrl `
+              --state-root $crossDeviceRoot
+            if ($LASTEXITCODE -ne 0) {
+              throw "installed cross-device Cloud acceptance exited with code $LASTEXITCODE"
+            }
+            $crossDeviceState = Invoke-RestMethod "$fixtureUrl/control/state" -TimeoutSec 5
+            if ($crossDeviceState.version -ne 42 -or $null -ne $crossDeviceState.activeDevice) {
+              throw "cross-device fixture ended in an unexpected profile state"
+            }
+            foreach ($device in @("a", "b")) {
+              $expectedClose = if ($device -eq "a") { 4 } else { 2 }
+              if ($crossDeviceState.counters.open.$device -ne 3 -or
+                  $crossDeviceState.counters.close.$device -ne $expectedClose -or
+                  $crossDeviceState.counters.heartbeat.$device -ne 0 -or
+                  $crossDeviceState.counters.abandon.$device -ne 0) {
+                throw "cross-device fixture request counters were not exact for device $device"
+              }
+            }
+            if ($crossDeviceState.counters.acceptedCloses -ne 4 -or
+                $crossDeviceState.counters.conflicts -ne 1 -or
+                $crossDeviceState.counters.profileOpen -ne 1 -or
+                $crossDeviceState.counters.droppedResponses -ne 2) {
+              throw "cross-device fixture outcome counters were not exact"
+            }
+            Stop-CloudRestoreFixture $fixtureProcess
+            $fixtureProcess = $null
+            Write-Host "installed Cloud session acceptance stage cross_device"
           } catch {
             $cloudAcceptanceFailure = $_
           } finally {
@@ -971,6 +1017,9 @@ jobs:
             throw "installed deterministic proxy mismatch smoke exited with code $LASTEXITCODE"
           }
 
+          foreach ($name in $liveProxyEnvironmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $savedLiveProxyEnvironment[$name], "Process")
+          }
           if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
             Write-Host "Installed headful Cloud proxy smoke skipped: no temporary test proxy configured"
             exit 0

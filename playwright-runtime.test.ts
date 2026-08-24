@@ -648,6 +648,7 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
       };
       const livePage = {
         url: () => "https://live.example/dashboard",
+        async goto() { throw new Error("live user page was navigated"); },
         async evaluate() {
           return { origin: "https://live.example", localStorage: storage["https://live.example"] };
         },
@@ -658,14 +659,19 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
       let browserDetached = false;
       const context = {
         pages: () => hiddenPage ? [livePage, hiddenPage] : [livePage],
+        async newPage() { throw new Error("capture used context.newPage"); },
         async route(_url, handler) { routeHandler = handler; },
         async unroute() { routeHandler = undefined; },
         async storageState() { throw new Error("capture used mutating storageState"); },
-        async cookies() { return []; },
+        async cookies(...urls) { if (urls.length) throw new Error("capture cookies were targeted"); return []; },
         async newCDPSession(page) {
           if (page !== hiddenPage) throw new Error("wrong storage CDP target");
           return {
             async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
               if (["Network.enable", "Network.setBypassServiceWorker", "DOMStorage.enable"].includes(method)) return {};
               if (method === "DOMStorage.getDOMStorageItems") {
                 return { entries: (storage[params.storageId.securityOrigin] ?? []).map(({ name, value }) => [name, value]) };
@@ -678,6 +684,10 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
       };
       const browserCdp = {
         async send(method, params) {
+          if (method === "Browser.getVersion") return { product: "Chrome/146.0.7680.153" };
+          if (method === "Target.getTargetInfo") return { targetInfo: { targetId: params.targetId, type: "other", url: "about:blank#__aliasmode_hidden_capture__" } };
+          if (method === "Browser.getWindowForTarget") throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
+          if (method === "Target.closeTarget") { hiddenPage = undefined; return { success: true }; }
           if (method !== "Target.createTarget" || params.url !== "about:blank#__aliasmode_hidden_capture__"
             || params.browserContextId !== undefined || params.background !== true || params.hidden !== true
             || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== "1") {
@@ -727,7 +737,228 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
   }
 });
 
-bunAsNodeTest("worker reads closed Telegram passcode storage through a hidden target", async () => {
+bunAsNodeTest("worker proves hidden target identity through marker collisions and cleans independently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-hidden-proof-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      import { join } from "node:path";
+      const root = ${JSON.stringify(root)};
+      let mode;
+      let hiddenPage;
+      let collisionPage;
+      let routeHandler;
+      let browserSessionRequested = false;
+      let bypassed = false;
+      let collisionDetached = false;
+      let collisionNavigated = false;
+      let collisionClosed = false;
+      let targetDetached = false;
+      let pageClosed = false;
+      let targetClosed = false;
+      let browserDetached = false;
+      let creates = 0;
+      let navigations = 0;
+      let fulfillments = 0;
+      const commands = [];
+      const note = (value) => appendFile(join(root, mode + ".log"), value + "\\n");
+      const cleanupFailure = () => mode === "cleanup";
+      const context = {
+        pages: () => [collisionPage, hiddenPage].filter(Boolean),
+        async newPage() { await note("newPage"); throw new Error("capture used context.newPage"); },
+        async cookies(...urls) { if (urls.length) throw new Error("capture cookies were targeted"); return []; },
+        async storageState() { throw new Error("capture used storageState"); },
+        async route(_url, handler) {
+          await note("route");
+          if (commands.at(-1) !== "Browser.getWindowForTarget") throw new Error("route preceded hidden-target proof");
+          routeHandler = handler;
+        },
+        async unroute() { routeHandler = undefined; },
+        async newCDPSession(page) {
+          if (page === collisionPage) return {
+            async send(method, params) {
+              if (method !== "Target.getTargetInfo" || params !== undefined) throw new Error("collision target was used");
+              return { targetInfo: { targetId: "visible-target", type: "page" } };
+            },
+            async detach() { collisionDetached = true; await note("collision-detach"); },
+          };
+          if (page !== hiddenPage) throw new Error("wrong hidden page");
+          let identityProved = false;
+          return {
+            async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                identityProved = true;
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
+              if (!identityProved) throw new Error("hidden target used before identity proof");
+              if (method === "Network.enable" || method === "DOMStorage.enable") return {};
+              if (method === "Network.setBypassServiceWorker") { bypassed = params?.bypass === true; return {}; }
+              if (method === "DOMStorage.getDOMStorageItems") {
+                const origin = params.storageId.securityOrigin;
+                return { entries: [["token", origin]] };
+              }
+              throw new Error("unexpected target CDP method " + method);
+            },
+            async detach() {
+              targetDetached = true;
+              await note("target-detach");
+              if (cleanupFailure()) throw new Error("target detach failed");
+            },
+          };
+        },
+      };
+      const browserCdp = {
+        async send(method, params) {
+          if (["Browser.getVersion", "Target.createTarget", "Target.getTargetInfo", "Browser.getWindowForTarget"].includes(method)) commands.push(method);
+          if (method === "Browser.getVersion") {
+            if (mode === "unsupported") return { product: "Chrome/136.0.7103.0" };
+            if (mode === "unparseable") return { product: "Chrome/dev" };
+            return { product: "Chromium/146.0.7680.153" };
+          }
+          if (method === "Target.createTarget") {
+            creates++;
+            await note("create");
+            if (commands.slice(0, 2).join(",") !== "Browser.getVersion,Target.createTarget"
+              || params?.url !== "about:blank#__aliasmode_hidden_capture__"
+              || params?.background !== true || params?.hidden !== true || params?.browserContextId !== undefined) {
+              throw new Error("wrong hidden target command");
+            }
+            if (mode === "supported") collisionPage = {
+              currentUrl: params.url,
+              url() { return this.currentUrl; },
+              async goto() { collisionNavigated = true; await note("collision-goto"); },
+              async close() { collisionClosed = true; await note("collision-close"); },
+            };
+            hiddenPage = {
+              currentUrl: params.url,
+              url() { return this.currentUrl; },
+              async goto(url) {
+                navigations++;
+                await note("goto");
+                if (commands.at(-1) !== "Browser.getWindowForTarget") throw new Error("navigation preceded hidden-target proof");
+                this.currentUrl = url;
+                await routeHandler?.({ fulfill: async () => { fulfillments++; } });
+              },
+              async close() {
+                pageClosed = true;
+                await note("page-close");
+                if (cleanupFailure()) throw new Error("page close failed");
+                hiddenPage = undefined;
+              },
+            };
+            return { targetId: "hidden-target" };
+          }
+          if (method === "Target.getTargetInfo") {
+            if (mode === "target-error") throw new Error("target verification unavailable");
+            return { targetInfo: {
+              targetId: mode === "wrong-id" ? "other-target" : params.targetId,
+              type: mode === "wrong-type" ? "page" : "other",
+              url: mode === "wrong-url" ? "about:blank#other" : "about:blank#__aliasmode_hidden_capture__",
+            } };
+          }
+          if (method === "Browser.getWindowForTarget") {
+            if (mode === "attached-window") return { windowId: 17 };
+            if (mode === "window-error") throw new Error("Protocol error (Browser.getWindowForTarget): Permission denied");
+            const prefix = mode === "supported" ? "cdpSession.send: " : "";
+            throw new Error(prefix + "Protocol error (Browser.getWindowForTarget): Browser window not found");
+          }
+          if (method === "Target.closeTarget") {
+            targetClosed = true;
+            hiddenPage = undefined;
+            await note("target-close");
+            if (cleanupFailure()) throw new Error("target close failed");
+            return { success: true };
+          }
+          throw new Error("unexpected browser CDP method " + method);
+        },
+        async detach() {
+          browserDetached = true;
+          await note("browser-detach");
+          if (cleanupFailure()) throw new Error("browser detach failed");
+        },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        mode = endpoint.split("//")[1];
+        return {
+          contexts: () => [context],
+          async newBrowserCDPSession() {
+            browserSessionRequested = true;
+            if (mode === "empty") throw new Error("empty capture created a browser CDP session");
+            return browserCdp;
+          },
+          async close() {
+            if (mode === "empty") {
+              if (browserSessionRequested || commands.length) throw new Error("empty capture created a target");
+              return;
+            }
+            if (["supported", "cleanup"].includes(mode)) {
+              const expectedNavigations = mode === "supported" ? 2 : 1;
+              if (creates !== 1 || navigations !== expectedNavigations || fulfillments !== expectedNavigations
+                || !bypassed || routeHandler || hiddenPage || !targetDetached || !pageClosed || !targetClosed || !browserDetached
+                || (mode === "supported" && (!collisionDetached || collisionNavigated || collisionClosed
+                  || collisionPage?.url() !== "about:blank#__aliasmode_hidden_capture__"))) {
+                throw new Error("hidden capture target lifecycle was incomplete");
+              }
+            }
+          },
+        };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://supported",
+      captureSeed: { origins: ["https://a.example", "https://b.example"] },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
+      cookies: [],
+      origins: ["https://a.example", "https://b.example"].map((origin) => ({
+        origin, localStorage: [{ name: "token", value: origin }],
+      })),
+    });
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://empty",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({ cookies: [], origins: [] });
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://cleanup",
+      captureSeed: { origins: ["https://closed.example"] },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
+      cookies: [],
+      origins: [{ origin: "https://closed.example", localStorage: [{ name: "token", value: "https://closed.example" }] }],
+    });
+
+    const modes = [
+      "unsupported", "unparseable", "wrong-id", "wrong-type", "wrong-url",
+      "target-error", "attached-window", "window-error",
+    ];
+    for (const mode of modes) {
+      const error = await runPlaywrightWorker("session-capture", {
+        endpoint: `ws://${mode}`,
+        captureSeed: { origins: ["https://closed.example"] },
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(error).toMatchObject({ code: "operation_failed" });
+      const logFile = Bun.file(join(root, `${mode}.log`));
+      const events = await logFile.exists() ? (await logFile.text()).trim().split("\n") : [];
+      if (["unsupported", "unparseable"].includes(mode)) expect(events).not.toContain("create");
+      else {
+        expect(events).toContain("create");
+        expect(events).toContain("target-close");
+      }
+      expect(events).not.toContain("route");
+      expect(events).not.toContain("goto");
+      expect(events).not.toContain("newPage");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker preserves Telegram direct-CDP allowlists through a hidden target", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-closed-telegram-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
@@ -751,6 +982,10 @@ bunAsNodeTest("worker reads closed Telegram passcode storage through a hidden ta
           if (page !== hiddenPage) throw new Error("wrong storage CDP target");
           return {
             async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
               if (["Network.enable", "Network.setBypassServiceWorker", "DOMStorage.enable", "IndexedDB.enable"].includes(method)) return {};
               if (method === "DOMStorage.getDOMStorageItems") return { entries: [["theme", "dark"]] };
               if (method === "IndexedDB.requestDatabaseNames") return { databaseNames: ["cache-db", "tt-passcode"] };
@@ -758,7 +993,7 @@ bunAsNodeTest("worker reads closed Telegram passcode storage through a hidden ta
                 databaseWithObjectStores: {
                   name: params.databaseName,
                   version: 1,
-                  objectStores: [{ name: "store", keyPath: { type: "null" }, autoIncrement: false, indexes: [] }],
+                  objectStores: ["store", "cache"].map((name) => ({ name, keyPath: { type: "null" }, autoIncrement: false, indexes: [] })),
                 },
               };
               if (method === "IndexedDB.requestData") return {
@@ -779,6 +1014,10 @@ bunAsNodeTest("worker reads closed Telegram passcode storage through a hidden ta
       };
       const browserCdp = {
         async send(method, params) {
+          if (method === "Browser.getVersion") return { product: "Chrome/146.0.7680.153" };
+          if (method === "Target.getTargetInfo") return { targetInfo: { targetId: params.targetId, type: "other", url: "about:blank#__aliasmode_hidden_capture__" } };
+          if (method === "Browser.getWindowForTarget") throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
+          if (method === "Target.closeTarget") { hiddenPage = undefined; return { success: true }; }
           if (method !== "Target.createTarget" || params.url !== "about:blank#__aliasmode_hidden_capture__"
             || params.browserContextId !== undefined || params.background !== true || params.hidden !== true
             || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== "1") {
@@ -872,7 +1111,11 @@ bunAsNodeTest("worker falls back safely when a live page changes origin during c
           };
           if (page !== hiddenPage) throw new Error("wrong storage CDP target");
           return {
-            async send(method) {
+            async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
               if (["Network.enable", "Network.setBypassServiceWorker", "DOMStorage.enable"].includes(method)) return {};
               if (method === "DOMStorage.getDOMStorageItems") return { entries: [["safe", "fallback"]] };
               throw new Error("unexpected storage CDP method " + method);
@@ -885,6 +1128,10 @@ bunAsNodeTest("worker falls back safely when a live page changes origin during c
       };
       const browserCdp = {
         async send(method, params) {
+          if (method === "Browser.getVersion") return { product: "Chrome/146.0.7680.153" };
+          if (method === "Target.getTargetInfo") return { targetInfo: { targetId: params.targetId, type: "other", url: "about:blank#__aliasmode_hidden_capture__" } };
+          if (method === "Browser.getWindowForTarget") throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
+          if (method === "Target.closeTarget") { hiddenPage = undefined; return { success: true }; }
           if (method !== "Target.createTarget" || params.browserContextId !== undefined
             || params.background !== true || params.hidden !== true
             || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== "1") {
