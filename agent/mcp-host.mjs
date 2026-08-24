@@ -277,15 +277,15 @@ export async function createAliasModeMcp(options = {}) {
   return { server, close };
 }
 
-function sanitizeEnvironment() {
+export function sanitizeEnvironment(env = process.env) {
   const allowed = new Set([
     "APPDATA", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH",
     "ALIASMODE_APP_VERSION", "ALIASMODE_DESKTOP_EXE", "ALIASMODE_PARENT_WATCH_FD",
     "ALIASMODE_RUNTIME_DESCRIPTOR",
     "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
   ]);
-  for (const key of Object.keys(process.env)) {
-    if (!allowed.has(key)) delete process.env[key];
+  for (const key of Object.keys(env)) {
+    if (!allowed.has(key.toUpperCase())) delete env[key];
   }
 }
 

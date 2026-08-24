@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createAliasModeMcp } from "./mcp-host.mjs";
+import { createAliasModeMcp, sanitizeEnvironment } from "./mcp-host.mjs";
 
 class FakeRuntime {
   events: string[] = [];
@@ -72,6 +72,18 @@ class FakePlaywright {
     this.tools = [];
   }
 }
+
+test("MCP host preserves Windows environment keys case-insensitively", () => {
+  const env: Record<string, string> = {
+    APPDATA: "appdata",
+    Path: "system path",
+    TEMP: "temp",
+    ALIASMODE_LIVE_PROXY_PASS: "secret",
+    GITHUB_TOKEN: "secret",
+  };
+  sanitizeEnvironment(env);
+  expect(env).toEqual({ APPDATA: "appdata", Path: "system path", TEMP: "temp" });
+});
 
 test("MCP host adds Playwright tools after selection and uses safe close", async () => {
   const runtime = new FakeRuntime();
