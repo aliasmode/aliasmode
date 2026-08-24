@@ -58,6 +58,27 @@ enum CleanupAction {
     Restart,
 }
 
+pub(crate) async fn graceful_sidecar_cleanup(sidecar: &SidecarSupervisor) -> Result<(), String> {
+    sidecar.request_shutdown()?;
+    sidecar.wait_for_shutdown().await
+}
+
+pub(crate) fn exit_after_cleanup_failure(
+    app: AppHandle,
+    sidecar: &SidecarSupervisor,
+    error: String,
+) {
+    let _ = sidecar.kill_owned();
+    app.dialog()
+        .message(format!(
+            "AliasMode could not confirm safe browser cleanup. {error}"
+        ))
+        .title("AliasMode shutdown failed")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(1));
+}
+
 fn finish_after_cleanup(
     app: AppHandle,
     window: WebviewWindow,
@@ -66,26 +87,12 @@ fn finish_after_cleanup(
 ) {
     let _ = window.hide();
     tauri::async_runtime::spawn(async move {
-        let result = match sidecar.request_shutdown() {
-            Ok(()) => sidecar.wait_for_shutdown().await,
-            Err(error) => Err(error),
-        };
-        match result {
+        match graceful_sidecar_cleanup(&sidecar).await {
             Ok(()) => match action {
                 CleanupAction::Exit => app.exit(0),
                 CleanupAction::Restart => app.request_restart(),
             },
-            Err(error) => {
-                let _ = sidecar.kill_owned();
-                app.dialog()
-                    .message(format!(
-                        "AliasMode could not confirm safe browser cleanup. {error}"
-                    ))
-                    .title("AliasMode shutdown failed")
-                    .kind(MessageDialogKind::Error)
-                    .buttons(MessageDialogButtons::Ok)
-                    .show(move |_| app.exit(1));
-            }
+            Err(error) => exit_after_cleanup_failure(app, &sidecar, error),
         }
     });
 }

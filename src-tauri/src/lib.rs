@@ -211,6 +211,7 @@ pub fn run() {
     let import_request = parse_cloakpit_import_args(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
         .manage(PendingFocus::default())
+        .manage(releases::UpdateCoordinator::default())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
@@ -222,12 +223,14 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             credential_get,
             credential_set,
             credential_delete,
             shutdown::restart_after_mode_change,
+            releases::check_for_updates,
+            releases::update_now,
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
@@ -312,7 +315,8 @@ pub fn run() {
                     .local(false)
                     .window("main")
                     .remote(format!("{origin}/*"))
-                    .permission("allow-credential-bridge"),
+                    .permission("allow-credential-bridge")
+                    .permission("allow-update-bridge"),
             ) {
                 let _ = sidecar.kill_owned();
                 return Err(error.into());
@@ -364,7 +368,6 @@ pub fn run() {
             if app.state::<PendingFocus>().0.swap(false, Ordering::AcqRel) {
                 let _ = window.set_focus();
             }
-            tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
         })
         .build(tauri::generate_context!())

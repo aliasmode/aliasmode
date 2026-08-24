@@ -1,6 +1,6 @@
 {
   "name": "aliasmode",
-  "version": "0.1.0-beta.35",
+  "version": "0.1.0-beta.36",
   "description": "Local-first browser profile manager with optional cloud synchronization",
   "module": "cli.ts",
   "type": "module",
@@ -12,7 +12,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "desktop:prepare": "bun scripts/prepare-windows-bundle.ts",
-    "desktop:build:nsis": "bun run desktop:prepare && tauri build --bundles nsis",
+    "desktop:build:nsis": "bun run desktop:prepare && tauri build --bundles nsis --config src-tauri/tauri.unsigned.conf.json",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
