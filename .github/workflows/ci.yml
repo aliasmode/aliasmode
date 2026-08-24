@@ -289,8 +289,11 @@ jobs:
             if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
               throw "MCP host did not launch AliasMode in background mode"
             }
+            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AliasModeWindow { [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr handle); }'
             $hiddenApp = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
-            if ($hiddenApp.MainWindowHandle -ne 0) { throw "background AliasMode exposed its main window" }
+            if ([AliasModeWindow]::IsWindowVisible($hiddenApp.MainWindowHandle)) {
+              throw "background AliasMode exposed its main window"
+            }
           } finally {
             $mcp.StandardInput.Close()
             if (-not $mcp.WaitForExit(15000)) {
@@ -335,11 +338,13 @@ jobs:
                 Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
                 Select-Object -First 1
               if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
-              if ($sidecarPid -and $app.MainWindowHandle -ne 0) { break }
+              if ($sidecarPid -and [AliasModeWindow]::IsWindowVisible($app.MainWindowHandle)) { break }
               Start-Sleep -Milliseconds 500
             }
             if (-not $sidecarPid) { throw "installed desktop did not start its packaged sidecar" }
-            if ($app.MainWindowHandle -eq 0) { throw "installed desktop did not create its main window" }
+            if (-not [AliasModeWindow]::IsWindowVisible($app.MainWindowHandle)) {
+              throw "installed desktop did not show its main window"
+            }
             Start-Sleep -Seconds 2
             $app.Refresh()
             if ($app.HasExited -or -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue)) {
