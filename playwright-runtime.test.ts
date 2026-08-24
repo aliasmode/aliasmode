@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -260,6 +261,98 @@ bunAsNodeTest("worker retries until the persistent context appears without creat
       runtimeRoot: root,
       timeoutMs: 5_000,
     })).toBe("delayed-context");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("search provider uses a standalone headless profile and closes it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-search-provider-headless-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let launched = false;
+      let closed = false;
+      process.on("beforeExit", () => {
+        if (launched && !closed) process.exitCode = 9;
+      });
+      export const chromium = {
+        async connectOverCDP() { throw new Error("search provider attached to a live browser"); },
+        async launchPersistentContext(userDataDir, options) {
+          launched = true;
+          const mode = userDataDir.split("/").at(-1);
+          if (!options?.executablePath.endsWith("/cloakbrowser.exe")
+            || options?.headless !== true
+            || !options.args.includes("--no-first-run")
+            || !options.args.includes("--no-default-browser-check")
+            || options.args.some((arg) => arg.startsWith("--load-extension=")
+              || arg.startsWith("--disable-extensions-except="))) {
+            throw new Error("wrong headless search launch");
+          }
+          const page = {
+            async goto(url) {
+              if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
+            },
+            async evaluate() {
+              if (mode === "failure") throw new Error("settings unavailable");
+              return mode === "configured"
+                ? { status: "configured", engine: "DuckDuckGo" }
+                : { status: "already-default", engine: "DuckDuckGo" };
+            },
+          };
+          return {
+            pages: () => [page],
+            async newPage() { throw new Error("initial headless page was ignored"); },
+            async newBrowserCDPSession() { throw new Error("hidden target was created"); },
+            async close() { closed = true; },
+          };
+        },
+      };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const executablePath = join(root, "cloakbrowser.exe");
+    const executableContents = "approved CloakBrowser";
+    await writeFile(executablePath, executableContents);
+    const executableSha256 = createHash("sha256")
+      .update(executableContents)
+      .digest("hex");
+    await expect(runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256,
+      userDataDir: "C:/Profiles/configured",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
+      status: "configured",
+      engine: "DuckDuckGo",
+    });
+    await expect(runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256,
+      userDataDir: "C:/Profiles/existing",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
+      status: "already-default",
+      engine: "DuckDuckGo",
+    });
+    const changedBinary = await runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256: "0".repeat(64),
+      userDataDir: "C:/Profiles/configured",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
+    expect(changedBinary).toMatchObject({ code: "operation_failed" });
+    const failure = await runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256,
+      userDataDir: "C:/Profiles/failure",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
+    expect(failure).toMatchObject({ code: "operation_failed" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

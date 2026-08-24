@@ -237,6 +237,7 @@ test("Windows window acceptance preserves native minimize state and selects only
   await exerciseWindowsWindowAcceptance({
     profileIds: ["first", "second"],
     async open(profileId) { events.push(`open:${profileId}`); },
+    async verifySearchProvider(profileId) { events.push(`search:${profileId}`); },
     async close(profileId) { events.push(`close:${profileId}`); },
     async nativeWindows() {
       return {
@@ -281,6 +282,8 @@ test("Windows window acceptance preserves native minimize state and selects only
   expect(events).toEqual([
     "open:first",
     "open:second",
+    "search:first",
+    "search:second",
     "targets:first:page-1",
     "targets:second:page-1",
     "minimize:first",

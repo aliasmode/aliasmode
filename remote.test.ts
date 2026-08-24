@@ -1632,7 +1632,7 @@ test("reclaimSurvivors stops and releases a survivor when the hub advanced past 
   expect(hub.calls.some((c) => c.startsWith("putSession"))).toBe(false);
 });
 
-test("reclaimSurvivors stops and releases when identity verification fails", async () => {
+test("reclaimSurvivors stops an unstamped browser rejected by identity verification", async () => {
   const hub = fakeHub();
   let sessionReads = 0;
   hub.getSession = async () => { sessionReads++; return null; };
@@ -1642,10 +1642,13 @@ test("reclaimSurvivors stops and releases when identity verification fails", asy
   const coord = new RemoteCoordinator({
     hub,
     launcher: {
-      async start() { throw new Error("Browser identity certification failed"); },
+      async start() { throw new Error("survivor start compatibility path was used"); },
       async stop(id: string) { store.clearLaunch(id); return true; },
-      async active() { return true; },
+      async active() { throw new Error("raw active exposed an unstamped survivor"); },
       async navigate() {},
+      async verifyRunningIdentity() {
+        throw new Error("safe search setup was not attempted");
+      },
     },
     store,
     readSession: async () => { throw new Error("must not read browser session"); },
@@ -1659,7 +1662,7 @@ test("reclaimSurvivors stops and releases when identity verification fails", asy
   expect(sessionReads).toBe(0);
   expect(hub.locks.has("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect(logs.some((message) => message.includes("identity certification failed"))).toBe(true);
+  expect(logs.some((message) => message.includes("safe search setup was not attempted"))).toBe(true);
   store.close();
 });
 

@@ -1,3 +1,5 @@
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -32,6 +34,12 @@ function typed(code, details) {
   error.code = code;
   if (details) error.details = details;
   return error;
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 function sessionError(operation, outcome = "failed") {
@@ -455,17 +463,15 @@ async function collectTelegramIndexedDB(cdp, origin) {
   return databases;
 }
 
-async function createReadOnlyStorageReader(browser, context) {
+async function createHiddenPage(browser, context, marker) {
   if (typeof context.newCDPSession !== "function" || typeof browser.newBrowserCDPSession !== "function") {
-    throw new Error("CDP storage capture is unavailable");
+    throw new Error("hidden page target is unavailable");
   }
 
   const browserCdp = await browser.newBrowserCDPSession();
-  const marker = "about:blank#__aliasmode_hidden_capture__";
   let targetId;
   let page;
   let cdp;
-  let ordinal = 0;
   const close = async () => {
     await cdp?.detach().catch(() => {});
     await page?.close().catch(() => {});
@@ -534,7 +540,22 @@ async function createReadOnlyStorageReader(browser, context) {
       if (previousAttachToOther === undefined) delete process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
       else process.env.PW_CHROMIUM_ATTACH_TO_OTHER = previousAttachToOther;
     }
-    if (!page || !cdp) throw new Error("hidden storage target is unavailable");
+    if (!page || !cdp) throw new Error("hidden page target is unavailable");
+  } catch (error) {
+    await close();
+    throw error;
+  }
+
+  return { page, cdp, close };
+}
+
+async function createReadOnlyStorageReader(browser, context) {
+  const { page, cdp, close } = await createHiddenPage(
+    browser,
+    context,
+    "about:blank#__aliasmode_hidden_capture__",
+  );
+  try {
     await cdp.send("Network.enable");
     await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     await cdp.send("DOMStorage.enable");
@@ -543,6 +564,7 @@ async function createReadOnlyStorageReader(browser, context) {
     throw error;
   }
 
+  let ordinal = 0;
   return {
     async read(origin) {
       const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
@@ -716,56 +738,156 @@ async function restoreSession(browser, context, payload) {
   return null;
 }
 
-async function searchProvider(context) {
-  const page = await context.newPage();
+async function searchProvider(chromium, payload) {
+  if (
+    typeof payload.executablePath !== "string"
+    || !payload.executablePath
+    || typeof payload.executableSha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(payload.executableSha256)
+    || typeof payload.userDataDir !== "string"
+    || !payload.userDataDir
+  ) throw typed("invalid_request");
+
+  if (await sha256File(payload.executablePath) !== payload.executableSha256) {
+    throw new Error("approved CloakBrowser binary changed before search setup");
+  }
+  const context = await chromium.launchPersistentContext(payload.userDataDir, {
+    executablePath: payload.executablePath,
+    headless: true,
+    args: ["--no-first-run", "--no-default-browser-check"],
+    timeout: Math.max(1, Math.min(Number(payload.launchTimeoutMs) || 20_000, 120_000)),
+  });
   try {
+    const page = context.pages()[0] || await context.newPage();
     await page.goto("chrome://settings/searchEngines", { waitUntil: "domcontentloaded", timeout: 10_000 });
     return await page.evaluate(async () => {
       const cr = await import("chrome://resources/js/cr.js");
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const engines = async () => Object.values(await cr.sendWithPromise("getSearchEnginesList")).filter(Array.isArray).flat();
-      const identity = (engine) => [engine.keyword, engine.name, engine.displayName, engine.url].filter(Boolean).join(" ").toLowerCase();
-      const current = (await engines()).find((engine) => engine.default);
-      const noSearch = current && (identity(current).includes("no search") || /^https?:\/\/%s\/?$/.test(String(current.url || "").toLowerCase()));
-      if (current && !noSearch) return { status: identity(current).includes("duckduckgo") ? "already-default" : "kept-existing", engine: current.displayName || current.name || current.keyword || "Current search provider" };
-      const deep = (root, selector) => {
-        const found = [...root.querySelectorAll(selector)];
-        for (const element of root.querySelectorAll("*")) if (element.shadowRoot) found.push(...deep(element.shadowRoot, selector));
-        return found;
-      };
-      let add;
-      for (let i = 0; i < 30 && !add; i++) { add = deep(document, "#addSearchEngine")[0]; if (!add) await wait(100); }
-      if (!add) throw new Error("add unavailable");
-      add.click();
-      let dialog;
-      for (let i = 0; i < 20 && !dialog; i++) { await wait(100); dialog = deep(document, "settings-search-engine-edit-dialog")[0]; }
-      if (!dialog) throw new Error("dialog unavailable");
-      for (const [id, value] of [["searchEngine", "DuckDuckGo"], ["keyword", "duckduckgo.com"], ["queryUrl", "https://duckduckgo.com/?q=%s"]]) {
-        const input = deep(dialog, `cr-input#${id}`)[0]?.shadowRoot?.querySelector("input");
-        if (!input) throw new Error("input unavailable");
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
-        input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      const engines = async () => Object.values(
+        await cr.sendWithPromise("getSearchEnginesList"),
+      ).filter(Array.isArray).flat();
+      const identity = (engine) => [
+        engine.keyword,
+        engine.name,
+        engine.displayName,
+        engine.url,
+      ].filter(Boolean).join(" ").toLowerCase();
+      const findDuckDuckGo = (items) => items.find((engine) =>
+        identity(engine).includes("duckduckgo")
+      );
+      const initial = await engines();
+      const current = initial.find((engine) => engine.default);
+      const noSearch = current && (
+        identity(current).includes("no search")
+        || /^https?:\/\/%s\/?$/.test(String(current.url || "").trim().toLowerCase())
+      );
+      if (current && !noSearch) {
+        return {
+          status: identity(current).includes("duckduckgo")
+            ? "already-default"
+            : "kept-existing",
+          engine: current.displayName || current.name || current.keyword || "Current search provider",
+        };
       }
-      let save;
-      for (let i = 0; i < 30; i++) { await wait(100); save = deep(dialog, "#actionButton")[0]; if (save && !save.disabled && !save.hasAttribute("disabled")) break; }
-      if (!save || save.disabled || save.hasAttribute("disabled")) throw new Error("settings rejected");
-      save.click();
-      let duck;
-      for (let i = 0; i < 20 && !duck; i++) { await wait(100); duck = (await engines()).find((engine) => identity(engine).includes("duckduckgo")); }
-      if (!duck) throw new Error("not saved");
-      const usesModelIndex = typeof duck.modelIndex === "number";
-      const ref = usesModelIndex ? duck.modelIndex : duck.id;
-      if (duck.canBeActivated) { globalThis.chrome.send("setIsActiveSearchEngine", [ref, true]); await wait(100); }
-      if (!duck.canBeDefault) throw new Error("default unavailable");
-      globalThis.chrome.send("setDefaultSearchEngine", [ref, usesModelIndex ? 0 : 1, null]);
-      for (let i = 0; i < 20; i++) { await wait(100); const saved = (await engines()).find((engine) => identity(engine).includes("duckduckgo")); if (saved?.default) return { status: "configured", engine: saved.displayName || saved.name || "DuckDuckGo" }; }
-      throw new Error("not persisted");
+
+      const deep = (root, selector) => {
+        const found = [];
+        if (root.shadowRoot) found.push(...deep(root.shadowRoot, selector));
+        found.push(...root.querySelectorAll(selector));
+        for (const element of root.querySelectorAll("*")) {
+          if (element.shadowRoot) found.push(...deep(element.shadowRoot, selector));
+        }
+        return [...new Set(found)];
+      };
+      let duck = findDuckDuckGo(initial);
+      if (!duck) {
+        let add;
+        for (let i = 0; i < 30 && !add; i++) {
+          add = deep(document, "#addSearchEngine")[0];
+          if (!add) await wait(100);
+        }
+        if (!add) throw new Error("Chromium search Add button was not available");
+        add.click();
+
+        let dialog;
+        for (let i = 0; i < 20 && !dialog; i++) {
+          await wait(100);
+          dialog = deep(document, "settings-search-engine-edit-dialog")[0];
+        }
+        if (!dialog) throw new Error("Chromium search dialog did not open");
+        for (const [id, value] of [
+          ["searchEngine", "DuckDuckGo"],
+          ["keyword", "duckduckgo.com"],
+          ["queryUrl", "https://duckduckgo.com/?q=%s"],
+        ]) {
+          const input = deep(dialog, `cr-input#${id}`)[0]?.shadowRoot?.querySelector("input");
+          if (!input) throw new Error(`Chromium search input ${id} was not available`);
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
+          input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        }
+
+        let save;
+        for (let i = 0; i < 30; i++) {
+          await wait(100);
+          save = deep(dialog, "#actionButton")[0];
+          if (save && !save.disabled && !save.hasAttribute("disabled")) break;
+        }
+        if (!save || save.disabled || save.hasAttribute("disabled")) {
+          throw new Error("Chromium rejected DuckDuckGo settings");
+        }
+        save.click();
+        for (let i = 0; i < 20 && !duck; i++) {
+          await wait(100);
+          duck = findDuckDuckGo(await engines());
+        }
+      }
+      if (!duck) throw new Error("Chromium did not save DuckDuckGo");
+
+      const modelIndex = (engine) => {
+        if (!Number.isInteger(engine.modelIndex) || engine.modelIndex < 0) {
+          throw new Error("Chromium search engine model index was unavailable");
+        }
+        return engine.modelIndex;
+      };
+      if (duck.canBeActivated) {
+        globalThis.chrome.send("setIsActiveSearchEngine", [modelIndex(duck), true]);
+        for (let i = 0; i < 20; i++) {
+          await wait(100);
+          duck = findDuckDuckGo(await engines()) || duck;
+          if (duck.default || duck.canBeDefault || !duck.canBeActivated) break;
+        }
+      }
+      if (duck.default) {
+        return {
+          status: "configured",
+          engine: duck.displayName || duck.name || "DuckDuckGo",
+        };
+      }
+      if (!duck.canBeDefault) throw new Error("Chromium will not allow DuckDuckGo as default");
+
+      globalThis.chrome.send("setDefaultSearchEngine", [
+        modelIndex(duck),
+        1,
+        null,
+      ]);
+      for (let i = 0; i < 20; i++) {
+        await wait(100);
+        const saved = findDuckDuckGo(await engines());
+        if (saved?.default) {
+          return {
+            status: "configured",
+            engine: saved.displayName || saved.name || "DuckDuckGo",
+          };
+        }
+      }
+      throw new Error("DuckDuckGo was not persisted as default");
     });
-  } finally { await page.close().catch(() => {}); }
+  } finally { await context.close().catch(() => {}); }
 }
 
 async function operate(chromium, operation, payload) {
+  if (operation === "search-provider") return searchProvider(chromium, payload);
   const endpoint = payload.endpoint;
   if (typeof endpoint !== "string" || !/^https?:\/\/|^wss?:\/\//.test(endpoint)) throw typed("invalid_request");
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
@@ -773,7 +895,6 @@ async function operate(chromium, operation, payload) {
     if (operation === "session-capture") return captureSession(browser, payload);
     if (operation === "session-restore") return restoreSession(browser, context, payload);
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
-    if (operation === "search-provider") return searchProvider(context);
     if (operation === "navigate") {
       for (let i = 0; i < payload.urls.length; i++) {
         const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();

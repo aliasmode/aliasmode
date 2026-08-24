@@ -62,7 +62,7 @@ import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import net from "node:net";
 import { defaultOperatorName } from "./operator.ts";
-import { ensureDuckDuckGoDefault } from "./search-provider.ts";
+import { ensureDuckDuckGoDefault, type SearchProviderSetupResult } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
 import { resolveEgressEndpoints } from "./egress.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
@@ -360,6 +360,7 @@ function makeLauncher(
   rest: string[],
   remoteMode = false,
   defaultDataRoot = "profiles",
+  ensureSearchProvider = ensureDuckDuckGoDefault,
 ): Launcher {
   const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
   return new Launcher({
@@ -380,7 +381,7 @@ function makeLauncher(
       `--aliasmode-launcher-pid=${process.pid}`,
       ...(has(rest, "no-sandbox") ? ["--no-sandbox"] : []),
     ],
-    ...(unsafeCanary ? {} : { ensureSearchProvider: ensureDuckDuckGoDefault }),
+    ...(unsafeCanary ? {} : { ensureSearchProvider }),
     // In remote mode the coordinator injects the roamed session over CDP, so the launcher's own
     // bootstrap cookie injection is turned off — and because the login is re-injected from the hub,
     // it's safe to reset a crash-corrupted profile's volatile storage on launch (auto-heals the
@@ -1047,6 +1048,7 @@ export interface WindowsPageLifecycleObservation extends WindowsProfileCardObser
 }
 
 export type WindowsWindowAcceptanceStage =
+  | "search_provider_ready"
   | "page_targets_ready"
   | "windows_distinct"
   | "window_minimized"
@@ -1059,6 +1061,7 @@ export type WindowsWindowAcceptanceStage =
 export interface WindowsWindowAcceptanceRuntime {
   profileIds: readonly [string, string];
   open(profileId: string): Promise<void>;
+  verifySearchProvider?(profileId: string): Promise<void>;
   close(profileId: string): Promise<void>;
   nativeWindows(): Promise<WindowsNativeWindowSnapshot>;
   minimize(profileId: string): Promise<void>;
@@ -1098,6 +1101,12 @@ export async function exerciseWindowsWindowAcceptance(
     opened.push(firstId);
     await runtime.open(secondId);
     opened.push(secondId);
+
+    if (runtime.verifySearchProvider) {
+      await runtime.verifySearchProvider(firstId);
+      await runtime.verifySearchProvider(secondId);
+      runtime.reportStage?.("search_provider_ready");
+    }
 
     const [firstTargets, secondTargets] = await Promise.all([
       runtime.pageTargetIds(firstId),
@@ -1694,7 +1703,18 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
     throw new Error("Windows window acceptance requires Windows");
   }
   const store = new ProfileStore(paths.cloudDatabase);
-  const launcher = makeLauncher(store, rest, true, paths.cloudProfiles);
+  const searchProviderResults = new Map<string, SearchProviderSetupResult>();
+  const launcher = makeLauncher(
+    store,
+    rest,
+    true,
+    paths.cloudProfiles,
+    async (options) => {
+      const result = await ensureDuckDuckGoDefault(options);
+      searchProviderResults.set(options.userDataDir, result);
+      return result;
+    },
+  );
   const [firstId, secondId] = WINDOWS_ACCEPTANCE_PROFILE_IDS;
   store.upsertProfiles([
     smokeProfile(firstId, "Window smoke one", 101),
@@ -1723,6 +1743,16 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
         await launcher.navigate(opened.ws, [
           `data:text/html;charset=utf-8,${encodeURIComponent(document)}`,
         ]);
+      },
+      async verifySearchProvider(profileId) {
+        const result = searchProviderResults.get(launcher.userDataDir(profileId));
+        if (
+          !result
+          || (result.status !== "configured" && result.status !== "already-default")
+          || !result.engine.toLowerCase().includes("duckduckgo")
+        ) {
+          throw new Error(`DuckDuckGo launch-time setup was not confirmed for ${profileId}`);
+        }
       },
       async close(profileId) {
         if (!await launcher.stop(profileId)) {
@@ -2386,7 +2416,7 @@ async function main() {
   if (cmd === "__cloud-launcher-smoke") {
     await runCloudLauncherSmoke(paths, rest);
     console.log(has(rest, "windows-window-acceptance")
-      ? "installed CloakBrowser native minimize, background page, session capture, target, HWND, and foreground acceptance passed"
+      ? "installed CloakBrowser search provider, native minimize, background page, session capture, target, HWND, and foreground acceptance passed"
       : "compiled sidecar opened, restored, captured, and closed a fresh and repeated cached Cloud profile");
     return;
   }
