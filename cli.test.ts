@@ -608,7 +608,7 @@ test("Cloud cross-device acceptance preserves conflicts and blocks ambiguous loc
     });
   } finally {
     await server.stop(true);
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
