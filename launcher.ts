@@ -1248,12 +1248,14 @@ export class Launcher {
     const launchBinaryPath = verifiedBinary.path;
 
     const userDataDir = this.userDataDir(profileId);
+    const existingUserDataDir = existsSync(userDataDir);
     const personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
     mkdirSync(userDataDir, { recursive: true });
 
-    // Reap leaked browsers still holding this dir BEFORE the repair/clear steps below
-    // touch its files or a second Chromium is spawned onto it.
-    await this.reapForeignProfileDirHolders(profileId, userDataDir);
+    // A directory that did not exist before this launch cannot have a foreign
+    // process holding it. Existing profile directories still require the exact
+    // scan before any repair or cleanup touches their files.
+    if (existingUserDataDir) await this.reapForeignProfileDirHolders(profileId, userDataDir);
 
     // Repair a corrupt Preferences before launch. A previous unclean exit (force-kill
     // mid-write, or two Chromes racing the same persistent dir when a browser leaked)

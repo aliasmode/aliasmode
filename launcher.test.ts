@@ -2800,6 +2800,8 @@ test("start() maps an unknown preparation failure to a fixed safe category", asy
   const logs: string[] = [];
   const rawFailure = "sentinel raw operating-system failure";
   const dataRoot = join(tmpdir(), `sentinel-private-profile-path-${process.pid}`);
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
@@ -3193,13 +3195,16 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   const store = seeded();
   makeDirect(store);
   const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-reaped-profile-holder-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   const killedPids: number[] = [];
   const order: string[] = [];
   let held = true;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot,
     portProbe: () => true,
     spawn: (bin, args) => {
       order.push("spawn");
@@ -3228,17 +3233,21 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   expect(killedPids).toEqual([4242]);
   expect(order).toEqual(["kill:4242", "spawn"]);
   store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("a fresh launch refuses to spawn while a leaked profile-dir holder survives", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-surviving-profile-holder-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   let spawned = false;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot,
     portProbe: () => true,
     spawn: (bin, args) => {
       spawned = true;
@@ -3261,17 +3270,58 @@ test("a fresh launch refuses to spawn while a leaked profile-dir holder survives
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
+});
+
+test("a first launch skips the holder scan for a new profile directory", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-new-profile-holder-scan-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  let scanned = false;
+  let spawned = false;
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot,
+    portProbe: () => true,
+    spawn: (bin, args) => {
+      spawned = true;
+      return f.spawn(bin, args);
+    },
+    fetch: f.fetchFn,
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => {
+      scanned = true;
+      return null;
+    },
+    cdpReadyTimeoutMs: 1000,
+  });
+
+  await launcher.start("k1d0cd11");
+  expect(scanned).toBe(false);
+  expect(spawned).toBe(true);
+  store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-existing-profile-holder-scan-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   let spawned = false;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot,
     portProbe: () => true,
     spawn: (bin, args) => {
       spawned = true;
@@ -3291,4 +3341,5 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
 });
