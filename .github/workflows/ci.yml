@@ -41,6 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-on-failure: true
       - run: bun install --frozen-lockfile
       - name: Warm Bun baseline compiler cache
         shell: pwsh
@@ -316,7 +317,7 @@ jobs:
 
           $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
           if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
-            throw "installed JSON CLI could not create a temporary profile"
+            throw "installed JSON CLI could not create a temporary profile: $($profile.error)"
           }
           $profileId = $profile.result.id
           $opened = & $helper browser open --profile $profileId --headless | ConvertFrom-Json
