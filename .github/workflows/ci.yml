@@ -637,11 +637,13 @@ jobs:
               if ($debugPort -le 0) {
                 $activePortPath = Join-Path $webviewRoot "EBWebView\DevToolsActivePort"
                 if (Test-Path $activePortPath -PathType Leaf) {
-                  $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
-                  $parsedPort = 0
-                  if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
-                    $debugPort = $parsedPort
-                  }
+                  try {
+                    $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
+                    $parsedPort = 0
+                    if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
+                      $debugPort = $parsedPort
+                    }
+                  } catch {}
                 }
               }
               if ($debugPort -gt 0) {
