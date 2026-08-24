@@ -200,13 +200,24 @@ async function connectAgent(descriptor) {
     },
   );
   await new Promise((resolve, reject) => {
-    const failed = () => {
+    let settled = false;
+    const failed = (message) => {
+      if (settled) return;
+      settled = true;
       socket.terminate();
-      reject(new Error("AliasMode agent handshake failed"));
+      reject(new Error(message));
     };
-    socket.once("open", resolve);
-    socket.once("error", failed);
-    socket.once("unexpected-response", failed);
+    socket.once("open", () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    });
+    socket.once("error", (error) => {
+      failed(`AliasMode agent handshake failed: ${error.message}`);
+    });
+    socket.once("unexpected-response", (_request, response) => {
+      failed(`AliasMode agent handshake was rejected with status ${response.statusCode}`);
+    });
   });
   if (socket.protocol !== AGENT_PROTOCOL) {
     socket.close();
