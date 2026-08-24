@@ -705,10 +705,10 @@ test("Cloud dirty monitor coalesces storage changes and captures target changes 
   (state.coordinator as any).startDirtyMonitor("profile1");
   await Bun.sleep(0);
 
+  expect(storageDirty).toHaveLength(3);
   for (const dirty of storageDirty) dirty();
   await Bun.sleep(15);
   const storageId = state.queue.list("account1")[0]?.id;
-  expect(storageDirty).toHaveLength(3);
   expect(state.events).toEqual(["capture"]);
   expect(storageId).not.toBe(initialId);
   expect(state.events).not.toContain("heartbeat");
@@ -722,7 +722,7 @@ test("Cloud dirty monitor coalesces storage changes and captures target changes 
   expect(state.queue.list("account1")[0]?.id).not.toBe(storageId);
 
   await state.coordinator.close("profile1");
-  expect(watcherCloses).toBe(3);
+  expect(watcherCloses).toBe(storageDirty.length);
   const capturesAfterClose = state.events.filter((event) => event === "capture").length;
   storageDirty[0]!();
   pollTargets();
@@ -732,12 +732,12 @@ test("Cloud dirty monitor coalesces storage changes and captures target changes 
   state.store.close();
 });
 
-test("Cloud dirty monitor latches one follow-up capture while a capture is running", async () => {
+test("Cloud dirty monitor latches a storage change after the capture snapshot", async () => {
   const state = setup();
   const storageDirty: Array<() => void> = [];
+  let captures = 0;
   let finishFirst!: () => void;
   const firstCapture = new Promise<void>((resolve) => { finishFirst = resolve; });
-  let captures = 0;
   const options = (state.coordinator as any).options;
   (state.coordinator as any).dirtyMonitorMs = 10;
   (state.coordinator as any).checkpointDebounceMs = 1;
@@ -746,6 +746,51 @@ test("Cloud dirty monitor latches one follow-up capture while a capture is runni
   options.launcher.pageTargetFingerprint = async () => "targets";
   options.watchPath = (_path: string, onDirty: () => void) => {
     storageDirty.push(onDirty);
+    return { close() {} };
+  };
+  options.setIntervalFn = () => ({ unref() {} });
+  options.clearIntervalFn = () => {};
+  options.readSession = async () => {
+    captures++;
+    const bundle = JSON.stringify({
+      cookies: [{ name: "auth_token", value: `capture-${captures}`, domain: ".x.com", path: "/" }],
+      origins: [],
+    });
+    if (captures === 1) await firstCapture;
+    return bundle;
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  (state.coordinator as any).startDirtyMonitor("profile1");
+  await Bun.sleep(0);
+  storageDirty[0]!();
+  for (let attempt = 0; attempt < 20 && captures === 0; attempt++) await Bun.sleep(1);
+  expect(captures).toBe(1);
+
+  storageDirty[0]!();
+  finishFirst();
+  await Bun.sleep(20);
+  expect(captures).toBe(2);
+
+  await state.coordinator.close("profile1");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud dirty monitor latches one target change while a capture is running", async () => {
+  const state = setup();
+  let onTarget!: (origin: string | null) => void;
+  let finishFirst!: () => void;
+  const firstCapture = new Promise<void>((resolve) => { finishFirst = resolve; });
+  let captures = 0;
+  const options = (state.coordinator as any).options;
+  (state.coordinator as any).dirtyMonitorMs = 10;
+  (state.coordinator as any).checkpointDebounceMs = 1;
+  (state.coordinator as any).checkpointMinIntervalMs = 0;
+  options.launcher.browserStorageWatchPaths = () => [];
+  options.launcher.pageTargetFingerprint = async () => "targets";
+  options.observeTargets = (_endpoint: string, target: (origin: string | null) => void) => {
+    onTarget = target;
     return { close() {} };
   };
   options.setIntervalFn = () => ({ unref() {} });
@@ -762,11 +807,11 @@ test("Cloud dirty monitor latches one follow-up capture while a capture is runni
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   (state.coordinator as any).startDirtyMonitor("profile1");
   await Bun.sleep(0);
-  storageDirty[0]!();
+  onTarget("https://first.example");
   await Bun.sleep(5);
   expect(captures).toBe(1);
-  storageDirty[0]!();
-  storageDirty[0]!();
+  onTarget("https://second.example");
+  onTarget("https://second.example");
   finishFirst();
   await Bun.sleep(20);
   expect(captures).toBe(2);
@@ -825,6 +870,7 @@ test("Cloud target observation retains a new origin after its tab closes", async
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
 
   onTarget(null);
+  onTarget("https://closed.example");
   await Bun.sleep(10);
   expect(state.captureSeeds).toEqual([]);
 
@@ -837,6 +883,10 @@ test("Cloud target observation retains a new origin after its tab closes", async
   expect(state.captureSeeds.at(-1)).toEqual({
     origins: ["https://closed.example", "https://new.example"],
   });
+  const captures = state.captureSeeds.length;
+  onTarget("https://new.example");
+  await Bun.sleep(10);
+  expect(state.captureSeeds).toHaveLength(captures);
   await state.coordinator.releaseAll(true);
   expect(observerCloses).toBe(1);
   state.queue.close();

@@ -45,19 +45,22 @@ test("dashboard profile roster rejects malformed JSON shape explicitly", async (
   await expect(fetchProfiles()).rejects.toThrow("no profile roster");
 });
 
-test("dashboard roster carries health metadata and tolerates an older local server", async () => {
+test("dashboard roster carries health and group metadata while tolerating an older local server", async () => {
   globalThis.fetch = (async () => Response.json({
     profiles: [{ id: "p1", healthStatus: "suspended", healthObservedAt: 1_000 }],
     healthSources: [{ sourceId: "node-a", lastSnapshotAt: 1_000, stale: false }],
+    groups: ["Empty group"],
   })) as unknown as typeof fetch;
   const roster = await fetchProfiles();
   expect(roster.profiles[0]).toMatchObject({ id: "p1", healthStatus: "suspended", healthObservedAt: 1_000 });
   expect(roster.healthSources).toEqual([{ sourceId: "node-a", lastSnapshotAt: 1_000, stale: false }]);
+  expect(roster.groups).toEqual(["Empty group"]);
 
   globalThis.fetch = (async () => Response.json({ profiles: [{ id: "legacy" }] })) as unknown as typeof fetch;
   const legacy = await fetchProfiles();
   expect(legacy.profiles[0]).toMatchObject({ id: "legacy" });
   expect(legacy.healthSources).toEqual([]);
+  expect(legacy.groups).toEqual([]);
 });
 
 test("app mode client reads first-launch state", async () => {

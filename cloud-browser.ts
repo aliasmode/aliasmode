@@ -1358,7 +1358,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     this.dirtyMonitors.set(profileId, monitor);
     const onDirty = () => this.markCheckpointDirty(profileId, monitor);
     const onTarget = (origin: string | null) => {
-      if (this.dirtyMonitors.get(profileId) !== monitor || !origin) return;
+      if (this.dirtyMonitors.get(profileId) !== monitor || !origin || checkpoint.origins.has(origin)) return;
       checkpoint.origins.add(origin);
       onDirty();
     };
@@ -1367,16 +1367,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     } catch {
       // Filesystem watching and target polling remain active when observation is unavailable.
     }
-    const watchPath = this.options.watchPath ?? ((path: string, dirty: () => void) =>
-      watch(path, { recursive: true }, () => dirty())
-    );
-    for (const path of this.options.launcher.browserStorageWatchPaths(profileId)) {
-      try {
-        monitor.watchers.push(watchPath(path, onDirty));
-      } catch {
-        // Target polling remains active when a browser storage directory is unavailable.
-      }
-    }
+    this.startStorageWatchers(profileId, monitor);
     if (monitor.watchers.length === 0) this.diagnosticEvents.record("dirty_monitor_unavailable");
 
     const poll = () => {
@@ -1400,6 +1391,27 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const timer = monitor.pollTimer;
     if (timer && typeof timer === "object" && "unref" in timer) {
       (timer as { unref?: () => void }).unref?.();
+    }
+  }
+
+  private startStorageWatchers(profileId: string, monitor: CloudDirtyMonitor): void {
+    const watchPath = this.options.watchPath ?? ((path: string, dirty: () => void) =>
+      watch(path, { recursive: true }, () => dirty())
+    );
+    for (const path of this.options.launcher.browserStorageWatchPaths(profileId)) {
+      try {
+        monitor.watchers.push(watchPath(path, () => {
+          this.markCheckpointDirty(profileId, monitor);
+        }));
+      } catch {
+        // Target polling remains active when a browser storage directory is unavailable.
+      }
+    }
+  }
+
+  private stopStorageWatchers(monitor: CloudDirtyMonitor): void {
+    for (const watcher of monitor.watchers.splice(0)) {
+      try { watcher.close(); } catch {}
     }
   }
 
@@ -1446,9 +1458,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     if (monitor.debounceTimer) clearTimeout(monitor.debounceTimer);
     try { monitor.targetObserver?.close(); } catch {}
-    for (const watcher of monitor.watchers) {
-      try { watcher.close(); } catch {}
-    }
+    this.stopStorageWatchers(monitor);
   }
 
   private startHeartbeat(profileId: string): void {

@@ -51,6 +51,7 @@ import {
   convertMobileProfile,
   exportProfiles,
   updateFromFile,
+  createGroup,
   renameGroup,
   deleteGroup,
   fetchTotp,
@@ -463,6 +464,7 @@ const BLANK_FORM = { name: "", group: "", platform: "", proxyType: "http", host:
 
 function App() {
   const [profiles, setProfiles] = useState<UiProfile[]>([]);
+  const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);
   const [appMode, setAppMode] = useState<AppModeConfig | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
   const [modeErr, setModeErr] = useState<string | null>(null);
@@ -550,6 +552,8 @@ function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameVal, setRenameVal] = useState("");
+  const [addingGroup, setAddingGroup] = useState(false);
+  const [sidebarGroupName, setSidebarGroupName] = useState("");
   // Bulk add accounts (CSV / AdsPower .txt with group + platform assignment)
   const [showBulk, setShowBulk] = useState(false);
   const [bulkFiles, setBulkFiles] = useState<File[]>([]);
@@ -568,11 +572,13 @@ function App() {
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
     profiles.some((profile) => profile.permission === "edit") || team?.folders.some((folder) => folder.permission === "edit") === true;
+  const canManageCloudFolders = cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin";
 
   const load = async () => {
     try {
       const roster = await fetchProfiles();
       setProfiles(roster.profiles);
+      setRegisteredGroups(roster.groups);
       setHealthSources(roster.healthSources);
       setConnErr(null); // manages connectivity only; never clears an action error
     } catch (e) {
@@ -1021,8 +1027,13 @@ function App() {
   }, [editId, isCloudMode]);
 
   const groups = useMemo(
-    () => ["all", ...Array.from(new Set(profiles.map((p) => p.group).filter(Boolean))).sort()],
-    [profiles],
+    () => ["all", ...Array.from(new Set([
+      ...profiles.map((profile) => profile.group).filter(Boolean),
+      ...(isCloudMode
+        ? (team?.folders.filter((folder) => !folder.archivedAt).map((folder) => folder.name) ?? [])
+        : registeredGroups),
+    ])).sort()],
+    [profiles, isCloudMode, registeredGroups, team?.folders],
   );
 
   const filtered = profiles.filter((p) => {
@@ -1055,6 +1066,9 @@ function App() {
     : existingGroups;
   const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");
   const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
+  const canEditGroup = (name: string) => !isCloudMode ||
+    team?.folders.some((folder) => folder.name === name && folder.permission === "edit" && !folder.archivedAt) === true ||
+    profiles.some((profile) => profile.group === name && profile.permission === "edit");
 
   const toggle = (id: string) =>
     setSelected((s) => {
@@ -1450,7 +1464,31 @@ function App() {
     }
   };
 
-  // ---- Group rename / delete ----
+  // ---- Group create / rename / delete ----
+  const createSidebarGroup = async () => {
+    const name = sidebarGroupName.trim();
+    if (!name) return;
+    if (name === "all") {
+      setActionErr("This name is reserved.");
+      return;
+    }
+    setActionErr(null);
+    try {
+      const result = isCloudMode
+        ? await cloudWorkspaceAction("create-folder", { name })
+        : await createGroup(name);
+      if (result.ok === false) {
+        setActionErr(result.error || "create failed");
+        return;
+      }
+      await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]);
+      setGroup(name);
+      setSidebarGroupName("");
+      setAddingGroup(false);
+    } catch (error) {
+      setActionErr(error instanceof Error ? error.message : String(error));
+    }
+  };
   const startRename = (g: string) => { setRenaming(g); setRenameVal(g); };
   const commitRename = async () => {
     const from = renaming, to = renameVal.trim();
@@ -1460,21 +1498,32 @@ function App() {
     try {
       const r = await renameGroup(from, to);
       if (r.ok === false) setActionErr(r.error || "rename failed");
-      else { if (group === from) setGroup(to); await load(); }
+      else {
+        if (group === from) setGroup(to);
+        await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]);
+      }
     } catch (e) {
       setActionErr(String(e));
     }
   };
   const removeGroup = async (g: string) => {
     const n = countFor(g);
-    if (!confirm(`Delete group "${g}"?${n ? ` Its ${n} profile(s) move to Ungrouped (not deleted).` : ""}`)) return;
+    const prompt = isCloudMode
+      ? `Permanently delete folder "${g}"? Only an empty folder can be deleted.`
+      : `Delete group "${g}"?${n ? ` Its ${n} profile(s) move to Ungrouped (not deleted).` : ""}`;
+    if (!confirm(prompt)) return;
     setActionErr(null);
     try {
-      const r = await deleteGroup(g);
+      const r = isCloudMode
+        ? await cloudWorkspaceAction("delete-folder", { name: g })
+        : await deleteGroup(g);
       if (r.ok === false) setActionErr(r.error || "delete failed");
-      else { if (group === g) setGroup("all"); await load(); }
+      else {
+        if (group === g) setGroup("all");
+        await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]);
+      }
     } catch (e) {
-      setActionErr(String(e));
+      setActionErr(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -1624,39 +1673,61 @@ function App() {
             <span className="grow" />
             <span className="cnt">{existingGroups.length}</span>
           </button>
-          {groupsOpen && <div className="folders">
-          {existingGroups.length === 0 && <div className="folders-empty">No {isCloudMode ? "folders" : "groups"} yet</div>}
-          {existingGroups.map((g) => (
-            <div
-              key={g}
-              className={`folder${group === g ? " active" : ""}`}
-              onClick={() => { if (renaming !== g) setGroup(g); }}
-            >
-              {renaming === g ? (
-                <input
-                  className="renameinput"
-                  autoFocus
-                  value={renameVal}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setRenameVal(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") setRenaming(null); }}
-                  onBlur={commitRename}
-                />
-              ) : (
-                <>
-                  <span className="fname" title={g}>{g}</span>
-                  {(!isCloudMode || profiles.some((profile) => profile.group === g && profile.permission === "edit")) && (
-                    <span className="gactions">
-                      <button title="Rename group" onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>
-                      {!isCloudMode && <button title="Delete group" onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>}
-                    </span>
-                  )}
-                  <span className="cnt">{countFor(g)}</span>
-                </>
-              )}
+          {groupsOpen && <>
+            <div className="folders">
+            {existingGroups.length === 0 && <div className="folders-empty">No {isCloudMode ? "folders" : "groups"} yet</div>}
+            {existingGroups.map((g) => (
+              <div
+                key={g}
+                className={`folder${group === g ? " active" : ""}`}
+                onClick={() => { if (renaming !== g) setGroup(g); }}
+              >
+                {renaming === g ? (
+                  <input
+                    className="renameinput"
+                    autoFocus
+                    value={renameVal}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setRenameVal(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") commitRename(); else if (e.key === "Escape") setRenaming(null); }}
+                    onBlur={commitRename}
+                  />
+                ) : (
+                  <>
+                    <span className="fname" title={g}>{g}</span>
+                    {(canEditGroup(g) || (isCloudMode && canManageCloudFolders)) && (
+                      <span className="gactions">
+                        {canEditGroup(g) && <button title={isCloudMode ? "Rename folder" : "Rename group"} onClick={(e) => { e.stopPropagation(); startRename(g); }}>✎</button>}
+                        {(!isCloudMode || canManageCloudFolders) && <button title={isCloudMode ? "Delete folder" : "Delete group"} onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>🗑</button>}
+                      </span>
+                    )}
+                    <span className="cnt">{countFor(g)}</span>
+                  </>
+                )}
+              </div>
+            ))}
             </div>
-          ))}
-          </div>}
+            {addingGroup ? (
+              <div className="newgroup">
+                <input
+                  autoFocus
+                  aria-label={isCloudMode ? "New folder name" : "New group name"}
+                  value={sidebarGroupName}
+                  onChange={(event) => setSidebarGroupName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void createSidebarGroup();
+                    else if (event.key === "Escape") { setAddingGroup(false); setSidebarGroupName(""); }
+                  }}
+                />
+                <button type="button" title="Create" onClick={() => void createSidebarGroup()}>✓</button>
+                <button type="button" title="Cancel" onClick={() => { setAddingGroup(false); setSidebarGroupName(""); }}>×</button>
+              </div>
+            ) : (
+              <button className="newgroup" type="button" disabled={!canEditCloud} onClick={() => setAddingGroup(true)}>
+                {isCloudMode ? "+ New folder" : "+ New group"}
+              </button>
+            )}
+          </>}
         </div>
         {!isCloudMode && <button className="extbtn" onClick={() => { setExtErr(null); setShowExts(true); }}>🧩 Extensions</button>}
         <button

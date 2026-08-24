@@ -32,6 +32,7 @@ import { HubClient } from "./hub-client.ts";
 import { RemoteCoordinator } from "./remote.ts";
 import {
   playwrightTransportAttribution,
+  parseCapturedSessionBundle,
   readSession,
   readSessionInSubprocess,
   READ_SESSION_WORKER_ARG,
@@ -778,11 +779,17 @@ export interface WindowsProfileCardObservation {
   nativeWindowStayedMinimized: boolean;
 }
 
+export interface WindowsPageLifecycleObservation extends WindowsProfileCardObservation {
+  destroyedPageTargetIds: string[];
+}
+
 export type WindowsWindowAcceptanceStage =
   | "page_targets_ready"
   | "windows_distinct"
   | "window_minimized"
   | "profile_card_observed"
+  | "background_page_observed"
+  | "session_capture_observed"
   | "first_window_raised"
   | "second_window_raised";
 
@@ -794,6 +801,8 @@ export interface WindowsWindowAcceptanceRuntime {
   minimize(profileId: string): Promise<void>;
   pageTargetIds(profileId: string): Promise<string[]>;
   runProfileCardObserved(profileId: string, hwnd: number): Promise<WindowsProfileCardObservation>;
+  runBackgroundPageObserved(profileId: string, hwnd: number): Promise<WindowsPageLifecycleObservation>;
+  runSessionCaptureObserved(profileId: string, hwnd: number): Promise<WindowsProfileCardObservation>;
   bringToFront(profileId: string): Promise<void>;
   reportStage?(stage: WindowsWindowAcceptanceStage): void;
 }
@@ -884,6 +893,57 @@ export async function exerciseWindowsWindowAcceptance(
       throw new Error("profile-card operation transiently restored the minimized native window");
     }
     runtime.reportStage?.("profile_card_observed");
+
+    const backgroundPageObservation = await runtime.runBackgroundPageObserved(firstId, firstHwnd);
+    const targetsAfterBackgroundPage = (await runtime.pageTargetIds(firstId)).slice().sort();
+    if (JSON.stringify(targetsAfterBackgroundPage) !== JSON.stringify(targetsAfter)) {
+      throw new Error("background page operation left a page target for a minimized window");
+    }
+    await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.visible === true
+        && snapshot.windows[firstId]?.minimized === true
+        && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.visible === true,
+      "background page operation restored or replaced the minimized native window",
+    );
+    if (backgroundPageObservation.createdPageTargetIds.length !== 1) {
+      throw new Error("background page operation did not observe exactly one created page target");
+    }
+    if (
+      backgroundPageObservation.destroyedPageTargetIds.length !== 1
+      || backgroundPageObservation.destroyedPageTargetIds[0]
+        !== backgroundPageObservation.createdPageTargetIds[0]
+    ) {
+      throw new Error("background page operation did not observe its page target being destroyed");
+    }
+    if (!backgroundPageObservation.nativeWindowStayedMinimized) {
+      throw new Error("background page operation transiently restored the minimized native window");
+    }
+    runtime.reportStage?.("background_page_observed");
+
+    const captureObservation = await runtime.runSessionCaptureObserved(firstId, firstHwnd);
+    const targetsAfterCapture = (await runtime.pageTargetIds(firstId)).slice().sort();
+    if (JSON.stringify(targetsAfterCapture) !== JSON.stringify(targetsAfterBackgroundPage)) {
+      throw new Error("session capture changed the page targets for a minimized window");
+    }
+    await waitForNativeWindowState(
+      runtime.nativeWindows,
+      (snapshot) => snapshot.windows[firstId]?.hwnd === firstHwnd
+        && snapshot.windows[firstId]?.visible === true
+        && snapshot.windows[firstId]?.minimized === true
+        && snapshot.windows[secondId]?.hwnd === secondHwnd
+        && snapshot.windows[secondId]?.visible === true,
+      "session capture restored or replaced the minimized native window",
+    );
+    if (captureObservation.createdPageTargetIds.length > 0) {
+      throw new Error("session capture created a page target while the window was minimized");
+    }
+    if (!captureObservation.nativeWindowStayedMinimized) {
+      throw new Error("session capture transiently restored the minimized native window");
+    }
+    runtime.reportStage?.("session_capture_observed");
 
     await runtime.bringToFront(firstId);
     await waitForNativeWindowState(
@@ -1431,6 +1491,55 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
           nativeWindowStayedMinimized: observed.stayedMinimized,
         };
       },
+      async runBackgroundPageObserved(profileId, hwnd) {
+        const observed = await observeNativeMinimized(hwnd, () => runPlaywrightWorker<{
+          createdPageTargetIds?: unknown;
+          destroyedPageTargetIds?: unknown;
+        }>("profile-card", {
+          endpoint: launch(profileId).ws,
+          url: "about:blank",
+          temporary: true,
+          connectTimeoutMs: 30_000,
+        }));
+        const created = observed.value?.createdPageTargetIds;
+        const destroyed = observed.value?.destroyedPageTargetIds;
+        if (
+          !Array.isArray(created)
+          || created.some((targetId) => typeof targetId !== "string" || !targetId)
+          || !Array.isArray(destroyed)
+          || destroyed.some((targetId) => typeof targetId !== "string" || !targetId)
+        ) {
+          throw new Error("background page target observation returned an invalid result");
+        }
+        return {
+          createdPageTargetIds: created,
+          destroyedPageTargetIds: destroyed,
+          nativeWindowStayedMinimized: observed.stayedMinimized,
+        };
+      },
+      async runSessionCaptureObserved(profileId, hwnd) {
+        const endpoint = launch(profileId).ws;
+        const before = await cdpPageTargetIds(launch(profileId).debugPort);
+        const captureOrigin = "https://aliasmode-window-acceptance.invalid";
+        const observed = await observeNativeMinimized(hwnd, () => runPlaywrightWorker<string>(
+          "session-capture",
+          {
+            endpoint,
+            captureSeed: { origins: [captureOrigin] },
+            connectTimeoutMs: 30_000,
+          },
+        ));
+        const captured = parseCapturedSessionBundle(observed.value);
+        if (!captured.origins.some((origin) => origin.origin === captureOrigin)) {
+          throw new Error("session capture omitted the closed acceptance origin");
+        }
+        const priorTargets = new Set(before);
+        const after = await cdpPageTargetIds(launch(profileId).debugPort);
+        return {
+          createdPageTargetIds: after.filter((targetId) => !priorTargets.has(targetId)),
+          nativeWindowStayedMinimized: observed.stayedMinimized,
+        };
+      },
       async bringToFront(profileId) {
         await launcher.bringToFront(profileId);
       },
@@ -1639,7 +1748,7 @@ async function main() {
   if (cmd === "__cloud-launcher-smoke") {
     await runCloudLauncherSmoke(paths, rest);
     console.log(has(rest, "windows-window-acceptance")
-      ? "installed CloakBrowser native minimize, target, HWND, and foreground acceptance passed"
+      ? "installed CloakBrowser native minimize, background page, session capture, target, HWND, and foreground acceptance passed"
       : "compiled sidecar opened, restored, captured, and closed a fresh and repeated cached Cloud profile");
     return;
   }

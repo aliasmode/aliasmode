@@ -140,6 +140,18 @@ test("Cloud workspace loads independently and refreshes with Account Settings", 
   expect(app).toContain("await Promise.all([load(), loadTeam()]);");
 });
 
+test("sidebar creates persistent groups and gates Cloud deletion to workspace managers", () => {
+  expect(app).toContain("const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);");
+  expect(app).toContain("team?.folders.filter((folder) => !folder.archivedAt).map((folder) => folder.name)");
+  expect(app).toContain("const canManageCloudFolders = cloudAuth?.workspace?.role === \"owner\" || cloudAuth?.workspace?.role === \"admin\";");
+  expect(app).toContain('className="newgroup"');
+  expect(app).toContain('{isCloudMode ? "+ New folder" : "+ New group"}');
+  expect(app).toContain('if (name === "all") {');
+  expect(app).toContain('cloudWorkspaceAction("delete-folder", { name: g })');
+  expect(app).toContain("!isCloudMode || canManageCloudFolders");
+  expect(styles).toContain(".newgroup");
+});
+
 test("Team settings guide invitations and explicit folder access", () => {
   for (const heading of ["Your folder access", "Members", "Invitations", "Join another workspace"]) expect(app).toContain(`>${heading}</h3>`);
   expect(app).toContain("New members see no folders until you grant access here.");

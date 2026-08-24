@@ -76,6 +76,15 @@ body {
 .sidehead .cnt { font-weight: 600; }
 .folders { display: flex; flex-direction: column; gap: 2px; overflow: auto; flex: 1; min-height: 0; }
 .folders-empty { color: var(--muted); font-size: 12px; padding: 6px 10px; }
+.newgroup { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; width: 100%; }
+button.newgroup {
+  padding: 7px 10px; background: none; color: var(--accent); border: 1px dashed var(--accent-line);
+  border-radius: 8px; cursor: pointer; font: inherit; text-align: left;
+}
+button.newgroup:hover { background: var(--accent-soft); }
+button.newgroup:disabled { color: var(--muted); cursor: default; background: none; }
+.newgroup input { flex: 1; min-width: 0; padding: 6px 7px; border: 1px solid var(--accent); border-radius: 7px; font: inherit; outline: none; }
+.newgroup button { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; }
 .folder {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 7px 10px; border-radius: 8px; cursor: pointer; color: #475067;

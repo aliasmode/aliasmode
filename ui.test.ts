@@ -312,6 +312,40 @@ test("GET /ui/api/profiles returns a JSON error when local reconciliation fails"
   s.close();
 });
 
+test("Local group creation keeps an empty group in the profile roster", async () => {
+  const s = store();
+  const created = await handleUiRequest(
+    new Request("http://x/ui/api/groups/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Empty group" }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(created!.status).toBe(200);
+  expect(await created!.json()).toEqual({ ok: true, name: "Empty group" });
+
+  const reserved = await handleUiRequest(
+    new Request("http://x/ui/api/groups/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "all" }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(reserved!.status).toBe(400);
+
+  const roster = await handleUiRequest(
+    new Request("http://x/ui/api/profiles"),
+    { reconcileOrphans: async () => {} } as any,
+    s,
+  );
+  expect((await roster!.json()).groups).toContain("Empty group");
+  s.close();
+});
+
 test("move route reassigns selected profiles' group", async () => {
   const s = store();
   const res = await handleUiRequest(
@@ -1252,6 +1286,34 @@ test("Cloud workspace API combines team state and forwards grants", async () => 
   expect(calls).toEqual([{ folderName: "Sales", accountId: "account1", permission: "view" }]);
   s.close();
 });
+test("Cloud workspace API forwards folder deletion and preserves Cloud conflicts", async () => {
+  const s = store();
+  const deleted: string[] = [];
+  const client = {
+    async deleteFolder(name: string) {
+      deleted.push(name);
+      if (name === "Used folder") {
+        throw new CloudApiError("Only an empty folder can be deleted.", "workspace_conflict", 409);
+      }
+      return { ok: true };
+    },
+  };
+  const options = { cloudConnection: { client } as unknown as CloudConnectionRuntime };
+  const request = (name: string) => new Request("http://x/ui/api/cloud-workspace", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "delete-folder", name }),
+  });
+
+  const removed = await handleUiRequest(request("Empty folder"), {} as any, s, null, options);
+  expect(removed!.status).toBe(200);
+  expect(await removed!.json()).toEqual({ ok: true });
+  const rejected = await handleUiRequest(request("Used folder"), {} as any, s, null, options);
+  expect(rejected!.status).toBe(409);
+  expect((await rejected!.json()).error).toBe("Only an empty folder can be deleted.");
+  expect(deleted).toEqual(["Empty folder", "Used folder"]);
+  s.close();
+});
+
 test("Cloud auth API accepts verified sign-in without exposing extra user metadata", async () => {
   const s = store();
   const cloudAuth = new CloudAuthRuntime({

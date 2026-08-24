@@ -244,6 +244,18 @@ test("Windows window acceptance preserves native minimize state and selects only
       events.push(`profile-card:${profileId}`);
       return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
     },
+    async runBackgroundPageObserved(profileId) {
+      events.push(`background-page:${profileId}`);
+      return {
+        createdPageTargetIds: ["temporary-page"],
+        destroyedPageTargetIds: ["temporary-page"],
+        nativeWindowStayedMinimized: true,
+      };
+    },
+    async runSessionCaptureObserved(profileId) {
+      events.push(`session-capture:${profileId}`);
+      return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
+    },
     async bringToFront(profileId) {
       events.push(`raise:${profileId}`);
       windows[profileId as keyof typeof windows].minimized = false;
@@ -259,6 +271,10 @@ test("Windows window acceptance preserves native minimize state and selects only
     "minimize:first",
     "targets:first:page-1",
     "profile-card:first",
+    "targets:first:page-1",
+    "background-page:first",
+    "targets:first:page-1",
+    "session-capture:first",
     "targets:first:page-1",
     "raise:first",
     "raise:second",
@@ -284,6 +300,16 @@ test("Windows window acceptance rejects a missing initial page before native pol
       return profileId === "first" ? ["page-1"] : [];
     },
     async runProfileCardObserved() {
+      return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
+    },
+    async runBackgroundPageObserved() {
+      return {
+        createdPageTargetIds: ["temporary-page"],
+        destroyedPageTargetIds: ["temporary-page"],
+        nativeWindowStayedMinimized: true,
+      };
+    },
+    async runSessionCaptureObserved() {
       return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
     },
     async bringToFront() {},
@@ -318,6 +344,16 @@ test("Windows window acceptance rejects a profile-card page target and still clo
     async pageTargetIds() { return [...pageTargets]; },
     async runProfileCardObserved() {
       pageTargets = ["page-2"];
+      return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
+    },
+    async runBackgroundPageObserved() {
+      return {
+        createdPageTargetIds: ["temporary-page"],
+        destroyedPageTargetIds: ["temporary-page"],
+        nativeWindowStayedMinimized: true,
+      };
+    },
+    async runSessionCaptureObserved() {
       return { createdPageTargetIds: [], nativeWindowStayedMinimized: true };
     },
     async bringToFront() {},
@@ -355,6 +391,113 @@ for (const scenario of [
       async minimize() {},
       async pageTargetIds() { return ["page-1"]; },
       async runProfileCardObserved() { return scenario.observation; },
+      async runBackgroundPageObserved() {
+        return {
+          createdPageTargetIds: ["temporary-page"],
+          destroyedPageTargetIds: ["temporary-page"],
+          nativeWindowStayedMinimized: true,
+        };
+      },
+      async runSessionCaptureObserved() { return { createdPageTargetIds: [], nativeWindowStayedMinimized: true }; },
+      async bringToFront() {},
+    })).rejects.toThrow(scenario.failure);
+    expect(closed).toEqual(["second", "first"]);
+  });
+}
+
+for (const scenario of [
+  {
+    name: "missing created background page target",
+    observation: {
+      createdPageTargetIds: [],
+      destroyedPageTargetIds: [],
+      nativeWindowStayedMinimized: true,
+    },
+    failure: "background page operation did not observe exactly one created page target",
+  },
+  {
+    name: "missing destroyed background page target",
+    observation: {
+      createdPageTargetIds: ["temporary-page"],
+      destroyedPageTargetIds: [],
+      nativeWindowStayedMinimized: true,
+    },
+    failure: "background page operation did not observe its page target being destroyed",
+  },
+  {
+    name: "background page native restore",
+    observation: {
+      createdPageTargetIds: ["temporary-page"],
+      destroyedPageTargetIds: ["temporary-page"],
+      nativeWindowStayedMinimized: false,
+    },
+    failure: "background page operation transiently restored the minimized native window",
+  },
+]) {
+  test(`Windows window acceptance rejects a ${scenario.name} and still closes both browsers`, async () => {
+    const closed: string[] = [];
+    await expect(exerciseWindowsWindowAcceptance({
+      profileIds: ["first", "second"],
+      async open() {},
+      async close(profileId) { closed.push(profileId); },
+      async nativeWindows() {
+        return {
+          foregroundHwnd: 202,
+          windows: {
+            first: { hwnd: 101, minimized: true, visible: true },
+            second: { hwnd: 202, minimized: false, visible: true },
+          },
+        };
+      },
+      async minimize() {},
+      async pageTargetIds() { return ["page-1"]; },
+      async runProfileCardObserved() { return { createdPageTargetIds: [], nativeWindowStayedMinimized: true }; },
+      async runBackgroundPageObserved() { return scenario.observation; },
+      async runSessionCaptureObserved() { return { createdPageTargetIds: [], nativeWindowStayedMinimized: true }; },
+      async bringToFront() {},
+    })).rejects.toThrow(scenario.failure);
+    expect(closed).toEqual(["second", "first"]);
+  });
+}
+
+for (const scenario of [
+  {
+    name: "session-capture page target",
+    observation: { createdPageTargetIds: ["transient-page"], nativeWindowStayedMinimized: true },
+    failure: "session capture created a page target",
+  },
+  {
+    name: "session-capture native restore",
+    observation: { createdPageTargetIds: [], nativeWindowStayedMinimized: false },
+    failure: "session capture transiently restored the minimized native window",
+  },
+]) {
+  test(`Windows window acceptance rejects a ${scenario.name} and still closes both browsers`, async () => {
+    const closed: string[] = [];
+    await expect(exerciseWindowsWindowAcceptance({
+      profileIds: ["first", "second"],
+      async open() {},
+      async close(profileId) { closed.push(profileId); },
+      async nativeWindows() {
+        return {
+          foregroundHwnd: 202,
+          windows: {
+            first: { hwnd: 101, minimized: true, visible: true },
+            second: { hwnd: 202, minimized: false, visible: true },
+          },
+        };
+      },
+      async minimize() {},
+      async pageTargetIds() { return ["page-1"]; },
+      async runProfileCardObserved() { return { createdPageTargetIds: [], nativeWindowStayedMinimized: true }; },
+      async runBackgroundPageObserved() {
+        return {
+          createdPageTargetIds: ["temporary-page"],
+          destroyedPageTargetIds: ["temporary-page"],
+          nativeWindowStayedMinimized: true,
+        };
+      },
+      async runSessionCaptureObserved() { return scenario.observation; },
       async bringToFront() {},
     })).rejects.toThrow(scenario.failure);
     expect(closed).toEqual(["second", "first"]);
