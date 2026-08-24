@@ -58,6 +58,7 @@ export class ProfileStore {
         user_data_dir TEXT,
         binary_sha256 TEXT,
         persona_digest TEXT,
+        headless INTEGER,
         process_group_id INTEGER,
         root_start_time TEXT
       );
@@ -79,6 +80,7 @@ export class ProfileStore {
       "user_data_dir TEXT",
       "binary_sha256 TEXT",
       "persona_digest TEXT",
+      "headless INTEGER",
       "process_group_id INTEGER",
       "root_start_time TEXT",
     ]) {
@@ -93,6 +95,12 @@ export class ProfileStore {
     // labels already on profiles so pre-existing groups persist even once emptied.
     this.db.exec(`CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY);`);
     this.db.exec(`INSERT OR IGNORE INTO groups (name) SELECT DISTINCT "group" FROM profiles WHERE "group" <> ''`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_temporary_profiles (
+        profile_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
+    `);
     // Uploaded browser extensions (files live on disk; this is the registry).
     // load_dir is the directory handed to --load-extension (has manifest.json).
     this.db.exec(`
@@ -264,8 +272,28 @@ export class ProfileStore {
   /** Delete a profile and its launch row. Returns true if a row was removed. */
   deleteProfile(id: string): boolean {
     this.db.query(`DELETE FROM launches WHERE profile_id = ?`).run(id);
+    this.db.query(`DELETE FROM agent_temporary_profiles WHERE profile_id = ?`).run(id);
     const res = this.db.query(`DELETE FROM profiles WHERE id = ?`).run(id);
     return Number(res.changes) > 0;
+  }
+
+  markAgentTemporary(profileId: string): void {
+    assertSafeProfileId(profileId);
+    this.db.query(
+      `INSERT INTO agent_temporary_profiles (profile_id, created_at) VALUES (?, ?)
+       ON CONFLICT(profile_id) DO NOTHING`,
+    ).run(profileId, Date.now());
+  }
+
+  clearAgentTemporary(profileId: string): void {
+    this.db.query(`DELETE FROM agent_temporary_profiles WHERE profile_id = ?`).run(profileId);
+  }
+
+  listAgentTemporary(): string[] {
+    return this.db
+      .query<{ profile_id: string }, []>(`SELECT profile_id FROM agent_temporary_profiles ORDER BY created_at, profile_id`)
+      .all()
+      .map((row) => row.profile_id);
   }
 
   /**
@@ -420,12 +448,12 @@ export class ProfileStore {
       .query(
         `INSERT INTO launches
            (profile_id, pid, debug_port, ws, started_at, relay_port, session_base_version,
-            binary_path, user_data_dir, binary_sha256, persona_digest, process_group_id, root_start_time)
-         VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$pgid,$root_start)
+            binary_path, user_data_dir, binary_sha256, persona_digest, headless, process_group_id, root_start_time)
+         VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$headless,$pgid,$root_start)
          ON CONFLICT(profile_id) DO UPDATE SET
            pid=$pid, debug_port=$port, ws=$ws, started_at=$at, relay_port=$relay,
            session_base_version=$base, binary_path=$binary, user_data_dir=$data,
-           binary_sha256=$binary_sha, persona_digest=$persona,
+           binary_sha256=$binary_sha, persona_digest=$persona, headless=$headless,
            process_group_id=$pgid, root_start_time=$root_start`,
       )
       .run({
@@ -440,6 +468,7 @@ export class ProfileStore {
         $data: info.userDataDir ?? null,
         $binary_sha: info.binarySha256 ?? null,
         $persona: info.personaDigest ?? null,
+        $headless: info.headless === undefined ? null : Number(info.headless),
         $pgid: info.processGroupId ?? null,
         $root_start: info.rootStartTime ?? null,
       });
@@ -536,6 +565,7 @@ function rowToLaunch(row: any): LaunchInfo {
     userDataDir: row.user_data_dir ?? undefined,
     binarySha256: row.binary_sha256 ?? undefined,
     personaDigest: row.persona_digest ?? undefined,
+    headless: row.headless == null ? undefined : Boolean(row.headless),
     processGroupId: row.process_group_id ?? undefined,
     rootStartTime: row.root_start_time ?? undefined,
   };

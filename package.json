@@ -26,6 +26,9 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@playwright/mcp": "0.0.56",
+    "playwright": "1.58.0-alpha-2026-01-16",
     "playwright-core": "1.58.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

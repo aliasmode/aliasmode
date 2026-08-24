@@ -49,6 +49,7 @@ function needsProxyRelay(profile: Profile): boolean {
 
 export type BrowserLaunchFailure =
   | "preflight"
+  | "mode_conflict"
   | "relay_setup"
   | "process_spawn"
   | "cdp_readiness";
@@ -349,9 +350,15 @@ export interface LauncherOptions {
   log?: (msg: string) => void;
 }
 
-export interface LaunchStartOptions {
+export interface BrowserOpenOptions {
+  headless?: boolean;
+}
+
+export interface LaunchStartOptions extends BrowserOpenOptions {
   autoNavigate?: boolean;
   resetStorage?: boolean;
+  /** Override the launcher's default mode for this launch generation. */
+  headless?: boolean;
   /** Hub session version the browser is being opened from; persisted for safe survivor reattach. */
   sessionBaseVersion?: number;
 }
@@ -604,6 +611,7 @@ export class Launcher {
    * overlap during that window.
    */
   private startsInFlight = new Map<string, Promise<LaunchStartResult>>();
+  private startModesInFlight = new Map<string, boolean>();
   /**
    * In-flight stop() per profile. start() waits for this promise before it
    * inspects or creates a launch, and overlapping stops share it. Together with
@@ -777,16 +785,16 @@ export class Launcher {
    * Durable, secret-safe revision of every input that determines the browser
    * persona. Proxy credentials are covered by the hash but never persisted.
    */
-  private launchPersonaDigest(profile: Profile, binarySha256: string): string {
+  private launchPersonaDigest(profile: Profile, binarySha256: string, headless: boolean): string {
     const extensions = (profile.extensions ?? []).map((id) => ({
       id,
       loadDir: this.store.getExtension(id)?.loadDir ?? null,
     }));
     const serialized = JSON.stringify({
-      schema: 1,
+      schema: 2,
       binarySha256,
       host: [this.hostPlatform, this.hostArch],
-      headless: this.headless,
+      headless,
       windowScale: [this.windowWidthScale, this.windowHeightScale],
       ua: profile.ua,
       platform: profile.platform,
@@ -811,7 +819,10 @@ export class Launcher {
         `does not match approved revision ${approvedSha256}`,
       );
     }
-    const expectedPersona = this.launchPersonaDigest(profile, approvedSha256);
+    if (launch.headless === undefined) {
+      throw new Error("legacy launch is missing its headless mode");
+    }
+    const expectedPersona = this.launchPersonaDigest(profile, approvedSha256, launch.headless);
     if (!launch.personaDigest || launch.personaDigest !== expectedPersona) {
       throw new Error("live browser persona or launch mode differs from the current approved profile revision");
     }
@@ -845,6 +856,7 @@ export class Launcher {
     userDataDir: string,
     launchArgs: string[],
     relayPort?: number,
+    headless = this.headless,
   ): string[] {
     const { chromeArgs } = splitLaunchUrls(launchArgs);
     const forwardedArgs = validateForwardedLaunchArgs(chromeArgs);
@@ -882,7 +894,7 @@ export class Launcher {
     // Chromium: the PRESENCE of --headless (any value, even "false") turns
     // headless ON. So headful = omit the flag entirely; headless = pass it.
     // Headful matches AdsPower (real windows) and avoids the headless signal.
-    if (this.headless) args.push("--headless=new");
+    if (headless) args.push("--headless=new");
     // Relayed proxies use a loopback HTTP endpoint. Everything else uses the
     // upstream proxy flag directly.
     if (relayPort) args.push(`--proxy-server=http://127.0.0.1:${relayPort}`);
@@ -1044,9 +1056,15 @@ export class Launcher {
   ): Promise<LaunchStartResult> {
     const stopping = this.stopsInFlight.get(profileId);
     const inFlight = this.startsInFlight.get(profileId);
+    const requestedHeadless = opts.headless ?? this.headless;
     // Coalesce only starts in the same lifecycle generation. If the existing
     // start predates a stop, this call is the replacement queued after it.
-    if (inFlight && (!stopping || this.startAfterStop.get(profileId) === stopping)) return inFlight;
+    if (inFlight && (!stopping || this.startAfterStop.get(profileId) === stopping)) {
+      if (this.startModesInFlight.get(profileId) !== requestedHeadless) {
+        throw new BrowserLaunchError("mode_conflict");
+      }
+      return inFlight;
+    }
     // Capture the predecessor before installing this start. The body is deferred
     // until after the map entry exists so even a synchronously-reentrant injected
     // fetch/spawn cannot start a duplicate. Capturing also avoids a wait cycle:
@@ -1067,10 +1085,12 @@ export class Launcher {
       .finally(() => {
         if (this.startsInFlight.get(profileId) === promise) {
           this.startsInFlight.delete(profileId);
+          this.startModesInFlight.delete(profileId);
         }
         if (this.startAfterStop.get(profileId) === stopping) this.startAfterStop.delete(profileId);
       });
     this.startsInFlight.set(profileId, promise);
+    this.startModesInFlight.set(profileId, requestedHeadless);
     if (stopping) this.startAfterStop.set(profileId, stopping);
     else this.startAfterStop.delete(profileId);
     return promise;
@@ -1082,6 +1102,7 @@ export class Launcher {
     opts: LaunchStartOptions = {},
   ): Promise<LaunchStartResult> {
     const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
+    const headless = opts.headless ?? this.headless;
     // Reject unsafe ids and switches before touching the profile directory or
     // opening a proxy connection.
     assertSafeProfileId(profileId);
@@ -1113,6 +1134,9 @@ export class Launcher {
     // which recovers this run without ever double-launching the profile.
     let existing = this.store.getLaunch(profileId);
     if (existing) {
+      if (existing.headless !== undefined && existing.headless !== headless) {
+        throw new BrowserLaunchError("mode_conflict");
+      }
       try {
         this.assertStoredLaunchPersona(profile, existing, approvedBinarySha256);
       } catch (error) {
@@ -1224,7 +1248,7 @@ export class Launcher {
     const launchBinaryPath = verifiedBinary.path;
 
     const userDataDir = this.userDataDir(profileId);
-    const personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256);
+    const personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
     mkdirSync(userDataDir, { recursive: true });
 
     // Reap leaked browsers still holding this dir BEFORE the repair/clear steps below
@@ -1299,7 +1323,7 @@ export class Launcher {
         this.log(`proxy relay ready for ${profileId}`);
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
-      const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort);
+      const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort, headless);
       this.log(`launching ${profileId} on port ${port} (seed ${profile.fingerprintSeed})`);
       launchStartedAt = Date.now();
       this.verifiedExternal.delete(profileId);
@@ -1333,6 +1357,7 @@ export class Launcher {
         userDataDir,
         binarySha256: spawnVerifiedBinary.sha256,
         personaDigest,
+        headless,
       };
       this.store.recordLaunch(provisionalLaunch);
       spawnAttempted = true;
@@ -1494,6 +1519,7 @@ export class Launcher {
         userDataDir,
         binarySha256: verifiedBinary.sha256,
         personaDigest,
+        headless,
         processGroupId: proc.processGroupId,
         rootStartTime: proc.rootStartTime,
       };
@@ -1520,6 +1546,7 @@ export class Launcher {
           userDataDir,
           binarySha256: verifiedBinary.sha256,
           personaDigest,
+          headless,
           processGroupId: proc?.processGroupId,
           rootStartTime: proc?.rootStartTime,
         };

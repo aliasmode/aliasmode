@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "product": "AliasMode",
+  "platforms": ["windows-x64"],
+  "wingetId": "AliasMode.AliasMode",
+  "releaseManifest": "https://github.com/Twitter-outreach/cloakpit/releases/download/v{version}/aliasmode-agent-bootstrap.json",
+  "bootstrapScript": "scripts/install-agent.ps1",
+  "installedHelper": "%LOCALAPPDATA%\\AliasMode\\aliasmode-mcp.exe",
+  "mcp": {
+    "transport": "stdio",
+    "command": "%LOCALAPPDATA%\\AliasMode\\playwright\\node\\node.exe",
+    "args": ["%LOCALAPPDATA%\\AliasMode\\playwright\\agent\\mcp-host.mjs"]
+  }
+}

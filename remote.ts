@@ -20,7 +20,13 @@ import {
   type RemoteProfile,
   type RemoteRoster,
 } from "./hub-client.ts";
-import { isTelegramPlatform, splitLaunchUrls, platformHomeUrl, type Launcher } from "./launcher.ts";
+import {
+  isTelegramPlatform,
+  splitLaunchUrls,
+  platformHomeUrl,
+  type BrowserOpenOptions,
+  type Launcher,
+} from "./launcher.ts";
 import {
   bundleHasRestorableLogin,
   bundleHasTelegramOrigin,
@@ -757,7 +763,12 @@ export class RemoteCoordinator {
     }
   }
 
-  async open(profileId: string, launchArgs: string[] = [], force = false): Promise<OpenResult> {
+  async open(
+    profileId: string,
+    launchArgs: string[] = [],
+    force = false,
+    options: BrowserOpenOptions = {},
+  ): Promise<OpenResult> {
     if (this.shuttingDown) return { ok: false, error: "remote coordinator is shutting down" };
     const currentGeneration = this.lifecycleGenerations.get(profileId) ?? 0;
     const existing = this.opening.get(profileId);
@@ -768,7 +779,10 @@ export class RemoteCoordinator {
 
     const generation = currentGeneration + 1;
     this.lifecycleGenerations.set(profileId, generation);
-    const promise = this.withProfileTransition(profileId, () => this.doOpen(profileId, launchArgs, force));
+    const promise = this.withProfileTransition(
+      profileId,
+      () => this.doOpen(profileId, launchArgs, force, options),
+    );
     this.opening.set(profileId, { promise, generation });
     try {
       return await promise;
@@ -777,7 +791,12 @@ export class RemoteCoordinator {
     }
   }
 
-  private async doOpen(profileId: string, launchArgs: string[], _force: boolean): Promise<OpenResult> {
+  private async doOpen(
+    profileId: string,
+    launchArgs: string[],
+    _force: boolean,
+    options: BrowserOpenOptions,
+  ): Promise<OpenResult> {
     // A caller deadline cannot cancel Playwright itself. Do not re-inject or
     // reuse this live browser while an older capture still owns its CDP
     // client; keep the current heartbeat/lease intact and let the operator
@@ -887,6 +906,7 @@ export class RemoteCoordinator {
         // A manager crash after spawn but before the authoritative restore
         // leaves an unmistakably provisional survivor.
         sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
+        headless: options.headless,
       });
       // start() may reuse an existing browser and preserve its old launch row.
       // Move that row to the provisional lineage explicitly before restore.

@@ -15,10 +15,25 @@ function workspace(): string {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-windows-bundle-"));
   mkdirSync(join(cwd, "src-tauri"), { recursive: true });
   writeFileSync(join(cwd, "playwright-worker.mjs"), "worker");
-  for (const dependency of ["playwright-core", "ws"]) {
-    const root = join(cwd, "node_modules", dependency);
+  mkdirSync(join(cwd, "agent"), { recursive: true });
+  for (const file of ["mcp-host.mjs", "playwright-proxy.mjs", "playwright-runner.mjs", "runtime-client.mjs"]) {
+    writeFileSync(join(cwd, "agent", file), file);
+  }
+  const dependencies: Record<string, { version: string; dependencies?: Record<string, string> }> = {
+    "playwright-core": { version: "1.58.2" },
+    "ws": { version: "8.21.0" },
+    "@modelcontextprotocol/sdk": { version: "1.30.0", dependencies: { zod: "1.0.0" } },
+    "@playwright/mcp": {
+      version: "0.0.56",
+      dependencies: { playwright: "1.58.0-alpha-2026-01-16", "playwright-core": "1.58.0-alpha-2026-01-16" },
+    },
+    "playwright": { version: "1.58.0-alpha-2026-01-16", dependencies: { "playwright-core": "1.58.0-alpha-2026-01-16" } },
+    "zod": { version: "1.0.0" },
+  };
+  for (const [dependency, manifest] of Object.entries(dependencies)) {
+    const root = join(cwd, "node_modules", ...dependency.split("/"));
     mkdirSync(root, { recursive: true });
-    writeFileSync(join(root, "package.json"), JSON.stringify({ name: dependency }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: dependency, ...manifest }));
   }
   return cwd;
 }
@@ -32,6 +47,7 @@ test("Windows bundle preparation packages the official runtime and records its h
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
@@ -54,8 +70,14 @@ test("Windows bundle preparation packages the official runtime and records its h
     expect(readFileSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chrome.dll"), "utf8")).toBe("dll");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node", "node.exe"), "utf8")).toBe("node");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "worker.mjs"), "utf8")).toBe("worker");
-    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8"))).toEqual({ name: "playwright-core" });
-    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8"))).toEqual({ name: "ws" });
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8")).version).toBe("1.58.2");
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8")).version).toBe("8.21.0");
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "@modelcontextprotocol", "sdk", "package.json"), "utf8")).version).toBe("1.30.0");
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "@playwright", "mcp", "package.json"), "utf8")).version).toBe("0.0.56");
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright", "package.json"), "utf8")).version).toBe("1.58.0-alpha-2026-01-16");
+    expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "zod", "package.json"), "utf8")).version).toBe("1.0.0");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "agent", "mcp-host.mjs"), "utf8")).toBe("mcp-host.mjs");
+    expect(readFileSync(join(cwd, "src-tauri", "binaries", "aliasmode-mcp-x86_64-pc-windows-msvc.exe"), "utf8")).toBe("agent");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "generated", "browser.json"), "utf8"))).toEqual(metadata);
     expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe("0.1.0-beta.32\n");
   } finally {
@@ -71,6 +93,7 @@ test("Windows bundle preparation rejects a non-Windows browser payload", async (
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
@@ -100,6 +123,7 @@ test("Windows bundle preparation rejects installer paths outside staging", async
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
@@ -119,6 +143,7 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
       platform: "win32",
       arch: "x64",
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");

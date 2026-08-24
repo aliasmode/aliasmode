@@ -16,7 +16,7 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
-    "externalBin": ["binaries/aliasmode-sidecar"],
+    "externalBin": ["binaries/aliasmode-sidecar", "binaries/aliasmode-mcp"],
     "resources": {
       "resources/cloakbrowser/": "cloakbrowser/",
       "resources/playwright/": "playwright/"

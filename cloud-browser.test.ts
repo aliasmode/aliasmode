@@ -51,6 +51,7 @@ function setup(options: {
   startRetainedFailure?: boolean;
   startError?: unknown;
   verifyWebSockets?: string[];
+  expectedHeadless?: boolean;
   proxy?: PortableProfileV1["profile"]["proxy"];
   session?: PortableProfileV1["session"];
   accountId?: () => string;
@@ -152,6 +153,7 @@ function setup(options: {
       startedProxy = store.getProfile(profileId)?.proxy;
       expect(args).toEqual(["--window-size=1200,800"]);
       expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
+      expect(startOptions.headless).toBe(options.expectedHeadless);
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
       if (options.startError) throw options.startError;
       store.recordLaunch({
@@ -264,6 +266,19 @@ test("Cloud browser creates a portable profile without a local-only fallback", a
   state.store.close();
 });
 
+
+test("Cloud browser forwards the typed headless launch option", async () => {
+  const state = setup({ expectedHeadless: true });
+
+  expect((await state.coordinator.open(
+    "profile1",
+    ["--window-size=1200,800"],
+    { headless: true },
+  )).ok).toBe(true);
+
+  state.queue.close();
+  state.store.close();
+});
 
 test("Cloud browser passes the authenticated proxy to Launcher without exposing it", async () => {
   const proxy = {

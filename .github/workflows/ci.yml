@@ -163,7 +163,152 @@ jobs:
           Remove-Item ".\node_modules" -Recurse -Force
           if (Test-Path ".\node_modules") { throw "checkout node_modules remained available to installed acceptance" }
 
-          $app = Start-Process -PassThru $appPath
+          $appData = Join-Path $env:APPDATA "com.aliasmode.desktop"
+          Remove-Item $appData -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $appData | Out-Null
+          @{ version = 1; mode = "local"; localAnalytics = $false } |
+            ConvertTo-Json -Compress |
+            Set-Content (Join-Path $appData "config.json")
+          $descriptorPath = Join-Path $appData "agent-runtime.json"
+
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $helper = Join-Path $installRoot "aliasmode-mcp.exe"
+          $playwrightRuntime = Join-Path $installRoot "playwright"
+          $node = Join-Path $playwrightRuntime "node\node.exe"
+          $host = Join-Path $playwrightRuntime "agent\mcp-host.mjs"
+          foreach ($path in @(
+            $helper,
+            $node,
+            $host,
+            (Join-Path $playwrightRuntime "agent\playwright-proxy.mjs"),
+            (Join-Path $playwrightRuntime "agent\playwright-runner.mjs"),
+            (Join-Path $playwrightRuntime "agent\runtime-client.mjs")
+          )) {
+            if (-not (Test-Path $path -PathType Leaf)) { throw "installed agent runtime file is missing: $path" }
+          }
+          if ((& $node --version).Trim() -ne "v22.23.2") { throw "installed Node runtime version is incorrect" }
+          foreach ($package in @{
+            "playwright-core" = "1.58.2"
+            "@modelcontextprotocol\sdk" = "1.30.0"
+            "@playwright\mcp" = "0.0.56"
+            "playwright" = "1.58.0-alpha-2026-01-16"
+          }.GetEnumerator()) {
+            $manifest = Join-Path $playwrightRuntime "node_modules\$($package.Key)\package.json"
+            if (-not (Test-Path $manifest -PathType Leaf)) { throw "installed agent package is missing: $($package.Key)" }
+            if ((Get-Content $manifest | ConvertFrom-Json).version -ne $package.Value) {
+              throw "installed agent package version is incorrect: $($package.Key)"
+            }
+          }
+
+          $helperVersion = & $helper version | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $helperVersion.ok -or $helperVersion.result.version -ne $bundleVersion) {
+            throw "installed agent helper returned an incorrect version"
+          }
+          $setup = & $helper setup --client generic --yes | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $setup.ok -or $setup.result.clients.Count -ne 0) {
+            throw "installed generic MCP setup failed"
+          }
+          if (
+            $setup.result.mcp.command -ne $node -or
+            $setup.result.mcp.args.Count -ne 1 -or
+            $setup.result.mcp.args[0] -ne $host -or
+            $setup.result.generic.mcpServers.aliasmode.command -ne $node -or
+            $setup.result.generic.mcpServers.aliasmode.args[0] -ne $host
+          ) {
+            throw "installed generic MCP setup returned incorrect paths"
+          }
+
+          $mcpStart = [System.Diagnostics.ProcessStartInfo]::new()
+          $mcpStart.FileName = $node
+          $mcpStart.ArgumentList.Add($host)
+          $mcpStart.WorkingDirectory = $installRoot
+          $mcpStart.UseShellExecute = $false
+          $mcpStart.CreateNoWindow = $true
+          $mcpStart.RedirectStandardInput = $true
+          $mcpStart.RedirectStandardOutput = $true
+          $mcp = [System.Diagnostics.Process]::new()
+          $mcp.StartInfo = $mcpStart
+          if (-not $mcp.Start()) { throw "installed MCP host did not start" }
+          $mcpShutdownFailure = $null
+          try {
+            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aliasmode-ci","version":"1"}}}')
+            $initialize = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
+            if ($initialize.id -ne 1 -or -not $initialize.result.serverInfo) {
+              throw "installed MCP host returned an invalid initialize response"
+            }
+            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}')
+            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+            $toolResponse = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
+            if ($toolResponse.id -ne 2) { throw "installed MCP host returned an invalid tools/list response" }
+            $toolNames = @($toolResponse.result.tools | ForEach-Object { $_.name })
+            foreach ($name in @(
+              "aliasmode_profiles_list",
+              "aliasmode_profile_create",
+              "aliasmode_profile_delete",
+              "aliasmode_browser_open",
+              "aliasmode_browser_select",
+              "aliasmode_browser_status",
+              "aliasmode_browser_close",
+              "browser_close"
+            )) {
+              if ($toolNames -notcontains $name) { throw "installed MCP host did not expose $name" }
+            }
+
+            if (-not (Test-Path $descriptorPath -PathType Leaf)) { throw "background runtime descriptor is missing" }
+            $descriptor = Get-Content $descriptorPath | ConvertFrom-Json
+            if (
+              $descriptor.protocol -ne "aliasmode-runtime-v1" -or
+              $descriptor.appVersion -ne $bundleVersion -or
+              $descriptor.readiness -ne "local" -or
+              $descriptor.generation -notmatch '^[a-f0-9]{64}$' -or
+              $descriptor.nonce -notmatch '^[a-f0-9]{64}$' -or
+              $descriptor.generation -eq $descriptor.nonce -or
+              $descriptor.port -le 0 -or
+              $descriptor.desktopPid -le 0 -or
+              $descriptor.sidecarPid -le 0
+            ) {
+              throw "background runtime descriptor is invalid"
+            }
+            $backgroundProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($descriptor.desktopPid)"
+            if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
+              throw "MCP host did not launch AliasMode in background mode"
+            }
+            $hiddenApp = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
+            if ($hiddenApp.MainWindowHandle -ne 0) { throw "background AliasMode exposed its main window" }
+          } finally {
+            $mcp.StandardInput.Close()
+            if (-not $mcp.WaitForExit(15000)) {
+              Stop-Process -Id $mcp.Id -Force
+              $mcp.WaitForExit()
+              $mcpShutdownFailure = "installed MCP host survived stdio disconnect"
+            }
+          }
+          if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
+
+          $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
+            throw "installed JSON CLI could not create a temporary profile"
+          }
+          $profileId = $profile.result.id
+          $opened = & $helper browser open --profile $profileId --headless | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $opened.ok -or -not $opened.result.headless -or $opened.result.alreadyOpen) {
+            throw "installed JSON CLI could not open a headless browser"
+          }
+          $status = & $helper browser status --profile $profileId | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $status.ok -or -not $status.result.running) {
+            throw "installed JSON CLI did not report its browser as running"
+          }
+          $closed = & $helper browser close --profile $profileId | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $closed.ok -or -not $closed.result.closed -or -not $closed.result.deleted) {
+            throw "installed JSON CLI did not close and delete its temporary profile"
+          }
+
+          $app = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
+          $reveal = Start-Process -PassThru $appPath
+          if (-not $reveal.WaitForExit(15000)) {
+            Stop-Process -Id $reveal.Id -Force
+            throw "second normal AliasMode launch did not return to the background instance"
+          }
           $sidecarPid = $null
           $shutdownFailure = $null
           try {
@@ -210,6 +355,11 @@ jobs:
             }
           }
           if ($shutdownFailure) { throw $shutdownFailure }
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            if (-not (Test-Path $descriptorPath)) { break }
+            Start-Sleep -Milliseconds 500
+          }
+          if (Test-Path $descriptorPath) { throw "runtime descriptor survived desktop shutdown" }
 
           $degradedApp = Start-Process -PassThru $appPath
           $degradedSidecarPid = $null
@@ -217,30 +367,29 @@ jobs:
             for ($attempt = 0; $attempt -lt 60; $attempt++) {
               $degradedApp.Refresh()
               if ($degradedApp.HasExited) { throw "degraded desktop exited before readiness" }
-              $degradedSidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($degradedApp.Id)" |
-                Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
-                Select-Object -First 1
-              if ($degradedSidecar) { $degradedSidecarPid = [int]$degradedSidecar.ProcessId }
-              if ($degradedSidecarPid -and $degradedApp.MainWindowHandle -ne 0) { break }
+              if (Test-Path $descriptorPath -PathType Leaf) {
+                $degradedDescriptor = Get-Content $descriptorPath | ConvertFrom-Json
+                if ($degradedDescriptor.desktopPid -eq $degradedApp.Id) {
+                  $degradedSidecarPid = [int]$degradedDescriptor.sidecarPid
+                  break
+                }
+              }
               Start-Sleep -Milliseconds 500
             }
-            if (-not $degradedSidecarPid) { throw "degraded desktop did not start its sidecar" }
+            if (-not $degradedSidecarPid) { throw "degraded desktop did not publish its runtime descriptor" }
             Stop-Process -Id $degradedSidecarPid -Force
-            $fallbackReady = $false
-            for ($attempt = 0; $attempt -lt 20; $attempt++) {
-              $degradedApp.Refresh()
-              if ($degradedApp.HasExited) { break }
-              if ($degradedApp.MainWindowTitle -eq "AliasMode service stopped") {
-                $fallbackReady = $true
-                break
-              }
-              Start-Sleep -Milliseconds 250
+            if (-not $degradedApp.WaitForExit(15000)) {
+              throw "degraded desktop did not exit after unexpected sidecar termination"
             }
-            if ($degradedApp.HasExited -or $degradedApp.MainWindowHandle -eq 0) {
-              throw "installed desktop exited after unexpected sidecar termination"
+            if ($degradedApp.ExitCode -eq 0) {
+              throw "degraded desktop reported success after unexpected sidecar termination"
             }
-            if (-not $fallbackReady) {
-              throw "installed desktop did not present its sidecar failure state"
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              if (-not (Test-Path $descriptorPath)) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if (Test-Path $descriptorPath) {
+              throw "runtime descriptor survived unexpected sidecar termination"
             }
           } finally {
             $degradedApp.Refresh()
@@ -254,7 +403,6 @@ jobs:
           if ($metadata.executable -ne "chrome.exe") { throw "Windows browser metadata does not target chrome.exe" }
           $browserPath = Join-Path $installRoot "cloakbrowser\chrome.exe"
           if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
-          $playwrightRuntime = Join-Path $installRoot "playwright"
           if (-not (Test-Path (Join-Path $playwrightRuntime "node\node.exe") -PathType Leaf)) {
             throw "installed official Node runtime is missing"
           }

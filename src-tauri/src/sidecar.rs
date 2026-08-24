@@ -1,4 +1,4 @@
-use crate::{browser::BrowserRuntime, credentials};
+use crate::{browser::BrowserRuntime, credentials, runtime_descriptor::RuntimeDescriptorState};
 use reqwest::{redirect::Policy, Client};
 use serde::Deserialize;
 use std::{
@@ -76,6 +76,7 @@ enum ChildStatus {
 
 struct SidecarInner {
     child: Mutex<Option<CommandChild>>,
+    pid: u32,
     nonce: String,
     status: watch::Sender<ChildStatus>,
     shutting_down: Arc<AtomicBool>,
@@ -86,6 +87,10 @@ struct SidecarInner {
 pub struct SidecarSupervisor(Arc<SidecarInner>);
 
 impl SidecarSupervisor {
+    pub fn pid(&self) -> u32 {
+        self.0.pid
+    }
+
     fn write_control(&self, value: &serde_json::Value) -> Result<(), String> {
         let mut child = self
             .0
@@ -316,6 +321,8 @@ pub async fn launch_and_verify(
     browser: &BrowserRuntime,
     playwright_runtime: &Path,
     nonce: &str,
+    agent_nonce: &str,
+    background: bool,
 ) -> Result<(SidecarSupervisor, u16), String> {
     let command = app
         .shell()
@@ -324,6 +331,8 @@ pub async fn launch_and_verify(
         .args(command_args(data_dir))
         .current_dir(data_dir)
         .env("ALIASMODE_DESKTOP_NONCE", nonce)
+        .env("ALIASMODE_AGENT_NONCE", agent_nonce)
+        .env("ALIASMODE_BACKGROUND", if background { "1" } else { "0" })
         .env("ALIASMODE_DESKTOP_VERSION", VERSION)
         .env("ALIASMODE_PLAYWRIGHT_RUNTIME", playwright_runtime)
         .env("CLOAKBROWSER_BINARY_PATH", &browser.executable)
@@ -389,6 +398,7 @@ pub async fn launch_and_verify(
     let cleanup_confirmed = Arc::new(AtomicBool::new(false));
     let supervisor = SidecarSupervisor(Arc::new(SidecarInner {
         child: Mutex::new(Some(child)),
+        pid,
         nonce: nonce.to_owned(),
         status: status.clone(),
         shutting_down: shutting_down.clone(),
@@ -459,12 +469,16 @@ pub async fn launch_and_verify(
                     if let Ok(mut child) = control.0.child.lock() {
                         child.take();
                     }
+                    if let Some(runtime) = app.try_state::<RuntimeDescriptorState>() {
+                        let _ = runtime.remove_owned();
+                    }
                     if should_present_unexpected_exit(shutting_down.load(Ordering::Acquire)) {
                         eprintln!(
                             "AliasMode sidecar exited unexpectedly (code {:?})",
                             exit.code
                         );
                         present_unexpected_exit(&app, exit.code);
+                        app.exit(1);
                     }
                     break;
                 }

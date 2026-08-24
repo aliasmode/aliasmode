@@ -307,7 +307,7 @@ test("restart config drift scans the survivor with its persisted binary and user
   rmSync(newRoot, { recursive: true, force: true });
 });
 
-test("a restart with a different launch mode stops the stale persona instead of certifying it", async () => {
+test("a live browser rejects a requested launch-mode change until it is closed", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
@@ -326,8 +326,8 @@ test("a restart with a different launch mode stops the stale persona instead of 
     browserClose: async () => false,
   });
 
-  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
+  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("mode_conflict"));
+  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
   store.close();
 });
 
@@ -1452,10 +1452,42 @@ test("buildArgs omits --headless when headful, and adds it only when headless", 
   const headful = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
   const argsHeadful = headful.buildArgs(profile, 9333, "/data", []);
   expect(argsHeadful.some((a) => a.startsWith("--headless"))).toBe(false); // raw chromium: any --headless = headless ON
+  expect(headful.buildArgs(profile, 9333, "/data", [], undefined, true)).toContain("--headless=new");
 
   const headless = new Launcher({ store, binaryPath: "/fake", headless: true, spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
   const argsHeadless = headless.buildArgs(profile, 9333, "/data", []);
   expect(argsHeadless).toContain("--headless=new");
+  expect(headless.buildArgs(profile, 9333, "/data", [], undefined, false).some((a) => a.startsWith("--headless"))).toBe(false);
+  store.close();
+});
+
+test("start applies and persists a per-launch headless override", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const args: string[][] = [];
+  const launcher = newLauncher(store, f, args);
+
+  await launcher.start("k1d0cd11", [], { headless: true });
+
+  expect(args[0]).toContain("--headless=new");
+  expect(store.getLaunch("k1d0cd11")?.headless).toBe(true);
+  await launcher.stop("k1d0cd11");
+  store.close();
+});
+
+test("concurrent starts with different modes do not silently coalesce", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const launcher = newLauncher(store, f, []);
+
+  const opening = launcher.start("k1d0cd11", [], { headless: true });
+  await expect(launcher.start("k1d0cd11", [], { headless: false })).rejects.toEqual(
+    new BrowserLaunchError("mode_conflict"),
+  );
+  await opening;
+  await launcher.stop("k1d0cd11");
   store.close();
 });
 

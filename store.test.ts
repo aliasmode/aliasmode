@@ -263,6 +263,7 @@ test("launch records round-trip exact process, kernel, and persona identity", ()
     userDataDir: "/profiles/k1d0cd11",
     binarySha256: "a".repeat(64),
     personaDigest: "b".repeat(64),
+    headless: true,
     processGroupId: 1234,
     rootStartTime: "987654",
   });
@@ -277,6 +278,7 @@ test("launch records round-trip exact process, kernel, and persona identity", ()
     userDataDir: "/profiles/k1d0cd11",
     binarySha256: "a".repeat(64),
     personaDigest: "b".repeat(64),
+    headless: true,
     processGroupId: 1234,
     rootStartTime: "987654",
   });
@@ -285,6 +287,20 @@ test("launch records round-trip exact process, kernel, and persona identity", ()
   expect(store.listLaunches().length).toBe(1);
   store.clearLaunch("k1d0cd11");
   expect(store.getLaunch("k1d0cd11")).toBeNull();
+  store.close();
+});
+
+test("temporary agent profile markers survive restart-style reads and clear on deletion", () => {
+  const store = memStore();
+  const profile = parseExport(SAMPLE).profiles[0]!;
+  store.upsertProfile(profile);
+
+  store.markAgentTemporary(profile.id);
+  expect(store.listAgentTemporary()).toEqual([profile.id]);
+  store.markAgentTemporary(profile.id);
+  expect(store.listAgentTemporary()).toEqual([profile.id]);
+  expect(store.deleteProfile(profile.id)).toBe(true);
+  expect(store.listAgentTemporary()).toEqual([]);
   store.close();
 });
 
