@@ -45,7 +45,7 @@ jobs:
           $version = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
           $candidateVersion = [System.Management.Automation.SemanticVersion]::Parse($version)
           $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
-          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers)
+          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers | Write-Output)
           foreach ($release in $releases) {
             if ($release.draft -or -not $release.tag_name.StartsWith("v")) { continue }
             try {
@@ -173,7 +173,7 @@ jobs:
 
           $candidateVersion = [System.Management.Automation.SemanticVersion]::Parse($env:ALIASMODE_CANDIDATE_VERSION)
           $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
-          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers)
+          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers | Write-Output)
           $previous = $releases |
             Where-Object { -not $_.draft -and $_.tag_name.StartsWith("v") } |
             ForEach-Object {
