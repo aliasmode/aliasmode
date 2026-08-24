@@ -280,18 +280,36 @@ pub fn run() {
             } else if background {
                 window.hide()?;
             }
-            if configured_local_mode(&data_dir) {
-                app.state::<runtime_descriptor::RuntimeDescriptorState>()
-                    .publish("local")
-                    .map_err(boxed)?;
-            }
             tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("AliasMode desktop failed");
 
-    app.run(|app, event| {
+    app.run(move |app, event| {
+        if matches!(event, tauri::RunEvent::Ready) {
+            if background {
+                let Some(window) = app.get_webview_window("main") else {
+                    app.exit(1);
+                    return;
+                };
+                if window.hide().is_err() {
+                    app.exit(1);
+                    return;
+                }
+            }
+            if app
+                .path()
+                .app_data_dir()
+                .is_ok_and(|data_dir| configured_local_mode(&data_dir))
+                && app
+                    .state::<runtime_descriptor::RuntimeDescriptorState>()
+                    .publish("local")
+                    .is_err()
+            {
+                app.exit(1);
+            }
+        }
         if matches!(event, tauri::RunEvent::Exit) {
             let _ = app
                 .state::<runtime_descriptor::RuntimeDescriptorState>()
