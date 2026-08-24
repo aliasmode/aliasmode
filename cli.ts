@@ -57,7 +57,7 @@ import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import net from "node:net";
@@ -1995,7 +1995,7 @@ async function assertCloudCrossDeviceQueueEncryption(
   requireCloudCrossDevice(existsSync(path), "pending queue artifact is missing");
   for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
     if (!existsSync(candidate)) continue;
-    const bytes = Buffer.from(await Bun.file(candidate).arrayBuffer());
+    const bytes = readFileSync(candidate);
     for (const sentinel of sentinels) {
       requireCloudCrossDevice(
         !bytes.includes(Buffer.from(sentinel, "utf8")),
