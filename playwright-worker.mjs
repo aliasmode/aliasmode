@@ -468,12 +468,21 @@ async function createReadOnlyStorageReader(browser, context) {
   let ordinal = 0;
   const close = async () => {
     await cdp?.detach().catch(() => {});
-    if (page) await page.close().catch(() => {});
-    else if (targetId) await browserCdp.send("Target.closeTarget", { targetId }).catch(() => {});
+    await page?.close().catch(() => {});
+    if (targetId) await browserCdp.send("Target.closeTarget", { targetId }).catch(() => {});
     await browserCdp.detach().catch(() => {});
   };
 
   try {
+    const version = await browserCdp.send("Browser.getVersion");
+    const product = typeof version?.product === "string"
+      ? /^[^/\s]+\/([1-9]\d*)(?:\.|$)/.exec(version.product)
+      : null;
+    const productMajor = product ? Number(product[1]) : NaN;
+    if (!Number.isSafeInteger(productMajor) || productMajor < 137) {
+      throw new Error("hidden storage target requires Chromium 137 or newer");
+    }
+
     const existing = new Set(context.pages());
     const previousAttachToOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
     process.env.PW_CHROMIUM_ATTACH_TO_OTHER = "1";
@@ -483,16 +492,49 @@ async function createReadOnlyStorageReader(browser, context) {
         background: true,
         hidden: true,
       }));
+      if (typeof targetId !== "string" || !targetId) throw new Error("hidden storage target identity is invalid");
+      const target = (await browserCdp.send("Target.getTargetInfo", { targetId }))?.targetInfo;
+      if (target?.targetId !== targetId || target.type !== "other" || target.url !== marker) {
+        throw new Error("hidden storage target identity is invalid");
+      }
+      let windowless = false;
+      try {
+        await browserCdp.send("Browser.getWindowForTarget", { targetId });
+      } catch (error) {
+        windowless = [
+          "Protocol error (Browser.getWindowForTarget): Browser window not found",
+          "cdpSession.send: Protocol error (Browser.getWindowForTarget): Browser window not found",
+        ].includes(error?.message);
+        if (!windowless) throw error;
+      }
+      if (!windowless) throw new Error("hidden storage target is attached to a browser window");
+      const rejected = new Set();
       for (let attempt = 0; attempt < 100 && !page; attempt++) {
-        page = context.pages().find((candidate) => !existing.has(candidate) && candidate.url() === marker);
+        const candidates = context.pages().filter((candidate) =>
+          !existing.has(candidate) && !rejected.has(candidate) && candidate.url() === marker);
+        for (const candidate of candidates) {
+          let candidateCdp;
+          let identified = false;
+          try {
+            candidateCdp = await context.newCDPSession(candidate);
+            const attached = (await candidateCdp.send("Target.getTargetInfo"))?.targetInfo;
+            identified = true;
+            if (attached?.targetId === targetId && attached.type === "other") {
+              page = candidate;
+              cdp = candidateCdp;
+              break;
+            }
+          } catch {}
+          if (identified) rejected.add(candidate);
+          await candidateCdp?.detach().catch(() => {});
+        }
         if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
       }
     } finally {
       if (previousAttachToOther === undefined) delete process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
       else process.env.PW_CHROMIUM_ATTACH_TO_OTHER = previousAttachToOther;
     }
-    if (!page) throw new Error("hidden storage target is unavailable");
-    cdp = await context.newCDPSession(page);
+    if (!page || !cdp) throw new Error("hidden storage target is unavailable");
     await cdp.send("Network.enable");
     await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     await cdp.send("DOMStorage.enable");

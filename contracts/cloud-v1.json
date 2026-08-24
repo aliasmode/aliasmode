@@ -20,7 +20,7 @@
   },
   "profiles": {
     "portableSchemaVersion": 1,
-    "concurrentOpen": "advisory_warning",
+    "concurrentOpen": "exclusive_active_lease",
     "closeConflict": "mandatory_compare_and_swap_first_valid_close_wins",
     "merge": false,
     "trash": {

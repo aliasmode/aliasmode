@@ -51,7 +51,7 @@ import {
 } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
-import { CloudBrowserCoordinator } from "./cloud-browser.ts";
+import { CloudBrowserCoordinator, type CloudBrowserOptions } from "./cloud-browser.ts";
 import { PendingSyncQueue, PendingSyncRuntime } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
@@ -554,7 +554,7 @@ export async function runCompiledSidecarSmoke(
   await deps.assertAlive(endpoint);
 }
 
-export type CloudRestoreFixtureMode = "healthy" | "offline" | "membership-revoked";
+export type CloudRestoreFixtureMode = "healthy" | "offline" | "membership-revoked" | "cross-device";
 
 export function parseCloudRestoreFixtureOptions(args: string[]): {
   port: number;
@@ -566,8 +566,8 @@ export function parseCloudRestoreFixtureOptions(args: string[]): {
     throw new Error("Cloud restore fixture requires a valid loopback port");
   }
   const mode = flag(args, "mode");
-  if (mode !== "healthy" && mode !== "offline" && mode !== "membership-revoked") {
-    throw new Error("Cloud restore fixture mode must be healthy, offline, or membership-revoked");
+  if (mode !== "healthy" && mode !== "offline" && mode !== "membership-revoked" && mode !== "cross-device") {
+    throw new Error("Cloud restore fixture mode must be healthy, offline, membership-revoked, or cross-device");
   }
   const initialRefresh = flag(args, "initial-refresh") ?? "seeded";
   if (initialRefresh !== "seeded" && initialRefresh !== "rotated") {
@@ -629,10 +629,273 @@ function fixtureAuthorized(request: Request): boolean {
     && request.headers.get("x-aliasmode-device") === CLOUD_RESTORE_FIXTURE_DEVICE_CREDENTIAL;
 }
 
+const CLOUD_CROSS_DEVICE_PROFILE_ID = "aliasmode-cross-device-profile";
+const CLOUD_CROSS_DEVICE_ACCOUNT_ID = "fixture-cross-device-account";
+const CLOUD_CROSS_DEVICE_INITIAL_SENTINEL = "fixture-session-n37";
+const CLOUD_CROSS_DEVICE_A_SENTINEL = "device-a-session-n38";
+const CLOUD_CROSS_DEVICE_CONFLICT_SENTINEL = "device-a-stale-conflict";
+const CLOUD_CROSS_DEVICE_LATEST_SENTINEL = "fixture-authoritative-n40";
+const CLOUD_CROSS_DEVICE_AMBIGUOUS_SENTINEL = "device-a-ambiguous-n42";
+const CLOUD_CROSS_DEVICE_DEVICES = {
+  a: {
+    id: "fixture-cross-device-a",
+    accessToken: "aliasmode-cross-device-access-a",
+    credential: "aliasmode-cross-device-credential-a",
+  },
+  b: {
+    id: "fixture-cross-device-b",
+    accessToken: "aliasmode-cross-device-access-b",
+    credential: "aliasmode-cross-device-credential-b",
+  },
+} as const;
+
+type CloudCrossDeviceFixtureDevice = keyof typeof CLOUD_CROSS_DEVICE_DEVICES;
+type CloudCrossDevicePayload = ReturnType<typeof encodePortableProfile>;
+
+export interface CloudCrossDeviceFixtureState {
+  ok: true;
+  version: number;
+  activeDevice: CloudCrossDeviceFixtureDevice | null;
+  counters: {
+    open: Record<CloudCrossDeviceFixtureDevice, number>;
+    close: Record<CloudCrossDeviceFixtureDevice, number>;
+    heartbeat: Record<CloudCrossDeviceFixtureDevice, number>;
+    abandon: Record<CloudCrossDeviceFixtureDevice, number>;
+    acceptedCloses: number;
+    conflicts: number;
+    profileOpen: number;
+    droppedResponses: number;
+  };
+}
+
+function cloudCrossDeviceSession(sentinel: string): string {
+  return JSON.stringify({
+    cookies: [{
+      name: "aliasmode_cross_device",
+      value: sentinel,
+      domain: ".x.com",
+      path: "/",
+      expires: -1,
+      httpOnly: false,
+      secure: true,
+      sameSite: "Lax",
+    }],
+    origins: [],
+  });
+}
+
+function cloudCrossDevicePayload(sentinel: string): CloudCrossDevicePayload {
+  return encodePortableProfile(
+    smokeProfile(CLOUD_CROSS_DEVICE_PROFILE_ID, "Cross-device fixture", 38),
+    cloudCrossDeviceSession(sentinel),
+  );
+}
+
+function cloudCrossDeviceRequestDevice(request: Request): CloudCrossDeviceFixtureDevice | null {
+  for (const device of ["a", "b"] as const) {
+    const expected = CLOUD_CROSS_DEVICE_DEVICES[device];
+    if (
+      request.headers.get("authorization") === `Bearer ${expected.accessToken}`
+      && request.headers.get("x-aliasmode-device") === expected.credential
+    ) return device;
+  }
+  return null;
+}
+
+export function createCloudCrossDeviceFixtureHandler(): (request: Request) => Promise<Response> {
+  let version = 37;
+  let payload = cloudCrossDevicePayload(CLOUD_CROSS_DEVICE_INITIAL_SENTINEL);
+  let registrationSequence = 0;
+  let dropNextCloseResponse = false;
+  let active: { registrationId: string; device: CloudCrossDeviceFixtureDevice } | null = null;
+  const registrations = new Map<string, {
+    device: CloudCrossDeviceFixtureDevice;
+    closed: boolean;
+    dropResponses: boolean;
+  }>();
+  const counters: CloudCrossDeviceFixtureState["counters"] = {
+    open: { a: 0, b: 0 },
+    close: { a: 0, b: 0 },
+    heartbeat: { a: 0, b: 0 },
+    abandon: { a: 0, b: 0 },
+    acceptedCloses: 0,
+    conflicts: 0,
+    profileOpen: 0,
+    droppedResponses: 0,
+  };
+  const state = (): CloudCrossDeviceFixtureState => ({
+    ok: true,
+    version,
+    activeDevice: active?.device ?? null,
+    counters: {
+      open: { ...counters.open },
+      close: { ...counters.close },
+      heartbeat: { ...counters.heartbeat },
+      abandon: { ...counters.abandon },
+      acceptedCloses: counters.acceptedCloses,
+      conflicts: counters.conflicts,
+      profileOpen: counters.profileOpen,
+      droppedResponses: counters.droppedResponses,
+    },
+  });
+
+  return async (request) => {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health") {
+      return fixtureJson({ ok: true, mode: "cross-device" });
+    }
+    if (request.method === "GET" && url.pathname === "/control/state") {
+      return fixtureJson(state());
+    }
+    if (request.method === "POST" && url.pathname === "/control/advance") {
+      if (active?.device !== "a") {
+        return fixtureJson({ ok: false, error: "fixture device A must be open" }, 409);
+      }
+      version++;
+      payload = cloudCrossDevicePayload(CLOUD_CROSS_DEVICE_LATEST_SENTINEL);
+      return fixtureJson({ ok: true, version });
+    }
+    if (request.method === "POST" && url.pathname === "/control/drop-close-response") {
+      if (active?.device !== "a" || dropNextCloseResponse) {
+        return fixtureJson({ ok: false, error: "fixture device A close cannot be armed" }, 409);
+      }
+      dropNextCloseResponse = true;
+      return fixtureJson({ ok: true });
+    }
+
+    const device = cloudCrossDeviceRequestDevice(request);
+    if (!device) {
+      return fixtureJson({
+        ok: false,
+        error: { code: "authentication_required", message: "fixture authentication is required" },
+      }, 401);
+    }
+
+    if (
+      request.method === "POST"
+      && url.pathname === `/v1/profiles/${CLOUD_CROSS_DEVICE_PROFILE_ID}/open`
+    ) {
+      const body = await request.json().catch(() => null) as { deviceId?: unknown } | null;
+      if (body?.deviceId !== CLOUD_CROSS_DEVICE_DEVICES[device].id) {
+        return fixtureJson({
+          ok: false,
+          error: { code: "validation_failed", message: "fixture device identity is invalid" },
+        }, 400);
+      }
+      counters.open[device]++;
+      if (active) {
+        counters.profileOpen++;
+        return fixtureJson({
+          ok: false,
+          error: { code: "profile_open", message: "fixture profile is already open" },
+        }, 409);
+      }
+      const registrationId = `fixture-${device}-${++registrationSequence}`;
+      registrations.set(registrationId, { device, closed: false, dropResponses: false });
+      active = { registrationId, device };
+      return fixtureJson({
+        ok: true,
+        registrationId,
+        baseVersion: version,
+        payload,
+        activeOpens: [],
+      });
+    }
+
+    const route = url.pathname.match(/^\/v1\/open-sessions\/([^/]+)\/(heartbeat|close|abandon)$/);
+    if (!route) {
+      return fixtureJson({
+        ok: false,
+        error: { code: "internal_error", message: "unknown fixture route" },
+      }, 404);
+    }
+    const registrationId = decodeURIComponent(route[1]!);
+    const action = route[2]!;
+    const registration = registrations.get(registrationId);
+    if (!registration || registration.device !== device) {
+      return fixtureJson({
+        ok: false,
+        error: { code: "profile_not_found", message: "fixture registration was not found" },
+      }, 404);
+    }
+
+    if (request.method === "POST" && action === "heartbeat") {
+      counters.heartbeat[device]++;
+      if (registration.closed || active?.registrationId !== registrationId) {
+        return fixtureJson({
+          ok: false,
+          error: { code: "profile_not_found", message: "fixture registration was closed" },
+        }, 404);
+      }
+      return fixtureJson({ ok: true, revoked: false, activeOpens: [] });
+    }
+    if (request.method === "POST" && action === "abandon") {
+      counters.abandon[device]++;
+      registration.closed = true;
+      if (active?.registrationId === registrationId) active = null;
+      return fixtureJson({ ok: true, status: "abandoned" });
+    }
+    if (request.method !== "PUT" || action !== "close") {
+      return fixtureJson({
+        ok: false,
+        error: { code: "internal_error", message: "unknown fixture route" },
+      }, 404);
+    }
+
+    counters.close[device]++;
+    if (registration.dropResponses) {
+      counters.droppedResponses++;
+      return Response.error();
+    }
+    if (registration.closed || active?.registrationId !== registrationId) {
+      return fixtureJson({
+        ok: false,
+        error: { code: "profile_not_found", message: "fixture registration was closed" },
+      }, 404);
+    }
+    const body = await request.json().catch(() => null) as {
+      expectedVersion?: unknown;
+      payload?: unknown;
+    } | null;
+    if (!Number.isSafeInteger(body?.expectedVersion) || !body?.payload || typeof body.payload !== "object") {
+      return fixtureJson({
+        ok: false,
+        error: { code: "validation_failed", message: "fixture close payload is invalid" },
+      }, 400);
+    }
+
+    registration.closed = true;
+    active = null;
+    if (body.expectedVersion !== version) {
+      counters.conflicts++;
+      return fixtureJson({
+        ok: false,
+        error: {
+          code: "version_conflict",
+          message: "fixture close used a stale version",
+          currentVersion: version,
+        },
+      }, 409);
+    }
+
+    payload = body.payload as CloudCrossDevicePayload;
+    version++;
+    counters.acceptedCloses++;
+    if (dropNextCloseResponse && device === "a") {
+      dropNextCloseResponse = false;
+      registration.dropResponses = true;
+      counters.droppedResponses++;
+      return Response.error();
+    }
+    return fixtureJson({ ok: true, status: "accepted", version });
+  };
+}
+
 export function createCloudRestoreFixtureHandler(
   mode: CloudRestoreFixtureMode,
   initialRefresh: "seeded" | "rotated" = "seeded",
 ): (request: Request) => Promise<Response> {
+  if (mode === "cross-device") return createCloudCrossDeviceFixtureHandler();
   let expectedRefreshToken = initialRefresh === "seeded"
     ? CLOUD_RESTORE_FIXTURE_SEEDED_REFRESH_TOKEN
     : CLOUD_RESTORE_FIXTURE_REFRESH_TOKEN;
@@ -1555,6 +1818,374 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
   }
 }
 
+interface CloudCrossDeviceSyntheticRuntime {
+  coordinator: CloudBrowserCoordinator;
+  store: ProfileStore;
+  queue: PendingSyncQueue;
+  calls: { start: number; stop: number; applySession: number; readSession: number };
+  appliedSessions: string[];
+  setSession(bundle: string): void;
+  close(): void;
+}
+
+function requireCloudCrossDevice(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(`Cloud cross-device acceptance failed: ${message}`);
+}
+
+function cloudCrossDeviceSentinel(bundle: string): string {
+  const parsed = JSON.parse(bundle) as { cookies?: Array<{ name?: unknown; value?: unknown }> };
+  const cookies = parsed.cookies?.filter((cookie) => cookie?.name === "aliasmode_cross_device") ?? [];
+  if (cookies.length !== 1 || typeof cookies[0]?.value !== "string") {
+    throw new Error("Cloud cross-device acceptance received an invalid sentinel session");
+  }
+  return cookies[0].value;
+}
+
+function cloudCrossDeviceFixtureOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Cloud cross-device acceptance requires a loopback fixture URL");
+  }
+  if (
+    url.protocol !== "http:"
+    || url.hostname !== "127.0.0.1"
+    || !url.port
+    || url.username
+    || url.password
+    || url.pathname !== "/"
+    || url.search
+    || url.hash
+  ) {
+    throw new Error("Cloud cross-device acceptance requires a loopback fixture URL");
+  }
+  return url.origin;
+}
+
+async function cloudCrossDeviceControl<T>(
+  fixtureOrigin: string,
+  path: string,
+  method: "GET" | "POST" = "GET",
+): Promise<T> {
+  const response = await fetch(`${fixtureOrigin}${path}`, {
+    method,
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`Cloud cross-device fixture control failed at ${path}`);
+  return await response.json() as T;
+}
+
+function createCloudCrossDeviceSyntheticRuntime(
+  paths: StatePaths,
+  fixtureOrigin: string,
+  device: CloudCrossDeviceFixtureDevice,
+): CloudCrossDeviceSyntheticRuntime {
+  ensureStateDirectories(paths);
+  const store = new ProfileStore(paths.cloudDatabase);
+  const queue = new PendingSyncQueue(
+    paths.pendingSync,
+    new Uint8Array(32).fill(device === "a" ? 0xa1 : 0xb2),
+  );
+  const credential = CLOUD_CROSS_DEVICE_DEVICES[device];
+  const connection = new CloudConnectionRuntime({
+    baseUrl: fixtureOrigin,
+    accessToken: () => credential.accessToken,
+    installation: {
+      installationId: `fixture-installation-${device}`,
+      label: `Fixture device ${device.toUpperCase()}`,
+      platform: "windows",
+      appVersion: ALIASMODE_VERSION,
+    },
+  });
+  connection.restoreAccount(CLOUD_CROSS_DEVICE_ACCOUNT_ID);
+  connection.restoreDevice(credential.id, credential.credential);
+
+  const calls = { start: 0, stop: 0, applySession: 0, readSession: 0 };
+  const appliedSessions: string[] = [];
+  let sessionBundle = cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_INITIAL_SENTINEL);
+  let generation = 0;
+  const launcher: CloudBrowserOptions["launcher"] = {
+    async start(profileId, _launchArgs, options) {
+      calls.start++;
+      generation++;
+      const port = (device === "a" ? 31_000 : 32_000) + generation;
+      const startedAt = (device === "a" ? 100_000 : 200_000) + generation;
+      const ws = `ws://127.0.0.1:${port}/fixture-${device}-${generation}`;
+      store.recordLaunch({
+        profileId,
+        pid: port,
+        debugPort: port,
+        ws,
+        startedAt,
+        sessionBaseVersion: options?.sessionBaseVersion,
+        userDataDir: join(paths.cloudProfiles, profileId),
+      });
+      return { ws, port };
+    },
+    async stop(profileId) {
+      calls.stop++;
+      store.clearLaunch(profileId);
+      return true;
+    },
+    async active(profileId) {
+      return !!store.getLaunch(profileId);
+    },
+    async hasPageTargets(profileId) {
+      return !!store.getLaunch(profileId);
+    },
+    async verifyRunningIdentity(profileId) {
+      if (!store.getLaunch(profileId)) throw new Error("synthetic browser generation is missing");
+    },
+    async reconcileOrphan(profileId, expected) {
+      const launch = store.getLaunch(profileId);
+      if (!launch) return "dead";
+      return launch.debugPort === expected.debugPort && launch.startedAt === expected.startedAt
+        ? "alive"
+        : "generation_changed";
+    },
+    async pageTargetFingerprint(profileId, expected) {
+      const launch = store.getLaunch(profileId);
+      if (!launch || launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt) return null;
+      return JSON.stringify([{ id: `fixture-${device}`, url: "https://x.com/home" }]);
+    },
+    browserStorageWatchPaths() {
+      return [];
+    },
+  };
+  const coordinator = new CloudBrowserCoordinator({
+    cloud: connection.client,
+    launcher,
+    store,
+    queue: () => queue,
+    accountId: () => connection.accountId(),
+    deviceId: () => connection.deviceId(),
+    async readSession() {
+      calls.readSession++;
+      return sessionBundle;
+    },
+    async applySession(_endpoint, bundle) {
+      calls.applySession++;
+      sessionBundle = bundle;
+      appliedSessions.push(bundle);
+    },
+    heartbeatMs: 0,
+    dirtyMonitorMs: 0,
+  });
+
+  return {
+    coordinator,
+    store,
+    queue,
+    calls,
+    appliedSessions,
+    setSession(bundle) { sessionBundle = bundle; },
+    close() {
+      store.clearLaunch(CLOUD_CROSS_DEVICE_PROFILE_ID);
+      queue.close();
+      store.close();
+    },
+  };
+}
+
+async function assertCloudCrossDeviceQueueEncryption(
+  path: string,
+  sentinels: readonly string[],
+): Promise<void> {
+  requireCloudCrossDevice(existsSync(path), "pending queue artifact is missing");
+  for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
+    if (!existsSync(candidate)) continue;
+    const bytes = Buffer.from(await Bun.file(candidate).arrayBuffer());
+    for (const sentinel of sentinels) {
+      requireCloudCrossDevice(
+        !bytes.includes(Buffer.from(sentinel, "utf8")),
+        `pending queue artifact exposed ${sentinel}`,
+      );
+    }
+  }
+}
+
+export async function runCloudCrossDeviceAcceptance(
+  paths: StatePaths,
+  fixtureUrl: string,
+): Promise<CloudCrossDeviceFixtureState> {
+  const fixtureOrigin = cloudCrossDeviceFixtureOrigin(fixtureUrl);
+  const deviceARoot = join(paths.root, "device-a");
+  const deviceBRoot = join(paths.root, "device-b");
+  requireCloudCrossDevice(
+    !existsSync(deviceARoot) && !existsSync(deviceBRoot),
+    "isolated device roots must be clean",
+  );
+  const deviceAPaths = statePaths(deviceARoot);
+  const deviceBPaths = statePaths(deviceBRoot);
+  const deviceA = createCloudCrossDeviceSyntheticRuntime(deviceAPaths, fixtureOrigin, "a");
+  const deviceB = createCloudCrossDeviceSyntheticRuntime(deviceBPaths, fixtureOrigin, "b");
+  let finalState: CloudCrossDeviceFixtureState | undefined;
+
+  try {
+    const openedA = await deviceA.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(openedA.ok, openedA.error ?? "device A did not open version 37");
+    requireCloudCrossDevice(
+      deviceA.store.getLaunch(CLOUD_CROSS_DEVICE_PROFILE_ID)?.sessionBaseVersion === 37,
+      "device A did not commit version 37",
+    );
+
+    const rejectedB = await deviceB.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(
+      !rejectedB.ok,
+      "device B did not receive profile_open",
+    );
+    requireCloudCrossDevice(
+      JSON.stringify(deviceB.calls) === JSON.stringify({ start: 0, stop: 0, applySession: 0, readSession: 0 }),
+      "device B launched local lifecycle work after profile_open",
+    );
+    requireCloudCrossDevice(
+      !deviceB.store.getProfile(CLOUD_CROSS_DEVICE_PROFILE_ID)
+        && !deviceB.store.getLaunch(CLOUD_CROSS_DEVICE_PROFILE_ID)
+        && deviceB.queue.list(CLOUD_CROSS_DEVICE_ACCOUNT_ID).length === 0
+        && deviceB.queue.listOpens(CLOUD_CROSS_DEVICE_ACCOUNT_ID).length === 0,
+      "device B retained local state after profile_open",
+    );
+
+    deviceA.setSession(cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_A_SENTINEL));
+    requireCloudCrossDevice(
+      await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      "device A version 37 close was not accepted",
+    );
+    let state = await cloudCrossDeviceControl<CloudCrossDeviceFixtureState>(fixtureOrigin, "/control/state");
+    requireCloudCrossDevice(state.version === 38 && state.activeDevice === null, "device A did not publish version 38");
+
+    const openedB = await deviceB.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(openedB.ok, openedB.error ?? "device B did not open version 38");
+    requireCloudCrossDevice(
+      deviceB.store.getLaunch(CLOUD_CROSS_DEVICE_PROFILE_ID)?.sessionBaseVersion === 38
+        && cloudCrossDeviceSentinel(deviceB.appliedSessions.at(-1)!) === CLOUD_CROSS_DEVICE_A_SENTINEL,
+      "device B did not restore device A's exact sentinel at version 38",
+    );
+    requireCloudCrossDevice(
+      await deviceB.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      "device B version 38 close was not accepted",
+    );
+
+    const staleA = await deviceA.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(staleA.ok, staleA.error ?? "device A did not reopen before the conflict");
+    deviceA.setSession(cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_CONFLICT_SENTINEL));
+    await cloudCrossDeviceControl(fixtureOrigin, "/control/advance", "POST");
+    requireCloudCrossDevice(
+      !await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      "device A stale close did not remain a terminal conflict",
+    );
+    const conflictSummary = deviceA.queue.list(CLOUD_CROSS_DEVICE_ACCOUNT_ID)
+      .find((pending) => pending.status === "conflict");
+    const conflict = conflictSummary
+      ? deviceA.queue.get(conflictSummary.id, CLOUD_CROSS_DEVICE_ACCOUNT_ID)
+      : null;
+    requireCloudCrossDevice(
+      !!conflict
+        && cloudCrossDeviceSentinel(JSON.stringify(conflict.payload.session)) === CLOUD_CROSS_DEVICE_CONFLICT_SENTINEL,
+      "device A conflict snapshot was not preserved and decryptable",
+    );
+
+    const latestB = await deviceB.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(latestB.ok, latestB.error ?? "device B did not open the authoritative version");
+    requireCloudCrossDevice(
+      deviceB.store.getLaunch(CLOUD_CROSS_DEVICE_PROFILE_ID)?.sessionBaseVersion === 40
+        && cloudCrossDeviceSentinel(deviceB.appliedSessions.at(-1)!) === CLOUD_CROSS_DEVICE_LATEST_SENTINEL,
+      "device B did not restore the authoritative version beside device A's conflict",
+    );
+    requireCloudCrossDevice(
+      await deviceB.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      "device B authoritative close was not accepted",
+    );
+
+    const ambiguousA = await deviceA.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(
+      ambiguousA.ok,
+      ambiguousA.error ?? "device A terminal conflict blocked reopen",
+    );
+    requireCloudCrossDevice(
+      deviceA.store.getLaunch(CLOUD_CROSS_DEVICE_PROFILE_ID)?.sessionBaseVersion === 41,
+      "device A did not open version 41",
+    );
+    deviceA.setSession(cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_AMBIGUOUS_SENTINEL));
+    await cloudCrossDeviceControl(fixtureOrigin, "/control/drop-close-response", "POST");
+    requireCloudCrossDevice(
+      !await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      "device A dropped close response was not retained as ambiguous",
+    );
+    const ambiguousSummary = deviceA.queue.list(CLOUD_CROSS_DEVICE_ACCOUNT_ID)
+      .find((pending) => pending.status === "retrying");
+    const ambiguous = ambiguousSummary
+      ? deviceA.queue.get(ambiguousSummary.id, CLOUD_CROSS_DEVICE_ACCOUNT_ID)
+      : null;
+    requireCloudCrossDevice(
+      !!ambiguous
+        && cloudCrossDeviceSentinel(JSON.stringify(ambiguous.payload.session)) === CLOUD_CROSS_DEVICE_AMBIGUOUS_SENTINEL,
+      "device A ambiguous snapshot was not preserved and decryptable",
+    );
+
+    const startsBeforeBlockedReopen = deviceA.calls.start;
+    state = await cloudCrossDeviceControl<CloudCrossDeviceFixtureState>(fixtureOrigin, "/control/state");
+    const opensBeforeBlockedReopen = state.counters.open.a;
+    const blockedA = await deviceA.coordinator.open(CLOUD_CROSS_DEVICE_PROFILE_ID);
+    requireCloudCrossDevice(
+      !blockedA.ok,
+      "device A ambiguous close did not block local reopen",
+    );
+    finalState = await cloudCrossDeviceControl<CloudCrossDeviceFixtureState>(fixtureOrigin, "/control/state");
+    requireCloudCrossDevice(
+      deviceA.calls.start === startsBeforeBlockedReopen
+        && finalState.counters.open.a === opensBeforeBlockedReopen,
+      "device A blocked reopen sent a new open request or launched a browser",
+    );
+    const retainedConflict = conflictSummary
+      ? deviceA.queue.get(conflictSummary.id, CLOUD_CROSS_DEVICE_ACCOUNT_ID)
+      : null;
+    const retainedAmbiguous = ambiguousSummary
+      ? deviceA.queue.get(ambiguousSummary.id, CLOUD_CROSS_DEVICE_ACCOUNT_ID)
+      : null;
+    requireCloudCrossDevice(
+      retainedConflict?.status === "conflict"
+        && cloudCrossDeviceSentinel(JSON.stringify(retainedConflict.payload.session)) === CLOUD_CROSS_DEVICE_CONFLICT_SENTINEL,
+      "device A conflict snapshot did not remain preserved",
+    );
+    requireCloudCrossDevice(
+      retainedAmbiguous?.status === "retrying"
+        && cloudCrossDeviceSentinel(JSON.stringify(retainedAmbiguous.payload.session)) === CLOUD_CROSS_DEVICE_AMBIGUOUS_SENTINEL,
+      "device A ambiguous snapshot did not remain preserved",
+    );
+    const expectedState: CloudCrossDeviceFixtureState = {
+      ok: true,
+      version: 42,
+      activeDevice: null,
+      counters: {
+        open: { a: 3, b: 3 },
+        close: { a: 4, b: 2 },
+        heartbeat: { a: 0, b: 0 },
+        abandon: { a: 0, b: 0 },
+        acceptedCloses: 4,
+        conflicts: 1,
+        profileOpen: 1,
+        droppedResponses: 2,
+      },
+    };
+    requireCloudCrossDevice(
+      JSON.stringify(finalState) === JSON.stringify(expectedState),
+      "fixture request counters were not exact",
+    );
+  } finally {
+    deviceB.close();
+    deviceA.close();
+  }
+
+  await assertCloudCrossDeviceQueueEncryption(deviceAPaths.pendingSync, [
+    CLOUD_CROSS_DEVICE_CONFLICT_SENTINEL,
+    CLOUD_CROSS_DEVICE_AMBIGUOUS_SENTINEL,
+  ]);
+  requireCloudCrossDevice(finalState, "fixture state was not recorded");
+  return finalState;
+}
+
 async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
   if (has(rest, "windows-window-acceptance")) {
     await runWindowsWindowAcceptance(paths, rest);
@@ -1745,6 +2376,13 @@ async function main() {
     ? new DesktopCredentialBridge(desktopHealth.instance)
     : null;
   ensureStateDirectories(paths);
+  if (cmd === "__cloud-cross-device-acceptance") {
+    const fixtureUrl = flag(rest, "fixture-url");
+    if (!fixtureUrl) throw new Error("Cloud cross-device acceptance requires --fixture-url");
+    await runCloudCrossDeviceAcceptance(paths, fixtureUrl);
+    console.log("installed sidecar cross-device Cloud acceptance passed");
+    return;
+  }
   if (cmd === "__cloud-launcher-smoke") {
     await runCloudLauncherSmoke(paths, rest);
     console.log(has(rest, "windows-window-acceptance")
