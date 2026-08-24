@@ -36,6 +36,19 @@ const localMode = {
   localAnalytics: false,
 };
 
+async function removeTemporaryRoot(path: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as { code?: string }).code !== "EBUSY" || attempt === 10) throw error;
+      Bun.gc(true);
+      await Bun.sleep(100);
+    }
+  }
+}
+
 async function freeLoopbackPort(): Promise<number> {
   const server = net.createServer();
   await new Promise<void>((resolve, reject) => {
@@ -608,7 +621,7 @@ test("Cloud cross-device acceptance preserves conflicts and blocks ambiguous loc
     });
   } finally {
     await server.stop(true);
-    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await removeTemporaryRoot(root);
   }
 });
 
