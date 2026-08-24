@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import {
   AgentRuntimeClient,
   RUNTIME_PROTOCOL,
@@ -52,7 +53,7 @@ test("invalid agent responses terminate their WebSocket", () => {
 
 test("runtime descriptor path uses the Tauri application data directory", () => {
   expect(defaultRuntimeDescriptorPath({ APPDATA: "C:\\Users\\me\\AppData\\Roaming" } as any))
-    .toBe("C:\\Users\\me\\AppData\\Roaming/com.aliasmode.desktop/agent-runtime.json");
+    .toBe(join("C:\\Users\\me\\AppData\\Roaming", "com.aliasmode.desktop", "agent-runtime.json"));
   expect(defaultRuntimeDescriptorPath({
     ALIASMODE_RUNTIME_DESCRIPTOR: "C:\\fixture\\runtime.json",
   } as any)).toBe("C:\\fixture\\runtime.json");
