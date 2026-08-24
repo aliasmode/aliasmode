@@ -1772,7 +1772,11 @@ export class Launcher {
   }
 
   private async ensureSearchProvider(profileId: string, ws: string): Promise<void> {
-    if (!this.ensureSearchProviderFn || this.searchProviderWs.get(profileId) === ws) return;
+    if (
+      this.headless
+      || !this.ensureSearchProviderFn
+      || this.searchProviderWs.get(profileId) === ws
+    ) return;
 
     try {
       const result = await this.ensureSearchProviderFn(ws);

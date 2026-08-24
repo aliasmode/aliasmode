@@ -1379,6 +1379,36 @@ test("start injects cookies before navigating startup URLs", async () => {
   store.close();
 });
 
+test("headless launches skip address-bar search provider setup", async () => {
+  const store = seeded();
+  const f = fleet();
+  const dataRoot = join(tmpdir(), `cloak-search-headless-${process.pid}`);
+  let attempts = 0;
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot,
+    headless: true,
+    portProbe: () => true,
+    spawn: f.spawn,
+    fetch: f.fetchFn,
+    ensureSearchProvider: async () => {
+      attempts++;
+      return { status: "configured", engine: "DuckDuckGo" };
+    },
+    ensureCookies: async () => ({ injected: false }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    cdpReadyTimeoutMs: 1000,
+  });
+
+  await launcher.start("k1d0cd11");
+  expect(attempts).toBe(0);
+
+  rmSync(dataRoot, { recursive: true, force: true });
+  store.close();
+});
+
 test("search provider failure never fails an otherwise healthy browser launch", async () => {
   const store = seeded();
   const f = fleet();
