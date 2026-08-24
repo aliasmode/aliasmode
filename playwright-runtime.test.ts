@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -284,16 +285,14 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
         async launchPersistentContext(userDataDir, options) {
           launched = true;
           const mode = userDataDir.split("/").at(-1);
-          if (options?.executablePath !== "C:/AliasMode/cloakbrowser/chrome.exe"
+          if (!options?.executablePath.endsWith("/cloakbrowser.exe")
             || options?.headless !== true
             || !options.args.includes("--no-first-run")
-            || !options.args.includes("--no-default-browser-check")) {
+            || !options.args.includes("--no-default-browser-check")
+            || options.args.some((arg) => arg.startsWith("--load-extension=")
+              || arg.startsWith("--disable-extensions-except="))) {
             throw new Error("wrong headless search launch");
           }
-          if (mode === "configured" && (
-            !options.args.includes("--load-extension=C:/Extensions/a")
-            || !options.args.includes("--disable-extensions-except=C:/Extensions/a")
-          )) throw new Error("assigned extension was omitted");
           const page = {
             async goto(url) {
               if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
@@ -316,11 +315,16 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
     `);
     await chmod(join(root, "node", "node.exe"), 0o755);
 
-    const executablePath = "C:/AliasMode/cloakbrowser/chrome.exe";
+    const executablePath = join(root, "cloakbrowser.exe");
+    const executableContents = "approved CloakBrowser";
+    await writeFile(executablePath, executableContents);
+    const executableSha256 = createHash("sha256")
+      .update(executableContents)
+      .digest("hex");
     await expect(runPlaywrightWorker("search-provider", {
       executablePath,
+      executableSha256,
       userDataDir: "C:/Profiles/configured",
-      extensionDirs: ["C:/Extensions/a"],
       launchTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       status: "configured",
@@ -328,17 +332,24 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
     });
     await expect(runPlaywrightWorker("search-provider", {
       executablePath,
+      executableSha256,
       userDataDir: "C:/Profiles/existing",
-      extensionDirs: [],
       launchTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       status: "already-default",
       engine: "DuckDuckGo",
     });
+    const changedBinary = await runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256: "0".repeat(64),
+      userDataDir: "C:/Profiles/configured",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
+    expect(changedBinary).toMatchObject({ code: "operation_failed" });
     const failure = await runPlaywrightWorker("search-provider", {
       executablePath,
+      executableSha256,
       userDataDir: "C:/Profiles/failure",
-      extensionDirs: [],
       launchTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
     expect(failure).toMatchObject({ code: "operation_failed" });

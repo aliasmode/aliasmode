@@ -1,3 +1,5 @@
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -32,6 +34,12 @@ function typed(code, details) {
   error.code = code;
   if (details) error.details = details;
   return error;
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 function sessionError(operation, outcome = "failed") {
@@ -734,22 +742,19 @@ async function searchProvider(chromium, payload) {
   if (
     typeof payload.executablePath !== "string"
     || !payload.executablePath
+    || typeof payload.executableSha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(payload.executableSha256)
     || typeof payload.userDataDir !== "string"
     || !payload.userDataDir
-    || !Array.isArray(payload.extensionDirs)
-    || payload.extensionDirs.some((path) => typeof path !== "string" || !path)
   ) throw typed("invalid_request");
 
-  const extensionArgs = payload.extensionDirs.length
-    ? [
-      `--load-extension=${payload.extensionDirs.join(",")}`,
-      `--disable-extensions-except=${payload.extensionDirs.join(",")}`,
-    ]
-    : [];
+  if (await sha256File(payload.executablePath) !== payload.executableSha256) {
+    throw new Error("approved CloakBrowser binary changed before search setup");
+  }
   const context = await chromium.launchPersistentContext(payload.userDataDir, {
     executablePath: payload.executablePath,
     headless: true,
-    args: ["--no-first-run", "--no-default-browser-check", ...extensionArgs],
+    args: ["--no-first-run", "--no-default-browser-check"],
     timeout: Math.max(1, Math.min(Number(payload.launchTimeoutMs) || 20_000, 120_000)),
   });
   try {

@@ -128,7 +128,10 @@ function newLauncher(
       return f.spawn(bin, args);
     },
     fetch: f.fetchFn,
-    ensureSearchProvider,
+    ensureSearchProvider: ensureSearchProvider ?? (async () => ({
+      status: "already-default",
+      engine: "DuckDuckGo",
+    })),
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     // Unit tests must never invoke the real OS-wide process scan (seconds per launch,
@@ -284,6 +287,23 @@ test("legacy search bootstrap never spawns while safe teardown is unconfirmed", 
   store.close();
 });
 
+test("survivor certification retires an unstamped browser before exposure", async () => {
+  const store = seeded();
+  const f = fleet();
+  const first = newLauncher(store, f, []);
+  await first.start("k1d0cd11");
+  const legacy = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch({ ...legacy, searchBootstrapRevision: undefined });
+  (first as any).closeRelay("k1d0cd11");
+
+  const killed: number[] = [];
+  const launcher = newLauncher(store, f, [], killed);
+  expect(await launcher.certifySurvivors()).toEqual({ certified: 0, stopped: 1 });
+  expect(killed).toEqual([legacy.pid]);
+  expect(store.getLaunch("k1d0cd11")).toBeNull();
+  store.close();
+});
+
 test("startup adopts a matching legacy launch identity only to stop it before reuse", async () => {
   const store = seeded();
   makeDirect(store);
@@ -343,6 +363,7 @@ test("restart config drift scans the survivor with its persisted binary and user
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
+    ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
     labelWindow: async () => {},
@@ -1362,10 +1383,8 @@ test("a quarantined legacy proxy is visible but cannot launch direct", async () 
 test("start injects cookies before navigating startup URLs", async () => {
   const store = seeded();
   const p = store.getProfile("k1d0cd11")!;
-  store.addExtension({ id: "extension-a", name: "Extension A", loadDir: "/tmp/extension-a" });
   store.upsertProfile({
     ...p,
-    extensions: ["extension-a"],
     cookies: [{ name: "auth_token", value: "v", domain: ".x.com", path: "/", expires: Date.now() / 1000 + 99999 }],
   });
   const f = fleet();
@@ -1406,14 +1425,15 @@ test("start injects cookies before navigating startup URLs", async () => {
   ]);
   expect(searchOptions).toEqual({
     executablePath: "/fake/cloak",
+    executableSha256: "0".repeat(64),
     userDataDir: launcher.userDataDir("k1d0cd11"),
-    extensionDirs: ["/tmp/extension-a"],
   });
   store.close();
 });
 
 test("headless launches skip address-bar search provider setup", async () => {
   const store = seeded();
+  makeDirect(store);
   const f = fleet();
   const dataRoot = join(tmpdir(), `cloak-search-headless-${process.pid}`);
   let attempts = 0;
@@ -1432,11 +1452,17 @@ test("headless launches skip address-bar search provider setup", async () => {
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
     labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
     cdpReadyTimeoutMs: 1000,
   });
 
-  await launcher.start("k1d0cd11");
+  const launch = await launcher.start("k1d0cd11");
   expect(attempts).toBe(0);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBeUndefined();
+  expect(await launcher.start("k1d0cd11")).toEqual(launch);
+  await expect(launcher.verifyRunningIdentity("k1d0cd11")).resolves.toBeUndefined();
 
   rmSync(dataRoot, { recursive: true, force: true });
   store.close();
@@ -1467,6 +1493,7 @@ test("search provider failure never fails an otherwise healthy browser launch", 
   const launch = await launcher.start("k1d0cd11");
 
   expect(launch.ws).toContain("/devtools/browser/x");
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
   expect(logs.some((message) =>
     message.includes("search provider setup failed") && message.includes("continuing")
   )).toBe(true);

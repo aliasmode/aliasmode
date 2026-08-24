@@ -1158,7 +1158,11 @@ export class Launcher {
         if (!existing) {
           // Exact scan proved the recorded launch is gone; continue to a fresh
           // allocation (the unrelated responding port remains OS-reserved).
-        } else if (existing.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION) {
+        } else if (
+          !this.headless
+          && !trackedProc
+          && existing.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
+        ) {
           this.log(`profile ${profileId} predates safe search setup; restarting it once before reattach`);
           if (!await this.doStop(profileId)) {
             throw new Error(`profile ${profileId} could not be safely restarted for search setup`);
@@ -1277,11 +1281,12 @@ export class Launcher {
 
     const searchPrepared = await this.ensureSearchProvider(profileId, {
       executablePath: launchBinaryPath,
+      executableSha256: verifiedBinary.sha256,
       userDataDir,
-      extensionDirs: (profile.extensions ?? [])
-        .map((id) => this.store.getExtension(id)?.loadDir)
-        .filter((path): path is string => !!path),
     });
+    const searchBootstrapRevision = searchPrepared
+      ? SEARCH_PROVIDER_BOOTSTRAP_REVISION
+      : undefined;
     if (searchPrepared) {
       // A failed helper can leave Chromium children or unclean-exit markers.
       // Confirm exclusive profile ownership and repair those leftovers before
@@ -1372,7 +1377,7 @@ export class Launcher {
         userDataDir,
         binarySha256: spawnVerifiedBinary.sha256,
         personaDigest,
-        searchBootstrapRevision: SEARCH_PROVIDER_BOOTSTRAP_REVISION,
+        searchBootstrapRevision,
       };
       this.store.recordLaunch(provisionalLaunch);
       spawnAttempted = true;
@@ -1515,7 +1520,7 @@ export class Launcher {
         userDataDir,
         binarySha256: verifiedBinary.sha256,
         personaDigest,
-        searchBootstrapRevision: SEARCH_PROVIDER_BOOTSTRAP_REVISION,
+        searchBootstrapRevision,
         processGroupId: proc.processGroupId,
         rootStartTime: proc.rootStartTime,
       };
@@ -1542,7 +1547,7 @@ export class Launcher {
           userDataDir,
           binarySha256: verifiedBinary.sha256,
           personaDigest,
-          searchBootstrapRevision: SEARCH_PROVIDER_BOOTSTRAP_REVISION,
+          searchBootstrapRevision,
           processGroupId: proc?.processGroupId,
           rootStartTime: proc?.rootStartTime,
         };
@@ -2386,6 +2391,13 @@ export class Launcher {
 
     const launch = this.store.getLaunch(profileId);
     if (!launch) throw new Error(`cannot verify survivor ${profileId}: launch record is missing`);
+    if (
+      !this.headless
+      && !this.procs.has(profileId)
+      && launch.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
+    ) {
+      throw new Error(`cannot verify survivor ${profileId}: safe search setup was not attempted`);
+    }
     this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
     const generation = `${launch.debugPort}:${launch.startedAt}`;
     profile = this.requireUnchangedProfile(profileId, snapshot, "survivor CDP verification");

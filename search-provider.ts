@@ -7,8 +7,8 @@ export type SearchProviderSetupResult = {
 
 export type SearchProviderBootstrapOptions = {
   executablePath: string;
+  executableSha256: string;
   userDataDir: string;
-  extensionDirs?: string[];
 };
 
 type SearchEngineSummary = {
@@ -48,8 +48,8 @@ export async function ensureDuckDuckGoDefault(
 ): Promise<SearchProviderSetupResult> {
   return runPlaywrightWorker<SearchProviderSetupResult>("search-provider", {
     executablePath: options.executablePath,
+    executableSha256: options.executableSha256,
     userDataDir: options.userDataDir,
-    extensionDirs: options.extensionDirs ?? [],
     launchTimeoutMs: CONFIGURE_TIMEOUT_MS,
   }, { timeoutMs: CONFIGURE_TIMEOUT_MS + 15_000 });
 }
