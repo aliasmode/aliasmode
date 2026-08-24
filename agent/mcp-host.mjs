@@ -314,8 +314,9 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => {
-    console.error("AliasMode MCP could not start. Run AliasMode setup again or open the app once.");
+  main().catch((error) => {
+    console.error(`AliasMode MCP could not start: ${safeError(error)}`);
+    console.error("Run AliasMode setup again or open the app once.");
     process.exit(1);
   });
 }
