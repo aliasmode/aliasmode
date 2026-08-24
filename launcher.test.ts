@@ -179,84 +179,108 @@ function legacyProxyPersonaDigest(store: ProfileStore, profileId: string, binary
   })).digest("hex");
 }
 
-test("after a restart, start() reattaches and repairs search once per live browser generation", async () => {
+test("after a restart, a bootstrapped browser reattaches without rerunning search setup", async () => {
   const store = seeded();
   const f = fleet();
+  const prepared: string[] = [];
 
-  // Manager run #1 launches the browser.
   const argsA: string[][] = [];
-  const launcherA = newLauncher(store, f, argsA);
-  const a = await launcherA.start("k1d0cd11", [], { sessionBaseVersion: 7 });
-  expect(argsA.length).toBe(1);
-  // Simulate the old manager dying: its relay listener disappears while the
-  // browser process and durable launch row survive.
-  (launcherA as any).closeRelay("k1d0cd11");
-
-  // Manager "restarts": new Launcher, same on-disk store, empty in-memory procs.
-  const argsB: string[][] = [];
-  const checked: string[] = [];
-  const launcherB = newLauncher(store, f, argsB, undefined, async (ws) => {
-    checked.push(ws);
+  const launcherA = newLauncher(store, f, argsA, undefined, async (options) => {
+    prepared.push(options.userDataDir);
     return { status: "configured", engine: "DuckDuckGo" };
   });
-  await launcherB.reconcileOrphans(); // browser still alive → row kept
-  expect((launcherB as any).relays.size).toBe(0); // discovery never restores account networking
+  const a = await launcherA.start("k1d0cd11", [], { sessionBaseVersion: 7 });
+  expect(argsA.length).toBe(1);
+  expect(prepared).toEqual([launcherA.userDataDir("k1d0cd11")]);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  (launcherA as any).closeRelay("k1d0cd11");
+
+  const argsB: string[][] = [];
+  const launcherB = newLauncher(store, f, argsB, undefined, async () => {
+    throw new Error("reattach reran search setup");
+  });
+  await launcherB.reconcileOrphans();
   const b = await launcherB.start("k1d0cd11", [], { sessionBaseVersion: -1 });
   const repeated = await launcherB.start("k1d0cd11", [], { sessionBaseVersion: -1 });
 
-  expect(argsB.length).toBe(0); // did NOT spawn a second browser
-  expect(b.port).toBe(a.port); // reused the same session/port
+  expect(argsB.length).toBe(0);
+  expect(b.port).toBe(a.port);
   expect(repeated).toEqual(b);
-  expect(checked).toEqual([b.ws]);
-  expect(store.getLaunch("k1d0cd11")?.sessionBaseVersion).toBe(-1); // provisional before returning
-  expect((launcherB as any).relays.has("k1d0cd11")).toBe(true); // restored only inside identity certification
+  expect(store.getLaunch("k1d0cd11")?.sessionBaseVersion).toBe(-1);
+  expect((launcherB as any).relays.has("k1d0cd11")).toBe(true);
 
   const changedWs = `ws://127.0.0.1:${b.port}/devtools/browser/restarted`;
   f.setWs(b.port, changedWs);
   expect(await launcherB.start("k1d0cd11")).toEqual({ ws: changedWs, port: b.port });
-  expect(checked).toEqual([b.ws, changedWs]);
+  expect(prepared).toHaveLength(1);
   store.close();
 });
 
-test("reattach keeps a healthy browser open and retries failed search repair", async () => {
+test("reattach safely recycles one legacy browser through prelaunch search setup", async () => {
   const store = seeded();
   const f = fleet();
   const first = newLauncher(store, f, []);
-  const opened = await first.start("k1d0cd11");
+  await first.start("k1d0cd11");
+  const legacy = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch({ ...legacy, searchBootstrapRevision: undefined });
   (first as any).closeRelay("k1d0cd11");
 
-  let attempts = 0;
-  const logs: string[] = [];
+  const prepared: string[] = [];
+  const spawnedArgs: string[][] = [];
+  const launcher = newLauncher(store, f, spawnedArgs, undefined, async (options) => {
+    prepared.push(options.userDataDir);
+    return { status: "already-default", engine: "DuckDuckGo" };
+  });
+
+  await launcher.reconcileOrphans();
+  const opened = await launcher.start("k1d0cd11");
+
+  expect(opened.port).toBe(legacy.debugPort);
+  expect(spawnedArgs).toHaveLength(1);
+  expect(prepared).toEqual([launcher.userDataDir("k1d0cd11")]);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  store.close();
+});
+
+test("legacy search bootstrap never spawns while safe teardown is unconfirmed", async () => {
+  const store = seeded();
+  const f = fleet();
+  const first = newLauncher(store, f, []);
+  await first.start("k1d0cd11");
+  const legacy = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch({ ...legacy, searchBootstrapRevision: undefined });
+  (first as any).closeRelay("k1d0cd11");
+
+  let spawned = 0;
+  let prepared = 0;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
     dataRoot: "/tmp/cloak-launcher-test",
     portProbe: () => true,
-    spawn: () => { throw new Error("reattach spawned a browser"); },
+    spawn: () => {
+      spawned++;
+      throw new Error("unsafe second browser spawn");
+    },
     fetch: f.fetchFn,
     ensureSearchProvider: async () => {
-      attempts++;
-      if (attempts === 1) throw new Error("settings unavailable");
-      return { status: "already-default", engine: "DuckDuckGo" };
+      prepared++;
+      return { status: "configured", engine: "DuckDuckGo" };
     },
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
-    ensureCookies: async () => { throw new Error("reattach injected cookies"); },
-    navigate: async () => { throw new Error("reattach navigated"); },
-    labelWindow: async () => { throw new Error("reattach labeled a window"); },
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
-    log: (message) => logs.push(message),
   });
 
-  await launcher.reconcileOrphans();
-  expect(await launcher.start("k1d0cd11")).toEqual(opened);
-  expect(attempts).toBe(1);
-  expect(logs.some((message) => message.includes("search provider setup failed") && message.includes("continuing"))).toBe(true);
-  expect(await launcher.start("k1d0cd11")).toEqual(opened);
-  expect(attempts).toBe(2);
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(
+    new BrowserLaunchError("preflight"),
+  );
+  expect(spawned).toBe(0);
+  expect(prepared).toBe(0);
+  expect(store.getLaunch("k1d0cd11")?.pid).toBe(legacy.pid);
   store.close();
 });
 
@@ -1137,7 +1161,7 @@ test("proxied launch preserves stored timezone and routes through the relay", as
   });
 
   await launcher.start("k1d0cd11", ["https://x.com/home"]);
-  expect(events).toEqual(["spawn", "search", "cookies", "navigate"]);
+  expect(events).toEqual(["search", "spawn", "cookies", "navigate"]);
   expect(spawnedArgs[0]!.some((arg) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(arg))).toBe(true);
   expect(spawnedArgs[0]!.some((arg) => arg.includes("u:p%40ss"))).toBe(false);
   expect(spawnedArgs[0]!.some((arg) => arg.startsWith("--fingerprint-webrtc-ip="))).toBe(false);
@@ -1338,13 +1362,16 @@ test("a quarantined legacy proxy is visible but cannot launch direct", async () 
 test("start injects cookies before navigating startup URLs", async () => {
   const store = seeded();
   const p = store.getProfile("k1d0cd11")!;
+  store.addExtension({ id: "extension-a", name: "Extension A", loadDir: "/tmp/extension-a" });
   store.upsertProfile({
     ...p,
+    extensions: ["extension-a"],
     cookies: [{ name: "auth_token", value: "v", domain: ".x.com", path: "/", expires: Date.now() / 1000 + 99999 }],
   });
   const f = fleet();
   const spawnedArgs: string[][] = [];
   const events: string[] = [];
+  let searchOptions: Parameters<SearchProviderEnsurer>[0] | undefined;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
@@ -1355,7 +1382,8 @@ test("start injects cookies before navigating startup URLs", async () => {
       return f.spawn(bin, args);
     },
     fetch: f.fetchFn,
-    ensureSearchProvider: async () => {
+    ensureSearchProvider: async (options) => {
+      searchOptions = options;
       events.push("ensureSearchProvider");
       return { status: "configured", engine: "DuckDuckGo" };
     },
@@ -1376,6 +1404,11 @@ test("start injects cookies before navigating startup URLs", async () => {
     "ensureCookies",
     "navigate:https://x.com/home",
   ]);
+  expect(searchOptions).toEqual({
+    executablePath: "/fake/cloak",
+    userDataDir: launcher.userDataDir("k1d0cd11"),
+    extensionDirs: ["/tmp/extension-a"],
+  });
   store.close();
 });
 

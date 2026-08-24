@@ -30,7 +30,7 @@ import { allocatePort } from "./ports.ts";
 import { deriveFingerprintFlags, isMobileUserAgent, platformFromUA, proxyServerFlag } from "./fingerprint.ts";
 export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
-import type { SearchProviderSetupResult } from "./search-provider.ts";
+import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "./search-provider.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { SessionRestoreError } from "./session.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
@@ -46,6 +46,8 @@ function needsProxyRelay(profile: Profile): boolean {
     || (profile.proxy.type === "http" && !!profile.proxy.user)
   );
 }
+
+const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 1;
 
 export type BrowserLaunchFailure =
   | "preflight"
@@ -111,8 +113,10 @@ export type OwnedBrowserProcessFinder = (identity: BrowserProcessIdentity) => Pr
  * a failure here must never fail (or slow) the launch. Injectable for tests.
  */
 export type WindowLabeler = (ws: string, label: string) => Promise<void>;
-/** Best-effort persistent omnibox-provider setup after CDP becomes ready. */
-export type SearchProviderEnsurer = (ws: string) => Promise<SearchProviderSetupResult>;
+/** Best-effort omnibox-provider setup in a separate prelaunch browser. */
+export type SearchProviderEnsurer = (
+  options: SearchProviderBootstrapOptions,
+) => Promise<SearchProviderSetupResult>;
 /**
  * Ensure the browser has a logged-in session: inject the exported cookies
  * only when none is present, and report whether it injected. Leaving an
@@ -606,8 +610,6 @@ export class Launcher {
   /** Full profile + launch generations certified by this manager process. */
   private certifiedLaunches = new Map<string, string>();
   private certificationsInFlight = new Map<string, Promise<boolean>>();
-  /** Successful search-provider checks keyed by profile and CDP websocket generation. */
-  private searchProviderWs = new Map<string, string>();
   /** Ports currently handed out, so the allocator never reuses a live one. */
   private liveReserved = new Set<number>();
   /**
@@ -1156,6 +1158,12 @@ export class Launcher {
         if (!existing) {
           // Exact scan proved the recorded launch is gone; continue to a fresh
           // allocation (the unrelated responding port remains OS-reserved).
+        } else if (existing.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION) {
+          this.log(`profile ${profileId} predates safe search setup; restarting it once before reattach`);
+          if (!await this.doStop(profileId)) {
+            throw new Error(`profile ${profileId} could not be safely restarted for search setup`);
+          }
+          existing = null;
         } else {
           const currentWs = liveness.cdpWs!;
           profile = this.requireUnchangedProfile(profileId, profileSnapshot, "live-browser CDP reattach");
@@ -1194,7 +1202,6 @@ export class Launcher {
               return await this.rejectUnsafeExistingLaunch(profileId, "live-browser relay restoration", error);
             }
           }
-          await this.ensureSearchProvider(profileId, currentWs);
           this.log(
             trackedProc
               ? `profile ${profileId} already running on port ${existing.debugPort}`
@@ -1267,6 +1274,23 @@ export class Launcher {
     // callers; remote mode passes false when the bundle it's about to inject can't restore the login —
     // e.g. a first-migration Telegram open with no hub session — so we never wipe the only local auth).
     this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
+
+    const searchPrepared = await this.ensureSearchProvider(profileId, {
+      executablePath: launchBinaryPath,
+      userDataDir,
+      extensionDirs: (profile.extensions ?? [])
+        .map((id) => this.store.getExtension(id)?.loadDir)
+        .filter((path): path is string => !!path),
+    });
+    if (searchPrepared) {
+      // A failed helper can leave Chromium children or unclean-exit markers.
+      // Confirm exclusive profile ownership and repair those leftovers before
+      // the managed headful generation starts.
+      await this.reapForeignProfileDirHolders(profileId, userDataDir);
+      this.repairCorruptPrefs(profileId);
+      this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
+      profile = this.requireUnchangedProfile(profileId, profileSnapshot, "search provider setup");
+    }
     if (profile.proxy) this.persistWebRtcPolicyPreference(profileId);
 
     // Identity bookmark (#2): `<name> · #<serial>` on a visible bookmark bar, pointing at the card.
@@ -1348,6 +1372,7 @@ export class Launcher {
         userDataDir,
         binarySha256: spawnVerifiedBinary.sha256,
         personaDigest,
+        searchBootstrapRevision: SEARCH_PROVIDER_BOOTSTRAP_REVISION,
       };
       this.store.recordLaunch(provisionalLaunch);
       spawnAttempted = true;
@@ -1368,12 +1393,6 @@ export class Launcher {
       const ws = await this.waitForCdp(port, proc);
       this.log(`${profileId}: launch stage CDP ready`);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser startup");
-
-      // Fresh ungoogled Chromium profiles can default to "No Search", which
-      // treats address-bar phrases as hostnames (https://<phrase>). Configure
-      // a real provider before navigation, but never make search setup capable
-      // of failing an otherwise healthy account launch.
-      await this.ensureSearchProvider(profileId, ws);
 
       // Label the window so the operator can tell which account this browser is
       // among many open profiles (the cue AdsPower's panel gave). Registered
@@ -1496,6 +1515,7 @@ export class Launcher {
         userDataDir,
         binarySha256: verifiedBinary.sha256,
         personaDigest,
+        searchBootstrapRevision: SEARCH_PROVIDER_BOOTSTRAP_REVISION,
         processGroupId: proc.processGroupId,
         rootStartTime: proc.rootStartTime,
       };
@@ -1522,6 +1542,7 @@ export class Launcher {
           userDataDir,
           binarySha256: verifiedBinary.sha256,
           personaDigest,
+          searchBootstrapRevision: SEARCH_PROVIDER_BOOTSTRAP_REVISION,
           processGroupId: proc?.processGroupId,
           rootStartTime: proc?.rootStartTime,
         };
@@ -1771,16 +1792,14 @@ export class Launcher {
     return adopted;
   }
 
-  private async ensureSearchProvider(profileId: string, ws: string): Promise<void> {
-    if (
-      this.headless
-      || !this.ensureSearchProviderFn
-      || this.searchProviderWs.get(profileId) === ws
-    ) return;
+  private async ensureSearchProvider(
+    profileId: string,
+    options: SearchProviderBootstrapOptions,
+  ): Promise<boolean> {
+    if (this.headless || !this.ensureSearchProviderFn) return false;
 
     try {
-      const result = await this.ensureSearchProviderFn(ws);
-      this.searchProviderWs.set(profileId, ws);
+      const result = await this.ensureSearchProviderFn(options);
       if (result.status === "configured") {
         this.log(`${profileId}: configured ${result.engine} as the address-bar search provider`);
       } else if (result.status === "already-default") {
@@ -1791,6 +1810,7 @@ export class Launcher {
     } catch (err) {
       this.log(`search provider setup failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
     }
+    return true;
   }
 
   /**
@@ -1816,7 +1836,6 @@ export class Launcher {
     this.procs.delete(profileId);
     this.verifiedExternal.delete(profileId);
     this.clearIdentityCertification(profileId);
-    this.searchProviderWs.delete(profileId);
     // Every successful call site has positively established that this exact
     // launch generation is dead. Cleaning here covers explicit stops, direct
     // window closes discovered by reconciliation, and failed-start rollback.

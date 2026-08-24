@@ -265,8 +265,8 @@ bunAsNodeTest("worker retries until the persistent context appears without creat
   }
 });
 
-bunAsNodeTest("search provider uses a windowless target and cleans up success and failure", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aliasmode-search-provider-hidden-"));
+bunAsNodeTest("search provider uses a standalone headless profile and closes it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-search-provider-headless-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
     await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
@@ -274,97 +274,72 @@ bunAsNodeTest("search provider uses a windowless target and cleans up success an
     await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
     await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
-      const marker = "about:blank#__aliasmode_hidden_search_provider__";
-      let mode;
-      let hiddenPage;
-      let targetDetached;
-      let browserDetached;
-      let pageClosed;
-      let targetClosed;
-      const context = {
-        pages: () => hiddenPage ? [hiddenPage] : [],
-        async newPage() { throw new Error("search provider created a visible page"); },
-        async newCDPSession(page) {
-          if (page !== hiddenPage) throw new Error("wrong search target");
-          return {
-            async send(method) {
-              if (method !== "Target.getTargetInfo") throw new Error("wrong target command");
-              return { targetInfo: { targetId: "search-target", type: "other" } };
+      let launched = false;
+      let closed = false;
+      process.on("beforeExit", () => {
+        if (launched && !closed) process.exitCode = 9;
+      });
+      export const chromium = {
+        async connectOverCDP() { throw new Error("search provider attached to a live browser"); },
+        async launchPersistentContext(userDataDir, options) {
+          launched = true;
+          const mode = userDataDir.split("/").at(-1);
+          if (options?.executablePath !== "C:/AliasMode/cloakbrowser/chrome.exe"
+            || options?.headless !== true
+            || !options.args.includes("--no-first-run")
+            || !options.args.includes("--no-default-browser-check")) {
+            throw new Error("wrong headless search launch");
+          }
+          if (mode === "configured" && (
+            !options.args.includes("--load-extension=C:/Extensions/a")
+            || !options.args.includes("--disable-extensions-except=C:/Extensions/a")
+          )) throw new Error("assigned extension was omitted");
+          const page = {
+            async goto(url) {
+              if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
             },
-            async detach() { targetDetached = true; },
+            async evaluate() {
+              if (mode === "failure") throw new Error("settings unavailable");
+              return mode === "configured"
+                ? { status: "configured", engine: "DuckDuckGo" }
+                : { status: "already-default", engine: "DuckDuckGo" };
+            },
+          };
+          return {
+            pages: () => [page],
+            async newPage() { throw new Error("initial headless page was ignored"); },
+            async newBrowserCDPSession() { throw new Error("hidden target was created"); },
+            async close() { closed = true; },
           };
         },
       };
-      const browserCdp = {
-        async send(method, params) {
-          if (method === "Browser.getVersion") return { product: "CloakBrowser/146.0.0.0" };
-          if (method === "Target.createTarget") {
-            if (params?.url !== marker || params?.background !== true || params?.hidden !== true || params?.browserContextId !== undefined) {
-              throw new Error("wrong hidden search target command");
-            }
-            hiddenPage = {
-              currentUrl: marker,
-              url() { return this.currentUrl; },
-              async goto(url) {
-                if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
-                this.currentUrl = url;
-              },
-              async evaluate() {
-                if (mode === "failure") throw new Error("settings unavailable");
-                return mode === "configured"
-                  ? { status: "configured", engine: "DuckDuckGo" }
-                  : { status: "already-default", engine: "DuckDuckGo" };
-              },
-              async close() { pageClosed = true; hiddenPage = undefined; },
-            };
-            return { targetId: "search-target" };
-          }
-          if (method === "Target.getTargetInfo") {
-            return { targetInfo: { targetId: params.targetId, type: "other", url: marker } };
-          }
-          if (method === "Browser.getWindowForTarget") {
-            throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
-          }
-          if (method === "Target.closeTarget") { targetClosed = true; hiddenPage = undefined; return { success: true }; }
-          throw new Error("wrong browser CDP command");
-        },
-        async detach() { browserDetached = true; },
-      };
-      export const chromium = { async connectOverCDP(endpoint) {
-        mode = endpoint.split("//")[1];
-        hiddenPage = undefined;
-        targetDetached = false;
-        browserDetached = false;
-        pageClosed = false;
-        targetClosed = false;
-        return {
-          contexts: () => [context],
-          async newBrowserCDPSession() { return browserCdp; },
-          async close() {
-            if (hiddenPage || !targetDetached || !browserDetached || !pageClosed || !targetClosed
-              || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== undefined) {
-              throw new Error("hidden search target cleanup was incomplete");
-            }
-          },
-        };
-      } };
     `);
     await chmod(join(root, "node", "node.exe"), 0o755);
 
+    const executablePath = "C:/AliasMode/cloakbrowser/chrome.exe";
     await expect(runPlaywrightWorker("search-provider", {
-      endpoint: "ws://configured", connectTimeoutMs: 2_000,
+      executablePath,
+      userDataDir: "C:/Profiles/configured",
+      extensionDirs: ["C:/Extensions/a"],
+      launchTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       status: "configured",
       engine: "DuckDuckGo",
     });
     await expect(runPlaywrightWorker("search-provider", {
-      endpoint: "ws://existing", connectTimeoutMs: 2_000,
+      executablePath,
+      userDataDir: "C:/Profiles/existing",
+      extensionDirs: [],
+      launchTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       status: "already-default",
       engine: "DuckDuckGo",
     });
     const failure = await runPlaywrightWorker("search-provider", {
-      endpoint: "ws://failure", connectTimeoutMs: 2_000,
+      executablePath,
+      userDataDir: "C:/Profiles/failure",
+      extensionDirs: [],
+      launchTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
     expect(failure).toMatchObject({ code: "operation_failed" });
   } finally {

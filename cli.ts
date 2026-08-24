@@ -1709,9 +1709,9 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
     rest,
     true,
     paths.cloudProfiles,
-    async (ws) => {
-      const result = await ensureDuckDuckGoDefault(ws);
-      searchProviderResults.set(ws, result);
+    async (options) => {
+      const result = await ensureDuckDuckGoDefault(options);
+      searchProviderResults.set(options.userDataDir, result);
       return result;
     },
   );
@@ -1745,7 +1745,7 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
         ]);
       },
       async verifySearchProvider(profileId) {
-        const result = searchProviderResults.get(launch(profileId).ws);
+        const result = searchProviderResults.get(launcher.userDataDir(profileId));
         if (
           !result
           || (result.status !== "configured" && result.status !== "already-default")

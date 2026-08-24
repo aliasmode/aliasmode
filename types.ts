@@ -116,6 +116,8 @@ export interface LaunchInfo {
   binarySha256?: string;
   /** Hash of every launch-time fingerprint input, kernel, extension and mode. */
   personaDigest?: string;
+  /** Search bootstrap attempted before this browser generation was spawned. */
+  searchBootstrapRevision?: number;
   /** Linux-only ownership proof for a dedicated browser process group. */
   processGroupId?: number;
   /** Linux /proc start-time token for the exact browser root PID. */

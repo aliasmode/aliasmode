@@ -730,13 +730,30 @@ async function restoreSession(browser, context, payload) {
   return null;
 }
 
-async function searchProvider(browser, context) {
-  const { page, close } = await createHiddenPage(
-    browser,
-    context,
-    "about:blank#__aliasmode_hidden_search_provider__",
-  );
+async function searchProvider(chromium, payload) {
+  if (
+    typeof payload.executablePath !== "string"
+    || !payload.executablePath
+    || typeof payload.userDataDir !== "string"
+    || !payload.userDataDir
+    || !Array.isArray(payload.extensionDirs)
+    || payload.extensionDirs.some((path) => typeof path !== "string" || !path)
+  ) throw typed("invalid_request");
+
+  const extensionArgs = payload.extensionDirs.length
+    ? [
+      `--load-extension=${payload.extensionDirs.join(",")}`,
+      `--disable-extensions-except=${payload.extensionDirs.join(",")}`,
+    ]
+    : [];
+  const context = await chromium.launchPersistentContext(payload.userDataDir, {
+    executablePath: payload.executablePath,
+    headless: true,
+    args: ["--no-first-run", "--no-default-browser-check", ...extensionArgs],
+    timeout: Math.max(1, Math.min(Number(payload.launchTimeoutMs) || 20_000, 120_000)),
+  });
   try {
+    const page = context.pages()[0] || await context.newPage();
     await page.goto("chrome://settings/searchEngines", { waitUntil: "domcontentloaded", timeout: 10_000 });
     return await page.evaluate(async () => {
       const cr = await import("chrome://resources/js/cr.js");
@@ -822,11 +839,14 @@ async function searchProvider(browser, context) {
       }
       if (!duck) throw new Error("Chromium did not save DuckDuckGo");
 
-      const reference = (engine) => typeof engine.modelIndex === "number"
-        ? engine.modelIndex
-        : engine.id;
+      const modelIndex = (engine) => {
+        if (!Number.isInteger(engine.modelIndex) || engine.modelIndex < 0) {
+          throw new Error("Chromium search engine model index was unavailable");
+        }
+        return engine.modelIndex;
+      };
       if (duck.canBeActivated) {
-        globalThis.chrome.send("setIsActiveSearchEngine", [reference(duck), true]);
+        globalThis.chrome.send("setIsActiveSearchEngine", [modelIndex(duck), true]);
         for (let i = 0; i < 20; i++) {
           await wait(100);
           duck = findDuckDuckGo(await engines()) || duck;
@@ -841,10 +861,9 @@ async function searchProvider(browser, context) {
       }
       if (!duck.canBeDefault) throw new Error("Chromium will not allow DuckDuckGo as default");
 
-      const usesModelIndex = typeof duck.modelIndex === "number";
       globalThis.chrome.send("setDefaultSearchEngine", [
-        reference(duck),
-        usesModelIndex ? 0 : 1,
+        modelIndex(duck),
+        1,
         null,
       ]);
       for (let i = 0; i < 20; i++) {
@@ -859,10 +878,11 @@ async function searchProvider(browser, context) {
       }
       throw new Error("DuckDuckGo was not persisted as default");
     });
-  } finally { await close(); }
+  } finally { await context.close().catch(() => {}); }
 }
 
 async function operate(chromium, operation, payload) {
+  if (operation === "search-provider") return searchProvider(chromium, payload);
   const endpoint = payload.endpoint;
   if (typeof endpoint !== "string" || !/^https?:\/\/|^wss?:\/\//.test(endpoint)) throw typed("invalid_request");
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
@@ -870,7 +890,6 @@ async function operate(chromium, operation, payload) {
     if (operation === "session-capture") return captureSession(browser, payload);
     if (operation === "session-restore") return restoreSession(browser, context, payload);
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
-    if (operation === "search-provider") return searchProvider(browser, context);
     if (operation === "navigate") {
       for (let i = 0; i < payload.urls.length; i++) {
         const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
