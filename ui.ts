@@ -627,6 +627,7 @@ export async function handleUiRequest(
       const action = String(body.action ?? "");
       if (action === "invite") return Response.json(await cloud.createInvitation(String(body.email ?? ""), body.role === "admin" ? "admin" : "member"));
       if (action === "create-folder") return Response.json(await cloud.createFolder(String(body.name ?? "")));
+      if (action === "delete-folder") return Response.json(await cloud.deleteFolder(String(body.name ?? "")));
       if (action === "resend") return Response.json(await cloud.resendInvitation(String(body.id ?? "")));
       if (action === "revoke") return Response.json(await cloud.revokeInvitation(String(body.id ?? "")));
       if (action === "role") return Response.json(await cloud.changeMemberRole(String(body.accountId ?? ""), body.role === "admin" ? "admin" : "member"));
@@ -635,7 +636,10 @@ export async function handleUiRequest(
       if (action === "remove-grant") return Response.json(await cloud.removeFolderGrant(String(body.folderName ?? ""), String(body.accountId ?? "")));
       return Response.json({ ok: false, error: "unknown Cloud workspace action" }, { status: 400 });
     } catch (error) {
-      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 400;
+      return Response.json({ ok: false, error: msg(error) }, { status });
     }
   }
 
@@ -693,7 +697,7 @@ export async function handleUiRequest(
       // otherwise show "running" forever and hide the Open action. reconcileOrphans
       // probes active() per launch and drops dead rows (it never kills processes).
       await launcher.reconcileOrphans();
-      return Response.json({ profiles: listUiProfiles(store), healthSources: [] });
+      return Response.json({ profiles: listUiProfiles(store), healthSources: [], groups: store.listGroups() });
     } catch (error) {
       // Bun renders an uncaught route exception as an HTML 500 page. The React
       // client then cannot expose the actual hub/reconciliation error and only
@@ -922,6 +926,20 @@ export async function handleUiRequest(
       store.upsertProfiles([...pending.values()]);
       updated = pending.size;
       return Response.json({ ok: true, updated, skipped, notFound, errors: [] });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/groups/create" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const body = (await req.json()) as { name?: unknown };
+      const name = String(body.name ?? "").trim();
+      if (!name) return Response.json({ ok: false, error: "group name required" }, { status: 400 });
+      if (name === "all") return Response.json({ ok: false, error: "group name is reserved" }, { status: 400 });
+      store.registerGroup(name);
+      return Response.json({ ok: true, name });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }

@@ -314,6 +314,220 @@ async function captureLiveOrigin(context, origin) {
   return null;
 }
 
+function serializeIndexedDBValue(value) {
+  const typedArrays = new Map([
+    ["Int8Array", "i8"], ["Uint8Array", "ui8"], ["Uint8ClampedArray", "ui8c"],
+    ["Int16Array", "i16"], ["Uint16Array", "ui16"], ["Int32Array", "i32"],
+    ["Uint32Array", "ui32"], ["Float32Array", "f32"], ["Float64Array", "f64"],
+    ["BigInt64Array", "bi64"], ["BigUint64Array", "bui64"],
+  ]);
+  const seenForTrivial = new Set();
+  const isTrivial = (candidate) => {
+    if (candidate === null || ["string", "number", "boolean"].includes(typeof candidate)) return true;
+    if (!candidate || typeof candidate !== "object" || seenForTrivial.has(candidate)) return false;
+    const proto = Object.getPrototypeOf(candidate);
+    if (!Array.isArray(candidate) && proto !== Object.prototype && proto !== null) return false;
+    seenForTrivial.add(candidate);
+    const result = (Array.isArray(candidate) ? candidate : Object.values(candidate)).every(isTrivial);
+    seenForTrivial.delete(candidate);
+    return result;
+  };
+  if (value !== null && isTrivial(value)) return { trivial: value };
+
+  const visited = new Map();
+  let lastId = 0;
+  const encode = (candidate) => {
+    if (candidate === undefined || typeof candidate === "symbol" || typeof candidate === "function") return { v: "undefined" };
+    if (candidate === null) return { v: "null" };
+    if (Number.isNaN(candidate)) return { v: "NaN" };
+    if (candidate === Infinity) return { v: "Infinity" };
+    if (candidate === -Infinity) return { v: "-Infinity" };
+    if (Object.is(candidate, -0)) return { v: "-0" };
+    if (["string", "number", "boolean"].includes(typeof candidate)) return candidate;
+    if (typeof candidate === "bigint") return { bi: candidate.toString() };
+    if (candidate instanceof Date) return { d: candidate.toJSON() };
+    if (candidate instanceof URL) return { u: candidate.toJSON() };
+    if (candidate instanceof RegExp) return { r: { p: candidate.source, f: candidate.flags } };
+    if (candidate instanceof Error) return { e: { n: candidate.name, m: candidate.message, s: candidate.stack ?? "" } };
+    const typed = typedArrays.get(candidate?.constructor?.name);
+    if (typed) {
+      const bytes = new Uint8Array(candidate.buffer, candidate.byteOffset, candidate.byteLength);
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      return { ta: { b: btoa(binary), k: typed } };
+    }
+    const prior = visited.get(candidate);
+    if (prior) return { ref: prior };
+    const id = ++lastId;
+    visited.set(candidate, id);
+    if (Array.isArray(candidate)) return { a: candidate.map(encode), id };
+    return { o: Object.keys(candidate).filter((key) => key !== "__proto__").map((key) => ({ k: key, v: encode(candidate[key]) })), id };
+  };
+  return { encoded: encode(value) };
+}
+
+async function serializedRemoteValue(cdp, remote) {
+  if (remote?.objectId) {
+    const response = await cdp.send("Runtime.callFunctionOn", {
+      objectId: remote.objectId,
+      functionDeclaration: `function() { return (${serializeIndexedDBValue.toString()})(this); }`,
+      returnByValue: true,
+    });
+    if (response.exceptionDetails || !response.result || !("value" in response.result)) {
+      throw new Error("Unable to serialize IndexedDB value");
+    }
+    return response.result.value;
+  }
+  if (remote && "value" in remote) return serializeIndexedDBValue(remote.value);
+  if (remote?.type === "undefined") return { encoded: { v: "undefined" } };
+  const value = remote?.unserializableValue;
+  if (value === "NaN" || value === "Infinity" || value === "-Infinity" || value === "-0") return { encoded: { v: value } };
+  if (remote?.type === "bigint" && typeof value === "string" && value.endsWith("n")) return { encoded: { bi: value.slice(0, -1) } };
+  throw new Error("Unable to serialize IndexedDB value");
+}
+
+function keyPathFields(keyPath) {
+  if (typeof keyPath === "string") return { keyPath };
+  if (Array.isArray(keyPath)) return { keyPathArray: keyPath };
+  if (keyPath?.type === "string") return { keyPath: keyPath.string };
+  if (keyPath?.type === "array") return { keyPathArray: keyPath.array };
+  return {};
+}
+
+async function collectTelegramIndexedDB(cdp, origin) {
+  await cdp.send("IndexedDB.enable");
+  const names = await cdp.send("IndexedDB.requestDatabaseNames", { securityOrigin: origin });
+  const databases = [];
+  for (const name of [...(names.databaseNames ?? [])].sort()) {
+    const rule = telegramRule(name);
+    if (!rule) continue;
+    const response = await cdp.send("IndexedDB.requestDatabase", { securityOrigin: origin, databaseName: name });
+    const metadata = response.databaseWithObjectStores;
+    if (!metadata || !Number.isInteger(metadata.version) || metadata.version <= 0) continue;
+    const stores = [];
+    for (const store of metadata.objectStores ?? []) {
+      if (!rule.stores.includes(store.name)) continue;
+      const records = [];
+      let skipCount = 0;
+      for (;;) {
+        const data = await cdp.send("IndexedDB.requestData", {
+          securityOrigin: origin,
+          databaseName: name,
+          objectStoreName: store.name,
+          indexName: "",
+          skipCount,
+          pageSize: 1_000,
+        });
+        for (const entry of data.objectStoreDataEntries ?? []) {
+          const record = {};
+          if (store.keyPath?.type === "null" || store.keyPath == null) {
+            const key = await serializedRemoteValue(cdp, entry.primaryKey ?? entry.key);
+            if ("trivial" in key) record.key = key.trivial;
+            else record.keyEncoded = key.encoded;
+          }
+          const value = await serializedRemoteValue(cdp, entry.value);
+          if ("trivial" in value) record.value = value.trivial;
+          else record.valueEncoded = value.encoded;
+          records.push(record);
+        }
+        if (!data.hasMore) break;
+        const count = data.objectStoreDataEntries?.length ?? 0;
+        if (!count) throw new Error("IndexedDB pagination made no progress");
+        skipCount += count;
+      }
+      stores.push({
+        name: store.name,
+        records,
+        indexes: (store.indexes ?? []).map((index) => ({
+          name: index.name,
+          ...keyPathFields(index.keyPath),
+          multiEntry: index.multiEntry,
+          unique: index.unique,
+        })),
+        autoIncrement: store.autoIncrement,
+        ...keyPathFields(store.keyPath),
+      });
+    }
+    if (stores.length) databases.push({ name, version: metadata.version, stores });
+  }
+  return databases;
+}
+
+async function createReadOnlyStorageReader(browser, context) {
+  if (typeof context.newCDPSession !== "function" || typeof browser.newBrowserCDPSession !== "function") {
+    throw new Error("CDP storage capture is unavailable");
+  }
+
+  const browserCdp = await browser.newBrowserCDPSession();
+  const marker = "about:blank#__aliasmode_hidden_capture__";
+  let targetId;
+  let page;
+  let cdp;
+  let ordinal = 0;
+  const close = async () => {
+    await cdp?.detach().catch(() => {});
+    if (page) await page.close().catch(() => {});
+    else if (targetId) await browserCdp.send("Target.closeTarget", { targetId }).catch(() => {});
+    await browserCdp.detach().catch(() => {});
+  };
+
+  try {
+    const existing = new Set(context.pages());
+    const previousAttachToOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+    process.env.PW_CHROMIUM_ATTACH_TO_OTHER = "1";
+    try {
+      ({ targetId } = await browserCdp.send("Target.createTarget", {
+        url: marker,
+        background: true,
+        hidden: true,
+      }));
+      for (let attempt = 0; attempt < 100 && !page; attempt++) {
+        page = context.pages().find((candidate) => !existing.has(candidate) && candidate.url() === marker);
+        if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      if (previousAttachToOther === undefined) delete process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+      else process.env.PW_CHROMIUM_ATTACH_TO_OTHER = previousAttachToOther;
+    }
+    if (!page) throw new Error("hidden storage target is unavailable");
+    cdp = await context.newCDPSession(page);
+    await cdp.send("Network.enable");
+    await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+    await cdp.send("DOMStorage.enable");
+  } catch (error) {
+    await close();
+    throw error;
+  }
+
+  return {
+    async read(origin) {
+      const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
+      let intercepted = false;
+      const handler = (route) => {
+        intercepted = true;
+        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
+      };
+      await context.route(url, handler);
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        if (!intercepted) throw new Error("Capture navigation was not intercepted");
+        if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
+        const response = await cdp.send("DOMStorage.getDOMStorageItems", {
+          storageId: { securityOrigin: origin, isLocalStorage: true },
+        });
+        const localStorage = (response.entries ?? []).map(([name, value]) => ({ name, value }));
+        const indexedDB = origin === TELEGRAM_ORIGIN ? await collectTelegramIndexedDB(cdp, origin) : [];
+        return { localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
+      } finally {
+        await context.unroute(url, handler).catch(() => {});
+      }
+    },
+    close,
+  };
+}
+
 async function captureSession(browser, payload) {
   const context = contextOf(browser);
   const seed = payload.captureSeed;
@@ -339,49 +553,23 @@ async function captureSession(browser, payload) {
     } catch {}
   }
 
-  const captures = [];
-  const routes = [];
-  const cdpSessions = [];
+  let reader;
   try {
     const byOrigin = new Map();
-    let ordinal = 0;
     for (const origin of [...origins].sort()) {
       let storage = await captureLiveOrigin(context, origin);
       if (!storage) {
-        const page = await context.newPage();
-        captures.push(page);
-        if (typeof context.newCDPSession === "function") {
-          const cdp = await context.newCDPSession(page);
-          cdpSessions.push(cdp);
-          await cdp.send("Network.enable");
-          await cdp.send("Network.setBypassServiceWorker", { bypass: true });
-        }
-        const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
-        let intercepted = false;
-        const handler = (route) => {
-          intercepted = true;
-          return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
-        };
-        routes.push({ url, handler });
-        await context.route(url, handler);
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
-        if (!intercepted) throw new Error("Capture navigation was not intercepted");
-        if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
-        storage = await page.evaluate(() => ({
-          localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
-        }));
-        if (origin === TELEGRAM_ORIGIN) {
-          let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
-          if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
-          if (capturePasscode) storage = await collectPasscodeStorage(page);
-        }
+        reader ??= await createReadOnlyStorageReader(browser, context);
+        storage = await reader.read(origin);
       }
       const captured = capturedWebOriginStorage(origin, storage);
       if (captured) byOrigin.set(origin, captured);
     }
 
-    const state = await context.storageState();
-    if (!Array.isArray(state.cookies) || state.cookies.some((cookie) =>
+    const cookies = typeof context.cookies === "function"
+      ? await context.cookies()
+      : (await context.storageState()).cookies;
+    if (!Array.isArray(cookies) || cookies.some((cookie) =>
       typeof cookie?.name !== "string" || typeof cookie.value !== "string" ||
       typeof cookie.domain !== "string" || typeof cookie.path !== "string" ||
       (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires))) ||
@@ -391,11 +579,9 @@ async function captureSession(browser, payload) {
       (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean") ||
       (cookie.sameSite !== undefined && !["Strict", "Lax", "None"].includes(cookie.sameSite))
     )) throw new Error("Invalid captured cookies");
-    return JSON.stringify({ cookies: state.cookies, origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
+    return JSON.stringify({ cookies, origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
   } finally {
-    for (const page of captures) await page.close().catch(() => {});
-    for (const cdp of cdpSessions) await cdp.detach().catch(() => {});
-    for (const route of routes) await context.unroute(route.url, route.handler).catch(() => {});
+    await reader?.close();
   }
 }
 
@@ -558,7 +744,9 @@ async function operate(chromium, operation, payload) {
       const targetCdp = await browser.newBrowserCDPSession();
       const existingPageTargetIds = new Set();
       const createdPageTargetIds = new Set();
+      const destroyedPageTargetIds = new Set();
       let armed = false;
+      let temporaryPage;
       try {
         const initialTargets = await targetCdp.send("Target.getTargets");
         for (const target of initialTargets?.targetInfos || []) {
@@ -570,34 +758,50 @@ async function operate(chromium, operation, payload) {
             createdPageTargetIds.add(target.targetId);
           }
         });
+        if (payload.temporary) {
+          targetCdp.on("Target.targetDestroyed", (event) => {
+            if (armed && createdPageTargetIds.has(event?.targetId)) destroyedPageTargetIds.add(event.targetId);
+          });
+        }
         armed = true;
         await targetCdp.send("Target.setDiscoverTargets", { discover: true });
 
         const automation = context.pages()[0];
-        let canCreate = false;
-        if (automation && typeof context.newCDPSession === "function") {
-          const cdp = await context.newCDPSession(automation);
-          try {
-            const { bounds } = await cdp.send("Browser.getWindowForTarget");
-            canCreate = bounds?.windowState !== "minimized";
-          } catch {
-            canCreate = false;
-          } finally {
-            await cdp.detach().catch(() => {});
+        if (payload.temporary) {
+          temporaryPage = await context.newPage();
+          await temporaryPage.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+          await temporaryPage.close();
+          temporaryPage = undefined;
+        } else {
+          let canCreate = false;
+          if (automation && typeof context.newCDPSession === "function") {
+            const cdp = await context.newCDPSession(automation);
+            try {
+              const { bounds } = await cdp.send("Browser.getWindowForTarget");
+              canCreate = bounds?.windowState !== "minimized";
+            } catch {
+              canCreate = false;
+            } finally {
+              await cdp.detach().catch(() => {});
+            }
           }
-        }
-        if (canCreate) {
-          const page = await context.newPage();
-          await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
-          if (automation !== page) await automation.bringToFront().catch(() => {});
+          if (canCreate) {
+            const page = await context.newPage();
+            await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+            if (automation !== page) await automation.bringToFront().catch(() => {});
+          }
         }
         await targetCdp.send("Target.getTargets");
       } finally {
+        if (temporaryPage) await temporaryPage.close().catch(() => {});
         armed = false;
         await targetCdp.send("Target.setDiscoverTargets", { discover: false }).catch(() => {});
         await targetCdp.detach().catch(() => {});
       }
-      return { createdPageTargetIds: [...createdPageTargetIds].sort() };
+      return {
+        createdPageTargetIds: [...createdPageTargetIds].sort(),
+        ...(payload.temporary ? { destroyedPageTargetIds: [...destroyedPageTargetIds].sort() } : {}),
+      };
     }
     if (operation === "label-window") {
       await context.addInitScript({ content: payload.script }).catch(() => {});

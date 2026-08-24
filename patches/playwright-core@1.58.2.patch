@@ -168,3 +168,15 @@ diff --git a/lib/server/browserContext.js b/lib/server/browserContext.js
      const currentCookies = await this.cookies();
      await this.doClearCookies();
      const matches = (cookie, prop, value) => {
+diff --git a/lib/server/chromium/crBrowser.js b/lib/server/chromium/crBrowser.js
+--- a/lib/server/chromium/crBrowser.js
++++ b/lib/server/chromium/crBrowser.js
+@@ -315,7 +315,7 @@ class CRBrowserContext extends import_browserContext.BrowserContext {
+     return this._crPages().map((crPage) => crPage._page);
+   }
+   async doCreateNewPage() {
+-    const { targetId } = await this._browser._session.send("Target.createTarget", { url: "about:blank", browserContextId: this._browserContextId });
++    const { targetId } = await this._browser._session.send("Target.createTarget", { url: "about:blank", browserContextId: this._browserContextId, background: true });
+     return this._browser._crPages.get(targetId)._page;
+   }
+   async doGetCookies(urls) {

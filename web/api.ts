@@ -46,6 +46,7 @@ export interface HealthSource {
 export interface UiRoster {
   profiles: UiProfile[];
   healthSources: HealthSource[];
+  groups: string[];
 }
 
 export interface DiagnoseReport {
@@ -310,6 +311,7 @@ export async function fetchProfiles(): Promise<UiRoster> {
   return {
     profiles: body.profiles,
     healthSources: Array.isArray(body.healthSources) ? body.healthSources : [],
+    groups: Array.isArray(body.groups) ? body.groups.filter((name: unknown) => typeof name === "string") : [],
   };
 }
 
@@ -500,7 +502,16 @@ export async function updateFromFile(files: FileList | File[]): Promise<any> {
   return apiJson(r, path);
 }
 
-// ---- Group rename / delete --------------------------------------------------
+// ---- Group create / rename / delete -----------------------------------------
+export async function createGroup(name: string): Promise<any> {
+  const r = await fetch("/ui/api/groups/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return apiJson(r, "/ui/api/groups/create");
+}
+
 export async function renameGroup(from: string, to: string): Promise<any> {
   const r = await fetch("/ui/api/groups/rename", {
     method: "POST",
