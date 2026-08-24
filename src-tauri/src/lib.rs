@@ -15,7 +15,9 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use tauri::{
-    ipc::CapabilityBuilder, webview::NewWindowResponse, Manager, WebviewUrl, WebviewWindowBuilder,
+    ipc::CapabilityBuilder,
+    webview::{NewWindowResponse, PageLoadEvent},
+    Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 #[derive(Default)]
@@ -250,11 +252,30 @@ pub fn run() {
             let url = format!("{origin}/")
                 .parse()
                 .map_err(|error| boxed(format!("invalid sidecar URL: {error}")))?;
+            let readiness_data_dir = data_dir.clone();
             let window = match WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("AliasMode")
                 .visible(!background)
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(960.0, 640.0)
+                .on_page_load(move |window, payload| {
+                    if !matches!(payload.event(), PageLoadEvent::Finished) {
+                        return;
+                    }
+                    if background && window.hide().is_err() {
+                        window.app_handle().exit(1);
+                        return;
+                    }
+                    let runtime = window
+                        .app_handle()
+                        .state::<runtime_descriptor::RuntimeDescriptorState>();
+                    runtime.activate();
+                    if configured_local_mode(&readiness_data_dir)
+                        && runtime.publish("local").is_err()
+                    {
+                        window.app_handle().exit(1);
+                    }
+                })
                 .on_navigation(move |url| {
                     (url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")
@@ -286,29 +307,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("AliasMode desktop failed");
 
-    app.run(move |app, event| {
-        if matches!(event, tauri::RunEvent::Ready) {
-            if background {
-                let Some(window) = app.get_webview_window("main") else {
-                    app.exit(1);
-                    return;
-                };
-                if window.hide().is_err() {
-                    app.exit(1);
-                    return;
-                }
-            }
-            let runtime = app.state::<runtime_descriptor::RuntimeDescriptorState>();
-            runtime.activate();
-            if app
-                .path()
-                .app_data_dir()
-                .is_ok_and(|data_dir| configured_local_mode(&data_dir))
-                && runtime.publish("local").is_err()
-            {
-                app.exit(1);
-            }
-        }
+    app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             let _ = app
                 .state::<runtime_descriptor::RuntimeDescriptorState>()
