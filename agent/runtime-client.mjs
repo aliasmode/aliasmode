@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
 import WebSocket from "ws";
@@ -43,17 +43,28 @@ export function defaultRuntimeDescriptorPath(env = process.env) {
   return join(env.APPDATA, "com.aliasmode.desktop", "agent-runtime.json");
 }
 
+export function windowsProcessIdentityCommand(pid, env = process.env) {
+  const executable = env.SYSTEMROOT
+    ? win32.join(env.SYSTEMROOT, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "powershell.exe";
+  return {
+    executable,
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `[System.Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToFileTimeUtc()`,
+    ],
+  };
+}
+
 async function processStartIdentity(pid) {
   if (process.platform === "win32") {
+    const command = windowsProcessIdentityCommand(pid);
     const { stdout } = await execFileAsync(
-      "powershell.exe",
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`,
-      ],
+      command.executable,
+      command.args,
       { windowsHide: true, timeout: 5_000, maxBuffer: 1024 },
     );
     const value = stdout.trim();

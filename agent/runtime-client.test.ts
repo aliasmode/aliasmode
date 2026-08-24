@@ -6,6 +6,7 @@ import {
   RUNTIME_PROTOCOL,
   defaultRuntimeDescriptorPath,
   validateRuntimeDescriptor,
+  windowsProcessIdentityCommand,
 } from "./runtime-client.mjs";
 
 function descriptor() {
@@ -49,6 +50,19 @@ test("invalid agent responses terminate their WebSocket", () => {
   expect(socket.terminated).toBe(1);
   client.close();
   expect(socket.readyState).toBe(3);
+});
+
+test("Windows process identity does not depend on PowerShell modules or PATH", () => {
+  expect(windowsProcessIdentityCommand(123, { SYSTEMROOT: "C:\\Windows" } as any)).toEqual({
+    executable: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "[System.Diagnostics.Process]::GetProcessById(123).StartTime.ToFileTimeUtc()",
+    ],
+  });
 });
 
 test("runtime descriptor path uses the Tauri application data directory", () => {
