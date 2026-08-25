@@ -133,7 +133,7 @@ jobs:
           & $installer -SkipSetup -Commit $commit
           if ($LASTEXITCODE -ne 0) { throw "pinned Hermes installation failed" }
 
-          $hermesBin = Join-Path $env:LOCALAPPDATA "hermes\bin"
+          $hermesBin = Join-Path $env:LOCALAPPDATA "hermes\hermes-agent\bin"
           $env:PATH = "$hermesBin;$env:PATH"
           $hermes = (Get-Command hermes -ErrorAction Stop).Source
           $helper = Join-Path $env:ALIASMODE_INSTALL_ROOT "aliasmode-mcp.exe"

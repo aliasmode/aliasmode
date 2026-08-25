@@ -3,8 +3,10 @@ import { configureClients, type CommandRunner } from "./setup.ts";
 
 test("setup uses each client's supported MCP registration command", async () => {
   const calls: Array<[string, string[]]> = [];
-  const run: CommandRunner = async (command, args) => {
+  const inputs: Array<[string, string[], string | undefined]> = [];
+  const run: CommandRunner = async (command, args, input) => {
     calls.push([command, args]);
+    inputs.push([command, args, input]);
     return { found: true, code: 0 };
   };
   const helper = "C:\\Program Files\\AliasMode\\aliasmode-mcp.exe";
@@ -41,6 +43,17 @@ test("setup uses each client's supported MCP registration command", async () => 
     "hermes",
     ["mcp", "add", "aliasmode", "--command", command, "--args", host],
   ]);
+  expect(inputs).toContainEqual([
+    "hermes",
+    ["mcp", "remove", "aliasmode"],
+    "y\n",
+  ]);
+  expect(inputs).toContainEqual([
+    "hermes",
+    ["mcp", "add", "aliasmode", "--command", command, "--args", host],
+    "y\n",
+  ]);
+  expect(inputs.filter(([client]) => client !== "hermes").every(([, , input]) => input === undefined)).toBe(true);
   expect(result.generic.mcpServers.aliasmode).toEqual({ command, args: [host] });
 });
 

@@ -7,12 +7,13 @@ export interface CommandResult {
   code: number;
 }
 
-export type CommandRunner = (command: string, args: string[]) => Promise<CommandResult>;
+export type CommandRunner = (command: string, args: string[], input?: string) => Promise<CommandResult>;
 
 const CLIENTS: Record<SetupClient, {
   command: string;
   remove: string[];
   add: (command: string, args: string[]) => string[];
+  input?: string;
 }> = {
   claude: {
     command: "claude",
@@ -36,16 +37,18 @@ const CLIENTS: Record<SetupClient, {
     command: "hermes",
     remove: ["mcp", "remove", "aliasmode"],
     add: (command, args) => ["mcp", "add", "aliasmode", "--command", command, "--args", ...args],
+    input: "y\n",
   },
 };
 
-export const defaultCommandRunner: CommandRunner = async (command, args) => {
+export const defaultCommandRunner: CommandRunner = async (command, args, input) => {
   return await new Promise((resolve) => {
     const child = spawn(command, args, {
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       shell: false,
     });
+    if (input !== undefined) child.stdin?.end(input);
     child.stdout?.on("data", () => {});
     child.stderr?.on("data", () => {});
     child.once("error", (error: NodeJS.ErrnoException) => {
@@ -85,8 +88,8 @@ export async function configureClients(options: {
       });
       continue;
     }
-    await run(config.command, config.remove);
-    const added = await run(config.command, config.add(command, commandArgs));
+    await run(config.command, config.remove, config.input);
+    const added = await run(config.command, config.add(command, commandArgs), config.input);
     statuses.push({
       client,
       status: added.code === 0 ? "configured" : "failed",
