@@ -1239,7 +1239,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     hostArch: "x64",
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
-  await expect(mismatch.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(mismatch.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("binary_verification"));
   expect(spawns).toBe(1);
   store.close();
   rmSync(root, { recursive: true, force: true });

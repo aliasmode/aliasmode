@@ -50,6 +50,7 @@ function needsProxyRelay(profile: Profile): boolean {
 export type BrowserLaunchFailure =
   | "preflight"
   | "mode_conflict"
+  | "binary_verification"
   | "profile_directory"
   | "relay_setup"
   | "process_spawn"
@@ -1245,7 +1246,12 @@ export class Launcher {
 
     // A fresh generation is never spawned until the configured executable has
     // been canonicalized and matched byte-for-byte against the deployment pin.
-    const verifiedBinary = await this.verifyConfiguredBinary();
+    let verifiedBinary: { path: string; sha256: string };
+    try {
+      verifiedBinary = await this.verifyConfiguredBinary();
+    } catch {
+      throw new BrowserLaunchError("binary_verification");
+    }
     const launchBinaryPath = verifiedBinary.path;
 
     const userDataDir = this.userDataDir(profileId);
@@ -1335,7 +1341,12 @@ export class Launcher {
       // Relay setup is asynchronous. Re-read and re-hash immediately before
       // the durable reservation and synchronous spawn so an atomic package/update
       // replacement cannot inherit the approval measured at launch start.
-      const spawnVerifiedBinary = await this.verifyConfiguredBinary(true);
+      let spawnVerifiedBinary: { path: string; sha256: string };
+      try {
+        spawnVerifiedBinary = await this.verifyConfiguredBinary(true);
+      } catch {
+        throw new BrowserLaunchError("binary_verification");
+      }
       this.log(`${profileId}: launch stage binary verified`);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "final browser binary verification");
       if (

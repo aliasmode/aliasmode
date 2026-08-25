@@ -160,7 +160,8 @@ pub fn run() {
             fs::create_dir_all(data_dir.join("inbox"))?;
 
             let resource_dir = app.path().resource_dir()?;
-            let browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
+            let mut browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
+            browser.executable = cli_compatible_windows_path(&browser.executable);
             let playwright_runtime = cli_compatible_windows_path(
                 &resource_dir
                     .join("playwright")
