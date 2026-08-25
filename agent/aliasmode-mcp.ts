@@ -72,7 +72,16 @@ async function runProcess(command: string, args: string[], env: NodeJS.ProcessEn
       windowsHide: true,
       env,
     });
-    process.stdin.pipe(child.stdin!);
+    const childInput = child.stdin!;
+    let childInputEnded = false;
+    const endChildInput = () => {
+      if (childInputEnded) return;
+      childInputEnded = true;
+      childInput.end();
+    };
+    process.stdin.pipe(childInput, { end: false });
+    process.stdin.once("end", endChildInput);
+    process.stdin.once("close", endChildInput);
     child.once("error", reject);
     child.once("exit", (code) => resolveCode(code ?? 1));
   });

@@ -320,6 +320,7 @@ async function main() {
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   process.stdin.once("end", shutdown);
+  process.stdin.once("close", shutdown);
   await host.server.connect(new StdioServerTransport());
 }
 
