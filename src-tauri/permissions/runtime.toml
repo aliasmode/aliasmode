@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-runtime-ready"
+description = "Allows the AliasMode UI to publish non-secret agent runtime readiness."
+commands.allow = ["agent_runtime_ready"]

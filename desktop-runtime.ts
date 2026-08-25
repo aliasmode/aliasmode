@@ -56,6 +56,17 @@ export interface ManagedDesktopRuntimeOptions {
   shutdownTimeoutMs?: number;
 }
 
+export function agentControlNonce(
+  env: Record<string, string | undefined>,
+): string | null {
+  const nonce = env.ALIASMODE_AGENT_NONCE;
+  if (nonce === undefined) return null;
+  if (!NONCE_RE.test(nonce)) {
+    throw new Error("ALIASMODE_AGENT_NONCE must be 64 lowercase hexadecimal characters");
+  }
+  return nonce;
+}
+
 export function desktopHealthMetadata(
   env: Record<string, string | undefined>,
   root: string | undefined,

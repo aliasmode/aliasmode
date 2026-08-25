@@ -63,6 +63,31 @@ AliasMode.exe --import-cloakpit C:\Cloakpit
 
 Use `--cloakpit-profile-root <dir>` if AliasMode reports browser data in multiple historical locations. Import works only into an empty Local destination on the same Windows machine and account because Windows DPAPI protects browser secrets. It preserves persisted persona data and session-bearing browser files, but runtime or browser differences can change the fingerprint visible to an account.
 
+## Agent browser automation
+
+The Windows installer includes `aliasmode-mcp.exe`. It connects AI agents to the free, open-source AliasMode client through local stdio MCP.
+
+```powershell
+& "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe" setup --client auto --yes --json
+```
+
+Setup configures Claude Code, Codex, OpenClaw, and Hermes when installed. Its JSON result also includes generic stdio MCP configuration. Restart an active agent harness after setup so it loads the new server.
+
+Agents can create profiles, open several headful or headless browsers, select one browser, and use the full pinned Playwright MCP tool set. AliasMode remains responsible for browser processes, profile locks, Cloud sessions, capture, and safe close. Local mode needs no account and does not contact AliasMode Cloud.
+
+For the same installation session, the helper also provides JSON-only commands:
+
+```powershell
+$aliasmode = "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe"
+& $aliasmode profiles list --json
+& $aliasmode profiles create --name research --json
+& $aliasmode browser open --profile <profile-id> --headless --json
+& $aliasmode playwright run --profile <profile-id> --file .\task.mjs --json
+& $aliasmode browser close --profile <profile-id> --json
+```
+
+The versioned bootstrap script tries winget first. It falls back to an exact GitHub Release installer and verifies its published SHA-256 manifest before installation. Unsigned beta installers can still require Windows SmartScreen or antivirus approval.
+
 ## Browser runtime
 
 AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The CloakBrowser binary is not part of this repository or the Apache-2.0 license.

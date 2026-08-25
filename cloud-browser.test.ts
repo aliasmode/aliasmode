@@ -51,6 +51,7 @@ function setup(options: {
   startRetainedFailure?: boolean;
   startError?: unknown;
   verifyWebSockets?: string[];
+  expectedHeadless?: boolean;
   proxy?: PortableProfileV1["profile"]["proxy"];
   session?: PortableProfileV1["session"];
   accountId?: () => string;
@@ -166,6 +167,7 @@ function setup(options: {
         restoreLastSession: false,
         sessionBaseVersion: -1,
       });
+      expect(startOptions.headless).toBe(options.expectedHeadless);
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
       if (options.startError) throw options.startError;
       store.recordLaunch({
@@ -301,6 +303,19 @@ test("Cloud browser imports one encoded batch without populating the Local store
   state.store.close();
 });
 
+
+test("Cloud browser forwards the typed headless launch option", async () => {
+  const state = setup({ expectedHeadless: true });
+
+  expect((await state.coordinator.open(
+    "profile1",
+    ["--window-size=1200,800"],
+    { headless: true },
+  )).ok).toBe(true);
+
+  state.queue.close();
+  state.store.close();
+});
 
 test("Cloud browser passes the authenticated proxy to Launcher without exposing it", async () => {
   const proxy = {
@@ -996,7 +1011,9 @@ test("Cloud dirty monitor latches one target change while a capture is running",
   onTarget("https://second.example");
   onTarget("https://second.example");
   finishFirst();
-  await Bun.sleep(20);
+  for (let attempt = 0; attempt < 100 && captures < 2; attempt++) {
+    await Bun.sleep(5);
+  }
   expect(captures).toBe(2);
 
   await state.coordinator.close("profile1");

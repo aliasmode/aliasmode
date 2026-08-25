@@ -10,6 +10,7 @@ import {
   BrowserLaunchError,
   platformHomeUrl,
   splitLaunchUrls,
+  type BrowserOpenOptions,
   type Launcher,
 } from "./launcher.ts";
 import {
@@ -65,7 +66,7 @@ export interface CloudBrowserLifecycle {
   listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }>;
   create(profile: Profile): Promise<{ id: string }>;
   importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse>;
-  open(profileId: string, launchArgs?: string[]): Promise<CloudBrowserOpenResult>;
+  open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<boolean>;
   secureAfterAuthentication(): Promise<void>;
   resumeAfterAuthentication(): Promise<void>;
@@ -368,13 +369,17 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     return imported;
   }
 
-  async open(profileId: string, launchArgs: string[] = []): Promise<CloudBrowserOpenResult> {
+  async open(
+    profileId: string,
+    launchArgs: string[] = [],
+    options: BrowserOpenOptions = {},
+  ): Promise<CloudBrowserOpenResult> {
     if (this.shuttingDown || this.draining) {
       return { ok: false, error: "Cloud browser coordinator is shutting down" };
     }
     const existing = this.opening.get(profileId);
     if (existing) return existing;
-    const promise = this.withProfileTransition(profileId, () => this.doOpen(profileId, launchArgs));
+    const promise = this.withProfileTransition(profileId, () => this.doOpen(profileId, launchArgs, options));
     this.opening.set(profileId, promise);
     try {
       return await promise;
@@ -383,7 +388,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
   }
 
-  private async doOpen(profileId: string, launchArgs: string[]): Promise<CloudBrowserOpenResult> {
+  private async doOpen(
+    profileId: string,
+    launchArgs: string[],
+    options: BrowserOpenOptions,
+  ): Promise<CloudBrowserOpenResult> {
     this.diagnosticEvents.record("open_started");
     let context: { queue: PendingSyncQueue; accountId: string; deviceId: string };
     try {
@@ -466,6 +475,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           restoreLastSession: false,
           resetStorage: bundleHasRestorableLogin(sessionBundle),
           sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
+          headless: options.headless,
         });
       };
       let launched: Awaited<ReturnType<typeof startBrowser>>;

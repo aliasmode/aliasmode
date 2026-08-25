@@ -26,6 +26,14 @@ import {
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
 import { handleUserApi } from "./adspower-users.ts";
 import {
+  AGENT_CONTROL_MAX_MESSAGE_BYTES,
+  AGENT_CONTROL_PATH,
+  AGENT_CONTROL_PROTOCOL,
+  AgentControlHub,
+  type AgentControlSession,
+  validAgentAuthorization,
+} from "./agent-control.ts";
+import {
   LifecycleAdmissionController,
   dispatchWithLifecycleAdmission,
   type LifecycleAdmissionOptions,
@@ -54,7 +62,13 @@ export interface DashboardServerOptions {
   lifecycleAdmissionOptions?: LifecycleAdmissionOptions;
   lifecycleAdmission?: LifecycleAdmissionController;
   health?: UiHealthMetadata | null;
+  /** Desktop-generated nonce used by the installed agent adapter. */
+  agentNonce?: string;
 }
+
+type AgentSocketData = {
+  session: AgentControlSession;
+};
 
 function escapeHtml(s: unknown): string {
   return String(s ?? "").replace(/[&<>"]/g, (c) => (({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }) as Record<string, string>)[c]!);
@@ -111,15 +125,62 @@ export function serveDashboard(opts: DashboardServerOptions) {
   const log = opts.log ?? ((m) => console.log(`[aliasmode] ${m}`));
   const admission = opts.lifecycleAdmission ?? new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
   const lifecycle = { admission };
-  const server = Bun.serve({
+  const agentNonce = opts.agentNonce;
+  const agentHub = agentNonce
+    ? new AgentControlHub({
+        launcher,
+        store,
+        admission,
+        remote: opts.remote,
+        cloudBrowser: opts.cloudBrowser,
+        cloudConnection: opts.cloudConnection,
+        log,
+      })
+    : undefined;
+  const server = Bun.serve<AgentSocketData>({
     port,
     hostname,
     // Queue wait plus a complete remote restore can legitimately hold a lifecycle
     // response for several minutes while the shared transition cap does its job.
     idleTimeout: 240,
     routes: { "/": index },
+    websocket: {
+      maxPayloadLength: AGENT_CONTROL_MAX_MESSAGE_BYTES,
+      message(socket, message) {
+        const raw = typeof message === "string" ? message : new Uint8Array(message);
+        void socket.data.session.enqueue(raw).then((response) => {
+          socket.send(JSON.stringify(response));
+        });
+      },
+      close(socket) {
+        void socket.data.session.disconnect();
+      },
+    },
     fetch: async (req, server) => {
       const reqUrl = new URL(req.url);
+      if (reqUrl.pathname === AGENT_CONTROL_PATH) {
+        if (!isLoopbackAddress(server.requestIP(req)?.address)) {
+          return Response.json({ ok: false, error: "loopback access only" }, { status: 403 });
+        }
+        if (!agentHub || !agentNonce) {
+          return Response.json({ ok: false, error: "agent control is unavailable" }, { status: 503 });
+        }
+        if (req.headers.get("sec-websocket-protocol") !== AGENT_CONTROL_PROTOCOL) {
+          return Response.json({ ok: false, error: "agent protocol mismatch" }, { status: 426 });
+        }
+        if (!validAgentAuthorization(req.headers.get("authorization"), agentNonce)) {
+          return Response.json({ ok: false, error: "agent authorization failed" }, { status: 401 });
+        }
+        const session = agentHub.connect();
+        const upgraded = server.upgrade(req, {
+          data: { session },
+        });
+        if (!upgraded) {
+          void session.disconnect();
+          return Response.json({ ok: false, error: "WebSocket upgrade failed" }, { status: 400 });
+        }
+        return undefined;
+      }
       // The automation client publishes through this local coordinator without entering the
       // browser lifecycle admission queue. Even if the dashboard is deliberately
       // bound beyond loopback, this ingestion route remains local-only.
@@ -173,6 +234,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
       });
     },
   });
+  void agentHub?.cleanupTemporaryProfiles();
   log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AdsPower API under /api)`);
   return server;
 }

@@ -1,6 +1,7 @@
 mod browser;
 mod credentials;
 mod releases;
+mod runtime_descriptor;
 mod shutdown;
 mod sidecar;
 
@@ -8,13 +9,18 @@ use credentials::{credential_delete, credential_get, credential_set, CredentialO
 use rand::random;
 use std::{
     error::Error,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicI32, Ordering},
+        Arc,
+    },
 };
 use tauri::{
-    ipc::CapabilityBuilder, webview::NewWindowResponse, Manager, WebviewUrl, WebviewWindowBuilder,
+    ipc::CapabilityBuilder,
+    webview::{NewWindowResponse, PageLoadEvent},
+    Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::ShellExt;
@@ -44,10 +50,53 @@ fn open_external_url(app: &tauri::AppHandle, url: &str) {
 }
 
 #[derive(Default)]
-struct PendingFocus(AtomicBool);
+struct RevealRequested(AtomicBool);
 
 fn boxed(error: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(error.into()).into()
+}
+
+fn background_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == OsStr::new("--background"))
+}
+
+fn packaged_node_package_version(root: &Path, package: &str) -> Result<String, Box<dyn Error>> {
+    let manifest = package
+        .split('/')
+        .fold(root.join("node_modules"), |path, segment| {
+            path.join(segment)
+        })
+        .join("package.json");
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).map_err(|error| {
+            boxed(format!(
+                "packaged agent dependency is unavailable: {package}: {error}"
+            ))
+        })?)?;
+    value
+        .get("version")
+        .and_then(|version| version.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            boxed(format!(
+                "packaged agent dependency has no version: {package}"
+            ))
+        })
+}
+
+fn configured_local_mode(data_dir: &Path) -> bool {
+    fs::read(data_dir.join("config.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|config| {
+            config.get("version").and_then(|version| version.as_u64()) == Some(1)
+                && config.get("mode").and_then(|mode| mode.as_str()) == Some("local")
+        })
 }
 
 fn cli_compatible_windows_path(path: &Path) -> PathBuf {
@@ -124,13 +173,45 @@ fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_legal_url, cli_compatible_windows_path, parse_cloakpit_import_args,
-        windows_acceptance_browser_args, CloakpitImportRequest,
+        allowed_legal_url, background_requested, cli_compatible_windows_path,
+        configured_local_mode, parse_cloakpit_import_args, windows_acceptance_browser_args,
+        CloakpitImportRequest,
     };
     use std::{
         ffi::OsString,
+        fs,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn recognizes_only_the_explicit_background_switch() {
+        assert!(background_requested(["aliasmode.exe", "--background"]));
+        assert!(!background_requested([
+            "aliasmode.exe",
+            "--background-worker"
+        ]));
+        assert!(!background_requested(["aliasmode.exe"]));
+    }
+
+    #[test]
+    fn recognizes_configured_local_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!configured_local_mode(dir.path()));
+        fs::write(
+            dir.path().join("config.json"),
+            br#"{"version":1,"mode":"local","localAnalytics":false}"#,
+        )
+        .unwrap();
+        assert!(configured_local_mode(dir.path()));
+        fs::write(dir.path().join("config.json"), br#"{"mode":"local"}"#).unwrap();
+        assert!(!configured_local_mode(dir.path()));
+        fs::write(
+            dir.path().join("config.json"),
+            br#"{"version":1,"mode":"cloud"}"#,
+        )
+        .unwrap();
+        assert!(!configured_local_mode(dir.path()));
+    }
 
     #[test]
     fn allows_only_public_legal_pages() {
@@ -208,17 +289,22 @@ mod tests {
 }
 
 pub fn run() {
+    let background = background_requested(std::env::args_os());
     let import_request = parse_cloakpit_import_args(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
-        .manage(PendingFocus::default())
+        .manage(RevealRequested::default())
         .manage(releases::UpdateCoordinator::default())
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if background_requested(argv) {
+                return;
+            }
+            app.state::<RevealRequested>()
+                .0
+                .store(true, Ordering::Release);
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
-            } else {
-                app.state::<PendingFocus>().0.store(true, Ordering::Release);
             }
         }))
         .plugin(tauri_plugin_shell::init())
@@ -228,6 +314,7 @@ pub fn run() {
             credential_get,
             credential_set,
             credential_delete,
+            runtime_descriptor::agent_runtime_ready,
             shutdown::restart_after_mode_change,
             releases::check_for_updates,
             releases::update_now,
@@ -273,7 +360,8 @@ pub fn run() {
             fs::create_dir_all(data_dir.join("inbox"))?;
 
             let resource_dir = app.path().resource_dir()?;
-            let browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
+            let mut browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
+            browser.executable = cli_compatible_windows_path(&browser.executable);
             let playwright_runtime = cli_compatible_windows_path(
                 &resource_dir
                     .join("playwright")
@@ -290,13 +378,40 @@ pub fn run() {
                 .join("package.json");
             let node_executable = playwright_runtime.join("node").join("node.exe");
             let worker_script = playwright_runtime.join("worker.mjs");
+            let agent_root = playwright_runtime.join("agent");
             if !playwright_manifest.is_file()
                 || !node_executable.is_file()
                 || !worker_script.is_file()
+                || !agent_root.join("mcp-host.mjs").is_file()
+                || !agent_root.join("playwright-proxy.mjs").is_file()
+                || !agent_root.join("playwright-runner.mjs").is_file()
+                || !agent_root.join("runtime-client.mjs").is_file()
             {
-                return Err(boxed("packaged Playwright worker is incomplete"));
+                return Err(boxed("packaged Playwright and MCP runtime is incomplete"));
+            }
+            for (package, expected) in [
+                ("playwright-core", "1.58.2"),
+                ("@modelcontextprotocol/sdk", "1.30.0"),
+                ("@playwright/mcp", "0.0.56"),
+                ("playwright", "1.58.0-alpha-2026-01-16"),
+            ] {
+                if packaged_node_package_version(&playwright_runtime, package)? != expected {
+                    return Err(boxed(format!(
+                        "packaged agent dependency version mismatch: {package}"
+                    )));
+                }
+            }
+            if !cfg!(dev) {
+                let helper = std::env::current_exe()?
+                    .parent()
+                    .ok_or_else(|| boxed("AliasMode installation directory is unavailable"))?
+                    .join("aliasmode-mcp.exe");
+                if !helper.is_file() {
+                    return Err(boxed("installed AliasMode agent helper is unavailable"));
+                }
             }
             let nonce = hex::encode(random::<[u8; 32]>());
+            let agent_nonce = hex::encode(random::<[u8; 32]>());
             let handle = app.handle().clone();
             let (sidecar, port) = tauri::async_runtime::block_on(sidecar::launch_and_verify(
                 &handle,
@@ -304,8 +419,20 @@ pub fn run() {
                 &browser,
                 &playwright_runtime,
                 &nonce,
+                &agent_nonce,
+                background,
             ))
             .map_err(boxed)?;
+
+            let runtime_descriptor = runtime_descriptor::RuntimeDescriptorState::new(
+                &data_dir,
+                nonce,
+                agent_nonce,
+                port,
+                sidecar.pid(),
+            )
+            .map_err(boxed)?;
+            app.manage(runtime_descriptor);
 
             let origin = format!("http://127.0.0.1:{port}");
             app.manage(CredentialOrigin(origin.clone()));
@@ -316,6 +443,7 @@ pub fn run() {
                     .window("main")
                     .remote(format!("{origin}/*"))
                     .permission("allow-credential-bridge")
+                    .permission("allow-runtime-ready")
                     .permission("allow-update-bridge"),
             ) {
                 let _ = sidecar.kill_owned();
@@ -327,10 +455,38 @@ pub fn run() {
             let url = format!("{origin}/")
                 .parse()
                 .map_err(|error| boxed(format!("invalid sidecar URL: {error}")))?;
+            let readiness_data_dir = data_dir.clone();
             let webview_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("AliasMode")
+                .visible(!background)
                 .inner_size(1280.0, 800.0)
-                .min_inner_size(960.0, 640.0);
+                .min_inner_size(960.0, 640.0)
+                .on_page_load(move |window, payload| {
+                    if !matches!(payload.event(), PageLoadEvent::Finished) {
+                        return;
+                    }
+                    let reveal_requested = window
+                        .app_handle()
+                        .state::<RevealRequested>()
+                        .0
+                        .load(Ordering::Acquire);
+                    if background
+                        && !reveal_requested
+                        && (window.hide().is_err() || window.is_visible().unwrap_or(true))
+                    {
+                        window.app_handle().exit(1);
+                        return;
+                    }
+                    let runtime = window
+                        .app_handle()
+                        .state::<runtime_descriptor::RuntimeDescriptorState>();
+                    runtime.activate();
+                    if configured_local_mode(&readiness_data_dir)
+                        && runtime.publish("local").is_err()
+                    {
+                        window.app_handle().exit(1);
+                    }
+                });
             #[cfg(windows)]
             let webview_builder = if let Some(args) = windows_acceptance_browser_args(matches!(
                 std::env::var("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG").as_deref(),
@@ -365,19 +521,36 @@ pub fn run() {
             };
 
             shutdown::install_close_handler(app.handle().clone(), window.clone(), sidecar, origin);
-            if app.state::<PendingFocus>().0.swap(false, Ordering::AcqRel) {
+            if app.state::<RevealRequested>().0.load(Ordering::Acquire) {
+                let _ = window.show();
                 let _ = window.set_focus();
+            } else if background {
+                window.hide()?;
             }
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("AliasMode desktop failed");
 
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
+    let requested_exit_code = Arc::new(AtomicI32::new(0));
+    let exit_code = Arc::clone(&requested_exit_code);
+    app.run_return(move |app, event| match event {
+        tauri::RunEvent::ExitRequested {
+            code: Some(code), ..
+        } => exit_code.store(code, Ordering::Release),
+        tauri::RunEvent::Exit => {
+            if let Some(runtime) = app.try_state::<runtime_descriptor::RuntimeDescriptorState>() {
+                let _ = runtime.remove_owned();
+            }
             if let Some(sidecar) = app.try_state::<sidecar::SidecarSupervisor>() {
                 let _ = sidecar.kill_owned();
             }
         }
+        _ => {}
     });
+
+    let exit_code = requested_exit_code.load(Ordering::Acquire);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 }

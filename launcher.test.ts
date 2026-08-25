@@ -511,7 +511,7 @@ test("restart config drift scans the survivor with its persisted binary and user
   rmSync(newRoot, { recursive: true, force: true });
 });
 
-test("a restart with a different launch mode stops the stale persona instead of certifying it", async () => {
+test("a live browser rejects a requested launch-mode change until it is closed", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
@@ -530,8 +530,8 @@ test("a restart with a different launch mode stops the stale persona instead of 
     browserClose: async () => false,
   });
 
-  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
-  expect(store.getLaunch("k1d0cd11")).toBeNull();
+  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("mode_conflict"));
+  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
   store.close();
 });
 
@@ -1481,7 +1481,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     hostArch: "x64",
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
-  await expect(mismatch.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(mismatch.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("binary_verification"));
   expect(spawns).toBe(1);
   store.close();
   rmSync(root, { recursive: true, force: true });
@@ -1739,10 +1739,42 @@ test("buildArgs omits --headless when headful, and adds it only when headless", 
   const headful = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
   const argsHeadful = headful.buildArgs(profile, 9333, "/data", []);
   expect(argsHeadful.some((a) => a.startsWith("--headless"))).toBe(false); // raw chromium: any --headless = headless ON
+  expect(headful.buildArgs(profile, 9333, "/data", [], undefined, true)).toContain("--headless=new");
 
   const headless = new Launcher({ store, binaryPath: "/fake", headless: true, spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
   const argsHeadless = headless.buildArgs(profile, 9333, "/data", []);
   expect(argsHeadless).toContain("--headless=new");
+  expect(headless.buildArgs(profile, 9333, "/data", [], undefined, false).some((a) => a.startsWith("--headless"))).toBe(false);
+  store.close();
+});
+
+test("start applies and persists a per-launch headless override", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const args: string[][] = [];
+  const launcher = newLauncher(store, f, args);
+
+  await launcher.start("k1d0cd11", [], { headless: true });
+
+  expect(args[0]).toContain("--headless=new");
+  expect(store.getLaunch("k1d0cd11")?.headless).toBe(true);
+  await launcher.stop("k1d0cd11");
+  store.close();
+});
+
+test("concurrent starts with different modes do not silently coalesce", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const launcher = newLauncher(store, f, []);
+
+  const opening = launcher.start("k1d0cd11", [], { headless: true });
+  await expect(launcher.start("k1d0cd11", [], { headless: false })).rejects.toEqual(
+    new BrowserLaunchError("mode_conflict"),
+  );
+  await opening;
+  await launcher.stop("k1d0cd11");
   store.close();
 });
 
@@ -3060,6 +3092,8 @@ test("start() maps an unknown preparation failure to a fixed safe category", asy
   const logs: string[] = [];
   const rawFailure = "sentinel raw operating-system failure";
   const dataRoot = join(tmpdir(), `sentinel-private-profile-path-${process.pid}`);
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
@@ -3086,7 +3120,7 @@ test("start() maps an unknown preparation failure to a fixed safe category", asy
     failure = error;
   }
 
-  expect(failure).toEqual(new BrowserLaunchError("preflight"));
+  expect(failure).toEqual(new BrowserLaunchError("profile_directory"));
   const publicOutput = `${failure}\n${logs.join("\n")}`;
   for (const secret of [rawFailure, dataRoot, "k1d0cd11"]) {
     expect(publicOutput).not.toContain(secret);
@@ -3453,13 +3487,16 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   const store = seeded();
   makeDirect(store);
   const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-reaped-profile-holder-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   const killedPids: number[] = [];
   const order: string[] = [];
   let held = true;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: testDataRoot(store),
+    dataRoot,
     portProbe: () => true,
     spawn: (bin, args) => {
       order.push("spawn");
@@ -3488,17 +3525,21 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   expect(killedPids).toEqual([4242]);
   expect(order).toEqual(["kill:4242", "spawn"]);
   store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("a fresh launch refuses to spawn while a leaked profile-dir holder survives", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-surviving-profile-holder-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   let spawned = false;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: testDataRoot(store),
+    dataRoot,
     portProbe: () => true,
     spawn: (bin, args) => {
       spawned = true;
@@ -3517,21 +3558,62 @@ test("a fresh launch refuses to spawn while a leaked profile-dir holder survives
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("profile_directory"));
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
+});
+
+test("a first launch skips the holder scan for a new profile directory", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-new-profile-holder-scan-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  let scanned = false;
+  let spawned = false;
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    dataRoot,
+    portProbe: () => true,
+    spawn: (bin, args) => {
+      spawned = true;
+      return f.spawn(bin, args);
+    },
+    fetch: f.fetchFn,
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => {
+      scanned = true;
+      return null;
+    },
+    cdpReadyTimeoutMs: 1000,
+  });
+
+  await launcher.start("k1d0cd11");
+  expect(scanned).toBe(false);
+  expect(spawned).toBe(true);
+  store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
+  const dataRoot = join(tmpdir(), "cloak-existing-profile-holder-scan-test");
+  rmSync(dataRoot, { recursive: true, force: true });
+  mkdirSync(join(dataRoot, "k1d0cd11"), { recursive: true });
   let spawned = false;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: testDataRoot(store),
+    dataRoot,
     portProbe: () => true,
     spawn: (bin, args) => {
       spawned = true;
@@ -3547,8 +3629,9 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
     cdpReadyTimeoutMs: 1000,
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("profile_directory"));
   expect(spawned).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
+  rmSync(dataRoot, { recursive: true, force: true });
 });

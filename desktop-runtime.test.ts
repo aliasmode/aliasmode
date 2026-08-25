@@ -3,6 +3,7 @@ import {
   DESKTOP_PROTOCOL,
   DesktopCredentialBridge,
   ManagedDesktopRuntime,
+  agentControlNonce,
   desktopHealthMetadata,
   desktopReadyRecord,
   isDesktopShutdownCommand,
@@ -28,6 +29,13 @@ test("desktop health metadata requires a nonce, version, and root", () => {
     ALIASMODE_DESKTOP_NONCE: "not-a-nonce",
     ALIASMODE_DESKTOP_VERSION: "0.1.0-beta.1",
   }, "root")).toThrow("64 lowercase hexadecimal");
+});
+
+test("agent control uses a separate validated desktop nonce", () => {
+  expect(agentControlNonce({})).toBeNull();
+  expect(agentControlNonce({ ALIASMODE_AGENT_NONCE: NONCE })).toBe(NONCE);
+  expect(() => agentControlNonce({ ALIASMODE_AGENT_NONCE: "invalid" }))
+    .toThrow("ALIASMODE_AGENT_NONCE");
 });
 
 test("desktop readiness is emitted only for a valid owned port and pid", () => {

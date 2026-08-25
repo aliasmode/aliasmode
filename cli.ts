@@ -71,6 +71,7 @@ import {
   DESKTOP_PROTOCOL,
   DesktopCredentialBridge,
   ManagedDesktopRuntime,
+  agentControlNonce,
   desktopHealthMetadata,
   desktopReadyRecord,
   isDesktopShutdownCommand,
@@ -2486,6 +2487,8 @@ async function main() {
   const desktopHealth = desktop
     ? desktopHealthMetadata(process.env, flag(rest, "desktop-root"))
     : null;
+  const agentNonce = desktop ? agentControlNonce(process.env) : null;
+  if (desktop && !agentNonce) throw new Error("ALIASMODE_AGENT_NONCE is required in desktop mode");
   const desktopCredentials = desktopHealth
     ? new DesktopCredentialBridge(desktopHealth.instance)
     : null;
@@ -2505,7 +2508,14 @@ async function main() {
     return;
   }
   const appConfig = new AppConfigStore(paths.config);
-  const savedMode = appConfig.read();
+  let savedMode = appConfig.read();
+  if (
+    desktop &&
+    process.env.ALIASMODE_BACKGROUND === "1" &&
+    savedMode.mode === "unconfigured"
+  ) {
+    savedMode = appConfig.setMode("local");
+  }
   const defaultCloudUrl = selectedCloudUrl(savedMode);
   const cloudConfig = cloudRuntimeConfiguration(savedMode);
   const cloudAuth = cloudConfig
@@ -2623,6 +2633,7 @@ async function main() {
           cloudConnection,
           pendingSync,
           health: desktopHealth,
+          agentNonce: agentNonce ?? undefined,
         });
 
         if (desktopHealth) {
@@ -2701,6 +2712,7 @@ async function main() {
           pendingSync,
           cloudBrowser,
           health: desktopHealth,
+          agentNonce: agentNonce ?? undefined,
         });
         if (desktopHealth) {
           const assignedPort = server.port;
@@ -2741,6 +2753,7 @@ async function main() {
         cloudConnection,
         pendingSync,
         health: desktopHealth,
+        agentNonce: agentNonce ?? undefined,
       });
       if (desktopHealth) {
         const assignedPort = server.port;

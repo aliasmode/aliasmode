@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { ProfileStore } from "./store.ts";
+import type { LaunchStartOptions } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { HubOwnershipLostError } from "./hub-client.ts";
 import { RemoteCoordinator, type RemoteDeps } from "./remote.ts";
@@ -82,7 +83,7 @@ function harness(
   const store = new ProfileStore(":memory:");
   const launched: string[] = [];
   const startedArgs: string[][] = [];
-  const startedOptions: any[] = [];
+  const startedOptions: LaunchStartOptions[] = [];
   const injected: string[] = [];
   const navigated: string[][] = [];
   const replacedPages: boolean[] = [];
@@ -90,7 +91,7 @@ function harness(
   let active = true; // short CDP probe result
   let processAlive = true; // exact executable/port/user-data reconciliation
   const launcher = {
-    async start(id: string, args: string[] = [], opts: any = {}) {
+    async start(id: string, args: string[] = [], opts: LaunchStartOptions = {}) {
       startedArgs.push(args);
       startedOptions.push(opts);
       const info = { profileId: id, pid: 1, debugPort: 9000, ws: `ws://x/${id}`, startedAt: 1, sessionBaseVersion: opts.sessionBaseVersion };
@@ -139,6 +140,15 @@ test("open claims the lock, launches, and injects the hub session", async () => 
   expect(h.launched).toEqual(["k1d0cd11"]);
   expect(h.injected[0]).toContain('"value":"hub"'); // the hub's session, not the original
   expect(h.store.getLaunch("k1d0cd11")!.sessionBaseVersion).toBe(1);
+});
+
+test("open forwards the typed per-launch headless option", async () => {
+  const h = harness();
+
+  const r = await h.coord.open("k1d0cd11", [], false, { headless: true });
+
+  expect(r.ok).toBe(true);
+  expect(h.startedOptions[0]?.headless).toBe(true);
 });
 
 test("open falls back to the profile's original cookies when the hub has no session", async () => {

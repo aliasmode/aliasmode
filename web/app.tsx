@@ -609,6 +609,8 @@ function App() {
   const [bulkOver, setBulkOver] = useState(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const authGeneration = useRef(0);
+  const publishedRuntimeReadiness = useRef<string | null>(null);
+  const [runtimeReadinessAttempt, setRuntimeReadinessAttempt] = useState(0);
   const restoreInFlight = useRef(false);
   const savedSessionRestoreEnabled = useRef(true);
   const desktopUpdateCheckStarted = useRef(false);
@@ -973,6 +975,31 @@ function App() {
       setLoaded(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (restartRequired) return;
+    const readiness = appMode?.mode === "local"
+      ? "local"
+      : appMode?.mode === "cloud" && cloudAuth !== null
+        ? cloudAuth.authenticated ? "cloud_authenticated" : "sign_in_required"
+        : null;
+    const invoke = desktopInvoke();
+    if (!readiness || !invoke || publishedRuntimeReadiness.current === readiness) return;
+    let active = true;
+    let retry: number | undefined;
+    publishedRuntimeReadiness.current = readiness;
+    void invoke("agent_runtime_ready", { readiness }).catch(() => {
+      if (!active || publishedRuntimeReadiness.current !== readiness) return;
+      publishedRuntimeReadiness.current = null;
+      retry = window.setTimeout(() => {
+        if (active) setRuntimeReadinessAttempt((attempt) => attempt + 1);
+      }, 500);
+    });
+    return () => {
+      active = false;
+      if (retry !== undefined) window.clearTimeout(retry);
+    };
+  }, [appMode?.mode, cloudAuth?.authenticated, restartRequired, runtimeReadinessAttempt]);
 
   useEffect(() => {
     if (!appMode || restartRequired || desktopUpdateCheckStarted.current) return;

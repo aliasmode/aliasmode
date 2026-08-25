@@ -28,6 +28,7 @@ export interface PrepareWindowsBundleOptions {
   platform?: NodeJS.Platform;
   arch?: string;
   compileSidecar?: (output: string) => Promise<void>;
+  compileAgent?: (output: string) => Promise<void>;
   installBrowser?: (cwd: string) => Promise<{ path: string; sha256: string }>;
   hashFile?: (path: string) => Promise<string>;
   downloadNode?: () => Promise<Uint8Array>;
@@ -64,6 +65,63 @@ async function compileSidecar(cwd: string, output: string): Promise<void> {
   if (code !== 0) throw new Error(`sidecar compilation exited with code ${code}`);
 }
 
+async function compileAgent(cwd: string, output: string): Promise<void> {
+  const child = Bun.spawn([
+    process.execPath,
+    "build",
+    "--compile",
+    `--target=${WINDOWS_SIDECAR_TARGET}`,
+    "agent/aliasmode-mcp.ts",
+    "--outfile",
+    output,
+  ], { cwd, stdout: "inherit", stderr: "inherit" });
+  const code = await child.exited;
+  if (code !== 0) throw new Error(`agent helper compilation exited with code ${code}`);
+}
+
+const AGENT_PACKAGE_VERSIONS: Record<string, string> = {
+  "@modelcontextprotocol/sdk": "1.30.0",
+  "@playwright/mcp": "0.0.56",
+  "playwright": "1.58.0-alpha-2026-01-16",
+  "playwright-core": "1.58.2",
+};
+
+function packageDirectory(root: string, name: string): string {
+  return join(root, "node_modules", ...name.split("/"));
+}
+
+function copyRuntimePackage(
+  cwd: string,
+  destinationRoot: string,
+  name: string,
+  copied = new Set<string>(),
+): void {
+  if (copied.has(name)) return;
+  const source = packageDirectory(cwd, name);
+  const manifestPath = join(source, "package.json");
+  if (!statSync(source).isDirectory() || !statSync(manifestPath).isFile()) {
+    throw new Error(`desktop dependency is missing: ${name}`);
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    version?: string;
+    dependencies?: Record<string, string>;
+  };
+  const expected = AGENT_PACKAGE_VERSIONS[name];
+  if (expected && manifest.version !== expected) {
+    throw new Error(`desktop dependency version mismatch: ${name}`);
+  }
+  const destination = packageDirectory(destinationRoot, name);
+  mkdirSync(dirname(destination), { recursive: true });
+  cpSync(source, destination, { recursive: true });
+  copied.add(name);
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    if (statSync(join(source, "node_modules", ...dependency.split("/")), { throwIfNoEntry: false })?.isDirectory()) {
+      continue;
+    }
+    copyRuntimePackage(cwd, destinationRoot, dependency, copied);
+  }
+}
+
 export async function prepareWindowsBundle(
   options: PrepareWindowsBundleOptions = {},
 ): Promise<PreparedBrowserMetadata> {
@@ -80,6 +138,7 @@ export async function prepareWindowsBundle(
   const resourceRoot = join(resources, "cloakbrowser");
   const playwrightRoot = join(resources, "playwright");
   const sidecar = join(binaries, "aliasmode-sidecar-x86_64-pc-windows-msvc.exe");
+  const agentHelper = join(binaries, "aliasmode-mcp-x86_64-pc-windows-msvc.exe");
 
   rmSync(staging, { recursive: true, force: true });
   rmSync(resourceRoot, { recursive: true, force: true });
@@ -91,6 +150,8 @@ export async function prepareWindowsBundle(
 
   await (options.compileSidecar ?? ((output) => compileSidecar(cwd, output)))(sidecar);
   if (!statSync(sidecar).isFile()) throw new Error("sidecar compiler did not create the expected Windows executable");
+  await (options.compileAgent ?? ((output) => compileAgent(cwd, output)))(agentHelper);
+  if (!statSync(agentHelper).isFile()) throw new Error("agent helper compiler did not create the expected Windows executable");
 
   if (options.installNode) {
     await options.installNode(playwrightRoot);
@@ -112,10 +173,25 @@ export async function prepareWindowsBundle(
   if (!statSync(join(playwrightRoot, "node", "node.exe")).isFile()) throw new Error("official Node runtime is incomplete");
   cpSync(join(cwd, "playwright-worker.mjs"), join(playwrightRoot, "worker.mjs"));
 
-  for (const dependency of ["playwright-core", "ws"]) {
-    const source = join(cwd, "node_modules", dependency);
-    if (!statSync(source).isDirectory()) throw new Error(`desktop dependency is missing: ${dependency}`);
-    cpSync(source, join(playwrightRoot, "node_modules", dependency), { recursive: true });
+  const agentRoot = join(playwrightRoot, "agent");
+  mkdirSync(agentRoot, { recursive: true });
+  for (const file of [
+    "mcp-host.mjs",
+    "playwright-proxy.mjs",
+    "playwright-runner.mjs",
+    "runtime-client.mjs",
+  ]) {
+    cpSync(join(cwd, "agent", file), join(agentRoot, file));
+  }
+  const copied = new Set<string>();
+  for (const dependency of [
+    "playwright-core",
+    "ws",
+    "@modelcontextprotocol/sdk",
+    "@playwright/mcp",
+    "playwright",
+  ]) {
+    copyRuntimePackage(cwd, playwrightRoot, dependency, copied);
   }
 
   const installed = await (options.installBrowser ?? ((dir) => installCloakBrowser({ cwd: dir, cacheDir: dir })))(staging);
