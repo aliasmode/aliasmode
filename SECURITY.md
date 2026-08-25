@@ -4,7 +4,7 @@
 
 Do not open a public issue for a vulnerability.
 
-Email the private security address listed on the AliasMode website. Include the affected version, reproduction steps, and impact.
+Email [security@aliasmode.com](mailto:security@aliasmode.com). Include the affected version, reproduction steps, and impact.
 
 Never send real cookies, passwords, proxy credentials, TOTP seeds, profile exports, private keys, or unredacted diagnostics.
 

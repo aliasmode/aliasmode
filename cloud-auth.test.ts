@@ -96,6 +96,52 @@ test("Cloud restore persists its rotated refresh token before returning", async 
   expect(persisted).toEqual(["rotated-refresh"]);
 });
 
+test("Cloud auth forgets stored session credentials without a remote request", async () => {
+  let remoteSignOuts = 0;
+  let credentialClears = 0;
+  const runtime = new CloudAuthRuntime(auth({
+    async signOut() { remoteSignOuts++; },
+  }), () => 1_000, undefined, async () => { credentialClears++; });
+  await runtime.signIn("user@example.com", "password");
+
+  await runtime.clearStoredSession();
+
+  expect(runtime.state()).toEqual({ authenticated: false });
+  expect(remoteSignOuts).toBe(0);
+  expect(credentialClears).toBe(1);
+});
+
+test("Cloud auth forget fences a restore started while credentials are clearing", async () => {
+  let markClearStarted!: () => void;
+  const clearStarted = new Promise<void>((resolve) => { markClearStarted = resolve; });
+  let finishClear!: () => void;
+  const clearPending = new Promise<void>((resolve) => { finishClear = resolve; });
+  const credentialEvents: string[] = [];
+  const runtime = new CloudAuthRuntime(
+    auth(),
+    () => 1_000,
+    async (token) => { credentialEvents.push(`persist:${token}`); },
+    async () => {
+      credentialEvents.push("clear:start");
+      markClearStarted();
+      await clearPending;
+      credentialEvents.push("clear:done");
+    },
+  );
+
+  const forgetting = runtime.clearStoredSession();
+  await clearStarted;
+  const restoring = runtime.restore("stale-refresh");
+  await Promise.resolve();
+  await Promise.resolve();
+  finishClear();
+
+  await forgetting;
+  await expect(restoring).rejects.toThrow("cancelled");
+  expect(runtime.state()).toEqual({ authenticated: false });
+  expect(credentialEvents).toEqual(["clear:start", "clear:done"]);
+});
+
 test("Cloud sign-out fences a late restore and clears credentials last", async () => {
   let finishRestore!: (session: any) => void;
   const restore = new Promise<any>((resolve) => { finishRestore = resolve; });
@@ -124,6 +170,8 @@ test("Cloud sign-out fences a late restore and clears credentials last", async (
 });
 
 test("Cloud sign-out waits for an accepted refresh write before clearing credentials", async () => {
+  let markPersistStarted!: () => void;
+  const persistStarted = new Promise<void>((resolve) => { markPersistStarted = resolve; });
   let finishPersist!: () => void;
   const persisted = new Promise<void>((resolve) => { finishPersist = resolve; });
   const credentialEvents: string[] = [];
@@ -132,6 +180,7 @@ test("Cloud sign-out waits for an accepted refresh write before clearing credent
     () => 1_000,
     async (token) => {
       credentialEvents.push(`persist:${token}:start`);
+      markPersistStarted();
       await persisted;
       credentialEvents.push(`persist:${token}:done`);
     },
@@ -139,7 +188,7 @@ test("Cloud sign-out waits for an accepted refresh write before clearing credent
   );
 
   const restoring = runtime.restore("stored-refresh");
-  await Promise.resolve();
+  await persistStarted;
   const signedOut = runtime.signOut();
   finishPersist();
 

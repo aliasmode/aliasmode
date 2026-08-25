@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { ProfileStore } from "./store.ts";
+import type { LaunchStartOptions } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { HubOwnershipLostError } from "./hub-client.ts";
 import { RemoteCoordinator, type RemoteDeps } from "./remote.ts";
@@ -77,18 +78,20 @@ function fakeHub(seed = true) {
 function harness(
   hub = fakeHub(),
   readSession: () => Promise<string> = async () => '{"cookies":[{"name":"auth_token","value":"rotated","domain":".x.com","path":"/"}],"origins":[]}',
-  writeSession?: (ws: string, bundle: string) => Promise<void>,
+  writeSession?: RemoteDeps["writeSession"],
 ) {
   const store = new ProfileStore(":memory:");
   const launched: string[] = [];
   const startedArgs: string[][] = [];
-  const startedOptions: Array<{ sessionBaseVersion?: number; headless?: boolean }> = [];
+  const startedOptions: LaunchStartOptions[] = [];
   const injected: string[] = [];
   const navigated: string[][] = [];
+  const replacedPages: boolean[] = [];
   const events: string[] = [];
-  let alive = true; // launcher.active() — toggle to simulate a crashed browser
+  let active = true; // short CDP probe result
+  let processAlive = true; // exact executable/port/user-data reconciliation
   const launcher = {
-    async start(id: string, args: string[] = [], opts: { sessionBaseVersion?: number; headless?: boolean } = {}) {
+    async start(id: string, args: string[] = [], opts: LaunchStartOptions = {}) {
       startedArgs.push(args);
       startedOptions.push(opts);
       const info = { profileId: id, pid: 1, debugPort: 9000, ws: `ws://x/${id}`, startedAt: 1, sessionBaseVersion: opts.sessionBaseVersion };
@@ -98,8 +101,20 @@ function harness(
       return { ws: info.ws, port: info.debugPort };
     },
     async stop(id: string) { store.clearLaunch(id); events.push("stop"); return true; },
-    async active(_id: string) { return alive; },
-    async navigate(_ws: string, urls: string[]) { navigated.push(urls); events.push("navigate"); },
+    async active(_id: string) { return active; },
+    async reconcileOrphan(id: string, expected: { debugPort: number; startedAt: number }) {
+      const launch = store.getLaunch(id);
+      if (!launch) return "dead" as const;
+      if (launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt) return "generation_changed" as const;
+      if (processAlive) return "alive" as const;
+      store.clearLaunch(id);
+      return "dead" as const;
+    },
+    async navigate(_ws: string, urls: string[], replacePages = false) {
+      navigated.push(urls);
+      replacedPages.push(replacePages);
+      events.push("navigate");
+    },
   };
   const deps: RemoteDeps = {
     hub,
@@ -109,7 +124,11 @@ function harness(
     writeSession: writeSession ?? (async (_ws, bundle) => { injected.push(bundle); events.push("writeSession"); }),
     heartbeatMs: 0, // no auto timer in tests
   };
-  return { coord: new RemoteCoordinator(deps), store, launched, startedArgs, startedOptions, injected, navigated, events, hub, setAlive: (v: boolean) => { alive = v; } };
+  return {
+    coord: new RemoteCoordinator(deps), store, launched, startedArgs, startedOptions, injected, navigated, replacedPages, events, hub,
+    setAlive(value: boolean) { active = value; processAlive = value; },
+    setActiveProbe(value: boolean) { active = value; },
+  };
 }
 
 test("open claims the lock, launches, and injects the hub session", async () => {
@@ -145,9 +164,36 @@ test("open seeds the remote session before navigating startup URLs", async () =>
   const r = await h.coord.open("k1d0cd11", ["--start-maximized", "https://x.com/home"]);
   expect(r.ok).toBe(true);
   expect(h.startedArgs[0]).toEqual(["--start-maximized"]); // URL withheld from Chromium argv
+  expect(h.startedOptions[0]).toMatchObject({ autoNavigate: false, restoreLastSession: false });
   expect(h.injected[0]).toContain('"value":"hub"');
   expect(h.navigated).toEqual([["https://x.com/home"]]);
+  expect(h.replacedPages).toEqual([true]);
   expect(h.events).toEqual(["start", "writeSession", "navigate"]);
+});
+
+test("open replaces stale pages with saved tabs followed by explicit URLs", async () => {
+  const hub = fakeHub();
+  let writeOptions: { authoritative?: boolean } | undefined;
+  const h = harness(hub, undefined, async (_ws, _bundle, options) => { writeOptions = options; });
+  h.hub.sessions.set("k1d0cd11", JSON.stringify({
+    cookies: [],
+    origins: [],
+    tabs: [
+      "https://saved.example/one",
+      "https://saved.example/one",
+      "https://saved.example/two",
+    ],
+  }));
+
+  expect((await h.coord.open("k1d0cd11", ["https://explicit.example/three"])).ok).toBe(true);
+  expect(writeOptions).toEqual({ authoritative: true });
+  expect(h.navigated).toEqual([[
+    "https://saved.example/one",
+    "https://saved.example/one",
+    "https://saved.example/two",
+    "https://explicit.example/three",
+  ]]);
+  expect(h.replacedPages).toEqual([true]);
 });
 
 test("open falls back to the platform home page (after the session) when no URL is passed", async () => {
@@ -690,6 +736,11 @@ test("browser-gone heartbeat retains the lock until an in-flight Telegram PUT dr
         return true;
       },
       async active() { return alive; },
+      async reconcileOrphan(id: string) {
+        if (alive) return "alive" as const;
+        store.clearLaunch(id);
+        return "dead" as const;
+      },
       async navigate() {},
     },
     store,
@@ -1196,6 +1247,11 @@ test("a stuck reader blocks live-browser reopen but not a new generation after c
         return true;
       },
       async active() { return alive; },
+      async reconcileOrphan(id: string) {
+        if (alive) return "alive" as const;
+        store.clearLaunch(id);
+        return "dead" as const;
+      },
       async navigate() {},
     },
     store,
@@ -1564,6 +1620,39 @@ test("open waits for an in-flight close before claiming and launching the replac
   store.close();
 });
 
+test("heartbeatOnce keeps the browser and renews after a transient active probe miss", async () => {
+  const h = harness();
+  await h.coord.open("k1d0cd11");
+  h.events.length = 0;
+  h.hub.calls.length = 0;
+  h.setActiveProbe(false);
+
+  await h.coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
+
+  expect(h.events).not.toContain("stop");
+  expect(h.store.getLaunch("k1d0cd11")).not.toBeNull();
+  expect(h.hub.calls).toContain("renew:k1d0cd11");
+  expect(h.hub.calls.some((call) => call === "release:k1d0cd11")).toBe(false);
+  h.store.close();
+});
+
+test("heartbeat stops renewing when a legacy launcher cannot reconcile a missed probe", async () => {
+  const h = harness();
+  await h.coord.open("k1d0cd11");
+  h.events.length = 0;
+  h.hub.calls.length = 0;
+  h.setActiveProbe(false);
+  (h.coord as any).d.launcher.reconcileOrphan = undefined;
+
+  await h.coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
+
+  expect(h.events).not.toContain("stop");
+  expect(h.store.getLaunch("k1d0cd11")).not.toBeNull();
+  expect(h.hub.calls).not.toContain("renew:k1d0cd11");
+  expect(h.hub.calls).not.toContain("release:k1d0cd11");
+  h.store.close();
+});
+
 test("heartbeatOnce frees the lock when the browser is gone (no renew)", async () => {
   const h = harness();
   await h.coord.open("k1d0cd11");
@@ -1594,6 +1683,7 @@ test("heartbeat teardown remains visible as stopping until a deferred stop settl
         return true;
       },
       async active() { return false; },
+      async reconcileOrphan(id: string) { store.clearLaunch(id); return "dead" as const; },
       async navigate() {},
     },
     store,
@@ -1643,7 +1733,7 @@ test("reclaimSurvivors stops and releases a survivor when the hub advanced past 
   expect(hub.calls.some((c) => c.startsWith("putSession"))).toBe(false);
 });
 
-test("reclaimSurvivors stops and releases when identity verification fails", async () => {
+test("reclaimSurvivors stops an unstamped browser rejected by identity verification", async () => {
   const hub = fakeHub();
   let sessionReads = 0;
   hub.getSession = async () => { sessionReads++; return null; };
@@ -1653,10 +1743,13 @@ test("reclaimSurvivors stops and releases when identity verification fails", asy
   const coord = new RemoteCoordinator({
     hub,
     launcher: {
-      async start() { throw new Error("Browser identity certification failed"); },
+      async start() { throw new Error("survivor start compatibility path was used"); },
       async stop(id: string) { store.clearLaunch(id); return true; },
-      async active() { return true; },
+      async active() { throw new Error("raw active exposed an unstamped survivor"); },
       async navigate() {},
+      async verifyRunningIdentity() {
+        throw new Error("safe search setup was not attempted");
+      },
     },
     store,
     readSession: async () => { throw new Error("must not read browser session"); },
@@ -1670,7 +1763,7 @@ test("reclaimSurvivors stops and releases when identity verification fails", asy
   expect(sessionReads).toBe(0);
   expect(hub.locks.has("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
-  expect(logs.some((message) => message.includes("identity certification failed"))).toBe(true);
+  expect(logs.some((message) => message.includes("safe search setup was not attempted"))).toBe(true);
   store.close();
 });
 

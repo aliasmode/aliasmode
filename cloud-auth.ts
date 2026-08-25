@@ -61,7 +61,7 @@ export class CloudAuthRuntime {
       const session = await this.auth.refresh(refreshToken);
       if (generation !== this.generation) return undefined;
       const result = this.accept(session);
-      await this.persistRefreshToken(result.refreshToken);
+      await this.persistRefreshToken(result.refreshToken, generation);
       if (generation !== this.generation) return undefined;
       return this.accessToken();
     })().finally(() => {
@@ -110,6 +110,15 @@ export class CloudAuthRuntime {
     return pending;
   }
 
+  async clearStoredSession(): Promise<void> {
+    this.clear();
+    try {
+      await this.mutateCredentials(async () => { await this.onSignOut?.(); });
+    } finally {
+      this.clear();
+    }
+  }
+
   clear(): void {
     this.generation++;
     this.accessTokenValue = undefined;
@@ -121,13 +130,16 @@ export class CloudAuthRuntime {
   private async acceptAndPersist(session: SupabaseAuthSession, generation: number): Promise<CloudAuthResult> {
     if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
     const result = this.accept(session);
-    await this.persistRefreshToken(result.refreshToken);
+    await this.persistRefreshToken(result.refreshToken, generation);
     if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
     return result;
   }
 
-  private persistRefreshToken(refreshToken: string): Promise<void> {
-    return this.mutateCredentials(async () => { await this.onRefreshToken?.(refreshToken); });
+  private persistRefreshToken(refreshToken: string, generation: number): Promise<void> {
+    return this.mutateCredentials(async () => {
+      if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
+      await this.onRefreshToken?.(refreshToken);
+    });
   }
 
   private mutateCredentials(mutation: () => Promise<void>): Promise<void> {

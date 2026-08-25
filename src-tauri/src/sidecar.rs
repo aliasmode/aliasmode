@@ -13,7 +13,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
+    process::{Command, CommandChild, CommandEvent},
     ShellExt,
 };
 use tokio::{sync::watch, time::timeout};
@@ -64,6 +64,12 @@ struct CredentialDeleteRecord {
     nonce: String,
     request: u64,
     key: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportRecord {
+    pub ok: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +275,68 @@ async fn wait_for_health(port: u16, nonce: &str, root: &Path) -> Result<(), Stri
     }
 }
 
+fn scrubbed_sidecar_command(app: &AppHandle) -> Result<Command, String> {
+    Ok(app
+        .shell()
+        .sidecar("aliasmode-sidecar")
+        .map_err(|error| error.to_string())?
+        .env("CLOAKBROWSER_DOWNLOAD_URL", "")
+        .env("ALIASMODE_ACCESS_TOKEN", "")
+        .env("ALIASMODE_REFRESH_TOKEN", "")
+        .env("ALIASMODE_DEVICE_CREDENTIAL", "")
+        .env("ALIASMODE_QUEUE_ENCRYPTION_KEY", "")
+        .env("HUB_URL", "")
+        .env("HUB_PASSWORD", ""))
+}
+
+fn import_command_args(
+    data_dir: &Path,
+    source: Option<&Path>,
+    profile_root: Option<&Path>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("__import-cloakpit"),
+        OsString::from("--state-root"),
+        data_dir.as_os_str().to_owned(),
+    ];
+    if let Some(source) = source {
+        args.push("--source".into());
+        args.push(source.as_os_str().to_owned());
+    }
+    if let Some(root) = profile_root {
+        args.push("--cloakpit-profile-root".into());
+        args.push(root.as_os_str().to_owned());
+    }
+    args
+}
+
+pub async fn run_import(
+    app: &AppHandle,
+    data_dir: &Path,
+    source: Option<&Path>,
+    profile_root: Option<&Path>,
+) -> Result<ImportRecord, String> {
+    let (mut events, child) = scrubbed_sidecar_command(app)?
+        .args(import_command_args(data_dir, source, profile_root))
+        .current_dir(data_dir.parent().unwrap_or(data_dir))
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let mut stdout = Vec::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+            CommandEvent::Terminated(_) => break,
+            CommandEvent::Error(error) => {
+                let _ = child.kill();
+                return Err(format!("Cloakpit import sidecar failed: {error}"));
+            }
+            _ => {}
+        }
+    }
+    serde_json::from_slice::<ImportRecord>(&stdout)
+        .map_err(|_| "Cloakpit import sidecar returned an invalid result".to_owned())
+}
+
 fn command_args(data_dir: &Path) -> Vec<OsString> {
     vec![
         "start".into(),
@@ -324,10 +392,7 @@ pub async fn launch_and_verify(
     agent_nonce: &str,
     background: bool,
 ) -> Result<(SidecarSupervisor, u16), String> {
-    let command = app
-        .shell()
-        .sidecar("aliasmode-sidecar")
-        .map_err(|error| error.to_string())?
+    let command = scrubbed_sidecar_command(app)?
         .args(command_args(data_dir))
         .current_dir(data_dir)
         .env("ALIASMODE_DESKTOP_NONCE", nonce)
@@ -336,14 +401,7 @@ pub async fn launch_and_verify(
         .env("ALIASMODE_DESKTOP_VERSION", VERSION)
         .env("ALIASMODE_PLAYWRIGHT_RUNTIME", playwright_runtime)
         .env("CLOAKBROWSER_BINARY_PATH", &browser.executable)
-        .env("CLOAKBROWSER_BINARY_SHA256", &browser.sha256)
-        .env("CLOAKBROWSER_DOWNLOAD_URL", "")
-        .env("ALIASMODE_ACCESS_TOKEN", "")
-        .env("ALIASMODE_REFRESH_TOKEN", "")
-        .env("ALIASMODE_DEVICE_CREDENTIAL", "")
-        .env("ALIASMODE_QUEUE_ENCRYPTION_KEY", "")
-        .env("HUB_URL", "")
-        .env("HUB_PASSWORD", "");
+        .env("CLOAKBROWSER_BINARY_SHA256", &browser.sha256);
 
     let (mut events, child) = command.spawn().map_err(|error| error.to_string())?;
     let pid = child.pid();
@@ -493,10 +551,10 @@ pub async fn launch_and_verify(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_credential_delete, parse_credential_set, parse_ready_line,
+        import_command_args, parse_credential_delete, parse_credential_set, parse_ready_line,
         should_present_unexpected_exit, verify_health_record, HealthRecord, PROTOCOL, VERSION,
     };
-    use std::path::Path;
+    use std::{ffi::OsString, path::Path};
 
     const NONCE: &str = "abababababababababababababababababababababababababababababababab";
 
@@ -580,5 +638,26 @@ mod tests {
             verify_health_record(&record, &"cd".repeat(32), Path::new("C:\\AliasMode")).is_err()
         );
         assert!(verify_health_record(&record, NONCE, Path::new("C:\\Other")).is_err());
+    }
+
+    #[test]
+    fn import_sidecar_receives_only_migration_arguments() {
+        assert_eq!(
+            import_command_args(
+                Path::new(r"C:\Users\Alias\AppData\Roaming\com.aliasmode.desktop"),
+                Some(Path::new(r"C:\Cloakpit")),
+                Some(Path::new(r"D:\Legacy\profiles")),
+            ),
+            [
+                "__import-cloakpit",
+                "--state-root",
+                r"C:\Users\Alias\AppData\Roaming\com.aliasmode.desktop",
+                "--source",
+                r"C:\Cloakpit",
+                "--cloakpit-profile-root",
+                r"D:\Legacy\profiles",
+            ]
+            .map(OsString::from),
+        );
     }
 }

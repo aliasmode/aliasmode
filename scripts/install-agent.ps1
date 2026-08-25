@@ -37,7 +37,7 @@ try {
   if (-not (Helper-MatchesVersion)) {
     New-Item -ItemType Directory -Path $tempRoot | Out-Null
     if (-not $ManifestUri) {
-      $ManifestUri = "https://github.com/Twitter-outreach/cloakpit/releases/download/v$Version/aliasmode-agent-bootstrap.json"
+      $ManifestUri = "https://github.com/aliasmode/aliasmode/releases/download/v$Version/aliasmode-agent-bootstrap.json"
     }
     $manifestPath = Join-Path $tempRoot "manifest.json"
     Invoke-WebRequest -UseBasicParsing -Uri $ManifestUri -OutFile $manifestPath
@@ -45,7 +45,7 @@ try {
     if ($manifest.schema -ne 1 -or $manifest.version -ne $Version) {
       Fail-Json "manifest_mismatch" "AliasMode release metadata did not match the requested version."
     }
-    if ($manifest.installer.url -notmatch '^https://github\.com/Twitter-outreach/cloakpit/releases/download/' -or
+    if ($manifest.installer.url -notmatch '^https://github\.com/aliasmode/aliasmode/releases/download/' -or
         $manifest.installer.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
       Fail-Json "manifest_invalid" "AliasMode release metadata is invalid."
     }

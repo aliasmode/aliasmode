@@ -22,7 +22,34 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain("Cloud profiles will not appear until you switch back");
   expect(app).toContain("does not upload them to Cloud automatically");
   expect(app).toContain("Accept and continue to Cloud");
-  expect(app).toContain(">Stay Local</button>");
+  expect(app).not.toContain(">Stay Local</button>");
+  expect(app).toContain('Switch to {isCloudMode ? "Local" : "Cloud"}');
+  expect(app).toContain('invoke("restart_after_mode_change")');
+});
+
+test("dashboard checks and installs desktop updates through argument-free native commands", () => {
+  expect(app).toContain('type DesktopUpdateStatus =');
+  expect(app).toContain('invoke("check_for_updates")');
+  expect(app).toContain('invoke("update_now")');
+  expect(app).not.toContain('invoke("check_for_updates",');
+  expect(app).not.toContain('invoke("update_now",');
+  expect(app).toContain("desktopUpdateCheckStarted.current = true");
+  expect(app).toContain("AliasMode checks for updates when it starts.");
+  expect(app).toContain("Downloading and verifying the update");
+  expect(app).toContain('disabled={modeBusy || desktopUpdateInstalling}');
+  expect(app).toContain('className="update-banner" role="status"');
+  expect(styles).toContain(".update-banner");
+  expect(styles).toContain(".update-actions");
+});
+
+test("dashboard contains long roster labels inside the window", () => {
+  expect(app).toContain('className="profile-table"');
+  expect(app).toContain('className="profile-name" title={p.name}');
+  expect(app).toContain('className="profile-group" title={p.group}');
+  expect(app).toContain('className="move-group"');
+  expect(styles).toContain("table-layout: fixed");
+  expect(styles).toContain("overflow-x: hidden");
+  expect(styles).toContain("text-overflow: ellipsis");
 });
 
 test("Account settings offers fenced Cloud sign-out and clears account state", () => {
@@ -33,6 +60,23 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("setProfiles([]);");
   expect(app).toContain("setTeam(null);");
   expect(app).toContain("generation !== authGeneration.current");
+});
+
+test("dashboard recovers saved Cloud sessions without false sign-out", () => {
+  expect(app).toContain('type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";');
+  expect(app).toContain('useState<SavedSessionPhase>("restoring")');
+  expect(app).toContain("Restoring saved session");
+  expect(app).toContain(">Try again</button>");
+  expect(app).toContain(">Sign in instead</button>");
+  expect(app).toContain("error instanceof CloudSessionRestoreError && !error.retryable");
+  expect(app).toContain("setScheduledRefreshPending(true)");
+  expect(app).toContain('window.addEventListener("online", retryWhenOnline)');
+  expect(app).toContain("await forgetCloudSession()");
+  expect(app).toContain("const savedSessionRestoreEnabled = useRef(true)");
+  expect(app).toContain("if (!savedSessionRestoreEnabled.current || restoreInFlight.current) return;");
+  expect(app).toContain("generation !== authGeneration.current || !savedSessionRestoreEnabled.current");
+  expect(app).toContain("savedSessionRestoreEnabled.current = false");
+  expect(app).toContain("cloudSessionContextReady(state)");
 });
 
 test("Account settings exposes fixed Cloud diagnostics without raw server messages", () => {
@@ -57,6 +101,13 @@ test("dashboard lists the supported profile platforms", () => {
   }
 });
 
+test("running profile rows expose Bring to front in Local and Cloud mode", () => {
+  expect(app).toContain('p.running ? (');
+  expect(app).toContain('className="btn raise"');
+  expect(app).toContain('onClick={() => act(p.id, raiseProfile)}>Bring to front</button>');
+  expect(app).not.toContain('!isCloudMode && <button className="btn raise"');
+});
+
 test("Cloud rows expose Edit and Convert device only with effective Edit permission", () => {
   expect(app).toContain('(p.permission === "edit" && !p.running && !p.lockedBy)');
   expect(app).toContain('(!isCloudMode || p.permission === "edit") ? <button className="btn convert"');
@@ -70,13 +121,48 @@ test("Cloud profile pickers use only editable folders", () => {
   expect(app).toContain('<GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />');
   expect(app).toContain('<GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />');
   expect(app).toContain('group !== "all" && (!isCloudMode || editableGroups.includes(group))');
-  expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={existingGroups} />');
+  expect(app).toContain('<GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={isCloudMode ? editableGroups : existingGroups} allowCreate={!isCloudMode} />');
 });
 
-test("Cloud workspace loading does not depend on Account Settings", () => {
+test("bulk import accepts pasted AdsPower text in Local and Cloud mode", () => {
+  expect(app).toContain('<button className="importbtn" disabled={!canEditCloud}');
+  expect(app).toContain('value={bulkText}');
+  expect(app).toContain('onChange={(event) => setBulkText(event.target.value)}');
+  expect(app).toContain('new File([bulkText], "pasted-adspower.txt", { type: "text/plain" })');
+  expect(app).toContain('setBulkText("")');
+  expect(app).toContain('bulkBusy || (!bulkFiles.length && !bulkText.trim()) || (isCloudMode && !bulkGroup)');
+  expect(app).not.toContain('max 1000');
+});
+
+test("Cloud workspace loads independently and refreshes with Account Settings", () => {
   expect(app).toContain("if (!isCloudMode || !workspaceReady || restartRequired) return;\n    void loadTeam();");
-  expect(app).not.toContain("void loadCloudEvents();\n    void loadTeam();");
+  expect(app).toContain("void loadCloudEvents();\n    void loadTeam();");
   expect(app).toContain("await Promise.all([load(), loadTeam()]);");
+});
+
+test("sidebar creates persistent groups and gates Cloud deletion to workspace managers", () => {
+  expect(app).toContain("const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);");
+  expect(app).toContain("team?.folders.filter((folder) => !folder.archivedAt).map((folder) => folder.name)");
+  expect(app).toContain("const canManageCloudFolders = cloudAuth?.workspace?.role === \"owner\" || cloudAuth?.workspace?.role === \"admin\";");
+  expect(app).toContain('className="newgroup"');
+  expect(app).toContain('{isCloudMode ? "+ New folder" : "+ New group"}');
+  expect(app).toContain('if (name === "all") {');
+  expect(app).toContain('cloudWorkspaceAction("delete-folder", { name: g })');
+  expect(app).toContain("!isCloudMode || canManageCloudFolders");
+  expect(styles).toContain(".newgroup");
+});
+
+test("Team settings guide invitations and explicit folder access", () => {
+  for (const heading of ["Your folder access", "Members", "Invitations", "Join another workspace"]) expect(app).toContain(`>${heading}</h3>`);
+  expect(app).toContain("New members see no folders until you grant access here.");
+  expect(app).toContain("It works only for the email you signed in with.");
+  expect(app).toContain('invite.expiresAt <= Date.now() ? "Expired" : "Pending"');
+  expect(app).toContain('aria-label={`${folder.name} access for ${member.email}`}');
+  expect(app).toContain('aria-label={`Resend invitation to ${invite.email}`}');
+  expect(app).toContain('if (ok) setTeamEmail("")');
+  expect(app).toContain('className="notice" role="status"');
+  expect(styles).toContain(".team-tag");
+  expect(styles).toContain(".team-code input:focus");
 });
 
 test("Admin invitations are read-only for Admin viewers", () => {

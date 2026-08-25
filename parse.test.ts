@@ -84,6 +84,16 @@ test("normalizeCookies drops sameSite for unspecified and omits expiry for sessi
   expect(cookies[1]!.expires).toBe(999);
 });
 
+test("normalizeCookies preserves valid partition metadata and omits wrong types", () => {
+  const { cookies } = normalizeCookies([
+    { name: "valid", value: "1", domain: ".x.com", partitionKey: "https://x.com", _crHasCrossSiteAncestor: false },
+    { name: "invalid", value: "2", domain: ".x.com", partitionKey: true, _crHasCrossSiteAncestor: "false" },
+  ]);
+  expect(cookies[0]).toMatchObject({ partitionKey: "https://x.com", _crHasCrossSiteAncestor: false });
+  expect(cookies[1]!.partitionKey).toBeUndefined();
+  expect(cookies[1]!._crHasCrossSiteAncestor).toBeUndefined();
+});
+
 test("parseProxy handles host:port:user:pass and blanks", () => {
   expect(parseProxy("http", "1.2.3.4:8080:u:p")).toEqual({ type: "http", host: "1.2.3.4", port: "8080", user: "u", pass: "p" });
   expect(parseProxy("http", "1.2.3.4:8080")).toEqual({ type: "http", host: "1.2.3.4", port: "8080", user: "", pass: "" });

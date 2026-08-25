@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   acceptCloudLegal,
+  CloudSessionRestoreError,
+  cloudSessionContextReady,
   cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
@@ -43,19 +45,22 @@ test("dashboard profile roster rejects malformed JSON shape explicitly", async (
   await expect(fetchProfiles()).rejects.toThrow("no profile roster");
 });
 
-test("dashboard roster carries health metadata and tolerates an older local server", async () => {
+test("dashboard roster carries health and group metadata while tolerating an older local server", async () => {
   globalThis.fetch = (async () => Response.json({
     profiles: [{ id: "p1", healthStatus: "suspended", healthObservedAt: 1_000 }],
     healthSources: [{ sourceId: "node-a", lastSnapshotAt: 1_000, stale: false }],
+    groups: ["Empty group"],
   })) as unknown as typeof fetch;
   const roster = await fetchProfiles();
   expect(roster.profiles[0]).toMatchObject({ id: "p1", healthStatus: "suspended", healthObservedAt: 1_000 });
   expect(roster.healthSources).toEqual([{ sourceId: "node-a", lastSnapshotAt: 1_000, stale: false }]);
+  expect(roster.groups).toEqual(["Empty group"]);
 
   globalThis.fetch = (async () => Response.json({ profiles: [{ id: "legacy" }] })) as unknown as typeof fetch;
   const legacy = await fetchProfiles();
   expect(legacy.profiles[0]).toMatchObject({ id: "legacy" });
   expect(legacy.healthSources).toEqual([]);
+  expect(legacy.groups).toEqual([]);
 });
 
 test("app mode client reads first-launch state", async () => {
@@ -133,6 +138,49 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
   expect(JSON.parse(String(requests[4]?.init?.body))).toEqual({});
 });
 
+test("Cloud restore can request startup lifecycle recovery", async () => {
+  let body: unknown;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return Response.json({ ok: true, authenticated: true, refreshToken: "rotated" });
+  }) as unknown as typeof fetch;
+
+  await restoreCloudSession("refresh", "device", "queue", true);
+  expect(body).toEqual({
+    refreshToken: "refresh",
+    deviceCredential: "device",
+    queueKey: "queue",
+    resumeLifecycle: true,
+  });
+});
+
+test("Cloud restore client preserves safe retry metadata", async () => {
+  globalThis.fetch = (async () => Response.json({
+    ok: false,
+    error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+    stage: "cloud_status",
+    retryable: true,
+    category: "network",
+    code: "network_unavailable",
+  }, { status: 503 })) as unknown as typeof fetch;
+
+  try {
+    await restoreCloudSession("secret-refresh", "secret-device", "secret-queue-key");
+    throw new Error("expected restore to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(CloudSessionRestoreError);
+    expect(error).toMatchObject({
+      stage: "cloud_status",
+      retryable: true,
+      category: "network",
+      code: "network_unavailable",
+    });
+    expect(JSON.stringify(error)).not.toContain("secret-refresh");
+    expect(JSON.stringify(error)).not.toContain("secret-device");
+    expect(JSON.stringify(error)).not.toContain("secret-queue-key");
+  }
+});
+
 test("Cloud team client uses the compact workspace endpoint", async () => {
   const requests: RequestInit[] = [];
   globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -146,6 +194,23 @@ test("Cloud team client uses the compact workspace endpoint", async () => {
   });
 });
 
+
+test("Cloud startup requires complete saved-session context", () => {
+  const legal = {
+    current: { terms: "v2", privacy: "v2", acceptableUse: "v2" },
+    accepted: null,
+  };
+  const workspace = {
+    id: "workspace1",
+    name: "Workspace",
+    ownerAccountId: "account1",
+    role: "member" as const,
+  };
+  expect(cloudSessionContextReady({ authenticated: true })).toBe(false);
+  expect(cloudSessionContextReady({ authenticated: true, workspace })).toBe(false);
+  expect(cloudSessionContextReady({ authenticated: true, legal })).toBe(false);
+  expect(cloudSessionContextReady({ authenticated: true, workspace, legal })).toBe(true);
+});
 
 test("Cloud workspace becomes ready only after current legal acceptance", () => {
   const current = { terms: "v2", privacy: "v2", acceptableUse: "v2" };

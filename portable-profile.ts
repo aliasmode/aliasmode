@@ -11,6 +11,7 @@ function portableSession(raw: unknown): PortableSessionV1 {
   return {
     cookies: normalized.cookies,
     ...(normalized.hasOrigins ? { origins: normalized.origins } : {}),
+    ...(normalized.hasTabs ? { tabs: normalized.tabs } : {}),
     ...(normalized.telegramClient ? { telegramClient: normalized.telegramClient } : {}),
   };
 }

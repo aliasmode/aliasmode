@@ -52,28 +52,58 @@ async fn active_browser_count(origin: &str) -> Result<usize, String> {
         .count())
 }
 
-fn exit_after_cleanup(app: AppHandle, window: WebviewWindow, sidecar: SidecarSupervisor) {
+#[derive(Clone, Copy)]
+enum CleanupAction {
+    Exit,
+    Restart,
+}
+
+pub(crate) async fn graceful_sidecar_cleanup(sidecar: &SidecarSupervisor) -> Result<(), String> {
+    sidecar.request_shutdown()?;
+    sidecar.wait_for_shutdown().await
+}
+
+pub(crate) fn exit_after_cleanup_failure(
+    app: AppHandle,
+    sidecar: &SidecarSupervisor,
+    error: String,
+) {
+    let _ = sidecar.kill_owned();
+    app.dialog()
+        .message(format!(
+            "AliasMode could not confirm safe browser cleanup. {error}"
+        ))
+        .title("AliasMode shutdown failed")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(1));
+}
+
+fn finish_after_cleanup(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: SidecarSupervisor,
+    action: CleanupAction,
+) {
     let _ = window.hide();
     tauri::async_runtime::spawn(async move {
-        let result = match sidecar.request_shutdown() {
-            Ok(()) => sidecar.wait_for_shutdown().await,
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(()) => app.exit(0),
-            Err(error) => {
-                let _ = sidecar.kill_owned();
-                app.dialog()
-                    .message(format!(
-                        "AliasMode could not confirm safe browser cleanup. {error}"
-                    ))
-                    .title("AliasMode shutdown failed")
-                    .kind(MessageDialogKind::Error)
-                    .buttons(MessageDialogButtons::Ok)
-                    .show(move |_| app.exit(1));
-            }
+        match graceful_sidecar_cleanup(&sidecar).await {
+            Ok(()) => match action {
+                CleanupAction::Exit => app.exit(0),
+                CleanupAction::Restart => app.request_restart(),
+            },
+            Err(error) => exit_after_cleanup_failure(app, &sidecar, error),
         }
     });
+}
+
+#[tauri::command]
+pub fn restart_after_mode_change(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: tauri::State<'_, SidecarSupervisor>,
+) {
+    finish_after_cleanup(app, window, sidecar.inner().clone(), CleanupAction::Restart);
 }
 
 fn ask_to_close(
@@ -98,7 +128,7 @@ fn ask_to_close(
         .buttons(MessageDialogButtons::YesNo)
         .show(move |confirmed| {
             if confirmed {
-                exit_after_cleanup(app, window, sidecar);
+                finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
             } else {
                 state.in_progress.store(false, Ordering::Release);
             }
@@ -126,7 +156,7 @@ pub fn install_close_handler(
             tauri::async_runtime::spawn(async move {
                 let active = active_browser_count(&origin).await;
                 if matches!(active, Ok(0)) {
-                    exit_after_cleanup(app, window, sidecar);
+                    finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
                 } else {
                     ask_to_close(app, window, sidecar, state, active);
                 }

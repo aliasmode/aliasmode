@@ -2,7 +2,7 @@
 
 AliasMode is a local-first browser profile manager with optional cloud synchronization for teams.
 
-> **Status:** early Windows beta. The desktop installer and AliasMode Cloud are under active development.
+> **Status:** public Windows beta. Download the current installer from [aliasmode.com/download](https://aliasmode.com/download/).
 
 ## Modes
 
@@ -42,6 +42,8 @@ The dashboard and compatibility API bind to loopback only.
 
 ### Windows desktop beta
 
+Published installers support Windows 10 version 1809 or newer, Windows 11, and Windows Server 2019 or newer on x64 processors with SSE4.2. They install for the current user and remain unsigned while release signing is configured.
+
 Desktop packaging requires Windows x64, Bun, the Rust MSVC toolchain, WebView2, and Visual Studio C++ Build Tools. The approved Alias Loop icon is included at `src-tauri/icons/icon.ico`.
 
 ```sh
@@ -49,7 +51,17 @@ bun run desktop:prepare
 bun run desktop:build:nsis
 ```
 
-The build produces a per-user NSIS installer. Beta installers are unsigned until release signing is configured. The build obtains CloakBrowser through the pinned official wrapper, verifies the staged executable hash, and packages the separately licensed runtime as a third-party resource. AliasMode verifies the installed executable again before startup and before every browser launch.
+The build obtains CloakBrowser through the pinned official wrapper, verifies the staged executable hash, and packages the separately licensed runtime as a third-party resource. AliasMode verifies the installed executable again before startup and before every browser launch.
+
+### Import from Cloakpit
+
+Close Cloakpit and all of its browsers. Then run:
+
+```powershell
+AliasMode.exe --import-cloakpit C:\Cloakpit
+```
+
+Use `--cloakpit-profile-root <dir>` if AliasMode reports browser data in multiple historical locations. Import works only into an empty Local destination on the same Windows machine and account because Windows DPAPI protects browser secrets. It preserves persisted persona data and session-bearing browser files, but runtime or browser differences can change the fingerprint visible to an account.
 
 ## Agent browser automation
 
@@ -82,7 +94,7 @@ AliasMode installs CloakBrowser through its approved official installer and pins
 
 ## Security
 
-Report vulnerabilities privately using the process in [SECURITY.md](SECURITY.md). Do not include cookies, passwords, proxy credentials, TOTP seeds, profile exports, or diagnostic archives in public issues.
+For product help, email [support@aliasmode.com](mailto:support@aliasmode.com). Report vulnerabilities privately to [security@aliasmode.com](mailto:security@aliasmode.com) using the process in [SECURITY.md](SECURITY.md). Do not include cookies, passwords, proxy credentials, TOTP seeds, profile exports, or diagnostic archives in public issues.
 
 ## License
 

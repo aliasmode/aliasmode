@@ -9,7 +9,7 @@ use credentials::{credential_delete, credential_get, credential_set, CredentialO
 use rand::random;
 use std::{
     error::Error,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -22,6 +22,32 @@ use tauri::{
     webview::{NewWindowResponse, PageLoadEvent},
     Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_shell::ShellExt;
+
+const IMPORT_RESTRICTION: &str = "Windows DPAPI protects persisted browser secrets, so this import works only for the same Windows machine and account. Persisted persona fields are preserved, but runtime or browser differences can change the account-visible fingerprint.";
+
+const LEGAL_URLS: [&str; 3] = [
+    "https://aliasmode.com/terms/",
+    "https://aliasmode.com/privacy/",
+    "https://aliasmode.com/acceptable-use/",
+];
+
+const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0";
+
+fn windows_acceptance_browser_args(enabled: bool) -> Option<&'static str> {
+    enabled.then_some(WINDOWS_ACCEPTANCE_BROWSER_ARGS)
+}
+
+fn allowed_legal_url(url: &str) -> bool {
+    LEGAL_URLS.contains(&url)
+}
+
+#[allow(deprecated)]
+fn open_external_url(app: &tauri::AppHandle, url: &str) {
+    let _ = app.shell().open(url, None);
+}
 
 #[derive(Default)]
 struct RevealRequested(AtomicBool);
@@ -81,10 +107,78 @@ fn cli_compatible_windows_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
+#[derive(Debug, PartialEq)]
+struct CloakpitImportRequest {
+    source: Option<PathBuf>,
+    profile_root: Option<PathBuf>,
+}
+
+fn parse_cloakpit_import_args(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<Option<CloakpitImportRequest>, String> {
+    let args: Vec<OsString> = args.into_iter().collect();
+    let marker = OsString::from("--import-cloakpit");
+    let Some(index) = args.iter().position(|arg| arg == &marker) else {
+        return Ok(None);
+    };
+    if args[..index].iter().any(|arg| !arg.is_empty()) {
+        return Err("--import-cloakpit cannot be combined with other arguments".to_owned());
+    }
+    let mut source = None;
+    let mut profile_root = None;
+    let mut cursor = index + 1;
+    while cursor < args.len() {
+        if args[cursor] == "--cloakpit-profile-root" {
+            cursor += 1;
+            let value = args
+                .get(cursor)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "--cloakpit-profile-root requires a directory".to_owned())?;
+            if profile_root.replace(PathBuf::from(value)).is_some() {
+                return Err("--cloakpit-profile-root was provided more than once".to_owned());
+            }
+        } else if args[cursor].to_string_lossy().starts_with("--") {
+            return Err(format!(
+                "unknown import option: {}",
+                args[cursor].to_string_lossy()
+            ));
+        } else if source.replace(PathBuf::from(&args[cursor])).is_some() {
+            return Err("only one Cloakpit source directory can be imported".to_owned());
+        }
+        cursor += 1;
+    }
+    Ok(Some(CloakpitImportRequest {
+        source,
+        profile_root,
+    }))
+}
+
+fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
+    app.dialog()
+        .message(message)
+        .title(if ok {
+            "Cloakpit import complete"
+        } else {
+            "Cloakpit import failed"
+        })
+        .kind(if ok {
+            MessageDialogKind::Info
+        } else {
+            MessageDialogKind::Error
+        })
+        .buttons(MessageDialogButtons::Ok)
+        .blocking_show();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{background_requested, cli_compatible_windows_path, configured_local_mode};
+    use super::{
+        allowed_legal_url, background_requested, cli_compatible_windows_path,
+        configured_local_mode, parse_cloakpit_import_args, windows_acceptance_browser_args,
+        CloakpitImportRequest,
+    };
     use std::{
+        ffi::OsString,
         fs,
         path::{Path, PathBuf},
     };
@@ -120,6 +214,35 @@ mod tests {
     }
 
     #[test]
+    fn allows_only_public_legal_pages() {
+        for url in [
+            "https://aliasmode.com/terms/",
+            "https://aliasmode.com/privacy/",
+            "https://aliasmode.com/acceptable-use/",
+        ] {
+            assert!(allowed_legal_url(url));
+        }
+        for url in [
+            "http://aliasmode.com/terms/",
+            "https://cloud.aliasmode.com/terms/",
+            "https://aliasmode.com/terms/extra",
+            "https://aliasmode.com/terms/?continue=https://example.com",
+            "https://example.com/terms/",
+        ] {
+            assert!(!allowed_legal_url(url));
+        }
+    }
+
+    #[test]
+    fn enables_webview_debugging_only_for_acceptance() {
+        assert_eq!(windows_acceptance_browser_args(false), None);
+        assert_eq!(
+            windows_acceptance_browser_args(true),
+            Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"),
+        );
+    }
+
+    #[test]
     fn removes_windows_namespace_prefix_before_cli_use() {
         assert_eq!(
             cli_compatible_windows_path(Path::new(r"\\?\C:\Users\AliasMode\playwright")),
@@ -130,12 +253,47 @@ mod tests {
             PathBuf::from(r"\\server\share\playwright"),
         );
     }
+
+    #[test]
+    fn parses_installed_cloakpit_import_arguments() {
+        let args = [
+            "--import-cloakpit",
+            r"C:\Cloakpit",
+            "--cloakpit-profile-root",
+            r"D:\Legacy\profiles",
+        ]
+        .map(OsString::from);
+        assert_eq!(
+            parse_cloakpit_import_args(args).unwrap(),
+            Some(CloakpitImportRequest {
+                source: Some(PathBuf::from(r"C:\Cloakpit")),
+                profile_root: Some(PathBuf::from(r"D:\Legacy\profiles")),
+            }),
+        );
+        assert_eq!(
+            parse_cloakpit_import_args([OsString::from("--import-cloakpit")]).unwrap(),
+            Some(CloakpitImportRequest {
+                source: None,
+                profile_root: None
+            }),
+        );
+        assert!(parse_cloakpit_import_args(
+            ["--import-cloakpit", "one", "two"].map(OsString::from)
+        )
+        .is_err());
+        assert_eq!(
+            parse_cloakpit_import_args(Vec::<OsString>::new()).unwrap(),
+            None
+        );
+    }
 }
 
 pub fn run() {
     let background = background_requested(std::env::args_os());
+    let import_request = parse_cloakpit_import_args(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
         .manage(RevealRequested::default())
+        .manage(releases::UpdateCoordinator::default())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if background_requested(argv) {
                 return;
@@ -151,15 +309,53 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             credential_get,
             credential_set,
             credential_delete,
             runtime_descriptor::agent_runtime_ready,
+            shutdown::restart_after_mode_change,
+            releases::check_for_updates,
+            releases::update_now,
         ])
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
+            match import_request {
+                Err(error) => {
+                    present_import_result(
+                        app.handle(),
+                        false,
+                        &format!("{error}. {IMPORT_RESTRICTION}"),
+                    );
+                    app.handle().exit(1);
+                    return Ok(());
+                }
+                Ok(Some(request)) => {
+                    let result = tauri::async_runtime::block_on(sidecar::run_import(
+                        app.handle(),
+                        &data_dir,
+                        request.source.as_deref(),
+                        request.profile_root.as_deref(),
+                    ));
+                    match result {
+                        Ok(record) => {
+                            present_import_result(app.handle(), record.ok, &record.message);
+                            app.handle().exit(if record.ok { 0 } else { 1 });
+                        }
+                        Err(error) => {
+                            present_import_result(
+                                app.handle(),
+                                false,
+                                &format!("{error}. {IMPORT_RESTRICTION}"),
+                            );
+                            app.handle().exit(1);
+                        }
+                    }
+                    return Ok(());
+                }
+                Ok(None) => {}
+            }
             fs::create_dir_all(data_dir.join("profiles"))?;
             fs::create_dir_all(data_dir.join("inbox"))?;
 
@@ -247,18 +443,20 @@ pub fn run() {
                     .window("main")
                     .remote(format!("{origin}/*"))
                     .permission("allow-credential-bridge")
-                    .permission("allow-runtime-ready"),
+                    .permission("allow-runtime-ready")
+                    .permission("allow-update-bridge"),
             ) {
                 let _ = sidecar.kill_owned();
                 return Err(error.into());
             }
 
             let allowed_port = port;
+            let shell_handle = handle.clone();
             let url = format!("{origin}/")
                 .parse()
                 .map_err(|error| boxed(format!("invalid sidecar URL: {error}")))?;
             let readiness_data_dir = data_dir.clone();
-            let window = match WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let webview_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
                 .title("AliasMode")
                 .visible(!background)
                 .inner_size(1280.0, 800.0)
@@ -288,7 +486,17 @@ pub fn run() {
                     {
                         window.app_handle().exit(1);
                     }
-                })
+                });
+            #[cfg(windows)]
+            let webview_builder = if let Some(args) = windows_acceptance_browser_args(matches!(
+                std::env::var("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG").as_deref(),
+                Ok("1")
+            )) {
+                webview_builder.additional_browser_args(args)
+            } else {
+                webview_builder
+            };
+            let window = match webview_builder
                 .on_navigation(move |url| {
                     (url.scheme() == "http"
                         && url.host_str() == Some("127.0.0.1")
@@ -297,7 +505,12 @@ pub fn run() {
                             && url.host_str() == Some("tauri.localhost"))
                         || (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
                 })
-                .on_new_window(|_, _| NewWindowResponse::Deny)
+                .on_new_window(move |url, _| {
+                    if allowed_legal_url(url.as_str()) {
+                        open_external_url(&shell_handle, url.as_str());
+                    }
+                    NewWindowResponse::Deny
+                })
                 .build()
             {
                 Ok(window) => window,
@@ -314,7 +527,6 @@ pub fn run() {
             } else if background {
                 window.hide()?;
             }
-            tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -327,10 +539,12 @@ pub fn run() {
             code: Some(code), ..
         } => exit_code.store(code, Ordering::Release),
         tauri::RunEvent::Exit => {
-            let _ = app
-                .state::<runtime_descriptor::RuntimeDescriptorState>()
-                .remove_owned();
-            let _ = app.state::<sidecar::SidecarSupervisor>().kill_owned();
+            if let Some(runtime) = app.try_state::<runtime_descriptor::RuntimeDescriptorState>() {
+                let _ = runtime.remove_owned();
+            }
+            if let Some(sidecar) = app.try_state::<sidecar::SidecarSupervisor>() {
+                let _ = sidecar.kill_owned();
+            }
         }
         _ => {}
     });

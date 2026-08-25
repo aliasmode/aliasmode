@@ -46,6 +46,7 @@ export interface HealthSource {
 export interface UiRoster {
   profiles: UiProfile[];
   healthSources: HealthSource[];
+  groups: string[];
 }
 
 export interface DiagnoseReport {
@@ -123,6 +124,10 @@ export interface CloudAuthState {
   legal?: CloudLegalState;
 }
 
+export function cloudSessionContextReady(state: CloudAuthState): boolean {
+  return state.authenticated && !!state.workspace && !!state.legal;
+}
+
 export function cloudWorkspaceReady(state: CloudAuthState | null): boolean {
   const legal = state?.legal;
   return state?.authenticated === true && !!legal?.accepted &&
@@ -145,7 +150,45 @@ export async function fetchCloudAuth(): Promise<CloudAuthState> {
   };
 }
 
-async function cloudAuthAction(action: string, input: Record<string, string>): Promise<any> {
+export type CloudRestoreStage = "auth_refresh" | "cloud_status" | "lifecycle_resume";
+export type CloudRestoreCategory = "network" | "service" | "authentication";
+export type CloudRestoreCode =
+  | "network_unavailable"
+  | "service_unavailable"
+  | "authentication_invalid"
+  | "authentication_required"
+  | "email_not_verified"
+  | "device_revoked"
+  | "membership_revoked"
+  | "response_invalid";
+
+export class CloudSessionRestoreError extends Error {
+  constructor(
+    message: string,
+    readonly stage: CloudRestoreStage,
+    readonly retryable: boolean,
+    readonly category: CloudRestoreCategory,
+    readonly code: CloudRestoreCode,
+  ) {
+    super(message);
+    this.name = "CloudSessionRestoreError";
+  }
+}
+
+const CLOUD_RESTORE_STAGES = new Set<CloudRestoreStage>(["auth_refresh", "cloud_status", "lifecycle_resume"]);
+const CLOUD_RESTORE_CATEGORIES = new Set<CloudRestoreCategory>(["network", "service", "authentication"]);
+const CLOUD_RESTORE_CODES = new Set<CloudRestoreCode>([
+  "network_unavailable",
+  "service_unavailable",
+  "authentication_invalid",
+  "authentication_required",
+  "email_not_verified",
+  "device_revoked",
+  "membership_revoked",
+  "response_invalid",
+]);
+
+async function cloudAuthAction(action: string, input: Record<string, string | boolean>): Promise<any> {
   const path = `/ui/api/cloud-auth/${action}`;
   const response = await fetch(path, {
     method: "POST",
@@ -153,7 +196,19 @@ async function cloudAuthAction(action: string, input: Record<string, string>): P
     body: JSON.stringify(input),
   });
   const body = await apiJson(response, path);
-  if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud authentication failed");
+  if (!response.ok || body.ok !== true) {
+    if (
+      action === "restore"
+      && typeof body.error === "string"
+      && CLOUD_RESTORE_STAGES.has(body.stage)
+      && typeof body.retryable === "boolean"
+      && CLOUD_RESTORE_CATEGORIES.has(body.category)
+      && CLOUD_RESTORE_CODES.has(body.code)
+    ) {
+      throw new CloudSessionRestoreError(body.error, body.stage, body.retryable, body.category, body.code);
+    }
+    throw new Error(body.error || "Cloud authentication failed");
+  }
   return body;
 }
 
@@ -166,7 +221,14 @@ export const restoreCloudSession = (
   refreshToken: string,
   deviceCredential: string,
   queueKey: string,
-) => cloudAuthAction("restore", { refreshToken, deviceCredential, queueKey });
+  resumeLifecycle = false,
+) => cloudAuthAction("restore", {
+  refreshToken,
+  deviceCredential,
+  queueKey,
+  ...(resumeLifecycle ? { resumeLifecycle: true } : {}),
+});
+export const forgetCloudSession = () => cloudAuthAction("forget", {});
 export const signOutCloud = () => cloudAuthAction("signout", {});
 export const acceptCloudLegal = () => cloudAuthAction("accept-legal", {});
 export const acceptCloudInvitation = (code: string) => cloudAuthAction("accept-invitation", { code });
@@ -249,6 +311,7 @@ export async function fetchProfiles(): Promise<UiRoster> {
   return {
     profiles: body.profiles,
     healthSources: Array.isArray(body.healthSources) ? body.healthSources : [],
+    groups: Array.isArray(body.groups) ? body.groups.filter((name: unknown) => typeof name === "string") : [],
   };
 }
 
@@ -411,8 +474,10 @@ export async function convertMobileProfile(id: string): Promise<any> {
   return post(`/ui/api/profiles/${encodeURIComponent(id)}/convert-mobile`);
 }
 
-// ---- Export selected → download a CSV / AdsPower .txt ------------------------
-export async function exportProfiles(ids: string[], format: "csv" | "txt"): Promise<void> {
+export type ExportFormat = "csv" | "txt" | "xlsx";
+
+// ---- Export selected → download a CSV / .txt / Excel workbook ----------------
+export async function exportProfiles(ids: string[], format: ExportFormat): Promise<void> {
   const r = await fetch("/ui/api/profiles/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -439,7 +504,16 @@ export async function updateFromFile(files: FileList | File[]): Promise<any> {
   return apiJson(r, path);
 }
 
-// ---- Group rename / delete --------------------------------------------------
+// ---- Group create / rename / delete -----------------------------------------
+export async function createGroup(name: string): Promise<any> {
+  const r = await fetch("/ui/api/groups/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return apiJson(r, "/ui/api/groups/create");
+}
+
 export async function renameGroup(from: string, to: string): Promise<any> {
   const r = await fetch("/ui/api/groups/rename", {
     method: "POST",

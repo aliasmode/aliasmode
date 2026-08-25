@@ -40,8 +40,20 @@ function unsafe(name: string): boolean {
   return norm.startsWith("..") || norm.includes(".." + "/") || norm.includes(".." + "\\");
 }
 
-/** Extract a ZIP/CRX to destDir. Returns the number of files written. */
-export async function extractZipTo(input: Uint8Array, destDir: string): Promise<number> {
+export interface ZipEntry {
+  /** Entry path as stored in the archive (never a directory, never unsafe). */
+  name: string;
+  /** Decompress this entry's bytes. Deferred so a caller can skip entries cheaply. */
+  bytes(): Promise<Uint8Array>;
+}
+
+/**
+ * Walk a ZIP/CRX central directory, yielding one entry at a time. Lazy on
+ * purpose: callers that only want a couple of members (xlsx.ts reads two XML
+ * parts out of a workbook) never pay to inflate the rest, and extractZipTo
+ * keeps its original one-entry-at-a-time memory profile.
+ */
+export async function* zipEntries(input: Uint8Array): AsyncGenerator<ZipEntry> {
   const data = stripCrx(input);
   // Locate End Of Central Directory (scan back over the optional comment).
   let eocd = -1;
@@ -53,7 +65,6 @@ export async function extractZipTo(input: Uint8Array, destDir: string): Promise<
 
   const total = u16(data, eocd + 10);
   let p = u32(data, eocd + 16); // central directory offset
-  let written = 0;
   for (let n = 0; n < total; n++) {
     if (u32(data, p) !== 0x02014b50) break; // central dir header signature
     const method = u16(data, p + 10);
@@ -73,8 +84,15 @@ export async function extractZipTo(input: Uint8Array, destDir: string): Promise<
     const lExtraLen = u16(data, localOff + 28);
     const start = localOff + 30 + lNameLen + lExtraLen;
     const comp = data.subarray(start, start + compSize);
-    const content = method === 0 ? comp : await inflateRaw(comp);
-    await Bun.write(join(destDir, name), content);
+    yield { name, bytes: async () => (method === 0 ? comp : await inflateRaw(comp)) };
+  }
+}
+
+/** Extract a ZIP/CRX to destDir. Returns the number of files written. */
+export async function extractZipTo(input: Uint8Array, destDir: string): Promise<number> {
+  let written = 0;
+  for await (const entry of zipEntries(input)) {
+    await Bun.write(join(destDir, entry.name), await entry.bytes());
     written++;
   }
   if (written === 0) throw new Error("archive contained no files");

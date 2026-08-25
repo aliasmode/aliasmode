@@ -18,7 +18,8 @@ import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
-import { CloudApiError } from "./cloud-client.ts";
+import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
+import { EmailVerificationRequiredError, SupabaseAuthRequestError } from "./supabase-auth.ts";
 import {
   CloudProfileEditor,
   CloudProfileEditorError,
@@ -27,10 +28,11 @@ import {
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import type { Profile } from "./types.ts";
-import { importInbox, importBuffers, type ImportOverrides } from "./inbox.ts";
+import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones } from "./geoip.ts";
-import { parseUpdateFile, serializeCsv, serializeAdsTxt, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
 import { installExtension, removeExtensionFiles } from "./extensions.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
@@ -112,6 +114,107 @@ async function readLatestDiagnose(reportsRoot = "reports"): Promise<unknown | nu
 }
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+type CloudRestoreStage = "auth_refresh" | "cloud_status" | "lifecycle_resume";
+type CloudRestoreCategory = "network" | "service" | "authentication";
+
+interface CloudRestoreFailure {
+  ok: false;
+  error: string;
+  stage: CloudRestoreStage;
+  retryable: boolean;
+  category: CloudRestoreCategory;
+  code: string;
+}
+
+const PERMANENT_CLOUD_SESSION_ERRORS = new Set([
+  "authentication_required",
+  "email_not_verified",
+  "device_revoked",
+  "membership_revoked",
+]);
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status < 600);
+}
+
+function cloudRestoreFailure(error: unknown, stage: CloudRestoreStage): CloudRestoreFailure {
+  if (error instanceof EmailVerificationRequiredError) {
+    return {
+      ok: false,
+      error: "Saved Cloud session is no longer valid. Sign in again.",
+      stage,
+      retryable: false,
+      category: "authentication",
+      code: "email_not_verified",
+    };
+  }
+  if (error instanceof SupabaseAuthRequestError) {
+    if (!error.failure.retryable) {
+      return {
+        ok: false,
+        error: "Saved Cloud session is no longer valid. Sign in again.",
+        stage,
+        retryable: false,
+        category: "authentication",
+        code: "authentication_invalid",
+      };
+    }
+    const network = error.failure.kind !== "http";
+    return {
+      ok: false,
+      error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+      stage,
+      retryable: true,
+      category: network ? "network" : "service",
+      code: network ? "network_unavailable" : "service_unavailable",
+    };
+  }
+  if (error instanceof CloudRequestError) {
+    return {
+      ok: false,
+      error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+      stage,
+      retryable: true,
+      category: "network",
+      code: "network_unavailable",
+    };
+  }
+  if (
+    error instanceof CloudApiError
+    && (error.status === 401 || PERMANENT_CLOUD_SESSION_ERRORS.has(error.code))
+  ) {
+    return {
+      ok: false,
+      error: "Saved Cloud session is no longer valid. Sign in again.",
+      stage,
+      retryable: false,
+      category: "authentication",
+      code: PERMANENT_CLOUD_SESSION_ERRORS.has(error.code) ? error.code : "authentication_invalid",
+    };
+  }
+  if (
+    error instanceof CloudApiError
+    && (retryableHttpStatus(error.status) || error.code === "rate_limited" || error.code === "internal_error")
+  ) {
+    return {
+      ok: false,
+      error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+      stage,
+      retryable: true,
+      category: "service",
+      code: "service_unavailable",
+    };
+  }
+  return {
+    ok: false,
+    error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+    stage,
+    retryable: true,
+    category: "service",
+    code: "response_invalid",
+  };
+}
 
 function rejectUntrustedJsonMutation(req: Request): Response | null {
   if (!req.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
@@ -340,6 +443,7 @@ export async function handleUiRequest(
         deviceId?: unknown;
         deviceCredential?: unknown;
         queueKey?: unknown;
+        resumeLifecycle?: unknown;
         code?: unknown;
       };
       if (pathname === "/ui/api/cloud-auth/signup") {
@@ -414,18 +518,24 @@ export async function handleUiRequest(
         if (!options.pendingSync || typeof body.queueKey !== "string" || !body.queueKey) {
           return Response.json({ ok: false, error: "stored queue encryption key is required" }, { status: 400 });
         }
+        if (body.resumeLifecycle !== undefined && typeof body.resumeLifecycle !== "boolean") {
+          return Response.json({ ok: false, error: "resumeLifecycle must be boolean" }, { status: 400 });
+        }
+        let stage: CloudRestoreStage = "auth_refresh";
         try {
           const queueWasInitialized = !!options.pendingSync.queue();
           if (!queueWasInitialized) options.pendingSync.initialize(body.queueKey);
           const priorAccountId = options.cloudConnection.accountId();
           const result = await options.cloudAuth.restore(body.refreshToken);
+          stage = "cloud_status";
           options.cloudConnection.restoreCredential(body.deviceCredential);
           const status = await options.cloudConnection.client.status();
           options.cloudConnection.restoreAccount(status.account.id);
           options.cloudConnection.restoreDevice(status.device.id, body.deviceCredential);
+          stage = "lifecycle_resume";
           if (
             legalAcceptanceIsCurrent(status.legal) &&
-            (!queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
+            (body.resumeLifecycle === true || !queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
           ) {
             await options.cloudBrowser?.resumeAfterAuthentication();
           } else {
@@ -442,10 +552,13 @@ export async function handleUiRequest(
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
-          options.pendingSync.close();
-          options.cloudAuth.clear();
-          options.cloudConnection.clearDevice();
-          throw error;
+          const failure = cloudRestoreFailure(error, stage);
+          if (!failure.retryable) {
+            options.pendingSync.close();
+            options.cloudConnection.clearDevice();
+            await options.cloudAuth.clearStoredSession().catch(() => {});
+          }
+          return Response.json(failure, { status: failure.retryable ? 503 : 401 });
         }
       }
       if (pathname === "/ui/api/cloud-auth/accept-invitation") {
@@ -465,6 +578,18 @@ export async function handleUiRequest(
           ok: true,
           legal: { current: status.legal.current, accepted: accepted.accepted },
         });
+      }
+      if (pathname === "/ui/api/cloud-auth/forget") {
+        if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          return Response.json(
+            { ok: false, error: "Cloud browsers could not be closed safely" },
+            { status: 409 },
+          );
+        }
+        options.pendingSync?.close();
+        options.cloudConnection?.clearDevice();
+        await options.cloudAuth.clearStoredSession();
+        return Response.json({ ok: true });
       }
       if (pathname === "/ui/api/cloud-auth/signout") {
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
@@ -503,6 +628,7 @@ export async function handleUiRequest(
       const action = String(body.action ?? "");
       if (action === "invite") return Response.json(await cloud.createInvitation(String(body.email ?? ""), body.role === "admin" ? "admin" : "member"));
       if (action === "create-folder") return Response.json(await cloud.createFolder(String(body.name ?? "")));
+      if (action === "delete-folder") return Response.json(await cloud.deleteFolder(String(body.name ?? "")));
       if (action === "resend") return Response.json(await cloud.resendInvitation(String(body.id ?? "")));
       if (action === "revoke") return Response.json(await cloud.revokeInvitation(String(body.id ?? "")));
       if (action === "role") return Response.json(await cloud.changeMemberRole(String(body.accountId ?? ""), body.role === "admin" ? "admin" : "member"));
@@ -511,7 +637,10 @@ export async function handleUiRequest(
       if (action === "remove-grant") return Response.json(await cloud.removeFolderGrant(String(body.folderName ?? ""), String(body.accountId ?? "")));
       return Response.json({ ok: false, error: "unknown Cloud workspace action" }, { status: 400 });
     } catch (error) {
-      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 400;
+      return Response.json({ ok: false, error: msg(error) }, { status });
     }
   }
 
@@ -526,8 +655,9 @@ export async function handleUiRequest(
     (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
     (pathname === "/ui/api/profiles/move" && req.method === "POST") ||
     (pathname === "/ui/api/profiles/delete" && req.method === "POST") ||
+    (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
-    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache)$/.test(pathname));
+    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise)$/.test(pathname));
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
@@ -568,7 +698,7 @@ export async function handleUiRequest(
       // otherwise show "running" forever and hide the Open action. reconcileOrphans
       // probes active() per launch and drops dead rows (it never kills processes).
       await launcher.reconcileOrphans();
-      return Response.json({ profiles: listUiProfiles(store), healthSources: [] });
+      return Response.json({ profiles: listUiProfiles(store), healthSources: [], groups: store.listGroups() });
     } catch (error) {
       // Bun renders an uncaught route exception as an HTML 500 page. The React
       // client then cannot expose the actual hub/reconciliation error and only
@@ -695,10 +825,18 @@ export async function handleUiRequest(
       const form = await req.formData();
       const uploads: { name: string; bytes: Uint8Array }[] = [];
       const override = importOverridesFromForm(form);
+      if (options.cloudBrowser && !override.group) {
+        return Response.json({ ok: false, error: "a Cloud destination folder is required" }, { status: 400 });
+      }
       for (const [, value] of form) {
         if (value instanceof File) uploads.push({ name: value.name, bytes: new Uint8Array(await value.arrayBuffer()) });
       }
       if (uploads.length === 0) return Response.json({ ok: false, error: "no files uploaded" }, { status: 400 });
+      if (options.cloudBrowser) {
+        const prepared = await prepareImportBuffers(uploads, console.log, override);
+        await options.cloudBrowser.importProfiles(override.group!, prepared.profiles);
+        return Response.json({ ok: true, ...prepared.result });
+      }
       const r = remote ? await remote.importToHub(uploads, override) : await importBuffers(store, uploads, console.log, override);
       return Response.json({ ok: true, ...r });
     } catch (e) {
@@ -724,14 +862,30 @@ export async function handleUiRequest(
     try {
       const body = (await req.json()) as { ids?: unknown; format?: unknown };
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-      const format = body.format === "txt" ? "txt" : "csv";
+      const format = body.format === "txt" ? "txt" : body.format === "xlsx" ? "xlsx" : "csv";
+      // .txt and .xlsx are the full-fidelity forms: they carry cookies and the
+      // user-agent, so they need the profile's secrets. .csv is the trimmed
+      // credential view.
+      const full = format !== "csv";
       // Remote mode: the roster (and the secrets export needs) live on the hub —
       // the local store is just a launch cache, so reading it here would silently
       // drop every selected account that wasn't opened on this machine. Pull each
       // from the hub instead, the same full-fidelity fetch Open/Edit already use.
       const profiles = remote
-        ? await remote.getProfiles(ids, format === "txt")
+        ? await remote.getProfiles(ids, full)
         : ids.map((id) => store.getProfile(id)).filter((p): p is Profile => !!p);
+
+      if (format === "xlsx") {
+        const { headers, rows } = serializeXlsxRows(profiles);
+        const book = await writeXlsx(headers, rows);
+        return new Response(book as unknown as BodyInit, {
+          headers: {
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "content-disposition": "attachment; filename=aliasmode-export.xlsx",
+          },
+        });
+      }
+
       const text = format === "txt" ? serializeAdsTxt(profiles) : serializeCsv(profiles);
       return new Response(text, {
         headers: {
@@ -757,7 +911,14 @@ export async function handleUiRequest(
       const pending = new Map<string, Profile>();
       for (const [, value] of form) {
         if (!(value instanceof File)) continue;
-        const summary = parseUpdateFile(decodeText(new Uint8Array(await value.arrayBuffer())));
+        const bytes = new Uint8Array(await value.arrayBuffer());
+        // An .xlsx is a ZIP, so it is binary and starts "PK" — decoding it as
+        // text would turn a spreadsheet into mojibake with no usable `id`
+        // column and report the whole upload as zero rows changed.
+        const isWorkbook = bytes[0] === 0x50 && bytes[1] === 0x4b;
+        const summary = isWorkbook
+          ? rowsToUpdates(await readXlsx(bytes))
+          : parseUpdateFile(decodeText(bytes));
         skipped += summary.skipped;
         for (const u of summary.updates) {
           if (!isSafeProfileId(u.id)) {
@@ -789,6 +950,20 @@ export async function handleUiRequest(
       store.upsertProfiles([...pending.values()]);
       updated = pending.size;
       return Response.json({ ok: true, updated, skipped, notFound, errors: [] });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/groups/create" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      const body = (await req.json()) as { name?: unknown };
+      const name = String(body.name ?? "").trim();
+      if (!name) return Response.json({ ok: false, error: "group name required" }, { status: 400 });
+      if (name === "all") return Response.json({ ok: false, error: "group name is reserved" }, { status: 400 });
+      store.registerGroup(name);
+      return Response.json({ ok: true, name });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }

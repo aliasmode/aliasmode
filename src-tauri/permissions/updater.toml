@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-update-bridge"
+description = "Allows the AliasMode UI to check for and install verified AliasMode updates."
+commands.allow = ["check_for_updates", "update_now"]

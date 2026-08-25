@@ -18,6 +18,8 @@ export interface CookieRecord {
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: "Strict" | "Lax" | "None";
+  partitionKey?: string;
+  _crHasCrossSiteAncestor?: boolean;
 }
 
 export type ProxyType = "http" | "https" | "socks5";
@@ -116,6 +118,8 @@ export interface LaunchInfo {
   personaDigest?: string;
   /** Explicit mode for this launch generation. Missing only on legacy rows. */
   headless?: boolean;
+  /** Search bootstrap attempted before this browser generation was spawned. */
+  searchBootstrapRevision?: number;
   /** Linux-only ownership proof for a dedicated browser process group. */
   processGroupId?: number;
   /** Linux /proc start-time token for the exact browser root PID. */

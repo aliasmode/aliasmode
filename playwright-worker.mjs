@@ -1,3 +1,5 @@
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -32,6 +34,12 @@ function typed(code, details) {
   error.code = code;
   if (details) error.details = details;
   return error;
+}
+
+async function sha256File(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }
 
 function sessionError(operation, outcome = "failed") {
@@ -127,6 +135,22 @@ function canonicalWebOrigin(value) {
   }
 }
 
+function canonicalUserPageUrl(value) {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    if (parsed.searchParams.has("__aliasmode_session_capture__")
+      || parsed.searchParams.has("__aliasmode_session_restore__")) return undefined;
+    if (parsed.hostname === "127.0.0.1"
+      && parsed.pathname === "/card"
+      && parsed.searchParams.has("id")) return undefined;
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeWebOriginStorage(origin, storage) {
   if (!canonicalWebOrigin(origin) || !Array.isArray(storage?.localStorage)) return undefined;
   const localStorage = storage.localStorage
@@ -172,6 +196,7 @@ function localStorageHasTelegramAuth(entries) {
 
 async function passcodeDatabasePresent(page) {
   return page.evaluate(async (rules) => {
+    if (globalThis.location.origin !== "https://web.telegram.org") throw new Error("Wrong capture origin");
     const ruleFor = (name) => rules.find((rule) => rule.databaseName ? name === rule.databaseName : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
     const resultOf = (request) => new Promise((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -211,6 +236,7 @@ async function storageScriptSource() {
 async function collectPasscodeStorage(page) {
   const source = await storageScriptSource();
   return page.evaluate(async ({ rules, source }) => {
+    if (globalThis.location.origin !== "https://web.telegram.org") throw new Error("Wrong capture origin");
     const module = { exports: {} };
     Function("module", "exports", source)(module, module.exports);
     const script = new (module.exports.StorageScript())(false);
@@ -278,8 +304,313 @@ function capturedWebOriginStorage(origin, storage) {
   return normalizeWebOriginStorage(origin, storage);
 }
 
+async function captureLiveOrigin(context, origin) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const page = context.pages().find((candidate) => {
+      try {
+        const url = new URL(candidate.url());
+        return canonicalWebOrigin(url.origin) === origin
+          && !url.searchParams.has("__aliasmode_session_capture__");
+      } catch {
+        return false;
+      }
+    });
+    if (!page) return null;
+    try {
+      const live = await page.evaluate((expectedOrigin) => {
+        const currentOrigin = globalThis.location.origin;
+        if (currentOrigin !== expectedOrigin) return { origin: currentOrigin };
+        return {
+          origin: currentOrigin,
+          localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
+        };
+      }, origin);
+      if (live?.origin !== origin) continue;
+      let storage = { localStorage: live.localStorage };
+      if (origin === TELEGRAM_ORIGIN) {
+        let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
+        if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
+        if (capturePasscode) storage = await collectPasscodeStorage(page);
+      }
+      return storage;
+    } catch {}
+  }
+  return null;
+}
+
+function serializeIndexedDBValue(value) {
+  const typedArrays = new Map([
+    ["Int8Array", "i8"], ["Uint8Array", "ui8"], ["Uint8ClampedArray", "ui8c"],
+    ["Int16Array", "i16"], ["Uint16Array", "ui16"], ["Int32Array", "i32"],
+    ["Uint32Array", "ui32"], ["Float32Array", "f32"], ["Float64Array", "f64"],
+    ["BigInt64Array", "bi64"], ["BigUint64Array", "bui64"],
+  ]);
+  const seenForTrivial = new Set();
+  const isTrivial = (candidate) => {
+    if (candidate === null || ["string", "number", "boolean"].includes(typeof candidate)) return true;
+    if (!candidate || typeof candidate !== "object" || seenForTrivial.has(candidate)) return false;
+    const proto = Object.getPrototypeOf(candidate);
+    if (!Array.isArray(candidate) && proto !== Object.prototype && proto !== null) return false;
+    seenForTrivial.add(candidate);
+    const result = (Array.isArray(candidate) ? candidate : Object.values(candidate)).every(isTrivial);
+    seenForTrivial.delete(candidate);
+    return result;
+  };
+  if (value !== null && isTrivial(value)) return { trivial: value };
+
+  const visited = new Map();
+  let lastId = 0;
+  const encode = (candidate) => {
+    if (candidate === undefined || typeof candidate === "symbol" || typeof candidate === "function") return { v: "undefined" };
+    if (candidate === null) return { v: "null" };
+    if (Number.isNaN(candidate)) return { v: "NaN" };
+    if (candidate === Infinity) return { v: "Infinity" };
+    if (candidate === -Infinity) return { v: "-Infinity" };
+    if (Object.is(candidate, -0)) return { v: "-0" };
+    if (["string", "number", "boolean"].includes(typeof candidate)) return candidate;
+    if (typeof candidate === "bigint") return { bi: candidate.toString() };
+    if (candidate instanceof Date) return { d: candidate.toJSON() };
+    if (candidate instanceof URL) return { u: candidate.toJSON() };
+    if (candidate instanceof RegExp) return { r: { p: candidate.source, f: candidate.flags } };
+    if (candidate instanceof Error) return { e: { n: candidate.name, m: candidate.message, s: candidate.stack ?? "" } };
+    const typed = typedArrays.get(candidate?.constructor?.name);
+    if (typed) {
+      const bytes = new Uint8Array(candidate.buffer, candidate.byteOffset, candidate.byteLength);
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      return { ta: { b: btoa(binary), k: typed } };
+    }
+    const prior = visited.get(candidate);
+    if (prior) return { ref: prior };
+    const id = ++lastId;
+    visited.set(candidate, id);
+    if (Array.isArray(candidate)) return { a: candidate.map(encode), id };
+    return { o: Object.keys(candidate).filter((key) => key !== "__proto__").map((key) => ({ k: key, v: encode(candidate[key]) })), id };
+  };
+  return { encoded: encode(value) };
+}
+
+async function serializedRemoteValue(cdp, remote) {
+  if (remote?.objectId) {
+    const response = await cdp.send("Runtime.callFunctionOn", {
+      objectId: remote.objectId,
+      functionDeclaration: `function() { return (${serializeIndexedDBValue.toString()})(this); }`,
+      returnByValue: true,
+    });
+    if (response.exceptionDetails || !response.result || !("value" in response.result)) {
+      throw new Error("Unable to serialize IndexedDB value");
+    }
+    return response.result.value;
+  }
+  if (remote && "value" in remote) return serializeIndexedDBValue(remote.value);
+  if (remote?.type === "undefined") return { encoded: { v: "undefined" } };
+  const value = remote?.unserializableValue;
+  if (value === "NaN" || value === "Infinity" || value === "-Infinity" || value === "-0") return { encoded: { v: value } };
+  if (remote?.type === "bigint" && typeof value === "string" && value.endsWith("n")) return { encoded: { bi: value.slice(0, -1) } };
+  throw new Error("Unable to serialize IndexedDB value");
+}
+
+function keyPathFields(keyPath) {
+  if (typeof keyPath === "string") return { keyPath };
+  if (Array.isArray(keyPath)) return { keyPathArray: keyPath };
+  if (keyPath?.type === "string") return { keyPath: keyPath.string };
+  if (keyPath?.type === "array") return { keyPathArray: keyPath.array };
+  return {};
+}
+
+async function collectTelegramIndexedDB(cdp, origin) {
+  await cdp.send("IndexedDB.enable");
+  const names = await cdp.send("IndexedDB.requestDatabaseNames", { securityOrigin: origin });
+  const databases = [];
+  for (const name of [...(names.databaseNames ?? [])].sort()) {
+    const rule = telegramRule(name);
+    if (!rule) continue;
+    const response = await cdp.send("IndexedDB.requestDatabase", { securityOrigin: origin, databaseName: name });
+    const metadata = response.databaseWithObjectStores;
+    if (!metadata || !Number.isInteger(metadata.version) || metadata.version <= 0) continue;
+    const stores = [];
+    for (const store of metadata.objectStores ?? []) {
+      if (!rule.stores.includes(store.name)) continue;
+      const records = [];
+      let skipCount = 0;
+      for (;;) {
+        const data = await cdp.send("IndexedDB.requestData", {
+          securityOrigin: origin,
+          databaseName: name,
+          objectStoreName: store.name,
+          indexName: "",
+          skipCount,
+          pageSize: 1_000,
+        });
+        for (const entry of data.objectStoreDataEntries ?? []) {
+          const record = {};
+          if (store.keyPath?.type === "null" || store.keyPath == null) {
+            const key = await serializedRemoteValue(cdp, entry.primaryKey ?? entry.key);
+            if ("trivial" in key) record.key = key.trivial;
+            else record.keyEncoded = key.encoded;
+          }
+          const value = await serializedRemoteValue(cdp, entry.value);
+          if ("trivial" in value) record.value = value.trivial;
+          else record.valueEncoded = value.encoded;
+          records.push(record);
+        }
+        if (!data.hasMore) break;
+        const count = data.objectStoreDataEntries?.length ?? 0;
+        if (!count) throw new Error("IndexedDB pagination made no progress");
+        skipCount += count;
+      }
+      stores.push({
+        name: store.name,
+        records,
+        indexes: (store.indexes ?? []).map((index) => ({
+          name: index.name,
+          ...keyPathFields(index.keyPath),
+          multiEntry: index.multiEntry,
+          unique: index.unique,
+        })),
+        autoIncrement: store.autoIncrement,
+        ...keyPathFields(store.keyPath),
+      });
+    }
+    if (stores.length) databases.push({ name, version: metadata.version, stores });
+  }
+  return databases;
+}
+
+async function createHiddenPage(browser, context, marker) {
+  if (typeof context.newCDPSession !== "function" || typeof browser.newBrowserCDPSession !== "function") {
+    throw new Error("hidden page target is unavailable");
+  }
+
+  const browserCdp = await browser.newBrowserCDPSession();
+  let targetId;
+  let page;
+  let cdp;
+  const close = async () => {
+    await cdp?.detach().catch(() => {});
+    await page?.close().catch(() => {});
+    if (targetId) await browserCdp.send("Target.closeTarget", { targetId }).catch(() => {});
+    await browserCdp.detach().catch(() => {});
+  };
+
+  try {
+    const version = await browserCdp.send("Browser.getVersion");
+    const product = typeof version?.product === "string"
+      ? /^[^/\s]+\/([1-9]\d*)(?:\.|$)/.exec(version.product)
+      : null;
+    const productMajor = product ? Number(product[1]) : NaN;
+    if (!Number.isSafeInteger(productMajor) || productMajor < 137) {
+      throw new Error("hidden storage target requires Chromium 137 or newer");
+    }
+
+    const existing = new Set(context.pages());
+    const previousAttachToOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+    process.env.PW_CHROMIUM_ATTACH_TO_OTHER = "1";
+    try {
+      ({ targetId } = await browserCdp.send("Target.createTarget", {
+        url: marker,
+        background: true,
+        hidden: true,
+      }));
+      if (typeof targetId !== "string" || !targetId) throw new Error("hidden storage target identity is invalid");
+      const target = (await browserCdp.send("Target.getTargetInfo", { targetId }))?.targetInfo;
+      if (target?.targetId !== targetId || target.type !== "other" || target.url !== marker) {
+        throw new Error("hidden storage target identity is invalid");
+      }
+      let windowless = false;
+      try {
+        await browserCdp.send("Browser.getWindowForTarget", { targetId });
+      } catch (error) {
+        windowless = [
+          "Protocol error (Browser.getWindowForTarget): Browser window not found",
+          "cdpSession.send: Protocol error (Browser.getWindowForTarget): Browser window not found",
+        ].includes(error?.message);
+        if (!windowless) throw error;
+      }
+      if (!windowless) throw new Error("hidden storage target is attached to a browser window");
+      const rejected = new Set();
+      for (let attempt = 0; attempt < 100 && !page; attempt++) {
+        const candidates = context.pages().filter((candidate) =>
+          !existing.has(candidate) && !rejected.has(candidate) && candidate.url() === marker);
+        for (const candidate of candidates) {
+          let candidateCdp;
+          let identified = false;
+          try {
+            candidateCdp = await context.newCDPSession(candidate);
+            const attached = (await candidateCdp.send("Target.getTargetInfo"))?.targetInfo;
+            identified = true;
+            if (attached?.targetId === targetId && attached.type === "other") {
+              page = candidate;
+              cdp = candidateCdp;
+              break;
+            }
+          } catch {}
+          if (identified) rejected.add(candidate);
+          await candidateCdp?.detach().catch(() => {});
+        }
+        if (!page) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      if (previousAttachToOther === undefined) delete process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+      else process.env.PW_CHROMIUM_ATTACH_TO_OTHER = previousAttachToOther;
+    }
+    if (!page || !cdp) throw new Error("hidden page target is unavailable");
+  } catch (error) {
+    await close();
+    throw error;
+  }
+
+  return { page, cdp, close };
+}
+
+async function createReadOnlyStorageReader(browser, context) {
+  const { page, cdp, close } = await createHiddenPage(
+    browser,
+    context,
+    "about:blank#__aliasmode_hidden_capture__",
+  );
+  try {
+    await cdp.send("Network.enable");
+    await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+    await cdp.send("DOMStorage.enable");
+  } catch (error) {
+    await close();
+    throw error;
+  }
+
+  let ordinal = 0;
+  return {
+    async read(origin) {
+      const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
+      let intercepted = false;
+      const handler = (route) => {
+        intercepted = true;
+        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
+      };
+      await context.route(url, handler);
+      try {
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
+        if (!intercepted) throw new Error("Capture navigation was not intercepted");
+        if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
+        const response = await cdp.send("DOMStorage.getDOMStorageItems", {
+          storageId: { securityOrigin: origin, isLocalStorage: true },
+        });
+        const localStorage = (response.entries ?? []).map(([name, value]) => ({ name, value }));
+        const indexedDB = origin === TELEGRAM_ORIGIN ? await collectTelegramIndexedDB(cdp, origin) : [];
+        return { localStorage, ...(indexedDB.length ? { indexedDB } : {}) };
+      } finally {
+        await context.unroute(url, handler).catch(() => {});
+      }
+    },
+    close,
+  };
+}
+
 async function captureSession(browser, payload) {
   const context = contextOf(browser);
+  const tabs = context.pages().map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
   const seed = payload.captureSeed;
   if (seed !== undefined && (!seed || typeof seed !== "object" || Array.isArray(seed)
     || !Array.isArray(seed.origins)
@@ -292,7 +623,9 @@ async function captureSession(browser, payload) {
   let telegramClient = seed?.telegramClient;
   for (const page of context.pages()) {
     try {
-      const url = new URL(page.url());
+      const pageUrl = canonicalUserPageUrl(page.url());
+      if (!pageUrl) continue;
+      const url = new URL(pageUrl);
       const origin = canonicalWebOrigin(url.origin);
       if (!origin) continue;
       origins.add(origin);
@@ -303,59 +636,74 @@ async function captureSession(browser, payload) {
     } catch {}
   }
 
-  const captures = [];
-  const routes = [];
-  const cdpSessions = [];
+  let reader;
   try {
     const byOrigin = new Map();
-    let ordinal = 0;
     for (const origin of [...origins].sort()) {
-      const page = await context.newPage();
-      captures.push(page);
-      if (typeof context.newCDPSession === "function") {
-        const cdp = await context.newCDPSession(page);
-        cdpSessions.push(cdp);
-        await cdp.send("Network.enable");
-        await cdp.send("Network.setBypassServiceWorker", { bypass: true });
-      }
-      const url = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
-      let intercepted = false;
-      const handler = (route) => {
-        intercepted = true;
-        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
-      };
-      routes.push({ url, handler });
-      await context.route(url, handler);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
-      if (!intercepted) throw new Error("Capture navigation was not intercepted");
-      if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
-      let storage = await page.evaluate(() => ({
-        localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
-      }));
-      if (origin === TELEGRAM_ORIGIN) {
-        let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
-        if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
-        if (capturePasscode) storage = await collectPasscodeStorage(page);
+      let storage = await captureLiveOrigin(context, origin);
+      if (!storage) {
+        reader ??= await createReadOnlyStorageReader(browser, context);
+        storage = await reader.read(origin);
       }
       const captured = capturedWebOriginStorage(origin, storage);
       if (captured) byOrigin.set(origin, captured);
     }
 
-    const state = await context.storageState();
-    if (!Array.isArray(state.cookies) || state.cookies.some((cookie) =>
+    const cookies = typeof context.cookies === "function"
+      ? await context.cookies()
+      : (await context.storageState()).cookies;
+    if (!Array.isArray(cookies) || cookies.some((cookie) =>
       typeof cookie?.name !== "string" || typeof cookie.value !== "string" ||
       typeof cookie.domain !== "string" || typeof cookie.path !== "string" ||
       (cookie.expires !== undefined && (typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires))) ||
       (cookie.httpOnly !== undefined && typeof cookie.httpOnly !== "boolean") ||
       (cookie.secure !== undefined && typeof cookie.secure !== "boolean") ||
+      (cookie.partitionKey !== undefined && typeof cookie.partitionKey !== "string") ||
+      (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean") ||
       (cookie.sameSite !== undefined && !["Strict", "Lax", "None"].includes(cookie.sameSite))
     )) throw new Error("Invalid captured cookies");
-    return JSON.stringify({ cookies: state.cookies, origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
+    return JSON.stringify({
+      cookies,
+      origins: [...byOrigin.values()],
+      tabs,
+      ...(telegramClient ? { telegramClient } : {}),
+    });
   } finally {
-    for (const page of captures) await page.close().catch(() => {});
-    for (const cdp of cdpSessions) await cdp.detach().catch(() => {});
-    for (const route of routes) await context.unroute(route.url, route.handler).catch(() => {});
+    await reader?.close();
   }
+}
+
+async function navigatePages(context, urls, replacePages = false) {
+  const targets = (Array.isArray(urls) ? urls : []).map(canonicalUserPageUrl).filter(Boolean);
+  const existing = [...context.pages()];
+  let blank = existing.find((page) => {
+    try { return page.url() === "about:blank"; } catch { return false; }
+  });
+  if (!replacePages && existing.some((page) => {
+    try { return canonicalUserPageUrl(page.url()) !== undefined; } catch { return false; }
+  })) blank = undefined;
+  let firstError;
+
+  if (replacePages) {
+    if (!blank) blank = await context.newPage();
+    for (const page of existing) {
+      let url = "";
+      try { url = page.url(); } catch {}
+      const disposable = canonicalUserPageUrl(url) !== undefined || (url === "about:blank" && page !== blank);
+      if (!disposable) continue;
+      try { await page.close(); } catch (error) { firstError ??= error; }
+    }
+  }
+
+  for (let index = 0; index < targets.length; index++) {
+    try {
+      const page = index === 0 && blank ? blank : await context.newPage();
+      await page.goto(targets[index], { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError) throw firstError;
 }
 
 async function restoreSession(browser, context, payload) {
@@ -365,7 +713,7 @@ async function restoreSession(browser, context, payload) {
     ? bundle.origins.map((target) => normalizeWebOriginStorage(target?.origin, target)).filter(Boolean)
     : [];
   const cookies = Array.isArray(bundle.cookies) ? bundle.cookies : [];
-  if (!cookies.length && !origins.length && !(payload.urls || []).length) return null;
+  if (!cookies.length && !origins.length && !(payload.urls || []).length && !payload.replacePages && !payload.authoritative) return null;
   const storageSource = origins.some((target) => target.indexedDB?.length)
     ? await sessionStep("origin_storage", storageScriptSource)
     : undefined;
@@ -438,65 +786,160 @@ async function restoreSession(browser, context, payload) {
   await sessionStep("cookie_clear", () => context.clearCookies());
   const inject = cookies.filter((cookie) => !LINKEDIN_DEVICE_COOKIES.has(cookie.name));
   if (inject.length) await sessionStep("cookie_add", () => context.addCookies(inject));
-  await sessionStep("navigation", async () => {
-    for (let i = 0; i < (payload.urls || []).length; i++) {
-      const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
-      await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
-    }
-  });
+  await sessionStep("navigation", () => navigatePages(context, payload.urls, !!payload.replacePages));
   return null;
 }
 
-async function searchProvider(context) {
-  const page = await context.newPage();
+async function searchProvider(chromium, payload) {
+  if (
+    typeof payload.executablePath !== "string"
+    || !payload.executablePath
+    || typeof payload.executableSha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(payload.executableSha256)
+    || typeof payload.userDataDir !== "string"
+    || !payload.userDataDir
+  ) throw typed("invalid_request");
+
+  if (await sha256File(payload.executablePath) !== payload.executableSha256) {
+    throw new Error("approved CloakBrowser binary changed before search setup");
+  }
+  const context = await chromium.launchPersistentContext(payload.userDataDir, {
+    executablePath: payload.executablePath,
+    headless: true,
+    args: ["--no-first-run", "--no-default-browser-check"],
+    timeout: Math.max(1, Math.min(Number(payload.launchTimeoutMs) || 20_000, 120_000)),
+  });
   try {
+    const page = context.pages()[0] || await context.newPage();
     await page.goto("chrome://settings/searchEngines", { waitUntil: "domcontentloaded", timeout: 10_000 });
     return await page.evaluate(async () => {
       const cr = await import("chrome://resources/js/cr.js");
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const engines = async () => Object.values(await cr.sendWithPromise("getSearchEnginesList")).filter(Array.isArray).flat();
-      const identity = (engine) => [engine.keyword, engine.name, engine.displayName, engine.url].filter(Boolean).join(" ").toLowerCase();
-      const current = (await engines()).find((engine) => engine.default);
-      const noSearch = current && (identity(current).includes("no search") || /^https?:\/\/%s\/?$/.test(String(current.url || "").toLowerCase()));
-      if (current && !noSearch) return { status: identity(current).includes("duckduckgo") ? "already-default" : "kept-existing", engine: current.displayName || current.name || current.keyword || "Current search provider" };
-      const deep = (root, selector) => {
-        const found = [...root.querySelectorAll(selector)];
-        for (const element of root.querySelectorAll("*")) if (element.shadowRoot) found.push(...deep(element.shadowRoot, selector));
-        return found;
-      };
-      let add;
-      for (let i = 0; i < 30 && !add; i++) { add = deep(document, "#addSearchEngine")[0]; if (!add) await wait(100); }
-      if (!add) throw new Error("add unavailable");
-      add.click();
-      let dialog;
-      for (let i = 0; i < 20 && !dialog; i++) { await wait(100); dialog = deep(document, "settings-search-engine-edit-dialog")[0]; }
-      if (!dialog) throw new Error("dialog unavailable");
-      for (const [id, value] of [["searchEngine", "DuckDuckGo"], ["keyword", "duckduckgo.com"], ["queryUrl", "https://duckduckgo.com/?q=%s"]]) {
-        const input = deep(dialog, `cr-input#${id}`)[0]?.shadowRoot?.querySelector("input");
-        if (!input) throw new Error("input unavailable");
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
-        input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      const engines = async () => Object.values(
+        await cr.sendWithPromise("getSearchEnginesList"),
+      ).filter(Array.isArray).flat();
+      const identity = (engine) => [
+        engine.keyword,
+        engine.name,
+        engine.displayName,
+        engine.url,
+      ].filter(Boolean).join(" ").toLowerCase();
+      const findDuckDuckGo = (items) => items.find((engine) =>
+        identity(engine).includes("duckduckgo")
+      );
+      const initial = await engines();
+      const current = initial.find((engine) => engine.default);
+      const noSearch = current && (
+        identity(current).includes("no search")
+        || /^https?:\/\/%s\/?$/.test(String(current.url || "").trim().toLowerCase())
+      );
+      if (current && !noSearch) {
+        return {
+          status: identity(current).includes("duckduckgo")
+            ? "already-default"
+            : "kept-existing",
+          engine: current.displayName || current.name || current.keyword || "Current search provider",
+        };
       }
-      let save;
-      for (let i = 0; i < 30; i++) { await wait(100); save = deep(dialog, "#actionButton")[0]; if (save && !save.disabled && !save.hasAttribute("disabled")) break; }
-      if (!save || save.disabled || save.hasAttribute("disabled")) throw new Error("settings rejected");
-      save.click();
-      let duck;
-      for (let i = 0; i < 20 && !duck; i++) { await wait(100); duck = (await engines()).find((engine) => identity(engine).includes("duckduckgo")); }
-      if (!duck) throw new Error("not saved");
-      const usesModelIndex = typeof duck.modelIndex === "number";
-      const ref = usesModelIndex ? duck.modelIndex : duck.id;
-      if (duck.canBeActivated) { globalThis.chrome.send("setIsActiveSearchEngine", [ref, true]); await wait(100); }
-      if (!duck.canBeDefault) throw new Error("default unavailable");
-      globalThis.chrome.send("setDefaultSearchEngine", [ref, usesModelIndex ? 0 : 1, null]);
-      for (let i = 0; i < 20; i++) { await wait(100); const saved = (await engines()).find((engine) => identity(engine).includes("duckduckgo")); if (saved?.default) return { status: "configured", engine: saved.displayName || saved.name || "DuckDuckGo" }; }
-      throw new Error("not persisted");
+
+      const deep = (root, selector) => {
+        const found = [];
+        if (root.shadowRoot) found.push(...deep(root.shadowRoot, selector));
+        found.push(...root.querySelectorAll(selector));
+        for (const element of root.querySelectorAll("*")) {
+          if (element.shadowRoot) found.push(...deep(element.shadowRoot, selector));
+        }
+        return [...new Set(found)];
+      };
+      let duck = findDuckDuckGo(initial);
+      if (!duck) {
+        let add;
+        for (let i = 0; i < 30 && !add; i++) {
+          add = deep(document, "#addSearchEngine")[0];
+          if (!add) await wait(100);
+        }
+        if (!add) throw new Error("Chromium search Add button was not available");
+        add.click();
+
+        let dialog;
+        for (let i = 0; i < 20 && !dialog; i++) {
+          await wait(100);
+          dialog = deep(document, "settings-search-engine-edit-dialog")[0];
+        }
+        if (!dialog) throw new Error("Chromium search dialog did not open");
+        for (const [id, value] of [
+          ["searchEngine", "DuckDuckGo"],
+          ["keyword", "duckduckgo.com"],
+          ["queryUrl", "https://duckduckgo.com/?q=%s"],
+        ]) {
+          const input = deep(dialog, `cr-input#${id}`)[0]?.shadowRoot?.querySelector("input");
+          if (!input) throw new Error(`Chromium search input ${id} was not available`);
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set.call(input, value);
+          input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        }
+
+        let save;
+        for (let i = 0; i < 30; i++) {
+          await wait(100);
+          save = deep(dialog, "#actionButton")[0];
+          if (save && !save.disabled && !save.hasAttribute("disabled")) break;
+        }
+        if (!save || save.disabled || save.hasAttribute("disabled")) {
+          throw new Error("Chromium rejected DuckDuckGo settings");
+        }
+        save.click();
+        for (let i = 0; i < 20 && !duck; i++) {
+          await wait(100);
+          duck = findDuckDuckGo(await engines());
+        }
+      }
+      if (!duck) throw new Error("Chromium did not save DuckDuckGo");
+
+      const modelIndex = (engine) => {
+        if (!Number.isInteger(engine.modelIndex) || engine.modelIndex < 0) {
+          throw new Error("Chromium search engine model index was unavailable");
+        }
+        return engine.modelIndex;
+      };
+      if (duck.canBeActivated) {
+        globalThis.chrome.send("setIsActiveSearchEngine", [modelIndex(duck), true]);
+        for (let i = 0; i < 20; i++) {
+          await wait(100);
+          duck = findDuckDuckGo(await engines()) || duck;
+          if (duck.default || duck.canBeDefault || !duck.canBeActivated) break;
+        }
+      }
+      if (duck.default) {
+        return {
+          status: "configured",
+          engine: duck.displayName || duck.name || "DuckDuckGo",
+        };
+      }
+      if (!duck.canBeDefault) throw new Error("Chromium will not allow DuckDuckGo as default");
+
+      globalThis.chrome.send("setDefaultSearchEngine", [
+        modelIndex(duck),
+        1,
+        null,
+      ]);
+      for (let i = 0; i < 20; i++) {
+        await wait(100);
+        const saved = findDuckDuckGo(await engines());
+        if (saved?.default) {
+          return {
+            status: "configured",
+            engine: saved.displayName || saved.name || "DuckDuckGo",
+          };
+        }
+      }
+      throw new Error("DuckDuckGo was not persisted as default");
     });
-  } finally { await page.close().catch(() => {}); }
+  } finally { await context.close().catch(() => {}); }
 }
 
 async function operate(chromium, operation, payload) {
+  if (operation === "search-provider") return searchProvider(chromium, payload);
   const endpoint = payload.endpoint;
   if (typeof endpoint !== "string" || !/^https?:\/\/|^wss?:\/\//.test(endpoint)) throw typed("invalid_request");
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
@@ -504,20 +947,76 @@ async function operate(chromium, operation, payload) {
     if (operation === "session-capture") return captureSession(browser, payload);
     if (operation === "session-restore") return restoreSession(browser, context, payload);
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
-    if (operation === "search-provider") return searchProvider(context);
     if (operation === "navigate") {
-      for (let i = 0; i < payload.urls.length; i++) {
-        const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
-        await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
-      }
+      await navigatePages(context, payload.urls, !!payload.replacePages);
       return null;
     }
     if (operation === "profile-card") {
-      const automation = context.pages()[0];
-      const page = await context.newPage();
-      await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
-      if (automation && automation !== page) await automation.bringToFront().catch(() => {});
-      return null;
+      if (!payload.temporary && context.pages().some((page) => {
+        try { return typeof page.url === "function" && page.url() === payload.url; } catch { return false; }
+      })) return { createdPageTargetIds: [] };
+      if (typeof browser.newBrowserCDPSession !== "function") throw new Error("browser target observation is unavailable");
+      const targetCdp = await browser.newBrowserCDPSession();
+      const existingPageTargetIds = new Set();
+      const createdPageTargetIds = new Set();
+      const destroyedPageTargetIds = new Set();
+      let armed = false;
+      let temporaryPage;
+      try {
+        const initialTargets = await targetCdp.send("Target.getTargets");
+        for (const target of initialTargets?.targetInfos || []) {
+          if (target?.type === "page" && typeof target.targetId === "string") existingPageTargetIds.add(target.targetId);
+        }
+        targetCdp.on("Target.targetCreated", (event) => {
+          const target = event?.targetInfo;
+          if (armed && target?.type === "page" && typeof target.targetId === "string" && !existingPageTargetIds.has(target.targetId)) {
+            createdPageTargetIds.add(target.targetId);
+          }
+        });
+        if (payload.temporary) {
+          targetCdp.on("Target.targetDestroyed", (event) => {
+            if (armed && createdPageTargetIds.has(event?.targetId)) destroyedPageTargetIds.add(event.targetId);
+          });
+        }
+        armed = true;
+        await targetCdp.send("Target.setDiscoverTargets", { discover: true });
+
+        const automation = context.pages()[0];
+        if (payload.temporary) {
+          temporaryPage = await context.newPage();
+          await temporaryPage.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+          await temporaryPage.close();
+          temporaryPage = undefined;
+        } else {
+          let canCreate = false;
+          if (automation && typeof context.newCDPSession === "function") {
+            const cdp = await context.newCDPSession(automation);
+            try {
+              const { bounds } = await cdp.send("Browser.getWindowForTarget");
+              canCreate = bounds?.windowState !== "minimized";
+            } catch {
+              canCreate = false;
+            } finally {
+              await cdp.detach().catch(() => {});
+            }
+          }
+          if (canCreate) {
+            const page = await context.newPage();
+            await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+            if (automation !== page) await automation.bringToFront().catch(() => {});
+          }
+        }
+        await targetCdp.send("Target.getTargets");
+      } finally {
+        if (temporaryPage) await temporaryPage.close().catch(() => {});
+        armed = false;
+        await targetCdp.send("Target.setDiscoverTargets", { discover: false }).catch(() => {});
+        await targetCdp.detach().catch(() => {});
+      }
+      return {
+        createdPageTargetIds: [...createdPageTargetIds].sort(),
+        ...(payload.temporary ? { destroyedPageTargetIds: [...destroyedPageTargetIds].sort() } : {}),
+      };
     }
     if (operation === "label-window") {
       await context.addInitScript({ content: payload.script }).catch(() => {});

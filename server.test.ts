@@ -90,6 +90,7 @@ function harness(): Harness {
     portProbe: () => true,
     spawn,
     fetch: fetchFn,
+    ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
     ensureCookies,
     // stop() routes kills through killPidFn (tree-kill); track them here.
     killPid: async (pid) => {

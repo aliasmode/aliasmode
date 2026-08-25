@@ -6,12 +6,13 @@ import { ProfileStore } from "./store.ts";
 import { Launcher } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { listUiProfiles, handleUiRequest } from "./ui.ts";
+import { readXlsx, writeXlsx } from "./xlsx.ts";
 import { AppConfigStore } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { PendingSyncRuntime } from "./pending-sync.ts";
-import type { SupabaseAuthClient } from "./supabase-auth.ts";
-import { CloudApiError } from "./cloud-client.ts";
+import { EmailVerificationRequiredError, SupabaseAuthRequestError, type SupabaseAuthClient } from "./supabase-auth.ts";
+import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 
 const SAMPLE = `id=k1d0cd11
@@ -128,6 +129,37 @@ test("open/close routes call the launcher", async () => {
   const close = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/close", { method: "POST" }), launcher, s);
   expect((await close!.json()).ok).toBe(true);
   expect(calls).toEqual(["start:k1d0cd11", "stop:k1d0cd11"]);
+  s.close();
+});
+
+test("raise route brings Local and Cloud browsers to the front", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const launcher = {
+    async bringToFront(id: string) { calls.push(id); },
+  } as any;
+
+  const local = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/raise", { method: "POST" }),
+    launcher,
+    s,
+  );
+  expect(local!.status).toBe(200);
+  expect(await local!.json()).toEqual({ ok: true });
+
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-raise-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const cloud = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/cloud1/raise", { method: "POST" }),
+    launcher,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any },
+  );
+  expect(cloud!.status).toBe(200);
+  expect(await cloud!.json()).toEqual({ ok: true });
+  expect(calls).toEqual(["k1d0cd11", "cloud1"]);
   s.close();
 });
 
@@ -281,6 +313,40 @@ test("GET /ui/api/profiles returns a JSON error when local reconciliation fails"
   s.close();
 });
 
+test("Local group creation keeps an empty group in the profile roster", async () => {
+  const s = store();
+  const created = await handleUiRequest(
+    new Request("http://x/ui/api/groups/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Empty group" }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(created!.status).toBe(200);
+  expect(await created!.json()).toEqual({ ok: true, name: "Empty group" });
+
+  const reserved = await handleUiRequest(
+    new Request("http://x/ui/api/groups/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "all" }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(reserved!.status).toBe(400);
+
+  const roster = await handleUiRequest(
+    new Request("http://x/ui/api/profiles"),
+    { reconcileOrphans: async () => {} } as any,
+    s,
+  );
+  expect((await roster!.json()).groups).toContain("Empty group");
+  s.close();
+});
+
 test("move route reassigns selected profiles' group", async () => {
   const s = store();
   const res = await handleUiRequest(
@@ -324,6 +390,43 @@ test("upload route imports profiles from posted files", async () => {
   s.close();
 });
 
+test("upload route atomically imports two AdsPower profiles from one pasted file", async () => {
+  const s = new ProfileStore(":memory:");
+  const ADSPOWER = `id=k1up0002\nname=first\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************\nid=k1up0003\nname=second\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************`;
+  const form = new FormData();
+  form.append("files", new File([ADSPOWER], "pasted-adspower.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toMatchObject({ ok: true, files: 1, profiles: 2 });
+  expect(s.count()).toBe(2);
+  expect(s.getProfile("k1up0002")).not.toBeNull();
+  expect(s.getProfile("k1up0003")).not.toBeNull();
+  s.close();
+});
+
+test("upload route rejects a malformed AdsPower record without partial writes", async () => {
+  const s = store();
+  const beforeCount = s.count();
+  const ADSPOWER = `id=k1up0002\nname=first\ngroup=ug\ncookie=[]\nresolution=1280*720\n******************\nid=k1up0003\nname=second\ngroup=ug\ncookie=[]\nresolution=0x0\n******************`;
+  const form = new FormData();
+  form.append("files", new File([ADSPOWER], "pasted-adspower.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(res!.status).toBe(500);
+  expect((await res!.json()).error).toContain("invalid resolution");
+  expect(s.count()).toBe(beforeCount);
+  expect(s.getProfile("k1up0002")).toBeNull();
+  expect(s.getProfile("k1up0003")).toBeNull();
+  s.close();
+});
+
 test("upload route applies group override in local mode", async () => {
   const s = new ProfileStore(":memory:");
   const NOPROXY = `id=k1up0001\nname=uploaded\ngroup=fromfile\ncookie=[]\nresolution=1280*720\n******************`;
@@ -337,6 +440,64 @@ test("upload route applies group override in local mode", async () => {
   );
   expect((await res!.json()).ok).toBe(true);
   expect(s.getProfile("k1up0001")!.group).toBe("selected");
+  s.close();
+});
+
+test("upload route sends one parsed batch to Cloud without writing the Local store", async () => {
+  const s = new ProfileStore(":memory:");
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-import-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const batches: Array<{ destination: string; profiles: any[] }> = [];
+  const cloudBrowser = {
+    async importProfiles(destination: string, profiles: any[]) {
+      batches.push({ destination, profiles: structuredClone(profiles) });
+      return { ok: true, imported: profiles.length, ids: profiles.map((profile) => profile.id) };
+    },
+  } as any;
+  const form = new FormData();
+  form.append("group", "Sales");
+  form.append("platform", "telegram.org");
+  form.append("files", new File([
+    `id=cloudimp1\nname=First\ngroup=from-file\ncookie=[]\nresolution=1280*720\n******************\n` +
+    `id=cloudimp2\nname=Second\ngroup=from-file\ncookie=[]\nresolution=1280*720\n******************`,
+  ], "export.txt", { type: "text/plain" }));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toMatchObject({ ok: true, files: 1, profiles: 2 });
+  expect(batches).toHaveLength(1);
+  expect(batches[0]!.destination).toBe("Sales");
+  expect(batches[0]!.profiles.map((profile) => ({ id: profile.id, group: profile.group, platform: profile.platform }))).toEqual([
+    { id: "cloudimp1", group: "Sales", platform: "telegram.org" },
+    { id: "cloudimp2", group: "Sales", platform: "telegram.org" },
+  ]);
+  expect(s.getProfile("cloudimp1")).toBeNull();
+  expect(s.getProfile("cloudimp2")).toBeNull();
+  s.close();
+});
+
+test("Cloud upload requires an explicit destination before parsing files", async () => {
+  const s = new ProfileStore(":memory:");
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-import-group-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const form = new FormData();
+  form.append("files", new File(["not parsed"], "export.txt", { type: "text/plain" }));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: { importProfiles: async () => { throw new Error("must not import"); } } as any },
+  );
+  expect(res!.status).toBe(400);
+  expect((await res!.json()).error).toContain("destination");
   s.close();
 });
 
@@ -777,6 +938,87 @@ test("export in remote mode pulls every selected profile from the hub, not the l
   s.close();
 });
 
+test("export as xlsx returns a workbook carrying the full identity", async () => {
+  const s = store();
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11"], format: "xlsx" }),
+    }),
+    {} as any,
+    s,
+    null as any,
+  );
+  expect(res!.status).toBe(200);
+  expect(res!.headers.get("content-disposition")).toContain("aliasmode-export.xlsx");
+  expect(res!.headers.get("content-type")).toContain("spreadsheetml.sheet");
+
+  const rows = await readXlsx(new Uint8Array(await res!.arrayBuffer()));
+  expect(rows).toHaveLength(1);
+  expect(rows[0]!.id).toBe("k1d0cd11");
+  expect(rows[0]!.proxy).toBe("1.2.3.4:8080:proxyuser:PROXYPASS");
+  expect(rows[0]!.resolution).toBe("1680*1050");
+  // The identity the export exists to move: cookies and the user-agent.
+  expect(JSON.parse(rows[0]!.cookie!)[0].name).toBe("auth_token");
+  expect(rows[0]!.ua).toContain("Chrome/143.0.0.0");
+  s.close();
+});
+
+test("export as xlsx pulls from the hub in remote mode, with secrets", async () => {
+  const s = store();
+  const asked: Array<[string[], boolean | undefined]> = [];
+  const base = parseExport(SAMPLE).profiles[0]!;
+  const remote = {
+    async getProfiles(ids: string[], full?: boolean) {
+      asked.push([ids, full]);
+      return ids.map((id) => ({ ...base, id }));
+    },
+  } as any;
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["hub0001"], format: "xlsx" }),
+    }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect(res!.status).toBe(200);
+  // A full-fidelity sheet without cookies would be a silent downgrade, so the
+  // hub fetch must ask for secrets exactly as the .txt export does.
+  expect(asked).toEqual([[["hub0001"], true]]);
+  expect((await readXlsx(new Uint8Array(await res!.arrayBuffer())))[0]!.id).toBe("hub0001");
+  s.close();
+});
+
+test("update-file accepts an edited .xlsx and applies only editable columns", async () => {
+  const s = store();
+  const book = await writeXlsx(
+    ["id", "name", "group", "cookie"],
+    [["k1d0cd11", "renamed", "NewGroup", "[]"]],
+  );
+  const form = new FormData();
+  form.append("files", new File([book as unknown as BlobPart], "edited.xlsx"));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null as any,
+  );
+  const body = (await res!.json()) as any;
+  expect(body.ok).toBe(true);
+  expect(body.updated).toBe(1);
+
+  const p = s.getProfile("k1d0cd11")!;
+  expect(p.name).toBe("renamed");
+  expect(p.group).toBe("NewGroup");
+  // Identity columns stay inert on re-upload, exactly as for .txt and .csv.
+  expect(p.cookies).toHaveLength(1);
+  s.close();
+});
+
 test("delete (standalone) blocks an open profile without stopping it or removing its data", async () => {
   const s = store();
   const dataRoot = join("/tmp", `ui-del-${process.pid}-${s.count()}`);
@@ -1126,6 +1368,34 @@ test("Cloud workspace API combines team state and forwards grants", async () => 
   expect(calls).toEqual([{ folderName: "Sales", accountId: "account1", permission: "view" }]);
   s.close();
 });
+test("Cloud workspace API forwards folder deletion and preserves Cloud conflicts", async () => {
+  const s = store();
+  const deleted: string[] = [];
+  const client = {
+    async deleteFolder(name: string) {
+      deleted.push(name);
+      if (name === "Used folder") {
+        throw new CloudApiError("Only an empty folder can be deleted.", "workspace_conflict", 409);
+      }
+      return { ok: true };
+    },
+  };
+  const options = { cloudConnection: { client } as unknown as CloudConnectionRuntime };
+  const request = (name: string) => new Request("http://x/ui/api/cloud-workspace", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "delete-folder", name }),
+  });
+
+  const removed = await handleUiRequest(request("Empty folder"), {} as any, s, null, options);
+  expect(removed!.status).toBe(200);
+  expect(await removed!.json()).toEqual({ ok: true });
+  const rejected = await handleUiRequest(request("Used folder"), {} as any, s, null, options);
+  expect(rejected!.status).toBe(409);
+  expect((await rejected!.json()).error).toBe("Only an empty folder can be deleted.");
+  expect(deleted).toEqual(["Empty folder", "Used folder"]);
+  s.close();
+});
+
 test("Cloud auth API accepts verified sign-in without exposing extra user metadata", async () => {
   const s = store();
   const cloudAuth = new CloudAuthRuntime({
@@ -1389,6 +1659,276 @@ test("Cloud auth API restores rotated credentials with the stored queue key", as
   s.close();
 });
 
+test("Cloud restore retains rotated auth, device, and queue state after a retryable status failure", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-retryable-restore-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  const queueKey = pendingSync.initialize().createdKey!;
+  const persisted: string[] = [];
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      return {
+        accessToken: "rotated-access-token",
+        refreshToken: "rotated-refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000, (token) => { persisted.push(token); });
+  let cleared = 0;
+  let restoredCredential = "";
+  const cloudConnection = {
+    accountId() { return "account1"; },
+    restoreCredential(value: string) { restoredCredential = value; },
+    client: {
+      async status() {
+        throw new CloudRequestError("offline", { kind: "transport", retryable: true });
+      },
+    },
+    clearDevice() { cleared++; },
+  } as unknown as CloudConnectionRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "stored-refresh-token",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(response!.status).toBe(503);
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session could not be restored. Try again when the connection is available.",
+    stage: "cloud_status",
+    retryable: true,
+    category: "network",
+    code: "network_unavailable",
+  });
+  expect(persisted).toEqual(["rotated-refresh-token"]);
+  expect(cloudAuth.state().authenticated).toBe(true);
+  expect(restoredCredential).toBe("stored-device-credential");
+  expect(cleared).toBe(0);
+  expect(pendingSync.queue()).toBeDefined();
+  expect(JSON.stringify(body)).not.toContain("stored-refresh-token");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  expect(body.queueKey).toBeUndefined();
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud restore clears only invalid session state after an unstructured 401 status failure", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-unauthorized-restore-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  const queueKey = pendingSync.initialize().createdKey!;
+  let durableSessionClears = 0;
+  let remoteSignOuts = 0;
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      return {
+        accessToken: "rotated-access-token",
+        refreshToken: "rotated-refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+    async signOut() { remoteSignOuts++; },
+  } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => { durableSessionClears++; });
+  let deviceClears = 0;
+  const cloudConnection = {
+    accountId() { return "account1"; },
+    restoreCredential() {},
+    client: {
+      async status() {
+        throw new CloudApiError("AliasMode Cloud /status returned non-JSON (401, text/html)", "internal_error", 401);
+      },
+    },
+    clearDevice() { deviceClears++; },
+  } as unknown as CloudConnectionRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "stored-refresh-token",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(response!.status).toBe(401);
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session is no longer valid. Sign in again.",
+    stage: "cloud_status",
+    retryable: false,
+    category: "authentication",
+    code: "authentication_invalid",
+  });
+  expect(durableSessionClears).toBe(1);
+  expect(remoteSignOuts).toBe(0);
+  expect(deviceClears).toBe(1);
+  expect(cloudAuth.state()).toEqual({ authenticated: false });
+  expect(pendingSync.queue()).toBeUndefined();
+  expect(pendingSync.initialize(queueKey).createdKey).toBeUndefined();
+  expect(JSON.stringify(body)).not.toContain("stored-refresh-token");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud restore clears only invalid session state after a permanent refresh failure", async () => {
+  const s = store();
+  const path = join(mkdtempSync(join(tmpdir(), "aliasmode-ui-permanent-restore-")), "pending.sqlite");
+  const pendingSync = new PendingSyncRuntime(path);
+  const queueKey = pendingSync.initialize().createdKey!;
+  let durableSessionClears = 0;
+  const cloudAuth = new CloudAuthRuntime({
+    async refresh() {
+      throw new SupabaseAuthRequestError(
+        "invalid refresh token",
+        { kind: "http", status: 401, retryable: false },
+      );
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => { durableSessionClears++; });
+  let deviceClears = 0;
+  const cloudConnection = {
+    accountId() { return undefined; },
+    clearDevice() { deviceClears++; },
+  } as unknown as CloudConnectionRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "invalid-stored-refresh",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session is no longer valid. Sign in again.",
+    stage: "auth_refresh",
+    retryable: false,
+    category: "authentication",
+    code: "authentication_invalid",
+  });
+  expect(response!.status).toBe(401);
+  expect(durableSessionClears).toBe(1);
+  expect(deviceClears).toBe(1);
+  expect(cloudAuth.state()).toEqual({ authenticated: false });
+  expect(pendingSync.queue()).toBeUndefined();
+  expect(pendingSync.initialize(queueKey).createdKey).toBeUndefined();
+  expect(JSON.stringify(body)).not.toContain("invalid-stored-refresh");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud restore treats unverified email as permanent and clears credentials locally", async () => {
+  const s = store();
+  let localClears = 0;
+  let remoteSignOuts = 0;
+  const cloudAuth = {
+    async restore() { throw new EmailVerificationRequiredError(); },
+    async clearStoredSession() { localClears++; },
+    async signOut() { remoteSignOuts++; },
+  } as unknown as CloudAuthRuntime;
+  let deviceClears = 0;
+  const cloudConnection = {
+    accountId() { return undefined; },
+    clearDevice() { deviceClears++; },
+  } as unknown as CloudConnectionRuntime;
+  let queueCloses = 0;
+  const pendingSync = {
+    queue() { return {}; },
+    close() { queueCloses++; },
+  } as unknown as PendingSyncRuntime;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "unverified-refresh",
+      deviceCredential: "stored-device-credential",
+      queueKey: "stored-queue-key",
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+  const body = await response!.json();
+
+  expect(response!.status).toBe(401);
+  expect(body).toEqual({
+    ok: false,
+    error: "Saved Cloud session is no longer valid. Sign in again.",
+    stage: "auth_refresh",
+    retryable: false,
+    category: "authentication",
+    code: "email_not_verified",
+  });
+  expect([localClears, remoteSignOuts, deviceClears, queueCloses]).toEqual([1, 0, 1, 1]);
+  expect(JSON.stringify(body)).not.toContain("unverified-refresh");
+  expect(JSON.stringify(body)).not.toContain("stored-device-credential");
+  expect(JSON.stringify(body)).not.toContain("stored-queue-key");
+  s.close();
+});
+
+test("Cloud restore treats device and membership revocation as permanent", async () => {
+  for (const code of ["device_revoked", "membership_revoked"] as const) {
+    const s = store();
+    let credentialClears = 0;
+    let deviceClears = 0;
+    let queueCloses = 0;
+    const cloudAuth = new CloudAuthRuntime({
+      async refresh() {
+        return {
+          accessToken: "access-token",
+          refreshToken: "rotated-refresh-token",
+          expiresIn: 60,
+          expiresAt: 61_000,
+          user: { id: "account1", email_confirmed_at: "verified" },
+        };
+      },
+      async signOut() {},
+    } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => { credentialClears++; });
+    const cloudConnection = {
+      accountId() { return "account1"; },
+      restoreCredential() {},
+      client: { async status() { throw new CloudApiError("revoked", code, 403); } },
+      clearDevice() { deviceClears++; },
+    } as unknown as CloudConnectionRuntime;
+    const pendingSync = {
+      queue() { return {}; },
+      close() { queueCloses++; },
+    } as unknown as PendingSyncRuntime;
+
+    const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refreshToken: "refresh", deviceCredential: "device", queueKey: "queue" }),
+    }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+
+    expect(response!.status).toBe(401);
+    expect(await response!.json()).toMatchObject({
+      stage: "cloud_status",
+      retryable: false,
+      category: "authentication",
+      code,
+    });
+    expect([credentialClears, deviceClears, queueCloses]).toEqual([1, 1, 1]);
+    s.close();
+  }
+});
+
 test("Cloud diagnostics route returns only sanitized current-process events", async () => {
   const s = store();
   const cloudBrowser = {
@@ -1421,6 +1961,28 @@ test("Cloud diagnostics route returns only sanitized current-process events", as
     s,
   );
   expect(await empty!.json()).toEqual({ events: [] });
+  s.close();
+});
+
+test("Cloud forget releases browsers and clears only stored session state", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const cloudAuth = {
+    async clearStoredSession() { calls.push("clearStoredSession"); },
+    async signOut() { throw new Error("remote sign-out must not run"); },
+  } as unknown as CloudAuthRuntime;
+  const cloudConnection = {
+    clearDevice() { calls.push("clearDevice"); },
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
+  const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return true; } } as any;
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/forget", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+
+  expect(response!.status).toBe(200);
+  expect(calls).toEqual(["releaseAll", "closeQueue", "clearDevice", "clearStoredSession"]);
   s.close();
 });
 

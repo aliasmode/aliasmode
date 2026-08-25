@@ -59,6 +59,7 @@ export class ProfileStore {
         binary_sha256 TEXT,
         persona_digest TEXT,
         headless INTEGER,
+        search_bootstrap_revision INTEGER,
         process_group_id INTEGER,
         root_start_time TEXT
       );
@@ -81,6 +82,7 @@ export class ProfileStore {
       "binary_sha256 TEXT",
       "persona_digest TEXT",
       "headless INTEGER",
+      "search_bootstrap_revision INTEGER",
       "process_group_id INTEGER",
       "root_start_time TEXT",
     ]) {
@@ -448,12 +450,14 @@ export class ProfileStore {
       .query(
         `INSERT INTO launches
            (profile_id, pid, debug_port, ws, started_at, relay_port, session_base_version,
-            binary_path, user_data_dir, binary_sha256, persona_digest, headless, process_group_id, root_start_time)
-         VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$headless,$pgid,$root_start)
+            binary_path, user_data_dir, binary_sha256, persona_digest, headless,
+            search_bootstrap_revision, process_group_id, root_start_time)
+         VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$headless,$search_bootstrap,$pgid,$root_start)
          ON CONFLICT(profile_id) DO UPDATE SET
            pid=$pid, debug_port=$port, ws=$ws, started_at=$at, relay_port=$relay,
            session_base_version=$base, binary_path=$binary, user_data_dir=$data,
            binary_sha256=$binary_sha, persona_digest=$persona, headless=$headless,
+           search_bootstrap_revision=$search_bootstrap,
            process_group_id=$pgid, root_start_time=$root_start`,
       )
       .run({
@@ -469,6 +473,7 @@ export class ProfileStore {
         $binary_sha: info.binarySha256 ?? null,
         $persona: info.personaDigest ?? null,
         $headless: info.headless === undefined ? null : Number(info.headless),
+        $search_bootstrap: info.searchBootstrapRevision ?? null,
         $pgid: info.processGroupId ?? null,
         $root_start: info.rootStartTime ?? null,
       });
@@ -566,6 +571,7 @@ function rowToLaunch(row: any): LaunchInfo {
     binarySha256: row.binary_sha256 ?? undefined,
     personaDigest: row.persona_digest ?? undefined,
     headless: row.headless == null ? undefined : Boolean(row.headless),
+    searchBootstrapRevision: row.search_bootstrap_revision ?? undefined,
     processGroupId: row.process_group_id ?? undefined,
     rootStartTime: row.root_start_time ?? undefined,
   };

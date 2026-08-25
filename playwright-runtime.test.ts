@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -265,6 +266,231 @@ bunAsNodeTest("worker retries until the persistent context appears without creat
   }
 });
 
+bunAsNodeTest("search provider uses a standalone headless profile and closes it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-search-provider-headless-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let launched = false;
+      let closed = false;
+      process.on("beforeExit", () => {
+        if (launched && !closed) process.exitCode = 9;
+      });
+      export const chromium = {
+        async connectOverCDP() { throw new Error("search provider attached to a live browser"); },
+        async launchPersistentContext(userDataDir, options) {
+          launched = true;
+          const mode = userDataDir.split("/").at(-1);
+          if (!options?.executablePath.endsWith("/cloakbrowser.exe")
+            || options?.headless !== true
+            || !options.args.includes("--no-first-run")
+            || !options.args.includes("--no-default-browser-check")
+            || options.args.some((arg) => arg.startsWith("--load-extension=")
+              || arg.startsWith("--disable-extensions-except="))) {
+            throw new Error("wrong headless search launch");
+          }
+          const page = {
+            async goto(url) {
+              if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
+            },
+            async evaluate() {
+              if (mode === "failure") throw new Error("settings unavailable");
+              return mode === "configured"
+                ? { status: "configured", engine: "DuckDuckGo" }
+                : { status: "already-default", engine: "DuckDuckGo" };
+            },
+          };
+          return {
+            pages: () => [page],
+            async newPage() { throw new Error("initial headless page was ignored"); },
+            async newBrowserCDPSession() { throw new Error("hidden target was created"); },
+            async close() { closed = true; },
+          };
+        },
+      };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const executablePath = join(root, "cloakbrowser.exe");
+    const executableContents = "approved CloakBrowser";
+    await writeFile(executablePath, executableContents);
+    const executableSha256 = createHash("sha256")
+      .update(executableContents)
+      .digest("hex");
+    await expect(runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256,
+      userDataDir: "C:/Profiles/configured",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
+      status: "configured",
+      engine: "DuckDuckGo",
+    });
+    await expect(runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256,
+      userDataDir: "C:/Profiles/existing",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
+      status: "already-default",
+      engine: "DuckDuckGo",
+    });
+    const changedBinary = await runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256: "0".repeat(64),
+      userDataDir: "C:/Profiles/configured",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
+    expect(changedBinary).toMatchObject({ code: "operation_failed" });
+    const failure = await runPlaywrightWorker("search-provider", {
+      executablePath,
+      executableSha256,
+      userDataDir: "C:/Profiles/failure",
+      launchTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
+    expect(failure).toMatchObject({ code: "operation_failed" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("profile card setup preserves a minimized browser window", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-profile-card-window-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let mode = "normal";
+      let created = false;
+      let raised = false;
+      let detached = false;
+      let browserDetached = false;
+      let targetCreated;
+      let targetDestroyed;
+      const browserCdp = {
+        on(method, listener) {
+          if (method === "Target.targetCreated") targetCreated = listener;
+          else if (method === "Target.targetDestroyed") targetDestroyed = listener;
+          else throw new Error("wrong browser CDP event");
+        },
+        async send(method, params) {
+          if (method === "Target.getTargets") {
+            return { targetInfos: [{ targetId: "existing-page", type: "page" }] };
+          }
+          if (method === "Target.setDiscoverTargets") {
+            if (params?.discover && mode === "arming-race") {
+              targetCreated?.({ targetInfo: { targetId: "existing-page", type: "page" } });
+              targetCreated?.({ targetInfo: { targetId: "during-arm-page", type: "page" } });
+            }
+            return {};
+          }
+          throw new Error("wrong browser CDP command");
+        },
+        async detach() { browserDetached = true; },
+      };
+      const automation = {
+        url() { return mode === "existing-card" ? "http://127.0.0.1/profile-card" : "about:blank"; },
+        async bringToFront() {
+          if (mode !== "normal") throw new Error("minimized window was raised");
+          raised = true;
+        },
+      };
+      const context = {
+        pages: () => mode === "missing-page" ? [] : [automation],
+        async newCDPSession(page) {
+          if (page !== automation) throw new Error("wrong CDP target");
+          return {
+            async send(method) {
+              if (method !== "Browser.getWindowForTarget") throw new Error("wrong CDP command");
+              if (mode === "query-failed") throw new Error("window state unavailable");
+              if (mode === "transient-target") {
+                targetCreated?.({ targetInfo: { targetId: "transient-page", type: "page" } });
+              }
+              return { bounds: { windowState: ["transient-target", "arming-race"].includes(mode) ? "minimized" : mode } };
+            },
+            async detach() { detached = true; },
+          };
+        },
+        async newPage() {
+          if (mode === "temporary") {
+            created = true;
+            targetCreated?.({ targetInfo: { targetId: "temporary-page", type: "page" } });
+            return {
+              async goto() {},
+              async close() { targetDestroyed?.({ targetId: "temporary-page" }); },
+            };
+          }
+          if (mode !== "normal") throw new Error("card created without known visible state");
+          created = true;
+          return { async goto() {} };
+        },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        mode = endpoint.split("//")[1];
+        created = false;
+        raised = false;
+        detached = false;
+        browserDetached = false;
+        targetCreated = undefined;
+        targetDestroyed = undefined;
+        return {
+          contexts: () => [context],
+          async newBrowserCDPSession() { return browserCdp; },
+          async close() {
+            if (mode === "existing-card") {
+              if (created || raised || detached || browserDetached) throw new Error("existing profile card was changed");
+              return;
+            }
+            if (!browserDetached) throw new Error("browser CDP session was not detached");
+            if (!["missing-page", "temporary"].includes(mode) && !detached) throw new Error("CDP session was not detached");
+            if (mode === "normal" && (!created || !raised)) throw new Error("visible profile card setup was incomplete");
+            if (mode === "temporary" && (!created || raised)) throw new Error("temporary profile card setup was incomplete");
+            if (!["normal", "temporary"].includes(mode) && (created || raised)) throw new Error("browser with unknown or minimized state was changed");
+          },
+        };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://normal", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://minimized", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://query-failed", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://missing-page", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://transient-target", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: ["transient-page"] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://arming-race", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: ["during-arm-page"] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://existing-card", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://temporary", url: "about:blank", temporary: true, connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
+      createdPageTargetIds: ["temporary-page"],
+      destroyedPageTargetIds: ["temporary-page"],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 bunAsNodeTest("worker restore failures preserve operation and outcome details", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-error-"));
   try {
@@ -284,6 +510,17 @@ bunAsNodeTest("worker restore failures preserve operation and outcome details", 
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
     expect(error).toMatchObject({ code: "operation_failed", details: { operation: "cookie_clear", outcome: "failed" } });
     expect(error.message).not.toContain("secret");
+
+    const emptyAuthoritativeError = await runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({ cookies: [], origins: [], tabs: ["https://x.com/home"] }),
+      urls: [],
+      authoritative: true,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(emptyAuthoritativeError).toMatchObject({
+      code: "operation_failed",
+      details: { operation: "cookie_clear", outcome: "failed" },
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -298,23 +535,37 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
     await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
     await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
-      const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/" };
+      const cookie = { name: "custom_auth", value: "value", domain: ".example.com", path: "/", partitionKey: "https://example.com", _crHasCrossSiteAncestor: false };
       let captureMode = "valid";
       let bypassServiceWorker = false;
       let liveUrl = "https://example.com/dashboard";
       const livePage = {
         url() { return liveUrl; },
         async goto(url) { liveUrl = url; },
-      };
-      const routes = new Map();
-      const context = {
-        async storageState() {
+        async evaluate(_fn, expectedOrigin) {
           return {
-            cookies: captureMode === "malformed-cookie" ? [{ name: "broken" }] : [cookie],
-            origins: [],
+            origin: expectedOrigin,
+            localStorage: [{ name: "session", value: captureMode === "malformed-storage" ? 42 : "active" }],
           };
         },
-        pages() { return [livePage]; },
+      };
+      const extraPages = [
+        { url: () => "https://example.com/dashboard" },
+        { url: () => "https://example.com/?__aliasmode_session_capture__=7" },
+        { url: () => "https://example.com/?__aliasmode_session_restore__=8" },
+        { url: () => "http://127.0.0.1:50400/card?id=profile1" },
+        { url: () => "about:blank" },
+      ];
+      const routes = new Map();
+      const context = {
+        async cookies() {
+          return captureMode === "malformed-cookie" ? [{ name: "broken" }]
+            : captureMode === "bad-partition-key" ? [{ ...cookie, partitionKey: true }]
+            : captureMode === "bad-cross-site-ancestor" ? [{ ...cookie, _crHasCrossSiteAncestor: "false" }]
+            : [cookie];
+        },
+        async storageState() { throw new Error("capture used storageState"); },
+        pages() { return [livePage, ...extraPages]; },
         async newPage() {
           return {
             currentUrl: "about:blank",
@@ -355,6 +606,8 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       export const chromium = { async connectOverCDP(endpoint) {
         bypassServiceWorker = false;
         if (endpoint.includes("malformed-cookie")) captureMode = "malformed-cookie";
+        else if (endpoint.includes("bad-partition-key")) captureMode = "bad-partition-key";
+        else if (endpoint.includes("bad-cross-site-ancestor")) captureMode = "bad-cross-site-ancestor";
         else if (endpoint.includes("malformed-storage")) captureMode = "malformed-storage";
         else if (endpoint.includes("internal-origin")) captureMode = "internal-origin";
         else if (endpoint.includes("service-worker")) captureMode = "service-worker";
@@ -368,13 +621,19 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       endpoint: "ws://browser",
     }, { runtimeRoot: root, timeoutMs: 5_000 }));
     expect(captured).toEqual({
-      cookies: [{ name: "custom_auth", value: "value", domain: ".example.com", path: "/" }],
+      cookies: [{
+        name: "custom_auth", value: "value", domain: ".example.com", path: "/",
+        partitionKey: "https://example.com", _crHasCrossSiteAncestor: false,
+      }],
       origins: [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
+      tabs: ["https://example.com/dashboard", "https://example.com/dashboard"],
     });
-    const malformedCookie = await runPlaywrightWorker("session-capture", {
-      endpoint: "ws://malformed-cookie",
-    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
-    expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+    for (const endpoint of ["ws://malformed-cookie", "ws://bad-partition-key", "ws://bad-cross-site-ancestor"]) {
+      const malformedCookie = await runPlaywrightWorker("session-capture", {
+        endpoint,
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+    }
 
     for (const endpoint of ["ws://malformed-storage", "ws://internal-origin"]) {
       const invalidOrigin = await runPlaywrightWorker("session-capture", {
@@ -401,6 +660,66 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       }),
       urls: [],
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker replaces stale pages and attempts every restored tab after a failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-tabs-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      const log = (event) => appendFile(${JSON.stringify(join(root, "events.log"))}, event + "\\n");
+      const makePage = (initialUrl, name) => ({
+        currentUrl: initialUrl,
+        url() { return this.currentUrl; },
+        async goto(url) {
+          this.currentUrl = url;
+          await log("goto:" + url);
+          if (url === "https://fails.example/") throw new Error("offline");
+        },
+        async close() { await log("close:" + name); },
+      });
+      const stale = makePage("https://stale.example/", "stale");
+      const blank = makePage("about:blank", "blank");
+      const extraBlank = makePage("about:blank", "extra-blank");
+      const card = makePage("http://127.0.0.1:50400/card?id=profile1", "card");
+      const pages = [stale, blank, extraBlank, card];
+      const context = {
+        pages: () => pages,
+        async newPage() { const page = makePage("about:blank", "created"); pages.push(page); return page; },
+        async clearCookies() {},
+      };
+      export const chromium = { async connectOverCDP() {
+        return { contexts: () => [context], async close() { await log("detach"); } };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const error = await runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({ cookies: [], origins: [] }),
+      urls: ["https://fails.example/", "https://ok.example/", "https://fails.example/"],
+      replacePages: true,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ details: { operation: "navigation", outcome: "failed" } });
+
+    const events = (await Bun.file(join(root, "events.log")).text()).trim().split("\n");
+    expect(events.filter((event) => event.startsWith("goto:"))).toEqual([
+      "goto:https://fails.example/",
+      "goto:https://ok.example/",
+      "goto:https://fails.example/",
+    ]);
+    expect(events).toContain("close:stale");
+    expect(events).toContain("close:extra-blank");
+    expect(events).not.toContain("close:card");
+    expect(events.at(-1)).toBe("detach");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -507,36 +826,77 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
         "https://closed.example": [{ name: "token", value: "fresh-closed-value" }],
         "https://live.example": [{ name: "live", value: "current-value" }],
       };
-      const livePage = { url: () => "https://live.example/dashboard" };
-      const pages = [];
-      const routes = new Map();
-      const context = {
-        pages: () => [livePage],
-        async newPage() {
-          const page = {
-            currentUrl: "about:blank",
-            closed: false,
-            url() { return this.currentUrl; },
-            async goto(url) {
-              const handler = routes.get(url);
-              if (!handler) throw new Error("network request was not intercepted");
-              await handler({ fulfill: async () => {} });
-              this.currentUrl = url;
-            },
-            async evaluate() { return { localStorage: storage[new URL(this.currentUrl).origin] ?? [] }; },
-            async close() { this.closed = true; },
-          };
-          pages.push(page);
-          return page;
-        },
-        async route(url, handler) { routes.set(url, handler); },
-        async unroute(url) { routes.delete(url); },
-        async storageState() {
-          if (pages.some((page) => page.closed)) throw new Error("capture page closed before storage snapshot");
-          return { cookies: [], origins: [] };
+      const livePage = {
+        url: () => "https://live.example/dashboard",
+        async goto() { throw new Error("live user page was navigated"); },
+        async evaluate() {
+          return { origin: "https://live.example", localStorage: storage["https://live.example"] };
         },
       };
-      export const chromium = { async connectOverCDP() { return { contexts: () => [context], async close() {} }; } };
+      let hiddenPage;
+      let routeHandler;
+      let storageDetached = false;
+      let browserDetached = false;
+      const context = {
+        pages: () => hiddenPage ? [livePage, hiddenPage] : [livePage],
+        async newPage() { throw new Error("capture used context.newPage"); },
+        async route(_url, handler) { routeHandler = handler; },
+        async unroute() { routeHandler = undefined; },
+        async storageState() { throw new Error("capture used mutating storageState"); },
+        async cookies(...urls) { if (urls.length) throw new Error("capture cookies were targeted"); return []; },
+        async newCDPSession(page) {
+          if (page !== hiddenPage) throw new Error("wrong storage CDP target");
+          return {
+            async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
+              if (["Network.enable", "Network.setBypassServiceWorker", "DOMStorage.enable"].includes(method)) return {};
+              if (method === "DOMStorage.getDOMStorageItems") {
+                return { entries: (storage[params.storageId.securityOrigin] ?? []).map(({ name, value }) => [name, value]) };
+              }
+              throw new Error("unexpected storage CDP method " + method);
+            },
+            async detach() { storageDetached = true; },
+          };
+        },
+      };
+      const browserCdp = {
+        async send(method, params) {
+          if (method === "Browser.getVersion") return { product: "Chrome/146.0.7680.153" };
+          if (method === "Target.getTargetInfo") return { targetInfo: { targetId: params.targetId, type: "other", url: "about:blank#__aliasmode_hidden_capture__" } };
+          if (method === "Browser.getWindowForTarget") throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
+          if (method === "Target.closeTarget") { hiddenPage = undefined; return { success: true }; }
+          if (method !== "Target.createTarget" || params.url !== "about:blank#__aliasmode_hidden_capture__"
+            || params.browserContextId !== undefined || params.background !== true || params.hidden !== true
+            || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== "1") {
+            throw new Error("wrong hidden target command");
+          }
+          hiddenPage = {
+            currentUrl: params.url,
+            url() { return this.currentUrl; },
+            async goto(url) {
+              this.currentUrl = url;
+              if (!routeHandler) throw new Error("capture route missing");
+              await routeHandler({ fulfill: async () => {} });
+            },
+            async close() { hiddenPage = undefined; },
+          };
+          return { targetId: "hidden-target" };
+        },
+        async detach() { browserDetached = true; },
+      };
+      export const chromium = { async connectOverCDP() { return {
+        contexts: () => [context],
+        async newBrowserCDPSession() { return browserCdp; },
+        async close() {
+          if (hiddenPage || routeHandler || !storageDetached || !browserDetached
+            || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== undefined) {
+            throw new Error("hidden storage target cleanup was incomplete");
+          }
+        },
+      }; } };
     `);
     await chmod(join(root, "node", "node.exe"), 0o755);
 
@@ -551,6 +911,448 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
         { origin: "https://empty.example", localStorage: [] },
         { origin: "https://live.example", localStorage: [{ name: "live", value: "current-value" }] },
       ],
+      tabs: ["https://live.example/dashboard"],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker proves hidden target identity through marker collisions and cleans independently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-hidden-proof-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      import { join } from "node:path";
+      const root = ${JSON.stringify(root)};
+      let mode;
+      let hiddenPage;
+      let collisionPage;
+      let routeHandler;
+      let browserSessionRequested = false;
+      let bypassed = false;
+      let collisionDetached = false;
+      let collisionNavigated = false;
+      let collisionClosed = false;
+      let targetDetached = false;
+      let pageClosed = false;
+      let targetClosed = false;
+      let browserDetached = false;
+      let creates = 0;
+      let navigations = 0;
+      let fulfillments = 0;
+      const commands = [];
+      const note = (value) => appendFile(join(root, mode + ".log"), value + "\\n");
+      const cleanupFailure = () => mode === "cleanup";
+      const context = {
+        pages: () => [collisionPage, hiddenPage].filter(Boolean),
+        async newPage() { await note("newPage"); throw new Error("capture used context.newPage"); },
+        async cookies(...urls) { if (urls.length) throw new Error("capture cookies were targeted"); return []; },
+        async storageState() { throw new Error("capture used storageState"); },
+        async route(_url, handler) {
+          await note("route");
+          if (commands.at(-1) !== "Browser.getWindowForTarget") throw new Error("route preceded hidden-target proof");
+          routeHandler = handler;
+        },
+        async unroute() { routeHandler = undefined; },
+        async newCDPSession(page) {
+          if (page === collisionPage) return {
+            async send(method, params) {
+              if (method !== "Target.getTargetInfo" || params !== undefined) throw new Error("collision target was used");
+              return { targetInfo: { targetId: "visible-target", type: "page" } };
+            },
+            async detach() { collisionDetached = true; await note("collision-detach"); },
+          };
+          if (page !== hiddenPage) throw new Error("wrong hidden page");
+          let identityProved = false;
+          return {
+            async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                identityProved = true;
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
+              if (!identityProved) throw new Error("hidden target used before identity proof");
+              if (method === "Network.enable" || method === "DOMStorage.enable") return {};
+              if (method === "Network.setBypassServiceWorker") { bypassed = params?.bypass === true; return {}; }
+              if (method === "DOMStorage.getDOMStorageItems") {
+                const origin = params.storageId.securityOrigin;
+                return { entries: [["token", origin]] };
+              }
+              throw new Error("unexpected target CDP method " + method);
+            },
+            async detach() {
+              targetDetached = true;
+              await note("target-detach");
+              if (cleanupFailure()) throw new Error("target detach failed");
+            },
+          };
+        },
+      };
+      const browserCdp = {
+        async send(method, params) {
+          if (["Browser.getVersion", "Target.createTarget", "Target.getTargetInfo", "Browser.getWindowForTarget"].includes(method)) commands.push(method);
+          if (method === "Browser.getVersion") {
+            if (mode === "unsupported") return { product: "Chrome/136.0.7103.0" };
+            if (mode === "unparseable") return { product: "Chrome/dev" };
+            return { product: "Chromium/146.0.7680.153" };
+          }
+          if (method === "Target.createTarget") {
+            creates++;
+            await note("create");
+            if (commands.slice(0, 2).join(",") !== "Browser.getVersion,Target.createTarget"
+              || params?.url !== "about:blank#__aliasmode_hidden_capture__"
+              || params?.background !== true || params?.hidden !== true || params?.browserContextId !== undefined) {
+              throw new Error("wrong hidden target command");
+            }
+            if (mode === "supported") collisionPage = {
+              currentUrl: params.url,
+              url() { return this.currentUrl; },
+              async goto() { collisionNavigated = true; await note("collision-goto"); },
+              async close() { collisionClosed = true; await note("collision-close"); },
+            };
+            hiddenPage = {
+              currentUrl: params.url,
+              url() { return this.currentUrl; },
+              async goto(url) {
+                navigations++;
+                await note("goto");
+                if (commands.at(-1) !== "Browser.getWindowForTarget") throw new Error("navigation preceded hidden-target proof");
+                this.currentUrl = url;
+                await routeHandler?.({ fulfill: async () => { fulfillments++; } });
+              },
+              async close() {
+                pageClosed = true;
+                await note("page-close");
+                if (cleanupFailure()) throw new Error("page close failed");
+                hiddenPage = undefined;
+              },
+            };
+            return { targetId: "hidden-target" };
+          }
+          if (method === "Target.getTargetInfo") {
+            if (mode === "target-error") throw new Error("target verification unavailable");
+            return { targetInfo: {
+              targetId: mode === "wrong-id" ? "other-target" : params.targetId,
+              type: mode === "wrong-type" ? "page" : "other",
+              url: mode === "wrong-url" ? "about:blank#other" : "about:blank#__aliasmode_hidden_capture__",
+            } };
+          }
+          if (method === "Browser.getWindowForTarget") {
+            if (mode === "attached-window") return { windowId: 17 };
+            if (mode === "window-error") throw new Error("Protocol error (Browser.getWindowForTarget): Permission denied");
+            const prefix = mode === "supported" ? "cdpSession.send: " : "";
+            throw new Error(prefix + "Protocol error (Browser.getWindowForTarget): Browser window not found");
+          }
+          if (method === "Target.closeTarget") {
+            targetClosed = true;
+            hiddenPage = undefined;
+            await note("target-close");
+            if (cleanupFailure()) throw new Error("target close failed");
+            return { success: true };
+          }
+          throw new Error("unexpected browser CDP method " + method);
+        },
+        async detach() {
+          browserDetached = true;
+          await note("browser-detach");
+          if (cleanupFailure()) throw new Error("browser detach failed");
+        },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        mode = endpoint.split("//")[1];
+        return {
+          contexts: () => [context],
+          async newBrowserCDPSession() {
+            browserSessionRequested = true;
+            if (mode === "empty") throw new Error("empty capture created a browser CDP session");
+            return browserCdp;
+          },
+          async close() {
+            if (mode === "empty") {
+              if (browserSessionRequested || commands.length) throw new Error("empty capture created a target");
+              return;
+            }
+            if (["supported", "cleanup"].includes(mode)) {
+              const expectedNavigations = mode === "supported" ? 2 : 1;
+              if (creates !== 1 || navigations !== expectedNavigations || fulfillments !== expectedNavigations
+                || !bypassed || routeHandler || hiddenPage || !targetDetached || !pageClosed || !targetClosed || !browserDetached
+                || (mode === "supported" && (!collisionDetached || collisionNavigated || collisionClosed
+                  || collisionPage?.url() !== "about:blank#__aliasmode_hidden_capture__"))) {
+                throw new Error("hidden capture target lifecycle was incomplete");
+              }
+            }
+          },
+        };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://supported",
+      captureSeed: { origins: ["https://a.example", "https://b.example"] },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
+      cookies: [],
+      origins: ["https://a.example", "https://b.example"].map((origin) => ({
+        origin, localStorage: [{ name: "token", value: origin }],
+      })),
+      tabs: [],
+    });
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://empty",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({ cookies: [], origins: [], tabs: [] });
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://cleanup",
+      captureSeed: { origins: ["https://closed.example"] },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
+      cookies: [],
+      origins: [{ origin: "https://closed.example", localStorage: [{ name: "token", value: "https://closed.example" }] }],
+      tabs: [],
+    });
+
+    const modes = [
+      "unsupported", "unparseable", "wrong-id", "wrong-type", "wrong-url",
+      "target-error", "attached-window", "window-error",
+    ];
+    for (const mode of modes) {
+      const error = await runPlaywrightWorker("session-capture", {
+        endpoint: `ws://${mode}`,
+        captureSeed: { origins: ["https://closed.example"] },
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(error).toMatchObject({ code: "operation_failed" });
+      const logFile = Bun.file(join(root, `${mode}.log`));
+      const events = await logFile.exists() ? (await logFile.text()).trim().split("\n") : [];
+      if (["unsupported", "unparseable"].includes(mode)) expect(events).not.toContain("create");
+      else {
+        expect(events).toContain("create");
+        expect(events).toContain("target-close");
+      }
+      expect(events).not.toContain("route");
+      expect(events).not.toContain("goto");
+      expect(events).not.toContain("newPage");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker preserves Telegram direct-CDP allowlists through a hidden target", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-closed-telegram-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const anchor = { url: () => "about:blank" };
+      let hiddenPage;
+      let routeHandler;
+      let storageDetached = false;
+      let browserDetached = false;
+      const context = {
+        pages: () => hiddenPage ? [anchor, hiddenPage] : [anchor],
+        async route(_url, handler) { routeHandler = handler; },
+        async unroute() { routeHandler = undefined; },
+        async storageState() { throw new Error("capture used storageState"); },
+        async cookies() { return []; },
+        async newCDPSession(page) {
+          if (page !== hiddenPage) throw new Error("wrong storage CDP target");
+          return {
+            async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
+              if (["Network.enable", "Network.setBypassServiceWorker", "DOMStorage.enable", "IndexedDB.enable"].includes(method)) return {};
+              if (method === "DOMStorage.getDOMStorageItems") return { entries: [["theme", "dark"]] };
+              if (method === "IndexedDB.requestDatabaseNames") return { databaseNames: ["cache-db", "tt-passcode"] };
+              if (method === "IndexedDB.requestDatabase") return {
+                databaseWithObjectStores: {
+                  name: params.databaseName,
+                  version: 1,
+                  objectStores: ["store", "cache"].map((name) => ({ name, keyPath: { type: "null" }, autoIncrement: false, indexes: [] })),
+                },
+              };
+              if (method === "IndexedDB.requestData") return {
+                objectStoreDataEntries: [
+                  { primaryKey: { value: "sessionEncrypted" }, value: { objectId: "session-value" } },
+                  { primaryKey: { value: "globalEncrypted" }, value: { objectId: "global-value" } },
+                ],
+                hasMore: false,
+              };
+              if (method === "Runtime.callFunctionOn") return {
+                result: { value: { encoded: { ta: { b: params.objectId === "session-value" ? "AQI=" : "AwQ=", k: "ui8" } } } },
+              };
+              throw new Error("unexpected storage CDP method " + method);
+            },
+            async detach() { storageDetached = true; },
+          };
+        },
+      };
+      const browserCdp = {
+        async send(method, params) {
+          if (method === "Browser.getVersion") return { product: "Chrome/146.0.7680.153" };
+          if (method === "Target.getTargetInfo") return { targetInfo: { targetId: params.targetId, type: "other", url: "about:blank#__aliasmode_hidden_capture__" } };
+          if (method === "Browser.getWindowForTarget") throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
+          if (method === "Target.closeTarget") { hiddenPage = undefined; return { success: true }; }
+          if (method !== "Target.createTarget" || params.url !== "about:blank#__aliasmode_hidden_capture__"
+            || params.browserContextId !== undefined || params.background !== true || params.hidden !== true
+            || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== "1") {
+            throw new Error("wrong hidden target command");
+          }
+          hiddenPage = {
+            currentUrl: params.url,
+            url() { return this.currentUrl; },
+            async goto(url) {
+              this.currentUrl = url;
+              if (!routeHandler) throw new Error("capture route missing");
+              await routeHandler({ fulfill: async () => {} });
+            },
+            async close() { hiddenPage = undefined; },
+          };
+          return { targetId: "hidden-target" };
+        },
+        async detach() { browserDetached = true; },
+      };
+      export const chromium = { async connectOverCDP() { return {
+        contexts: () => [context],
+        async newBrowserCDPSession() { return browserCdp; },
+        async close() {
+          if (hiddenPage || routeHandler || !storageDetached || !browserDetached
+            || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== undefined) {
+            throw new Error("hidden storage target cleanup was incomplete");
+          }
+        },
+      }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+      captureSeed: { origins: ["https://web.telegram.org"], telegramClient: "a" },
+    }, { runtimeRoot: root, timeoutMs: 5_000 }));
+    expect(captured).toEqual({
+      cookies: [],
+      origins: [{
+        origin: "https://web.telegram.org",
+        localStorage: [{ name: "theme", value: "dark" }],
+        indexedDB: [{
+          name: "tt-passcode",
+          version: 1,
+          stores: [{
+            name: "store",
+            records: [
+              { key: "sessionEncrypted", valueEncoded: { ta: { b: "AQI=", k: "ui8" } } },
+              { key: "globalEncrypted", valueEncoded: { ta: { b: "AwQ=", k: "ui8" } } },
+            ],
+            indexes: [],
+            autoIncrement: false,
+          }],
+        }],
+      }],
+      tabs: [],
+      telegramClient: "a",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker falls back safely when a live page changes origin during capture", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-origin-race-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      const livePage = {
+        url: () => "https://race.example/start",
+        async evaluate() {
+          return { origin: "https://elsewhere.example", localStorage: [{ name: "wrong", value: "origin" }] };
+        },
+      };
+      let hiddenPage;
+      let routeHandler;
+      const context = {
+        pages: () => hiddenPage ? [livePage, hiddenPage] : [livePage],
+        async route(_url, handler) { routeHandler = handler; },
+        async unroute() { routeHandler = undefined; },
+        async newCDPSession(page) {
+          if (page === livePage) return {
+            async send(method) {
+              if (method === "Target.getTargetInfo") return { targetInfo: { browserContextId: "context-1" } };
+              throw new Error("unexpected anchor CDP method " + method);
+            },
+            async detach() {},
+          };
+          if (page !== hiddenPage) throw new Error("wrong storage CDP target");
+          return {
+            async send(method, params) {
+              if (method === "Target.getTargetInfo") {
+                if (params !== undefined) throw new Error("candidate identity used a targetId");
+                return { targetInfo: { targetId: "hidden-target", type: "other" } };
+              }
+              if (["Network.enable", "Network.setBypassServiceWorker", "DOMStorage.enable"].includes(method)) return {};
+              if (method === "DOMStorage.getDOMStorageItems") return { entries: [["safe", "fallback"]] };
+              throw new Error("unexpected storage CDP method " + method);
+            },
+            async detach() {},
+          };
+        },
+        async cookies() { return []; },
+        async storageState() { throw new Error("capture used storageState"); },
+      };
+      const browserCdp = {
+        async send(method, params) {
+          if (method === "Browser.getVersion") return { product: "Chrome/146.0.7680.153" };
+          if (method === "Target.getTargetInfo") return { targetInfo: { targetId: params.targetId, type: "other", url: "about:blank#__aliasmode_hidden_capture__" } };
+          if (method === "Browser.getWindowForTarget") throw new Error("Protocol error (Browser.getWindowForTarget): Browser window not found");
+          if (method === "Target.closeTarget") { hiddenPage = undefined; return { success: true }; }
+          if (method !== "Target.createTarget" || params.browserContextId !== undefined
+            || params.background !== true || params.hidden !== true
+            || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== "1") {
+            throw new Error("wrong hidden target command");
+          }
+          hiddenPage = {
+            currentUrl: params.url,
+            url() { return this.currentUrl; },
+            async goto(url) {
+              this.currentUrl = url;
+              if (!routeHandler) throw new Error("capture route missing");
+              await routeHandler({ fulfill: async () => {} });
+            },
+            async close() { hiddenPage = undefined; },
+          };
+          return { targetId: "hidden-target" };
+        },
+        async detach() {},
+      };
+      export const chromium = { async connectOverCDP() { return {
+        contexts: () => [context],
+        async newBrowserCDPSession() { return browserCdp; },
+        async close() {
+          if (hiddenPage || routeHandler || process.env.PW_CHROMIUM_ATTACH_TO_OTHER !== undefined) {
+            throw new Error("hidden storage target cleanup was incomplete");
+          }
+        },
+      }; } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
+      endpoint: "ws://browser",
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
+      cookies: [],
+      origins: [{ origin: "https://race.example", localStorage: [{ name: "safe", value: "fallback" }] }],
+      tabs: ["https://race.example/start"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });

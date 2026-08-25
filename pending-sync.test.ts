@@ -140,6 +140,46 @@ test("pending sync retry accepts first valid closes and preserves conflicts", as
   state.queue.close();
 });
 
+test("pending sync skips an older same-profile conflict and submits a newer close", async () => {
+  const state = queue();
+  const conflictId = state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "stale-registration",
+    expectedVersion: 4,
+    payload: payload(),
+  });
+  await retryPendingSync(state.queue, {
+    async closeOpen() {
+      return {
+        ok: false as const,
+        error: { code: "version_conflict" as const, message: "stale", currentVersion: 5 },
+      };
+    },
+  }, "account1");
+  expect(state.queue.get(conflictId, "account1")?.status).toBe("conflict");
+
+  const newerId = state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "new-registration",
+    expectedVersion: 5,
+    payload: payload(),
+  });
+  const seen: Array<{ registrationId: string; expectedVersion: number }> = [];
+  expect(await retryPendingSync(state.queue, {
+    async closeOpen(registrationId, request) {
+      seen.push({ registrationId, expectedVersion: request.expectedVersion });
+      return { ok: true as const, status: "accepted" as const, version: 6 };
+    },
+  }, "account1")).toEqual({ accepted: 1, conflicts: 0, failed: 0 });
+
+  expect(seen).toEqual([{ registrationId: "new-registration", expectedVersion: 5 }]);
+  expect(state.queue.get(newerId, "account1")).toBeNull();
+  expect(state.queue.get(conflictId, "account1")?.status).toBe("conflict");
+  state.queue.close();
+});
+
 test("concurrent pending retries report only durable accepted transitions", async () => {
   const state = queue();
   state.queue.enqueue({

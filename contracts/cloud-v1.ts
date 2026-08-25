@@ -105,6 +105,8 @@ export interface CloudCookie {
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: "Strict" | "Lax" | "None";
+  partitionKey?: string;
+  _crHasCrossSiteAncestor?: boolean;
 }
 
 export interface CloudOriginStorage {
@@ -116,6 +118,8 @@ export interface CloudOriginStorage {
 export interface PortableSessionV1 {
   cookies: CloudCookie[];
   origins?: CloudOriginStorage[];
+  /** Ordered normal web tabs. Duplicates are intentional. */
+  tabs?: string[];
   telegramClient?: "a" | "k";
 }
 
@@ -293,6 +297,17 @@ export interface CreateProfileResponse {
   ok: true;
   profile: CloudProfileSummary;
   payloadDigest: string;
+}
+
+export interface ImportProfilesRequest {
+  destination: string;
+  profiles: PortableProfileV1[];
+}
+
+export interface ImportProfilesResponse {
+  ok: true;
+  imported: number;
+  ids: string[];
 }
 
 export interface GetProfileResponse {
