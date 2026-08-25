@@ -135,6 +135,22 @@ function canonicalWebOrigin(value) {
   }
 }
 
+function canonicalUserPageUrl(value) {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    if (parsed.searchParams.has("__aliasmode_session_capture__")
+      || parsed.searchParams.has("__aliasmode_session_restore__")) return undefined;
+    if (parsed.hostname === "127.0.0.1"
+      && parsed.pathname === "/card"
+      && parsed.searchParams.has("id")) return undefined;
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeWebOriginStorage(origin, storage) {
   if (!canonicalWebOrigin(origin) || !Array.isArray(storage?.localStorage)) return undefined;
   const localStorage = storage.localStorage
@@ -594,6 +610,7 @@ async function createReadOnlyStorageReader(browser, context) {
 
 async function captureSession(browser, payload) {
   const context = contextOf(browser);
+  const tabs = context.pages().map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
   const seed = payload.captureSeed;
   if (seed !== undefined && (!seed || typeof seed !== "object" || Array.isArray(seed)
     || !Array.isArray(seed.origins)
@@ -606,7 +623,9 @@ async function captureSession(browser, payload) {
   let telegramClient = seed?.telegramClient;
   for (const page of context.pages()) {
     try {
-      const url = new URL(page.url());
+      const pageUrl = canonicalUserPageUrl(page.url());
+      if (!pageUrl) continue;
+      const url = new URL(pageUrl);
       const origin = canonicalWebOrigin(url.origin);
       if (!origin) continue;
       origins.add(origin);
@@ -643,10 +662,48 @@ async function captureSession(browser, payload) {
       (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean") ||
       (cookie.sameSite !== undefined && !["Strict", "Lax", "None"].includes(cookie.sameSite))
     )) throw new Error("Invalid captured cookies");
-    return JSON.stringify({ cookies, origins: [...byOrigin.values()], ...(telegramClient ? { telegramClient } : {}) });
+    return JSON.stringify({
+      cookies,
+      origins: [...byOrigin.values()],
+      tabs,
+      ...(telegramClient ? { telegramClient } : {}),
+    });
   } finally {
     await reader?.close();
   }
+}
+
+async function navigatePages(context, urls, replacePages = false) {
+  const targets = (Array.isArray(urls) ? urls : []).map(canonicalUserPageUrl).filter(Boolean);
+  const existing = [...context.pages()];
+  let blank = existing.find((page) => {
+    try { return page.url() === "about:blank"; } catch { return false; }
+  });
+  if (!replacePages && existing.some((page) => {
+    try { return canonicalUserPageUrl(page.url()) !== undefined; } catch { return false; }
+  })) blank = undefined;
+  let firstError;
+
+  if (replacePages) {
+    if (!blank) blank = await context.newPage();
+    for (const page of existing) {
+      let url = "";
+      try { url = page.url(); } catch {}
+      const disposable = canonicalUserPageUrl(url) !== undefined || (url === "about:blank" && page !== blank);
+      if (!disposable) continue;
+      try { await page.close(); } catch (error) { firstError ??= error; }
+    }
+  }
+
+  for (let index = 0; index < targets.length; index++) {
+    try {
+      const page = index === 0 && blank ? blank : await context.newPage();
+      await page.goto(targets[index], { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError) throw firstError;
 }
 
 async function restoreSession(browser, context, payload) {
@@ -656,7 +713,7 @@ async function restoreSession(browser, context, payload) {
     ? bundle.origins.map((target) => normalizeWebOriginStorage(target?.origin, target)).filter(Boolean)
     : [];
   const cookies = Array.isArray(bundle.cookies) ? bundle.cookies : [];
-  if (!cookies.length && !origins.length && !(payload.urls || []).length) return null;
+  if (!cookies.length && !origins.length && !(payload.urls || []).length && !payload.replacePages && !payload.authoritative) return null;
   const storageSource = origins.some((target) => target.indexedDB?.length)
     ? await sessionStep("origin_storage", storageScriptSource)
     : undefined;
@@ -729,12 +786,7 @@ async function restoreSession(browser, context, payload) {
   await sessionStep("cookie_clear", () => context.clearCookies());
   const inject = cookies.filter((cookie) => !LINKEDIN_DEVICE_COOKIES.has(cookie.name));
   if (inject.length) await sessionStep("cookie_add", () => context.addCookies(inject));
-  await sessionStep("navigation", async () => {
-    for (let i = 0; i < (payload.urls || []).length; i++) {
-      const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
-      await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
-    }
-  });
+  await sessionStep("navigation", () => navigatePages(context, payload.urls, !!payload.replacePages));
   return null;
 }
 
@@ -896,13 +948,13 @@ async function operate(chromium, operation, payload) {
     if (operation === "session-restore") return restoreSession(browser, context, payload);
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
     if (operation === "navigate") {
-      for (let i = 0; i < payload.urls.length; i++) {
-        const page = i === 0 ? context.pages()[0] || await context.newPage() : await context.newPage();
-        await page.goto(payload.urls[i], { waitUntil: "domcontentloaded", timeout: 30_000 });
-      }
+      await navigatePages(context, payload.urls, !!payload.replacePages);
       return null;
     }
     if (operation === "profile-card") {
+      if (!payload.temporary && context.pages().some((page) => {
+        try { return typeof page.url === "function" && page.url() === payload.url; } catch { return false; }
+      })) return { createdPageTargetIds: [] };
       if (typeof browser.newBrowserCDPSession !== "function") throw new Error("browser target observation is unavailable");
       const targetCdp = await browser.newBrowserCDPSession();
       const existingPageTargetIds = new Set();

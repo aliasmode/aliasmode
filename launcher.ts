@@ -21,6 +21,7 @@ import {
   readdirSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   statSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -32,7 +33,7 @@ export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "./search-provider.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
-import { SessionRestoreError } from "./session.ts";
+import { canonicalUserPageUrl, SessionRestoreError } from "./session.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
@@ -48,6 +49,14 @@ function needsProxyRelay(profile: Profile): boolean {
 }
 
 const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 1;
+const SEARCH_PROVIDER_BOOTSTRAP_MARKER = `.aliasmode-search-bootstrap-v${SEARCH_PROVIDER_BOOTSTRAP_REVISION}`;
+const NATIVE_SESSION_ARTIFACTS = [
+  "Default/Sessions",
+  "Default/Current Session",
+  "Default/Current Tabs",
+  "Default/Last Session",
+  "Default/Last Tabs",
+];
 
 export type BrowserLaunchFailure =
   | "preflight"
@@ -61,17 +70,6 @@ export class BrowserLaunchError extends Error {
 
   constructor(readonly failure: BrowserLaunchFailure) {
     super(`browser_launch/${failure} (failed)`);
-  }
-}
-
-export function canonicalUserPageUrl(raw: string): string | null {
-  try {
-    const url = new URL(raw);
-    if ((url.protocol !== "http:" && url.protocol !== "https:")
-      || url.searchParams.has("__aliasmode_session_capture__")) return null;
-    return url.href;
-  } catch {
-    return null;
   }
 }
 
@@ -97,7 +95,7 @@ export interface SpawnedProcess {
 
 export type SpawnFn = (binary: string, args: string[]) => SpawnedProcess;
 export type FetchFn = (url: string) => Promise<{ ok: boolean; json(): Promise<any> }>;
-export type LaunchNavigator = (ws: string, urls: string[]) => Promise<void>;
+export type LaunchNavigator = (ws: string, urls: string[], replacePages?: boolean) => Promise<void>;
 export interface BrowserProcessIdentity {
   profileId: string;
   debugPort: number;
@@ -366,6 +364,8 @@ export interface LauncherOptions {
 
 export interface LaunchStartOptions {
   autoNavigate?: boolean;
+  /** Use Chromium's on-disk last session. Defaults on for Windows Local launches. */
+  restoreLastSession?: boolean;
   resetStorage?: boolean;
   /** Hub session version the browser is being opened from; persisted for safe survivor reattach. */
   sessionBaseVersion?: number;
@@ -861,6 +861,7 @@ export class Launcher {
     userDataDir: string,
     launchArgs: string[],
     relayPort?: number,
+    restoreLastSession = false,
   ): string[] {
     const { chromeArgs } = splitLaunchUrls(launchArgs);
     const forwardedArgs = validateForwardedLaunchArgs(chromeArgs);
@@ -899,6 +900,7 @@ export class Launcher {
     // headless ON. So headful = omit the flag entirely; headless = pass it.
     // Headful matches AdsPower (real windows) and avoids the headless signal.
     if (this.headless) args.push("--headless=new");
+    if (restoreLastSession) args.push("--restore-last-session");
     // Relayed proxies use a loopback HTTP endpoint. Everything else uses the
     // upstream proxy flag directly.
     if (relayPort) args.push(`--proxy-server=http://127.0.0.1:${relayPort}`);
@@ -926,9 +928,9 @@ export class Launcher {
     return args;
   }
 
-  async navigate(ws: string, urls: string[]): Promise<void> {
-    if (urls.length === 0) return;
-    await this.navigateFn(ws, urls);
+  async navigate(ws: string, urls: string[], replacePages = false): Promise<void> {
+    if (urls.length === 0 && !replacePages) return;
+    await this.navigateFn(ws, urls, replacePages);
   }
 
   private identityCertificationKey(profileId: string): string | null {
@@ -1257,6 +1259,10 @@ export class Launcher {
     // touch its files or a second Chromium is spawned onto it.
     await this.reapForeignProfileDirHolders(profileId, userDataDir);
 
+    const nativeRestoreRequested = this.hostPlatform === "win32" && opts.restoreLastSession !== false;
+    // Only existence is inspected. Chromium owns the opaque session bytes.
+    const nativeSessionAvailable = nativeRestoreRequested && this.hasNativeSessionArtifacts(userDataDir);
+
     // Repair a corrupt Preferences before launch. A previous unclean exit (force-kill
     // mid-write, or two Chromes racing the same persistent dir when a browser leaked)
     // can leave Default/Preferences unparseable — Chromium then pops a modal "Your
@@ -1279,15 +1285,15 @@ export class Launcher {
     // e.g. a first-migration Telegram open with no hub session — so we never wipe the only local auth).
     this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
 
-    const searchPrepared = await this.ensureSearchProvider(profileId, {
+    const searchPreparation = await this.ensureSearchProvider(profileId, {
       executablePath: launchBinaryPath,
       executableSha256: verifiedBinary.sha256,
       userDataDir,
-    });
-    const searchBootstrapRevision = searchPrepared
+    }, nativeRestoreRequested);
+    const searchBootstrapRevision = searchPreparation.prepared
       ? SEARCH_PROVIDER_BOOTSTRAP_REVISION
       : undefined;
-    if (searchPrepared) {
+    if (searchPreparation.helperRan) {
       // A failed helper can leave Chromium children or unclean-exit markers.
       // Confirm exclusive profile ownership and repair those leftovers before
       // the managed headful generation starts.
@@ -1296,6 +1302,7 @@ export class Launcher {
       this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "search provider setup");
     }
+    const restoreLastSession = nativeSessionAvailable && !searchPreparation.helperRan;
     if (profile.proxy) this.persistWebRtcPolicyPreference(profileId);
 
     // Identity bookmark (#2): `<name> · #<serial>` on a visible bookmark bar, pointing at the card.
@@ -1343,7 +1350,7 @@ export class Launcher {
         this.log(`proxy relay ready for ${profileId}`);
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
-      const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort);
+      const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort, restoreLastSession);
       this.log(`launching ${profileId} on port ${port} (seed ${profile.fingerprintSeed})`);
       launchStartedAt = Date.now();
       this.verifiedExternal.delete(profileId);
@@ -1398,6 +1405,9 @@ export class Launcher {
       const ws = await this.waitForCdp(port, proc);
       this.log(`${profileId}: launch stage CDP ready`);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser startup");
+      const startupTargets = restoreLastSession || SESSION_LAUNCH
+        ? await this.startupPageTargets(port, profileId, restoreLastSession && startupUrls.length === 0)
+        : { userUrls: [], profileCardPresent: false };
 
       // Label the window so the operator can tell which account this browser is
       // among many open profiles (the cue AdsPower's panel gave). Registered
@@ -1413,8 +1423,8 @@ export class Launcher {
       }
 
       // Identity card (#3): open the AdsPower-style landing page in its OWN tab (leaves the
-      // automation's tab 0 untouched). Visible-mode only; best-effort.
-      if (SESSION_LAUNCH) {
+      // automation's tab 0 untouched). Native session restore may already contain it.
+      if (SESSION_LAUNCH && startupTargets && !startupTargets.profileCardPresent) {
         try {
           await openProfileCardTab(ws, profileCardUrl(profileId));
         } catch (err) {
@@ -1456,18 +1466,20 @@ export class Launcher {
           }
         }
       }
-      // Open the account's platform home page once the session is seeded —
-      // unless the caller already passed startup URLs. Deferred to a post-seed
-      // CDP navigation (never an argv URL) so the first page load runs with the
-      // injected cookies in place rather than rendering logged-out. Remote mode
-      // suppresses this (autoNavigate=false) and navigates itself only after it
-      // has written the authoritative hub session.
+      // Open explicit caller URLs after any natively restored tabs. The platform
+      // home is only a true empty-state fallback. An uncertain target probe must
+      // not replace a page that Chromium may still be restoring.
       if (opts.autoNavigate ?? true) {
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "account navigation");
         // Standalone mode has no roamed bundle carrying the last A/K choice, so platformHomeUrl keeps
         // its historical K fallback. Remote mode passes the captured client explicitly (defaulting A).
         const home = platformHomeUrl(profile.platform);
-        const urlsToOpen = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
+        const restoredUserPages = restoreLastSession ? startupTargets?.userUrls.length ?? null : 0;
+        const urlsToOpen = startupUrls.length > 0
+          ? startupUrls
+          : restoredUserPages === 0 && home
+            ? [home]
+            : [];
         if (urlsToOpen.length > 0) {
           try {
             await this.navigate(ws, urlsToOpen);
@@ -1797,11 +1809,78 @@ export class Launcher {
     return adopted;
   }
 
+  private async startupPageTargets(
+    port: number,
+    profileId: string,
+    waitForRestoredUserPage = false,
+  ): Promise<{ userUrls: string[]; profileCardPresent: boolean } | null> {
+    const deadline = Date.now() + (waitForRestoredUserPage ? 1_000 : 0);
+    let latest: { userUrls: string[]; profileCardPresent: boolean } | null = null;
+    do {
+      try {
+        const response = await this.fetchFn(`http://127.0.0.1:${port}/json/list`);
+        if (response.ok) {
+          const raw = await response.json();
+          if (Array.isArray(raw)) {
+            const cardUrl = profileCardUrl(profileId);
+            const userUrls: string[] = [];
+            let profileCardPresent = false;
+            for (const target of raw) {
+              if (target?.type !== "page" || typeof target.url !== "string") continue;
+              if (target.url === cardUrl) profileCardPresent = true;
+              const userUrl = canonicalUserPageUrl(target.url);
+              if (userUrl) userUrls.push(userUrl);
+            }
+            latest = { userUrls, profileCardPresent };
+            if (!waitForRestoredUserPage || userUrls.length > 0) return latest;
+          }
+        }
+      } catch {}
+      if (Date.now() >= deadline) return latest;
+      await Bun.sleep(50);
+    } while (true);
+  }
+
+  private hasNativeSessionArtifacts(userDataDir: string): boolean {
+    return NATIVE_SESSION_ARTIFACTS.some((relativePath) =>
+      existsSync(join(userDataDir, ...relativePath.split("/")))
+    );
+  }
+
+  private writeSearchBootstrapMarker(profileId: string, userDataDir: string): boolean {
+    const marker = join(userDataDir, SEARCH_PROVIDER_BOOTSTRAP_MARKER);
+    const temporary = `${marker}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, `${SEARCH_PROVIDER_BOOTSTRAP_REVISION}\n`);
+      renameSync(temporary, marker);
+      return true;
+    } catch (err) {
+      try { rmSync(temporary, { force: true }); } catch {}
+      this.log(`search provider marker failed for ${profileId} (setup skipped): ${err instanceof Error ? err.message : err}`);
+      return false;
+    }
+  }
+
   private async ensureSearchProvider(
     profileId: string,
     options: SearchProviderBootstrapOptions,
-  ): Promise<boolean> {
-    if (this.headless || !this.ensureSearchProviderFn) return false;
+    protectNativeSession: boolean,
+  ): Promise<{ prepared: boolean; helperRan: boolean }> {
+    if (this.headless || !this.ensureSearchProviderFn) return { prepared: false, helperRan: false };
+
+    if (this.hostPlatform === "win32") {
+      const marker = join(options.userDataDir, SEARCH_PROVIDER_BOOTSTRAP_MARKER);
+      if (existsSync(marker)) return { prepared: true, helperRan: false };
+      if (!this.writeSearchBootstrapMarker(profileId, options.userDataDir)) {
+        // Never launch a helper that can run again when its one-shot marker was
+        // not made durable. The managed browser can still launch normally.
+        return { prepared: true, helperRan: false };
+      }
+      if (protectNativeSession && this.hasNativeSessionArtifacts(options.userDataDir)) {
+        this.log(`${profileId}: existing Chromium session kept; search helper skipped`);
+        return { prepared: true, helperRan: false };
+      }
+    }
 
     try {
       const result = await this.ensureSearchProviderFn(options);
@@ -1815,7 +1894,7 @@ export class Launcher {
     } catch (err) {
       this.log(`search provider setup failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
     }
-    return true;
+    return { prepared: true, helperRan: true };
   }
 
   /**
@@ -2419,6 +2498,29 @@ export class Launcher {
     this.log(`survivor identity verified for ${profileId}: host persona + relay restored`);
   }
 
+  /** Return a proven durable survivor-policy mismatch, or null for transport uncertainty. */
+  private survivorPolicyMismatch(profileId: string, generation: string): string | null {
+    try {
+      const profile = this.store.getProfile(profileId);
+      if (!profile) throw new Error(`cannot verify survivor ${profileId}: profile is missing`);
+      this.assertHostCompatibility(profile);
+      const approvedBinarySha256 = this.approvedBinarySha256();
+      const launch = this.store.getLaunch(profileId);
+      if (!launch || `${launch.debugPort}:${launch.startedAt}` !== generation) return null;
+      this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
+      if (
+        !this.headless
+        && !this.procs.has(profileId)
+        && launch.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
+      ) {
+        throw new Error("safe search setup was not attempted");
+      }
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   /**
    * Safe externally-visible Active state. Raw active() is only a liveness
    * primitive; a survivor is not exposed until this manager has certified its
@@ -2445,12 +2547,24 @@ export class Launcher {
         this.clearIdentityCertification(profileId);
         const current = this.store.getLaunch(profileId);
         if (!current || `${current.debugPort}:${current.startedAt}` !== targetGeneration) return false;
-        const stopped = await this.stop(profileId).catch(() => false);
         const detail = error instanceof Error ? error.message : String(error);
+        const mismatch = this.survivorPolicyMismatch(profileId, targetGeneration);
+        if (mismatch) {
+          const stopped = await this.stop(profileId).catch(() => false);
+          this.log(
+            stopped
+              ? `survivor identity certification failed (${mismatch}); browser stopped with confirmed death`
+              : `survivor identity certification failed (${mismatch}); stop was not confirmed and ownership was retained`,
+          );
+          return false;
+        }
+        const reconciled = await this.reconcileOrphan(profileId, {
+          debugPort: current.debugPort,
+          startedAt: current.startedAt,
+        }).catch(() => "alive" as const);
         this.log(
-          stopped
-            ? `survivor identity certification failed (${detail}); browser stopped with confirmed death`
-            : `survivor identity certification failed (${detail}); stop was not confirmed and ownership was retained`,
+          `survivor identity certification was inconclusive (${detail}); ` +
+          `non-destructive reconciliation reported ${reconciled}`,
         );
         return false;
       } finally {
@@ -3720,10 +3834,11 @@ function writeIdentityBookmark(userDataDir: string, name: string, url: string): 
   } catch { /* best-effort: identity extras must never fail a launch */ }
 }
 
-const defaultNavigate: LaunchNavigator = async (ws, urls) => {
+const defaultNavigate: LaunchNavigator = async (ws, urls, replacePages = false) => {
   await runPlaywrightWorker("navigate", {
     endpoint: ws,
     urls,
+    replacePages,
     connectTimeoutMs: 30_000,
   });
 };

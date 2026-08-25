@@ -32,6 +32,7 @@ test("portable profile codec round-trips profile secrets and normalized session 
   const bundle = JSON.stringify({
     cookies: [{ name: "auth", value: "secret", domain: ".telegram.org", path: "/" }],
     origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "dc", value: "2" }] }],
+    tabs: ["https://web.telegram.org/k/", "https://example.com/path", "https://web.telegram.org/k/"],
     telegramClient: "k",
   });
   const encoded = encodePortableProfile(source, bundle);
@@ -45,6 +46,7 @@ test("portable profile codec round-trips profile secrets and normalized session 
     },
     session: {
       cookies: [{ name: "auth", value: "secret" }],
+      tabs: ["https://web.telegram.org/k/", "https://example.com/path", "https://web.telegram.org/k/"],
       telegramClient: "k",
     },
   });
@@ -59,6 +61,12 @@ test("portable profile codec round-trips profile secrets and normalized session 
     seeded: false,
   });
   expect(JSON.parse(decoded.sessionBundle)).toEqual(encoded.session);
+});
+
+test("portable profile codec keeps legacy sessions without a tabs field compatible", () => {
+  const encoded = encodePortableProfile(profile(), JSON.stringify({ cookies: [], origins: [] }));
+  expect("tabs" in encoded.session).toBe(false);
+  expect(JSON.parse(decodePortableProfile(encoded).sessionBundle)).toEqual({ cookies: [], origins: [] });
 });
 
 test("portable profile codec uses stored cookies when no captured bundle exists", () => {

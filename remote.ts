@@ -24,6 +24,7 @@ import { isTelegramPlatform, splitLaunchUrls, platformHomeUrl, type Launcher } f
 import {
   bundleHasRestorableLogin,
   bundleHasTelegramOrigin,
+  bundleTabUrls,
   bundleTelegramClient,
   parseCapturedSessionBundle,
   sessionCaptureSeed,
@@ -56,14 +57,18 @@ type HubLike = Pick<
 > & Partial<Pick<HubClient, "getRosterSnapshot" | "publishAutomationHealthSnapshot">>;
 type LauncherLike = Pick<Launcher, "start" | "active" | "navigate">
   & { stop(profileId: string): Promise<boolean> }
-  & Partial<Pick<Launcher, "diagnoseCdp" | "verifyRunningIdentity">>;
+  & Partial<Pick<Launcher, "diagnoseCdp" | "verifyRunningIdentity" | "reconcileOrphan">>;
 
 export interface RemoteDeps {
   hub: HubLike;
   launcher: LauncherLike;
   store: ProfileStore;
   readSession: (ws: string, captureSeed: SessionCaptureSeed) => Promise<string>;
-  writeSession: (ws: string, bundle: string) => Promise<void>;
+  writeSession: (
+    ws: string,
+    bundle: string,
+    options?: { authoritative?: boolean },
+  ) => Promise<void>;
   log?: (msg: string) => void;
   /** Heartbeat interval; 0 disables the auto timer (tests drive heartbeatOnce). */
   heartbeatMs?: number;
@@ -883,6 +888,7 @@ export class RemoteCoordinator {
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
       const { ws, port } = await this.d.launcher.start(profileId, chromeArgs, {
         autoNavigate: false,
+        restoreLastSession: false,
         resetStorage,
         // A manager crash after spawn but before the authoritative restore
         // leaves an unmistakably provisional survivor.
@@ -897,16 +903,19 @@ export class RemoteCoordinator {
       // Fail closed only on restore failure. Losing the writer lease changes this
       // browser to advisory mode, but no longer blocks or tears down the launch.
       if (ownsWriterLease) ownsWriterLease = await this.confirmWriterOwnership(profileId, "before session restore");
-      await this.d.writeSession(ws, bundle);
+      await this.d.writeSession(ws, bundle, { authoritative: true });
       if (ownsWriterLease) ownsWriterLease = await this.confirmWriterOwnership(profileId, "after session restore");
-      // Now that the session is in place, open the caller's URLs or fall back to
-      // the account's platform home page.
+      // Now that the session is in place, replace stale normal pages with the
+      // bundle's saved tabs followed by explicit caller URLs.
       const home = platformHomeUrl(profile.platform, bundleTelegramClient(bundle) ?? "a");
-      const urlsToOpen = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
-      if (urlsToOpen.length > 0) {
-        await this.d.launcher.navigate(ws, urlsToOpen).catch(async (e) => this.log(`navigate failed for ${profileId}: ${msg(e)}${await this.cdpDiagWithin(profileId)}`));
-        if (ownsWriterLease) ownsWriterLease = await this.confirmWriterOwnership(profileId, "after startup navigation");
-      }
+      const savedTabs = bundleTabUrls(bundle);
+      const urlsToOpen = savedTabs.length > 0 || startupUrls.length > 0
+        ? [...savedTabs, ...startupUrls]
+        : home
+          ? [home]
+          : [];
+      await this.d.launcher.navigate(ws, urlsToOpen, true).catch(async (e) => this.log(`navigate failed for ${profileId}: ${msg(e)}${await this.cdpDiagWithin(profileId)}`));
+      if (ownsWriterLease) ownsWriterLease = await this.confirmWriterOwnership(profileId, "after startup navigation");
       // Mark ready only after restore and every ownership boundary has passed.
       this.d.store.updateLaunchSessionBaseVersion(profileId, baseVersion);
 
@@ -1197,9 +1206,33 @@ export class RemoteCoordinator {
     const active = await this.d.launcher.active(profileId).catch(() => true);
     if (!stillCurrent()) return;
     if (!active) {
-      this.log(`${profileId}: browser is gone — releasing the lock`);
-      await this.stopAfterHeartbeat(profileId, true, currentToken);
-      return;
+      const launch = this.d.store.getLaunch(profileId);
+      let dead = !launch;
+      if (launch && this.d.launcher.reconcileOrphan) {
+        try {
+          const reconciled = await this.d.launcher.reconcileOrphan(profileId, {
+            debugPort: launch.debugPort,
+            startedAt: launch.startedAt,
+          });
+          if (!stillCurrent()) return;
+          dead = reconciled === "dead" && !this.d.store.getLaunch(profileId);
+        } catch {
+          dead = false;
+        }
+      } else if (launch) {
+        this.downgradeHeartbeat(
+          profileId,
+          undefined,
+          "browser liveness could not be reconciled; continuing in advisory mode",
+          currentToken,
+        );
+        return;
+      }
+      if (dead) {
+        this.log(`${profileId}: browser is gone — releasing the lock`);
+        await this.stopAfterHeartbeat(profileId, true, currentToken);
+        return;
+      }
     }
     const currentWs = this.d.store.getLaunch(profileId)?.ws ?? ws;
     let held: boolean;
@@ -1330,7 +1363,10 @@ export class RemoteCoordinator {
             // Small test/adapter launchers predate the explicit certification
             // contract. Their idempotent start remains the compatibility path.
             if (!await this.d.launcher.active(launch.profileId)) throw new Error("browser identity/CDP is unavailable");
-            currentWs = (await this.d.launcher.start(launch.profileId, [], { autoNavigate: false })).ws;
+            currentWs = (await this.d.launcher.start(launch.profileId, [], {
+              autoNavigate: false,
+              restoreLastSession: false,
+            })).ws;
           }
           if (!await this.confirmWriterOwnership(launch.profileId, "after survivor identity verification")) {
             continue;
@@ -1438,7 +1474,10 @@ export class RemoteCoordinator {
             if (!await this.d.launcher.active(launch.profileId)) {
               throw new Error("browser identity/CDP is unavailable");
             }
-            await this.d.launcher.start(launch.profileId, [], { autoNavigate: false });
+            await this.d.launcher.start(launch.profileId, [], {
+              autoNavigate: false,
+              restoreLastSession: false,
+            });
           }
           const refreshedLaunch = this.d.store.getLaunch(launch.profileId);
           if (!refreshedLaunch?.ws) throw new Error("verified launch row is missing a CDP websocket");

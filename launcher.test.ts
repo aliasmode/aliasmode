@@ -47,6 +47,16 @@ class Launcher extends ProductionLauncher {
   }
 }
 
+const TEST_DATA_ROOTS = new WeakMap<ProfileStore, string>();
+function testDataRoot(store: ProfileStore): string {
+  let root = TEST_DATA_ROOTS.get(store);
+  if (!root) {
+    root = join(tmpdir(), `cloak-launcher-test-${crypto.randomUUID()}`);
+    TEST_DATA_ROOTS.set(store, root);
+  }
+  return root;
+}
+
 const SAMPLE = `id=k1d0cd11
 name=acct
 group=g
@@ -117,11 +127,12 @@ function newLauncher(
   spawnedArgs: string[][],
   killedPids?: number[],
   ensureSearchProvider?: SearchProviderEnsurer,
+  overrides: Partial<ConstructorParameters<typeof ProductionLauncher>[0]> = {},
 ) {
   return new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => {
       spawnedArgs.push(args);
@@ -146,6 +157,7 @@ function newLauncher(
     },
     browserClose: async () => false, // force-kill path; graceful close is unit-tested in server.test.ts
     cdpReadyTimeoutMs: 1000,
+    ...overrides,
   });
 }
 
@@ -219,11 +231,106 @@ test("after a restart, a bootstrapped browser reattaches without rerunning searc
   store.close();
 });
 
+test("Windows search bootstrap runs once and suppresses native restore for its generation", async () => {
+  const store = seeded();
+  const f = fleet();
+  const spawnedArgs: string[][] = [];
+  let prepared = 0;
+  const launcher = newLauncher(store, f, spawnedArgs, undefined, async () => {
+    prepared++;
+    return { status: "configured", engine: "DuckDuckGo" };
+  }, { hostPlatform: "win32" });
+
+  await launcher.start("k1d0cd11");
+  expect(prepared).toBe(1);
+  expect(spawnedArgs[0]).not.toContain("--restore-last-session");
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(await launcher.stop("k1d0cd11")).toBe(true);
+
+  await launcher.start("k1d0cd11");
+  expect(prepared).toBe(1);
+  expect(spawnedArgs[1]).not.toContain("--restore-last-session");
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  store.close();
+});
+
+test("Windows Local preserves native session artifacts and adds explicit URLs after restored tabs", async () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, platform: "x.com" });
+  const f = fleet();
+  const spawnedArgs: string[][] = [];
+  const navigated: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+  let prepared = 0;
+  let targets: Array<{ type: string; url: string }> = [
+    { type: "page", url: "https://restored.example/one" },
+    { type: "page", url: "https://restored.example/two" },
+    { type: "page", url: "https://example.com/?__aliasmode_session_restore__=1" },
+    { type: "page", url: "http://127.0.0.1:50400/card?id=k1d0cd11" },
+  ];
+  const fetchFn: FetchFn = async (url) => url.endsWith("/json/list")
+    ? { ok: true, json: async () => targets }
+    : f.fetchFn(url);
+  const launcher = newLauncher(store, f, spawnedArgs, undefined, async () => {
+    prepared++;
+    return { status: "configured", engine: "DuckDuckGo" };
+  }, {
+    hostPlatform: "win32",
+    fetch: fetchFn,
+    navigate: async (_ws, urls) => { navigated.push(urls); },
+  });
+
+  await launcher.start("k1d0cd11", ["https://explicit.example/start"], { restoreLastSession: true });
+  expect(prepared).toBe(0);
+  expect(spawnedArgs[0]).toContain("--restore-last-session");
+  expect(navigated).toEqual([["https://explicit.example/start"]]);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(await launcher.stop("k1d0cd11")).toBe(true);
+
+  targets = [{ type: "page", url: "about:blank" }];
+  await launcher.start("k1d0cd11");
+  expect(prepared).toBe(0);
+  expect(spawnedArgs[1]).toContain("--restore-last-session");
+  expect(navigated).toEqual([
+    ["https://explicit.example/start"],
+    ["https://x.com/home"],
+  ]);
+  store.close();
+});
+
+test("Windows Local does not replace restored tabs with the platform home", async () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, platform: "x.com" });
+  const f = fleet();
+  const navigated: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  const launcher = newLauncher(store, f, [], undefined, async () => ({
+    status: "configured",
+    engine: "DuckDuckGo",
+  }), {
+    hostPlatform: "win32",
+    fetch: async (url) => url.endsWith("/json/list")
+      ? { ok: true, json: async () => [{ type: "page", url: "https://restored.example/account" }] }
+      : f.fetchFn(url),
+    navigate: async (_ws, urls) => { navigated.push(urls); },
+  });
+
+  await launcher.start("k1d0cd11");
+  expect(navigated).toEqual([]);
+  store.close();
+});
+
 test("reattach safely recycles one legacy browser through prelaunch search setup", async () => {
   const store = seeded();
   const f = fleet();
   const first = newLauncher(store, f, []);
   await first.start("k1d0cd11");
+  rmSync(join(first.userDataDir("k1d0cd11"), ".aliasmode-search-bootstrap-v1"), { force: true });
   const legacy = store.getLaunch("k1d0cd11")!;
   store.recordLaunch({ ...legacy, searchBootstrapRevision: undefined });
   (first as any).closeRelay("k1d0cd11");
@@ -259,7 +366,7 @@ test("legacy search bootstrap never spawns while safe teardown is unconfirmed", 
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: () => {
       spawned++;
@@ -413,7 +520,7 @@ test("a restart with a different launch mode stops the stale persona instead of 
   const launcherB = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     headless: true,
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
@@ -497,6 +604,44 @@ test("certifiedActive verifies a survivor once and stops it when the stored time
   store.upsertProfile({ ...edited, timezone: "Europe/London" });
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
+  store.close();
+});
+
+test("certifiedActive retains a survivor after one transient CDP miss", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const prior = newLauncher(store, f, []);
+  await prior.start("k1d0cd11");
+
+  let versionProbes = 0;
+  let failThirdProbe = true;
+  let browserCloses = 0;
+  const killed: number[] = [];
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    spawn: () => { throw new Error("must not spawn"); },
+    fetch: async (url) => {
+      if (url.includes("/json/version") && ++versionProbes === 3 && failThirdProbe) {
+        return { ok: false, json: async () => ({}) };
+      }
+      return f.fetchFn(url);
+    },
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    browserClose: async () => { browserCloses++; return false; },
+    killPid: async (pid) => { killed.push(pid); f.killPid(pid); },
+  });
+
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(false);
+  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
+  expect(browserCloses).toBe(0);
+  expect(killed).toEqual([]);
+
+  failThirdProbe = false;
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
   store.close();
 });
 
@@ -1053,7 +1198,7 @@ test("authenticated SOCKS5 uses the compatibility relay before browser setup", a
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
     fetch: f.fetchFn,
@@ -1118,7 +1263,7 @@ test("proxy relay failures do not expose upstream or target details through laun
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
     fetch: f.fetchFn,
@@ -1394,7 +1539,7 @@ test("start injects cookies before navigating startup URLs", async () => {
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => {
       spawnedArgs.push(args);
@@ -1516,7 +1661,7 @@ test("start opens the platform home page (deferred) when the caller passes no UR
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
     fetch: f.fetchFn,
@@ -1544,7 +1689,7 @@ test("standalone Telegram launch preserves the historical Web K fallback", async
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: f.spawn,
     fetch: f.fetchFn,
@@ -1571,7 +1716,7 @@ test("start with autoNavigate:false skips startup navigation (remote owns it)", 
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: f.spawn,
     fetch: f.fetchFn,
@@ -3116,7 +3261,7 @@ test("start() labels the window with '<name> · #<serial> — '", async () => {
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
     fetch: f.fetchFn,
@@ -3140,7 +3285,7 @@ test("a thrown window labeler never fails the launch (best-effort)", async () =>
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: f.spawn,
     fetch: f.fetchFn,
@@ -3172,7 +3317,7 @@ test("windowWidthScale / windowHeightScale control the launched window size", as
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, a) => { spawnedArgs.push(a); return f.spawn(bin, a); },
     fetch: f.fetchFn,
@@ -3226,7 +3371,7 @@ test("a spawner that proves the browser never started fails immediately with a s
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     // Models the Windows session helper refusing to launch (nobody logged in):
     // no process is created, so the debug port never answers.
@@ -3266,7 +3411,7 @@ test("a healthy CDP endpoint still wins over a late spawn-failure report", async
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     // The helper reports a nonzero exit, but the browser it started is up: the
     // launch must succeed rather than throw on a stale diagnostic.
@@ -3314,7 +3459,7 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => {
       order.push("spawn");
@@ -3353,7 +3498,7 @@ test("a fresh launch refuses to spawn while a leaked profile-dir holder survives
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => {
       spawned = true;
@@ -3386,7 +3531,7 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
-    dataRoot: "/tmp/cloak-launcher-test",
+    dataRoot: testDataRoot(store),
     portProbe: () => true,
     spawn: (bin, args) => {
       spawned = true;

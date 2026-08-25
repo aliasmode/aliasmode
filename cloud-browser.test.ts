@@ -161,7 +161,11 @@ function setup(options: {
       events.push("start");
       startedProxy = store.getProfile(profileId)?.proxy;
       expect(args).toEqual(["--window-size=1200,800"]);
-      expect(startOptions).toMatchObject({ autoNavigate: false, sessionBaseVersion: -1 });
+      expect(startOptions).toMatchObject({
+        autoNavigate: false,
+        restoreLastSession: false,
+        sessionBaseVersion: -1,
+      });
       expect(queue.getOpen(profileId, "account1")?.phase).toBe("opening");
       if (options.startError) throw options.startError;
       store.recordLaunch({
@@ -345,6 +349,46 @@ test("Cloud browser restores the session and navigates in one attach", async () 
     debugPort: 9222,
     startedAt: 1000,
   });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser keeps saved tabs before explicit startup URLs", async () => {
+  const session = {
+    ...payload().session,
+    tabs: ["https://saved.example/one", "https://saved.example/one"],
+  };
+  const state = setup({ session });
+
+  expect((await state.coordinator.open("profile1", [
+    "--window-size=1200,800",
+    "https://explicit.example/two",
+  ])).ok).toBe(true);
+  // applySession prepends the bundle tabs and receives only additional URLs.
+  expect(state.navigatedUrls).toEqual([["https://explicit.example/two"]]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser suppresses the platform home when the bundle has saved tabs", async () => {
+  const state = setup({
+    session: {
+      ...payload().session,
+      tabs: ["https://saved.example/account"],
+    },
+  });
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.navigatedUrls).toEqual([[]]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser keeps the platform home fallback for legacy bundles", async () => {
+  const state = setup();
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.navigatedUrls).toEqual([["https://x.com/home"]]);
   state.queue.close();
   state.store.close();
 });
@@ -553,22 +597,26 @@ test("Cloud roster reconciles a manually closed browser from its latest checkpoi
   state.store.close();
 });
 
-test("Cloud roster requires two consecutive no-page observations before closing", async () => {
+test("Cloud roster polls cannot accelerate the heartbeat no-page confirmation", async () => {
   const state = setup({ hasPageTargets: false });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   state.events.length = 0;
 
-  const firstRoster = await state.coordinator.listRoster();
-
-  expect(state.events).toEqual(["reconcile", "cloud-list"]);
-  expect(firstRoster.profiles[0]?.running).toBe(true);
-  expect(state.queue.getOpen("profile1", "account1")).not.toBeNull();
+  await state.coordinator.heartbeatOnce("profile1");
+  expect(state.events).toEqual(["heartbeat", "capture"]);
   state.events.length = 0;
 
+  const firstRoster = await state.coordinator.listRoster();
   const secondRoster = await state.coordinator.listRoster();
 
-  expect(state.events).toEqual(["reconcile", "reconcile", "capture", "stop", "cloud-close", "cloud-list"]);
-  expect(secondRoster.profiles[0]?.running).toBe(false);
+  expect(state.events).toEqual(["reconcile", "cloud-list", "reconcile", "cloud-list"]);
+  expect(firstRoster.profiles[0]?.running).toBe(true);
+  expect(secondRoster.profiles[0]?.running).toBe(true);
+  expect(state.queue.getOpen("profile1", "account1")).not.toBeNull();
+
+  await state.coordinator.heartbeatOnce("profile1");
+  await Bun.sleep(0);
+  expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   state.queue.close();
   state.store.close();
@@ -657,6 +705,24 @@ test("Cloud stopped checkpoint finalization cannot delete a replacement registra
   await state.coordinator.listRoster();
 
   expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe("replacement-registration");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud heartbeat retains an exactly alive browser after a transient active probe miss", async () => {
+  const state = setup({ activeResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events).toContain("reconcile");
+  expect(state.events).toContain("heartbeat");
+  expect(state.events).not.toContain("stop");
+  expect(state.events).not.toContain("cloud-close");
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")).not.toBeNull();
+  await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();
 });

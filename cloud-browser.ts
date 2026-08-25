@@ -8,7 +8,6 @@ import {
 } from "./cloud-diagnostics.ts";
 import {
   BrowserLaunchError,
-  canonicalUserPageUrl,
   platformHomeUrl,
   splitLaunchUrls,
   type Launcher,
@@ -22,7 +21,9 @@ import {
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import {
   bundleHasRestorableLogin,
+  bundleTabUrls,
   bundleTelegramClient,
+  canonicalUserPageUrl,
   parseCapturedSessionBundle,
   sessionBundleSignature,
   sessionCaptureSeed,
@@ -324,11 +325,6 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           if (!current || current.registrationId !== candidate.registrationId
             || reconciled === "generation_changed") return;
           if (reconciled === "alive") {
-            if (!launch || !this.isExactRunningLaunch(current, launch)) return;
-            const hasPageTargets = await this.options.launcher.hasPageTargets(candidate.profileId).catch(() => true);
-            if (this.confirmNoPageTargets(candidate.profileId, current.registrationId, hasPageTargets)) {
-              await this.doClose(candidate.profileId).catch(() => false);
-            }
             return;
           }
         } else if (launch) {
@@ -467,6 +463,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const startBrowser = async () => {
         return await this.options.launcher.start(profileId, chromeArgs, {
           autoNavigate: false,
+          restoreLastSession: false,
           resetStorage: bundleHasRestorableLogin(sessionBundle),
           sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
         });
@@ -523,9 +520,14 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         throw new Error("Cloud open lifecycle state disappeared during launch");
       }
       // ONE CDP attach: restore the authoritative bundle (no-op attach-free when
-      // the bundle is empty) and open the startup pages, then detach once.
+      // the bundle is empty) and open explicit pages after its saved tabs.
       const home = platformHomeUrl(profile.platform, bundleTelegramClient(sessionBundle) ?? "a");
-      const urls = startupUrls.length > 0 ? startupUrls : home ? [home] : [];
+      const savedTabs = bundleTabUrls(sessionBundle);
+      const urls = startupUrls.length > 0
+        ? startupUrls
+        : savedTabs.length === 0 && home
+          ? [home]
+          : [];
       let navigationWarning: string | undefined;
       try {
         await this.options.applySession(verifiedLaunch.ws, sessionBundle, urls);
@@ -1090,18 +1092,37 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
     }
     if (!active) {
-      this.stopHeartbeat(profileId);
-      context.queue.setOpenCleanup(
-        profileId,
-        context.accountId,
-        open.registrationId,
-        open.phase === "running" ? "sync" : "abandon",
-      );
-      const retained = context.queue.getOpen(profileId, context.accountId);
-      if (retained && !await this.retryCleanup(retained, context.queue)) {
-        this.startHeartbeat(profileId);
+      const launch = this.options.store.getLaunch(profileId);
+      let dead = !launch;
+      if (launch && this.isExactRunningLaunch(open, launch)) {
+        try {
+          const reconciled = await this.options.launcher.reconcileOrphan(profileId, {
+            debugPort: launch.debugPort,
+            startedAt: launch.startedAt,
+          });
+          const current = context.queue.getOpen(profileId, context.accountId);
+          if (!current || current.registrationId !== open.registrationId) return;
+          dead = reconciled === "dead" && !this.options.store.getLaunch(profileId);
+        } catch {
+          dead = false;
+        }
+      } else if (launch) {
+        return;
       }
-      return;
+      if (dead) {
+        this.stopHeartbeat(profileId);
+        context.queue.setOpenCleanup(
+          profileId,
+          context.accountId,
+          open.registrationId,
+          open.phase === "running" ? "sync" : "abandon",
+        );
+        const retained = context.queue.getOpen(profileId, context.accountId);
+        if (retained && !await this.retryCleanup(retained, context.queue)) {
+          this.startHeartbeat(profileId);
+        }
+        return;
+      }
     }
     try {
       await this.options.cloud.heartbeat(open.registrationId);

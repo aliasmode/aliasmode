@@ -227,6 +227,7 @@ test("Windows native window candidates map only one distinct HWND per profile", 
 
 test("Windows window acceptance preserves native minimize state and selects only one distinct HWND", async () => {
   const events: string[] = [];
+  const stages: string[] = [];
   const windows = {
     first: { hwnd: 101, minimized: false, visible: true },
     second: { hwnd: 202, minimized: false, visible: true },
@@ -238,6 +239,7 @@ test("Windows window acceptance preserves native minimize state and selects only
     profileIds: ["first", "second"],
     async open(profileId) { events.push(`open:${profileId}`); },
     async verifySearchProvider(profileId) { events.push(`search:${profileId}`); },
+    async verifyTabsRestored() { events.push("tabs-restored"); },
     async close(profileId) { events.push(`close:${profileId}`); },
     async nativeWindows() {
       return {
@@ -277,6 +279,7 @@ test("Windows window acceptance preserves native minimize state and selects only
       windows[profileId as keyof typeof windows].minimized = false;
       foregroundHwnd = windows[profileId as keyof typeof windows].hwnd;
     },
+    reportStage(stage) { stages.push(stage); },
   });
 
   expect(events).toEqual([
@@ -284,6 +287,7 @@ test("Windows window acceptance preserves native minimize state and selects only
     "open:second",
     "search:first",
     "search:second",
+    "tabs-restored",
     "targets:first:page-1",
     "targets:second:page-1",
     "minimize:first",
@@ -300,6 +304,18 @@ test("Windows window acceptance preserves native minimize state and selects only
     "close:first",
   ]);
   expect(pageTargets).toEqual(["page-1"]);
+  expect(stages).toEqual([
+    "search_provider_ready",
+    "tabs_restored",
+    "page_targets_ready",
+    "windows_distinct",
+    "window_minimized",
+    "profile_card_observed",
+    "background_page_observed",
+    "session_capture_observed",
+    "first_window_raised",
+    "second_window_raised",
+  ]);
 });
 
 test("Windows window acceptance rejects a missing initial page before native polling", async () => {
