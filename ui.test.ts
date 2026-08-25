@@ -6,6 +6,7 @@ import { ProfileStore } from "./store.ts";
 import { Launcher } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { listUiProfiles, handleUiRequest } from "./ui.ts";
+import { readXlsx, writeXlsx } from "./xlsx.ts";
 import { AppConfigStore } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
@@ -934,6 +935,87 @@ test("export in remote mode pulls every selected profile from the hub, not the l
   expect(text).toContain("hub0001");
   expect(text).toContain("hub0002");
   expect(text).not.toContain("k1d0cd11"); // the local-cache fallback is gone
+  s.close();
+});
+
+test("export as xlsx returns a workbook carrying the full identity", async () => {
+  const s = store();
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11"], format: "xlsx" }),
+    }),
+    {} as any,
+    s,
+    null as any,
+  );
+  expect(res!.status).toBe(200);
+  expect(res!.headers.get("content-disposition")).toContain("aliasmode-export.xlsx");
+  expect(res!.headers.get("content-type")).toContain("spreadsheetml.sheet");
+
+  const rows = await readXlsx(new Uint8Array(await res!.arrayBuffer()));
+  expect(rows).toHaveLength(1);
+  expect(rows[0]!.id).toBe("k1d0cd11");
+  expect(rows[0]!.proxy).toBe("1.2.3.4:8080:proxyuser:PROXYPASS");
+  expect(rows[0]!.resolution).toBe("1680*1050");
+  // The identity the export exists to move: cookies and the user-agent.
+  expect(JSON.parse(rows[0]!.cookie!)[0].name).toBe("auth_token");
+  expect(rows[0]!.ua).toContain("Chrome/143.0.0.0");
+  s.close();
+});
+
+test("export as xlsx pulls from the hub in remote mode, with secrets", async () => {
+  const s = store();
+  const asked: Array<[string[], boolean | undefined]> = [];
+  const base = parseExport(SAMPLE).profiles[0]!;
+  const remote = {
+    async getProfiles(ids: string[], full?: boolean) {
+      asked.push([ids, full]);
+      return ids.map((id) => ({ ...base, id }));
+    },
+  } as any;
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["hub0001"], format: "xlsx" }),
+    }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect(res!.status).toBe(200);
+  // A full-fidelity sheet without cookies would be a silent downgrade, so the
+  // hub fetch must ask for secrets exactly as the .txt export does.
+  expect(asked).toEqual([[["hub0001"], true]]);
+  expect((await readXlsx(new Uint8Array(await res!.arrayBuffer())))[0]!.id).toBe("hub0001");
+  s.close();
+});
+
+test("update-file accepts an edited .xlsx and applies only editable columns", async () => {
+  const s = store();
+  const book = await writeXlsx(
+    ["id", "name", "group", "cookie"],
+    [["k1d0cd11", "renamed", "NewGroup", "[]"]],
+  );
+  const form = new FormData();
+  form.append("files", new File([book as unknown as BlobPart], "edited.xlsx"));
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null as any,
+  );
+  const body = (await res!.json()) as any;
+  expect(body.ok).toBe(true);
+  expect(body.updated).toBe(1);
+
+  const p = s.getProfile("k1d0cd11")!;
+  expect(p.name).toBe("renamed");
+  expect(p.group).toBe("NewGroup");
+  // Identity columns stay inert on re-upload, exactly as for .txt and .csv.
+  expect(p.cookies).toHaveLength(1);
   s.close();
 });
 

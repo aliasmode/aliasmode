@@ -31,7 +31,8 @@ import type { Profile } from "./types.ts";
 import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones } from "./geoip.ts";
-import { parseUpdateFile, serializeCsv, serializeAdsTxt, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
 import { installExtension, removeExtensionFiles } from "./extensions.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
@@ -861,14 +862,30 @@ export async function handleUiRequest(
     try {
       const body = (await req.json()) as { ids?: unknown; format?: unknown };
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-      const format = body.format === "txt" ? "txt" : "csv";
+      const format = body.format === "txt" ? "txt" : body.format === "xlsx" ? "xlsx" : "csv";
+      // .txt and .xlsx are the full-fidelity forms: they carry cookies and the
+      // user-agent, so they need the profile's secrets. .csv is the trimmed
+      // credential view.
+      const full = format !== "csv";
       // Remote mode: the roster (and the secrets export needs) live on the hub —
       // the local store is just a launch cache, so reading it here would silently
       // drop every selected account that wasn't opened on this machine. Pull each
       // from the hub instead, the same full-fidelity fetch Open/Edit already use.
       const profiles = remote
-        ? await remote.getProfiles(ids, format === "txt")
+        ? await remote.getProfiles(ids, full)
         : ids.map((id) => store.getProfile(id)).filter((p): p is Profile => !!p);
+
+      if (format === "xlsx") {
+        const { headers, rows } = serializeXlsxRows(profiles);
+        const book = await writeXlsx(headers, rows);
+        return new Response(book as unknown as BodyInit, {
+          headers: {
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "content-disposition": "attachment; filename=aliasmode-export.xlsx",
+          },
+        });
+      }
+
       const text = format === "txt" ? serializeAdsTxt(profiles) : serializeCsv(profiles);
       return new Response(text, {
         headers: {
@@ -894,7 +911,14 @@ export async function handleUiRequest(
       const pending = new Map<string, Profile>();
       for (const [, value] of form) {
         if (!(value instanceof File)) continue;
-        const summary = parseUpdateFile(decodeText(new Uint8Array(await value.arrayBuffer())));
+        const bytes = new Uint8Array(await value.arrayBuffer());
+        // An .xlsx is a ZIP, so it is binary and starts "PK" — decoding it as
+        // text would turn a spreadsheet into mojibake with no usable `id`
+        // column and report the whole upload as zero rows changed.
+        const isWorkbook = bytes[0] === 0x50 && bytes[1] === 0x4b;
+        const summary = isWorkbook
+          ? rowsToUpdates(await readXlsx(bytes))
+          : parseUpdateFile(decodeText(bytes));
         skipped += summary.skipped;
         for (const u of summary.updates) {
           if (!isSafeProfileId(u.id)) {

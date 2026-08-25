@@ -474,8 +474,10 @@ export async function convertMobileProfile(id: string): Promise<any> {
   return post(`/ui/api/profiles/${encodeURIComponent(id)}/convert-mobile`);
 }
 
-// ---- Export selected → download a CSV / AdsPower .txt ------------------------
-export async function exportProfiles(ids: string[], format: "csv" | "txt"): Promise<void> {
+export type ExportFormat = "csv" | "txt" | "xlsx";
+
+// ---- Export selected → download a CSV / .txt / Excel workbook ----------------
+export async function exportProfiles(ids: string[], format: ExportFormat): Promise<void> {
   const r = await fetch("/ui/api/profiles/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
