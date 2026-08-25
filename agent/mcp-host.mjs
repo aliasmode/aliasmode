@@ -148,6 +148,7 @@ export async function createAliasModeMcp(options = {}) {
     { capabilities: { tools: { listChanged: true } } },
   );
   let selectedProfileId;
+  const ownedProfileIds = new Set();
   let closing;
 
   const notifyToolsChanged = async () => {
@@ -182,6 +183,7 @@ export async function createAliasModeMcp(options = {}) {
     if (selected) await playwright.detach();
     try {
       const result = await runtime.call("browser.close", { profileId: target });
+      ownedProfileIds.delete(target);
       if (selected) {
         selectedProfileId = undefined;
         await notifyToolsChanged();
@@ -219,6 +221,7 @@ export async function createAliasModeMcp(options = {}) {
           ...(args.headless !== undefined ? { headless: args.headless } : {}),
           ...(args.startupUrls ? { startupUrls: args.startupUrls } : {}),
         });
+        if (opened.ownedByConnection) ownedProfileIds.add(args.profileId);
         if (args.select !== false) {
           try {
             await selectBrowser(args.profileId, {
@@ -229,7 +232,9 @@ export async function createAliasModeMcp(options = {}) {
             });
           } catch (error) {
             if (opened.ownedByConnection) {
-              await runtime.call("browser.close", { profileId: args.profileId }).catch(() => {});
+              const closed = await runtime.call("browser.close", { profileId: args.profileId })
+                .then(() => true, () => false);
+              if (closed) ownedProfileIds.delete(args.profileId);
             }
             throw error;
           }
@@ -269,6 +274,11 @@ export async function createAliasModeMcp(options = {}) {
     if (closing) return closing;
     closing = (async () => {
       await playwright.detach();
+      for (const profileId of [...ownedProfileIds]) {
+        const closed = await runtime.call("browser.close", { profileId })
+          .then(() => true, () => false);
+        if (closed) ownedProfileIds.delete(profileId);
+      }
       runtime.close();
     })();
     return closing;

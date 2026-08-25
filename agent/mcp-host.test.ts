@@ -11,13 +11,14 @@ class FakeRuntime {
     this.events.push(`${method}:${params.profileId ?? ""}`);
     if (method === "profiles.list") return { profiles: [] };
     if (method === "browser.open") {
+      const ownedByConnection = params.profileId !== "existing";
       return {
         profileId: params.profileId,
         ws: "ws://127.0.0.1:9333/devtools/browser/test",
         port: 9333,
         headless: params.headless === true,
-        alreadyOpen: false,
-        ownedByConnection: true,
+        alreadyOpen: !ownedByConnection,
+        ownedByConnection,
       };
     }
     if (method === "browser.status") {
@@ -127,6 +128,32 @@ test("MCP host adds Playwright tools after selection and uses safe close", async
   await client.close();
   await host.close();
   expect(runtime.closed).toBe(true);
+});
+
+test("MCP shutdown closes owned browsers but preserves pre-existing browsers", async () => {
+  const runtime = new FakeRuntime();
+  const host = await createAliasModeMcp({
+    discovered: { client: runtime },
+    playwright: new FakePlaywright(),
+  });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  await client.callTool({
+    name: "aliasmode_browser_open",
+    arguments: { profileId: "existing" },
+  });
+  await client.callTool({
+    name: "aliasmode_browser_open",
+    arguments: { profileId: "owned" },
+  });
+  await client.close();
+  await host.close();
+
+  expect(runtime.events).toContain("browser.close:owned");
+  expect(runtime.events).not.toContain("browser.close:existing");
+  expect(runtime.events.at(-1)).toBe("runtime.close:");
 });
 
 test("a failed profile switch clears the stale selection", async () => {
