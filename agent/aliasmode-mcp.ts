@@ -4,8 +4,9 @@ import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { discoverRuntime } from "./runtime-client.mjs";
 import { configureClients, type SetupClient } from "./setup.ts";
+import { ALIASMODE_VERSION } from "../version.ts";
 
-const VERSION = "0.1.0-beta.32";
+const VERSION = ALIASMODE_VERSION;
 
 class SetupFailure extends Error {
   constructor(readonly result: unknown) {
