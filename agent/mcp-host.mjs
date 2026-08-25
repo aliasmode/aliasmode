@@ -319,7 +319,7 @@ async function main() {
   }
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
-  process.stdin.once("end", () => { void host.close(); });
+  process.stdin.once("end", shutdown);
   await host.server.connect(new StdioServerTransport());
 }
 
