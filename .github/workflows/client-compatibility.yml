@@ -41,17 +41,17 @@ jobs:
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP "aliasmode-client-compatibility"
-          $home = Join-Path $root "home"
-          $appData = Join-Path $home "AppData\Roaming"
-          $localAppData = Join-Path $home "AppData\Local"
+          $testHome = Join-Path $root "home"
+          $appData = Join-Path $testHome "AppData\Roaming"
+          $localAppData = Join-Path $testHome "AppData\Local"
           $npmPrefix = Join-Path $root "npm"
           $installRoot = Join-Path $root "AliasMode"
-          foreach ($path in @($home, $appData, $localAppData, $npmPrefix)) {
+          foreach ($path in @($testHome, $appData, $localAppData, $npmPrefix)) {
             New-Item -ItemType Directory -Force $path | Out-Null
           }
           @(
-            "HOME=$home"
-            "USERPROFILE=$home"
+            "HOME=$testHome"
+            "USERPROFILE=$testHome"
             "APPDATA=$appData"
             "LOCALAPPDATA=$localAppData"
             "NPM_CONFIG_PREFIX=$npmPrefix"
