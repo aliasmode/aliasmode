@@ -15,6 +15,12 @@ const VERSION = process.env.ALIASMODE_APP_VERSION || "0.1.0-beta.32";
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
 const PROFILE_ID = { type: "string", minLength: 1 };
 
+function diagnose(message) {
+  if (process.env.ALIASMODE_MCP_DIAGNOSTICS === "1") {
+    process.stderr.write(`[aliasmode-mcp-host] ${message}\n`);
+  }
+}
+
 const ALIAS_TOOLS = [
   {
     name: "aliasmode_profiles_list",
@@ -273,13 +279,18 @@ export async function createAliasModeMcp(options = {}) {
   const close = async () => {
     if (closing) return closing;
     closing = (async () => {
+      diagnose("close started");
       await playwright.detach();
+      diagnose("playwright detached");
       for (const profileId of [...ownedProfileIds]) {
+        diagnose("owned browser close started");
         const closed = await runtime.call("browser.close", { profileId })
           .then(() => true, () => false);
+        diagnose(`owned browser close finished closed=${closed}`);
         if (closed) ownedProfileIds.delete(profileId);
       }
       runtime.close();
+      diagnose("runtime closed");
     })();
     return closing;
   };
@@ -290,7 +301,8 @@ export async function createAliasModeMcp(options = {}) {
 export function sanitizeEnvironment(env = process.env) {
   const allowed = new Set([
     "APPDATA", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH",
-    "ALIASMODE_APP_VERSION", "ALIASMODE_DESKTOP_EXE", "ALIASMODE_PARENT_WATCH_FD",
+    "ALIASMODE_APP_VERSION", "ALIASMODE_DESKTOP_EXE", "ALIASMODE_MCP_DIAGNOSTICS",
+    "ALIASMODE_PARENT_WATCH_FD",
     "ALIASMODE_RUNTIME_DESCRIPTOR",
     "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
   ]);
@@ -308,19 +320,23 @@ async function main() {
     "AliasMode.exe",
   );
   const host = await createAliasModeMcp({ runtime: { desktopExecutable } });
-  const shutdown = () => {
-    void host.close().finally(() => process.exit(0));
+  const shutdown = (event = "signal") => {
+    diagnose(`shutdown requested event=${event}`);
+    void host.close().finally(() => {
+      diagnose("shutdown complete");
+      process.exit(0);
+    });
   };
   if (process.env.ALIASMODE_PARENT_WATCH_FD === "3") {
     const parentWatch = createReadStream("", { fd: 3, autoClose: true });
     parentWatch.resume();
-    parentWatch.once("end", shutdown);
-    parentWatch.once("error", shutdown);
+    parentWatch.once("end", () => shutdown("parent-end"));
+    parentWatch.once("error", () => shutdown("parent-error"));
   }
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
-  process.stdin.once("end", shutdown);
-  process.stdin.once("close", shutdown);
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.stdin.once("end", () => shutdown("stdin-end"));
+  process.stdin.once("close", () => shutdown("stdin-close"));
   await host.server.connect(new StdioServerTransport());
 }
 

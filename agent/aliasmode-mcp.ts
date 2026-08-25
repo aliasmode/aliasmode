@@ -46,6 +46,7 @@ function nodeExecutable(root: string): string {
 
 function childEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const keys = [
+    "ALIASMODE_MCP_DIAGNOSTICS",
     "APPDATA",
     "HOME",
     "HOMEDRIVE",
@@ -65,6 +66,12 @@ function childEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { ...env, ...extra };
 }
 
+function diagnose(message: string): void {
+  if (process.env.ALIASMODE_MCP_DIAGNOSTICS === "1") {
+    process.stderr.write(`[aliasmode-mcp] ${message}\n`);
+  }
+}
+
 async function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   return await new Promise((resolveCode, reject) => {
     const child = spawn(command, args, {
@@ -72,18 +79,24 @@ async function runProcess(command: string, args: string[], env: NodeJS.ProcessEn
       windowsHide: true,
       env,
     });
+    diagnose(`child started pid=${child.pid ?? 0}`);
     const childInput = child.stdin!;
     let childInputEnded = false;
-    const endChildInput = () => {
+    const endChildInput = (event: string) => {
+      diagnose(`stdin ${event}`);
       if (childInputEnded) return;
       childInputEnded = true;
       childInput.end();
     };
     process.stdin.pipe(childInput, { end: false });
-    process.stdin.once("end", endChildInput);
-    process.stdin.once("close", endChildInput);
+    process.stdin.once("end", () => endChildInput("end"));
+    process.stdin.once("close", () => endChildInput("close"));
+    childInput.once("finish", () => diagnose("child stdin finish"));
     child.once("error", reject);
-    child.once("exit", (code) => resolveCode(code ?? 1));
+    child.once("exit", (code) => {
+      diagnose(`child exited code=${code ?? 1}`);
+      resolveCode(code ?? 1);
+    });
   });
 }
 

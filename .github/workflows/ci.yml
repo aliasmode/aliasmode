@@ -318,6 +318,7 @@ jobs:
           $mcpStart.CreateNoWindow = $true
           $mcpStart.RedirectStandardInput = $true
           $mcpStart.RedirectStandardOutput = $true
+          $mcpStart.Environment["ALIASMODE_MCP_DIAGNOSTICS"] = "1"
           $mcp = [System.Diagnostics.Process]::new()
           $mcp.StartInfo = $mcpStart
           if (-not $mcp.Start()) { throw "installed MCP host did not start" }
