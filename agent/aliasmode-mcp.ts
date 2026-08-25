@@ -68,10 +68,11 @@ function childEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 async function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   return await new Promise((resolveCode, reject) => {
     const child = spawn(command, args, {
-      stdio: ["inherit", "inherit", "inherit", "pipe"],
+      stdio: ["pipe", "inherit", "inherit", "pipe"],
       windowsHide: true,
       env,
     });
+    process.stdin.pipe(child.stdin!);
     child.once("error", reject);
     child.once("exit", (code) => resolveCode(code ?? 1));
   });
