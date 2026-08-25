@@ -79,6 +79,8 @@ export interface OriginStorage {
 export interface SessionBundle {
   cookies: CookieRecord[];
   origins?: OriginStorage[];
+  /** Ordered normal web tabs. Duplicates are intentional. */
+  tabs?: string[];
   /** Telegram web variant last used in this profile. A and K share an origin but not all passcode DBs. */
   telegramClient?: TelegramWebClient;
 }
@@ -95,9 +97,12 @@ export interface SessionCaptureSeed {
 export interface NormalizedSessionBundle {
   cookies: CookieRecord[];
   origins: OriginStorage[];
+  tabs: string[];
   telegramClient?: TelegramWebClient;
   /** False for a legacy cookie-only bundle — distinct from a modern bundle with an empty origins list. */
   hasOrigins: boolean;
+  /** False for bundles created before portable tab capture. */
+  hasTabs: boolean;
 }
 
 export type SessionRestoreOperation =
@@ -210,6 +215,23 @@ function canonicalWebOrigin(value: string): string | null {
   }
 }
 
+/** Canonical user-visible web page URL, excluding AliasMode's temporary/internal pages. */
+export function canonicalUserPageUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    if (parsed.searchParams.has("__aliasmode_session_capture__")
+      || parsed.searchParams.has("__aliasmode_session_restore__")) return null;
+    if (parsed.hostname === "127.0.0.1"
+      && parsed.pathname === "/card"
+      && parsed.searchParams.has("id")) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
 /** Keep well-shaped localStorage for web origins and only allowlisted Telegram auth IndexedDB. */
 export function normalizeOriginStorage(origin: string, storage: any): OriginStorage | null {
   const normalizedOrigin = canonicalWebOrigin(origin);
@@ -296,7 +318,10 @@ export function parseCapturedSessionBundle(bundle: string): CapturedSessionBundl
   const parsed = parseBundle(bundle);
   const invalid = () => { throw new Error("invalid captured session bundle"); };
   if (!isRecord(parsed) || !Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) invalid();
+  if (parsed.tabs !== undefined && !Array.isArray(parsed.tabs)) invalid();
   if (parsed.telegramClient !== undefined && parsed.telegramClient !== "a" && parsed.telegramClient !== "k") invalid();
+  if (Array.isArray(parsed.tabs)
+    && parsed.tabs.some((tab: unknown) => canonicalUserPageUrl(tab) !== tab)) invalid();
 
   for (const cookie of parsed.cookies) {
     if (!isRecord(cookie)
@@ -517,8 +542,24 @@ export function normalizeBundle(raw: any): NormalizedSessionBundle {
         .map((o: any) => (typeof o?.origin === "string" ? normalizeOriginStorage(o.origin, o) : null))
         .filter((o: OriginStorage | null): o is OriginStorage => !!o)
     : [];
+  const hasTabs = Array.isArray(raw?.tabs);
+  const tabs = hasTabs
+    ? raw.tabs.map(canonicalUserPageUrl).filter((tab: string | null): tab is string => !!tab)
+    : [];
   const telegramClient = raw?.telegramClient === "a" || raw?.telegramClient === "k" ? raw.telegramClient : undefined;
-  return { cookies, origins, ...(telegramClient ? { telegramClient } : {}), hasOrigins };
+  return {
+    cookies,
+    origins,
+    tabs,
+    ...(telegramClient ? { telegramClient } : {}),
+    hasOrigins,
+    hasTabs,
+  };
+}
+
+/** Ordered portable user tabs from a tolerant legacy/external bundle. */
+export function bundleTabUrls(bundle: string): string[] {
+  return normalizeBundle(parseBundle(bundle)).tabs;
 }
 
 export function sessionCaptureSeed(bundle: string): SessionCaptureSeed {
@@ -553,6 +594,7 @@ export function sessionBundleSignature(bundle: string): string {
   const canonical = JSON.stringify({
     cookies: sortCanonical(normalized.cookies),
     origins,
+    tabs: normalized.tabs,
     telegramClient: normalized.telegramClient ?? null,
   });
   return createHash("sha256").update(canonical).digest("hex");
@@ -586,8 +628,8 @@ async function primeCaptureOrigins(context: any, seed: SessionCaptureSeed): Prom
   const origins = new Set(seed.origins);
   for (const page of context.pages()) {
     try {
-      const origin = new URL(page.url()).origin;
-      if (canonicalWebOrigin(origin)) origins.add(origin);
+      const pageUrl = canonicalUserPageUrl(page.url());
+      if (pageUrl) origins.add(new URL(pageUrl).origin);
     } catch {}
   }
   const pages: any[] = [];
@@ -740,6 +782,9 @@ export async function collectSessionFromContext(
   ctx: any,
   captureSeed: SessionCaptureSeed = { origins: [] },
 ): Promise<SessionBundle> {
+  const tabs = ctx.pages()
+    .map((page: any) => canonicalUserPageUrl(page.url()))
+    .filter((tab: string | null): tab is string => !!tab);
   const cleanup = await primeCaptureOrigins(ctx, captureSeed);
   try {
     // The public no-IndexedDB state is deliberately the baseline. Telegram's normal A/K login is
@@ -764,6 +809,7 @@ export async function collectSessionFromContext(
     return {
       cookies,
       origins: [...byOrigin.values()],
+      tabs,
       ...(telegramClient ? { telegramClient } : {}),
     };
   } finally {
@@ -1176,6 +1222,8 @@ export interface WriteSessionOptions {
   contextRetryMs?: number;
   writeTimeoutMs?: number;
   disconnectTimeoutMs?: number;
+  /** Clear stale browser auth even when the authoritative bundle is empty. */
+  authoritative?: boolean;
   connect?: (endpoint: string, timeoutMs: number) => Promise<any>;
   sleep?: (ms: number) => Promise<void>;
   /** Fixed-label step logging (no endpoints, cookies, or payload values). */
@@ -1247,7 +1295,7 @@ export async function writeSession(
   options: WriteSessionOptions = {},
 ): Promise<void> {
   const parsed = parseSessionBundle(bundle);
-  if (isSessionBundleEmpty(parsed)) return;
+  if (isSessionBundleEmpty(parsed) && !options.authoritative) return;
   if (options.connect) {
     const browser = await connectPersistentSessionBrowser(ws, options);
     await writeSessionToBrowser(browser, parsed, options);
@@ -1258,6 +1306,7 @@ export async function writeSession(
       endpoint: ws,
       bundle,
       urls: [],
+      authoritative: !!options.authoritative,
       connectTimeoutMs: options.connectTimeoutMs ?? SESSION_CONNECT_TIMEOUT_MS,
     }, { timeoutMs: options.writeTimeoutMs ?? SESSION_WRITE_TIMEOUT_MS });
   } catch (error) {
@@ -1277,10 +1326,41 @@ function isSessionBundleEmpty(parsed: NormalizedSessionBundle): boolean {
   return parsed.cookies.length === 0 && parsed.origins.length === 0;
 }
 
+/** Replace stale normal pages while keeping one blank tab and AliasMode-owned pages. */
+async function restorePortableTabs(context: any, urls: readonly string[]): Promise<void> {
+  const targets = urls
+    .map(canonicalUserPageUrl)
+    .filter((url: string | null): url is string => !!url);
+  const existing = [...context.pages()];
+  let blank = existing.find((page: any) => {
+    try { return page.url() === "about:blank"; } catch { return false; }
+  });
+  if (!blank) blank = await context.newPage();
+
+  let firstError: unknown;
+  for (const page of existing) {
+    let url = "";
+    try { url = page.url(); } catch {}
+    const disposable = canonicalUserPageUrl(url) !== null || (url === "about:blank" && page !== blank);
+    if (!disposable) continue;
+    try { await page.close(); } catch (error) { firstError ??= error; }
+  }
+
+  for (let index = 0; index < targets.length; index++) {
+    const page = index === 0 ? blank : await context.newPage();
+    try {
+      await page.goto(targets[index]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError) throw firstError;
+}
+
 /**
  * ONE CDP attach for the whole Cloud open: wait for the persistent context,
- * restore the authoritative bundle (skipped when empty), navigate the startup
- * pages, then detach exactly once. Replaces the probe/restore/navigate chain of
+ * restore the authoritative bundle (skipped when empty), replace portable tabs,
+ * then detach exactly once. Replaces the probe/restore/navigate chain of
  * separate connects that hung against CloakBrowser's CDP server on real devices.
  */
 export async function applySessionToEndpoint(
@@ -1291,6 +1371,7 @@ export async function applySessionToEndpoint(
 ): Promise<void> {
   const parsed = parseSessionBundle(bundle);
   const empty = isSessionBundleEmpty(parsed);
+  const navigationUrls = [...parsed.tabs, ...urls];
   if (options.connect) {
     const log = options.log ?? (() => {});
     const browser = await connectPersistentSessionBrowser(ws, options);
@@ -1298,9 +1379,11 @@ export async function applySessionToEndpoint(
       if (!empty) await writeSessionToBrowser(browser, parsed, { ...options, disconnect: false });
       const context = browser.contexts()[0];
       if (!context) throw new SessionRestoreError("context", "failed");
-      for (let i = 0; i < urls.length; i++) {
-        const page = i === 0 ? context.pages()[0] ?? await context.newPage() : await context.newPage();
-        await page.goto(urls[i]!, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      try {
+        await restorePortableTabs(context, navigationUrls);
+      } catch (error) {
+        if (error instanceof SessionRestoreError) throw error;
+        throw new SessionRestoreError("navigation", "failed");
       }
     } finally { await browser.close(); }
     log("session attach: detached");
@@ -1310,7 +1393,8 @@ export async function applySessionToEndpoint(
     await runPlaywrightWorker("session-restore", {
       endpoint: ws,
       bundle,
-      urls,
+      urls: navigationUrls,
+      replacePages: true,
       connectTimeoutMs: options.connectTimeoutMs ?? SESSION_CONNECT_TIMEOUT_MS,
     }, { timeoutMs: options.writeTimeoutMs ?? SESSION_WRITE_TIMEOUT_MS });
   } catch (error) {

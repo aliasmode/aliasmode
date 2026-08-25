@@ -396,6 +396,7 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
         async detach() { browserDetached = true; },
       };
       const automation = {
+        url() { return mode === "existing-card" ? "http://127.0.0.1/profile-card" : "about:blank"; },
         async bringToFront() {
           if (mode !== "normal") throw new Error("minimized window was raised");
           raised = true;
@@ -443,6 +444,10 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
           contexts: () => [context],
           async newBrowserCDPSession() { return browserCdp; },
           async close() {
+            if (mode === "existing-card") {
+              if (created || raised || detached || browserDetached) throw new Error("existing profile card was changed");
+              return;
+            }
             if (!browserDetached) throw new Error("browser CDP session was not detached");
             if (!["missing-page", "temporary"].includes(mode) && !detached) throw new Error("CDP session was not detached");
             if (mode === "normal" && (!created || !raised)) throw new Error("visible profile card setup was incomplete");
@@ -473,6 +478,9 @@ bunAsNodeTest("profile card setup preserves a minimized browser window", async (
       endpoint: "ws://arming-race", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: ["during-arm-page"] });
     await expect(runPlaywrightWorker("profile-card", {
+      endpoint: "ws://existing-card", url: "http://127.0.0.1/profile-card", connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({ createdPageTargetIds: [] });
+    await expect(runPlaywrightWorker("profile-card", {
       endpoint: "ws://temporary", url: "about:blank", temporary: true, connectTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       createdPageTargetIds: ["temporary-page"],
@@ -502,6 +510,17 @@ bunAsNodeTest("worker restore failures preserve operation and outcome details", 
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
     expect(error).toMatchObject({ code: "operation_failed", details: { operation: "cookie_clear", outcome: "failed" } });
     expect(error.message).not.toContain("secret");
+
+    const emptyAuthoritativeError = await runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({ cookies: [], origins: [], tabs: ["https://x.com/home"] }),
+      urls: [],
+      authoritative: true,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(emptyAuthoritativeError).toMatchObject({
+      code: "operation_failed",
+      details: { operation: "cookie_clear", outcome: "failed" },
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -530,6 +549,13 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
           };
         },
       };
+      const extraPages = [
+        { url: () => "https://example.com/dashboard" },
+        { url: () => "https://example.com/?__aliasmode_session_capture__=7" },
+        { url: () => "https://example.com/?__aliasmode_session_restore__=8" },
+        { url: () => "http://127.0.0.1:50400/card?id=profile1" },
+        { url: () => "about:blank" },
+      ];
       const routes = new Map();
       const context = {
         async cookies() {
@@ -539,7 +565,7 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
             : [cookie];
         },
         async storageState() { throw new Error("capture used storageState"); },
-        pages() { return [livePage]; },
+        pages() { return [livePage, ...extraPages]; },
         async newPage() {
           return {
             currentUrl: "about:blank",
@@ -600,6 +626,7 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
         partitionKey: "https://example.com", _crHasCrossSiteAncestor: false,
       }],
       origins: [{ origin: "https://example.com", localStorage: [{ name: "session", value: "active" }] }],
+      tabs: ["https://example.com/dashboard", "https://example.com/dashboard"],
     });
     for (const endpoint of ["ws://malformed-cookie", "ws://bad-partition-key", "ws://bad-cross-site-ancestor"]) {
       const malformedCookie = await runPlaywrightWorker("session-capture", {
@@ -633,6 +660,66 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       }),
       urls: [],
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker replaces stale pages and attempts every restored tab after a failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-tabs-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      const log = (event) => appendFile(${JSON.stringify(join(root, "events.log"))}, event + "\\n");
+      const makePage = (initialUrl, name) => ({
+        currentUrl: initialUrl,
+        url() { return this.currentUrl; },
+        async goto(url) {
+          this.currentUrl = url;
+          await log("goto:" + url);
+          if (url === "https://fails.example/") throw new Error("offline");
+        },
+        async close() { await log("close:" + name); },
+      });
+      const stale = makePage("https://stale.example/", "stale");
+      const blank = makePage("about:blank", "blank");
+      const extraBlank = makePage("about:blank", "extra-blank");
+      const card = makePage("http://127.0.0.1:50400/card?id=profile1", "card");
+      const pages = [stale, blank, extraBlank, card];
+      const context = {
+        pages: () => pages,
+        async newPage() { const page = makePage("about:blank", "created"); pages.push(page); return page; },
+        async clearCookies() {},
+      };
+      export const chromium = { async connectOverCDP() {
+        return { contexts: () => [context], async close() { await log("detach"); } };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    const error = await runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({ cookies: [], origins: [] }),
+      urls: ["https://fails.example/", "https://ok.example/", "https://fails.example/"],
+      replacePages: true,
+    }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+    expect(error).toMatchObject({ details: { operation: "navigation", outcome: "failed" } });
+
+    const events = (await Bun.file(join(root, "events.log")).text()).trim().split("\n");
+    expect(events.filter((event) => event.startsWith("goto:"))).toEqual([
+      "goto:https://fails.example/",
+      "goto:https://ok.example/",
+      "goto:https://fails.example/",
+    ]);
+    expect(events).toContain("close:stale");
+    expect(events).toContain("close:extra-blank");
+    expect(events).not.toContain("close:card");
+    expect(events.at(-1)).toBe("detach");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -824,6 +911,7 @@ bunAsNodeTest("worker captures current localStorage for a closed known origin", 
         { origin: "https://empty.example", localStorage: [] },
         { origin: "https://live.example", localStorage: [{ name: "live", value: "current-value" }] },
       ],
+      tabs: ["https://live.example/dashboard"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1013,16 +1101,18 @@ bunAsNodeTest("worker proves hidden target identity through marker collisions an
       origins: ["https://a.example", "https://b.example"].map((origin) => ({
         origin, localStorage: [{ name: "token", value: origin }],
       })),
+      tabs: [],
     });
     expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
       endpoint: "ws://empty",
-    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({ cookies: [], origins: [] });
+    }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({ cookies: [], origins: [], tabs: [] });
     expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
       endpoint: "ws://cleanup",
       captureSeed: { origins: ["https://closed.example"] },
     }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
       cookies: [],
       origins: [{ origin: "https://closed.example", localStorage: [{ name: "token", value: "https://closed.example" }] }],
+      tabs: [],
     });
 
     const modes = [
@@ -1166,6 +1256,7 @@ bunAsNodeTest("worker preserves Telegram direct-CDP allowlists through a hidden 
           }],
         }],
       }],
+      tabs: [],
       telegramClient: "a",
     });
   } finally {
@@ -1261,6 +1352,7 @@ bunAsNodeTest("worker falls back safely when a live page changes origin during c
     }, { runtimeRoot: root, timeoutMs: 5_000 }))).toEqual({
       cookies: [],
       origins: [{ origin: "https://race.example", localStorage: [{ name: "safe", value: "fallback" }] }],
+      tabs: ["https://race.example/start"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });

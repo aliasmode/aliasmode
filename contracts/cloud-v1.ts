@@ -118,6 +118,8 @@ export interface CloudOriginStorage {
 export interface PortableSessionV1 {
   cookies: CloudCookie[];
   origins?: CloudOriginStorage[];
+  /** Ordered normal web tabs. Duplicates are intentional. */
+  tabs?: string[];
   telegramClient?: "a" | "k";
 }
 

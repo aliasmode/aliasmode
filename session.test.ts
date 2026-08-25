@@ -3,7 +3,9 @@ import {
   applySessionToEndpoint,
   bundleHasRestorableLogin,
   bundleLoggedInPlatforms,
+  bundleTabUrls,
   bundleTelegramClient,
+  canonicalUserPageUrl,
   collectSessionFromContext,
   isSessionCookie,
   normalizeBundle,
@@ -77,7 +79,7 @@ test("readSessionFromBrowser does not hang when CDP disconnect stalls", async ()
   expect(await readSessionFromBrowser(browser, {
     captureTimeoutMs: 20,
     disconnectTimeoutMs: 5,
-  })).toBe('{"cookies":[],"origins":[]}');
+  })).toBe('{"cookies":[],"origins":[],"tabs":[]}');
 });
 
 test("writeSessionToBrowser bounds a hung origin restore and disconnects", async () => {
@@ -570,29 +572,36 @@ test("parseCapturedSessionBundle accepts only complete fresh-capture shapes", ()
       _crHasCrossSiteAncestor: false,
     }],
     origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: "value" }] }],
+    tabs: ["https://example.com/dashboard?view=all#latest", "https://example.com/dashboard?view=all#latest"],
   };
   expect(parseCapturedSessionBundle(JSON.stringify(valid))).toEqual(valid);
   expect(parseCapturedSessionBundle(JSON.stringify({
     cookies: [],
     origins: [{ origin: "https://example.com", localStorage: [] }],
+    tabs: [],
   }))).toEqual({
     cookies: [],
     origins: [{ origin: "https://example.com", localStorage: [] }],
+    tabs: [],
   });
 
   for (const invalid of [
     null,
     {},
-    { cookies: [], origins: "wrong" },
-    { cookies: [{ name: "session", value: "active", domain: ".example.com" }], origins: [] },
-    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", secure: "yes" }], origins: [] },
-    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", partitionKey: true }], origins: [] },
-    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", _crHasCrossSiteAncestor: "false" }], origins: [] },
-    { cookies: [], origins: [{ origin: "https://example.com/path", localStorage: [] }] },
-    { cookies: [], origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: 1 }] }] },
-    { cookies: [], origins: [{ origin: "https://example.com", localStorage: [], indexedDB: [] }] },
-    { cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [], indexedDB: [{ name: "tt-passcode", version: 1, stores: [] }] }] },
-    { cookies: [], origins: [], telegramClient: "z" },
+    { cookies: [], origins: [], tabs: "wrong" },
+    { cookies: [], origins: "wrong", tabs: [] },
+    { cookies: [{ name: "session", value: "active", domain: ".example.com" }], origins: [], tabs: [] },
+    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", secure: "yes" }], origins: [], tabs: [] },
+    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", partitionKey: true }], origins: [], tabs: [] },
+    { cookies: [{ name: "session", value: "active", domain: ".example.com", path: "/", _crHasCrossSiteAncestor: "false" }], origins: [], tabs: [] },
+    { cookies: [], origins: [{ origin: "https://example.com/path", localStorage: [] }], tabs: [] },
+    { cookies: [], origins: [{ origin: "https://example.com", localStorage: [{ name: "auth", value: 1 }] }], tabs: [] },
+    { cookies: [], origins: [{ origin: "https://example.com", localStorage: [], indexedDB: [] }], tabs: [] },
+    { cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [], indexedDB: [{ name: "tt-passcode", version: 1, stores: [] }] }], tabs: [] },
+    { cookies: [], origins: [], tabs: ["about:blank"] },
+    { cookies: [], origins: [], tabs: ["https://example.com", 1] },
+    { cookies: [], origins: [], tabs: ["https://example.com/?__aliasmode_session_restore__=1"] },
+    { cookies: [], origins: [], tabs: [], telegramClient: "z" },
   ]) {
     expect(() => parseCapturedSessionBundle(JSON.stringify(invalid))).toThrow("invalid captured session bundle");
   }
@@ -628,10 +637,58 @@ test("sessionBundleSignature ignores portable entry order but detects session ch
   expect(sessionBundleSignature(first)).not.toBe(sessionBundleSignature(changed));
 });
 
+test("sessionBundleSignature preserves tab order and duplicate URLs", () => {
+  const base = { cookies: [], origins: [], tabs: ["https://one.example/", "https://two.example/", "https://one.example/"] };
+  expect(sessionBundleSignature(JSON.stringify(base))).toBe(sessionBundleSignature(JSON.stringify({ ...base })));
+  expect(sessionBundleSignature(JSON.stringify(base))).not.toBe(sessionBundleSignature(JSON.stringify({
+    ...base,
+    tabs: ["https://two.example/", "https://one.example/", "https://one.example/"],
+  })));
+  expect(sessionBundleSignature(JSON.stringify(base))).not.toBe(sessionBundleSignature(JSON.stringify({
+    ...base,
+    tabs: ["https://one.example/", "https://two.example/"],
+  })));
+});
+
+test("canonicalUserPageUrl keeps normal web URLs and rejects AliasMode-owned pages", () => {
+  expect(canonicalUserPageUrl("https://example.com/path?q=one#section")).toBe("https://example.com/path?q=one#section");
+  expect(canonicalUserPageUrl("about:blank")).toBeNull();
+  expect(canonicalUserPageUrl("chrome://settings/")).toBeNull();
+  expect(canonicalUserPageUrl("https://example.com/?__aliasmode_session_capture__=1")).toBeNull();
+  expect(canonicalUserPageUrl("https://example.com/?__aliasmode_session_restore__=1")).toBeNull();
+  expect(canonicalUserPageUrl("http://127.0.0.1:50400/card?id=profile1")).toBeNull();
+});
+
+test("bundleTabUrls tolerantly filters malformed legacy entries without deduplicating", () => {
+  expect(bundleTabUrls(JSON.stringify({
+    cookies: [],
+    tabs: [
+      "https://one.example/path",
+      "about:blank",
+      "https://one.example/path",
+      4,
+      "https://two.example/?__aliasmode_session_capture__=1",
+    ],
+  }))).toEqual(["https://one.example/path", "https://one.example/path"]);
+  expect(bundleTabUrls(JSON.stringify({ cookies: [] }))).toEqual([]);
+});
+
 test("normalizeBundle tolerates missing/malformed input instead of throwing", () => {
-  expect(normalizeBundle(null)).toEqual({ cookies: [], origins: [], hasOrigins: false });
-  expect(normalizeBundle({})).toEqual({ cookies: [], origins: [], hasOrigins: false });
-  expect(normalizeBundle({ cookies: "not-an-array" })).toEqual({ cookies: [], origins: [], hasOrigins: false });
+  const empty = { cookies: [], origins: [], tabs: [], hasOrigins: false, hasTabs: false };
+  expect(normalizeBundle(null)).toEqual(empty);
+  expect(normalizeBundle({})).toEqual(empty);
+  expect(normalizeBundle({ cookies: "not-an-array" })).toEqual(empty);
+});
+
+test("normalizeBundle preserves ordered valid tabs and tracks optional field presence", () => {
+  expect(normalizeBundle({ cookies: [] })).toMatchObject({ tabs: [], hasTabs: false });
+  expect(normalizeBundle({
+    cookies: [],
+    tabs: ["https://one.example/path", "bad", "https://one.example/path", "file:///private"],
+  })).toMatchObject({
+    tabs: ["https://one.example/path", "https://one.example/path"],
+    hasTabs: true,
+  });
 });
 
 test("normalizeBundle distinguishes a legacy cookie-only bundle from a modern one with an empty origins list", () => {
@@ -839,6 +896,27 @@ test("collectSessionFromContext rejects malformed raw origin storage", async () 
     pages: () => [],
   };
   await expect(collectSessionFromContext(internalOrigin)).rejects.toThrow("invalid captured origin storage");
+});
+
+test("collectSessionFromContext captures ordered duplicate user tabs and excludes internal pages", async () => {
+  const pages = [
+    { url: () => "https://one.example/path?q=1#top" },
+    { url: () => "about:blank" },
+    { url: () => "https://one.example/path?q=1#top" },
+    { url: () => "https://two.example/?__aliasmode_session_restore__=1" },
+    { url: () => "http://127.0.0.1:50400/card?id=profile1" },
+    { url: () => "https://two.example/other" },
+  ];
+  const ctx = {
+    pages: () => pages,
+    async storageState() { return { cookies: [], origins: [] }; },
+  };
+
+  expect((await collectSessionFromContext(ctx)).tabs).toEqual([
+    "https://one.example/path?q=1#top",
+    "https://one.example/path?q=1#top",
+    "https://two.example/other",
+  ]);
 });
 
 test("collectSessionFromContext includes storage from pages loaded before CDP attach", async () => {
@@ -1146,10 +1224,26 @@ test("writeSession skips the browser attach entirely for an empty bundle", async
   expect(connects).toBe(0);
 });
 
+test("authoritative writeSession clears stale cookies for an empty bundle", async () => {
+  const events: string[] = [];
+  await writeSession("ws://verified-browser", JSON.stringify({ cookies: [], origins: [], tabs: ["https://x.com/home"] }), {
+    authoritative: true,
+    async connect() {
+      events.push("connect");
+      return {
+        contexts: () => [{ async clearCookies() { events.push("clear"); } }],
+        async close() { events.push("close"); },
+      };
+    },
+  });
+  expect(events).toEqual(["connect", "clear", "close"]);
+});
+
 test("applySessionToEndpoint restores and navigates over one attach, then detaches once", async () => {
   const events: string[] = [];
   const context = {
     pages: () => [{
+      url: () => "about:blank",
       async goto(url: string) { events.push(`goto:${url}`); },
     }],
     async newPage() { events.push("newPage"); return { async goto(url: string) { events.push(`goto:${url}`); } }; },
@@ -1172,6 +1266,51 @@ test("applySessionToEndpoint restores and navigates over one attach, then detach
     },
   );
   expect(events).toEqual(["connect", "clear", "add", "goto:https://x.com/home", "close"]);
+});
+
+test("applySessionToEndpoint replaces stale pages and attempts every ordered duplicate URL", async () => {
+  const navigated: string[] = [];
+  const closed: string[] = [];
+  const page = (initialUrl: string) => ({
+    currentUrl: initialUrl,
+    url() { return this.currentUrl; },
+    async goto(url: string) {
+      this.currentUrl = url;
+      navigated.push(url);
+      if (url === "https://fails.example/") throw new Error("offline");
+    },
+    async close() { closed.push(initialUrl); },
+  });
+  const stale = page("https://stale.example/");
+  const reusableBlank = page("about:blank");
+  const extraBlank = page("about:blank");
+  const card = page("http://127.0.0.1:50400/card?id=profile1");
+  const pages = [stale, reusableBlank, extraBlank, card];
+  const context = {
+    pages: () => pages,
+    async newPage() {
+      const created = page("about:blank");
+      pages.push(created);
+      return created;
+    },
+  };
+
+  await expectRestoreError(applySessionToEndpoint(
+    "ws://verified-browser",
+    JSON.stringify({ cookies: [], origins: [], tabs: ["https://fails.example/", "https://ok.example/", "https://fails.example/"] }),
+    [],
+    {
+      async connect() {
+        return { contexts: () => [context], async close() { closed.push("browser"); } };
+      },
+    },
+  ), "navigation", "failed");
+
+  expect(navigated).toEqual(["https://fails.example/", "https://ok.example/", "https://fails.example/"]);
+  expect(closed).toContain("https://stale.example/");
+  expect(closed.filter((url) => url === "about:blank")).toHaveLength(1);
+  expect(closed).not.toContain("http://127.0.0.1:50400/card?id=profile1");
+  expect(closed.at(-1)).toBe("browser");
 });
 
 test("applySessionToEndpoint detaches after restore fails", async () => {
@@ -1232,7 +1371,10 @@ test("applySessionToEndpoint detaches after restore times out", async () => {
 test("applySessionToEndpoint with an empty bundle navigates without cookie work", async () => {
   const events: string[] = [];
   const context = {
-    pages: () => [{ async goto(url: string) { events.push(`goto:${url}`); } }],
+    pages: () => [{
+      url: () => "about:blank",
+      async goto(url: string) { events.push(`goto:${url}`); },
+    }],
   };
   await applySessionToEndpoint("ws://verified-browser", JSON.stringify({ cookies: [], origins: [] }), ["https://x.com/home"], {
     sleep: async () => {},

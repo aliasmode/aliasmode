@@ -39,6 +39,7 @@ import {
   runReadSessionWorker,
   writeSession,
   applySessionToEndpoint,
+  canonicalUserPageUrl,
 } from "./session.ts";
 import { importBuffers, importInbox, watchInbox } from "./inbox.ts";
 import { ensureStateDirectories, profileDataPaths, resolveStateRoot, statePaths, type StatePaths } from "./paths.ts";
@@ -57,7 +58,7 @@ import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import net from "node:net";
@@ -1049,6 +1050,7 @@ export interface WindowsPageLifecycleObservation extends WindowsProfileCardObser
 
 export type WindowsWindowAcceptanceStage =
   | "search_provider_ready"
+  | "tabs_restored"
   | "page_targets_ready"
   | "windows_distinct"
   | "window_minimized"
@@ -1062,6 +1064,7 @@ export interface WindowsWindowAcceptanceRuntime {
   profileIds: readonly [string, string];
   open(profileId: string): Promise<void>;
   verifySearchProvider?(profileId: string): Promise<void>;
+  verifyTabsRestored?(): Promise<void>;
   close(profileId: string): Promise<void>;
   nativeWindows(): Promise<WindowsNativeWindowSnapshot>;
   minimize(profileId: string): Promise<void>;
@@ -1106,6 +1109,10 @@ export async function exerciseWindowsWindowAcceptance(
       await runtime.verifySearchProvider(firstId);
       await runtime.verifySearchProvider(secondId);
       runtime.reportStage?.("search_provider_ready");
+    }
+    if (runtime.verifyTabsRestored) {
+      await runtime.verifyTabsRestored();
+      runtime.reportStage?.("tabs_restored");
     }
 
     const [firstTargets, secondTargets] = await Promise.all([
@@ -1698,6 +1705,33 @@ async function cdpPageTargetIds(port: number): Promise<string[]> {
   return ids;
 }
 
+async function cdpUserPageUrls(port: number): Promise<string[]> {
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error("managed CloakBrowser target list is unavailable");
+  const targets = await response.json();
+  if (!Array.isArray(targets)) throw new Error("managed CloakBrowser target list is invalid");
+  return targets.flatMap((target) => {
+    if (target?.type !== "page" || typeof target.url !== "string") return [];
+    const url = canonicalUserPageUrl(target.url);
+    return url ? [url] : [];
+  }).sort();
+}
+
+async function waitForWindowsAcceptanceTabs(port: number, expected: readonly string[]): Promise<void> {
+  const wanted = [...expected].sort();
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    try {
+      const actual = await cdpUserPageUrls(port);
+      if (JSON.stringify(actual) === JSON.stringify(wanted)) return;
+    } catch {}
+    await Bun.sleep(250);
+  }
+  throw new Error("clean-close tab restoration did not return the exact saved user pages");
+}
+
 async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Promise<void> {
   if (process.platform !== "win32") {
     throw new Error("Windows window acceptance requires Windows");
@@ -1716,9 +1750,32 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
     },
   );
   const [firstId, secondId] = WINDOWS_ACCEPTANCE_PROFILE_IDS;
+  const tabServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      const profileId = url.searchParams.get("profile") ?? "";
+      const title = WINDOWS_ACCEPTANCE_PROFILE_IDS.includes(profileId as typeof firstId)
+        ? windowsAcceptanceWindowMarker(profileId)
+        : "AliasMode window acceptance";
+      return new Response(`<!doctype html><title>${title}</title><main>${url.pathname}</main>`, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    },
+  });
+  const tabOrigin = `http://127.0.0.1:${tabServer.port}`;
+  const initialPageUrl = (profileId: string) =>
+    `${tabOrigin}/window?profile=${encodeURIComponent(profileId)}`;
+  const restoredTabs = ["one", "two", "three"].map((name) =>
+    `${tabOrigin}/tabs/${name}?profile=${encodeURIComponent(firstId)}`
+  );
   store.upsertProfiles([
-    smokeProfile(firstId, "Window smoke one", 101),
-    smokeProfile(secondId, "Window smoke two", 202),
+    {
+      ...smokeProfile(firstId, windowsAcceptanceWindowMarker(firstId), 101),
+      platform: "x.com",
+    },
+    smokeProfile(secondId, windowsAcceptanceWindowMarker(secondId), 202),
   ]);
   const launch = (profileId: string) => {
     const value = store.getLaunch(profileId);
@@ -1734,15 +1791,20 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
 
   try {
     await launcher.reconcileOrphans();
+    for (const profileId of WINDOWS_ACCEPTANCE_PROFILE_IDS) {
+      if (store.getLaunch(profileId) && !await launcher.stop(profileId)) {
+        throw new Error(`managed CloakBrowser pre-acceptance cleanup was not confirmed for ${profileId}`);
+      }
+      rmSync(launcher.userDataDir(profileId), { recursive: true, force: true });
+    }
     await exerciseWindowsWindowAcceptance({
       profileIds: WINDOWS_ACCEPTANCE_PROFILE_IDS,
       async open(profileId) {
-        const opened = await launcher.start(profileId, [], { autoNavigate: false });
-        const marker = windowsAcceptanceWindowMarker(profileId);
-        const document = `<!doctype html><title>${marker}</title>`;
-        await launcher.navigate(opened.ws, [
-          `data:text/html;charset=utf-8,${encodeURIComponent(document)}`,
-        ]);
+        const opened = await launcher.start(profileId, [], {
+          autoNavigate: false,
+          restoreLastSession: false,
+        });
+        await launcher.navigate(opened.ws, [initialPageUrl(profileId)]);
       },
       async verifySearchProvider(profileId) {
         const result = searchProviderResults.get(launcher.userDataDir(profileId));
@@ -1752,6 +1814,27 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
           || !result.engine.toLowerCase().includes("duckduckgo")
         ) {
           throw new Error(`DuckDuckGo launch-time setup was not confirmed for ${profileId}`);
+        }
+      },
+      async verifyTabsRestored() {
+        const first = launch(firstId);
+        const second = launch(secondId);
+        await launcher.navigate(first.ws, restoredTabs, true);
+        await waitForWindowsAcceptanceTabs(first.debugPort, restoredTabs);
+        if (!await launcher.stop(firstId)) {
+          throw new Error(`managed CloakBrowser clean close was not confirmed for ${firstId}`);
+        }
+        const reopened = await launcher.start(firstId, [], {
+          restoreLastSession: true,
+        });
+        await waitForWindowsAcceptanceTabs(reopened.port, restoredTabs);
+        const currentSecond = launch(secondId);
+        if (
+          currentSecond.debugPort !== second.debugPort
+          || currentSecond.startedAt !== second.startedAt
+          || !await launcher.active(secondId)
+        ) {
+          throw new Error("clean-close tab restoration changed the independent acceptance profile");
         }
       },
       async close(profileId) {
@@ -1844,6 +1927,7 @@ async function runWindowsWindowAcceptance(paths: StatePaths, rest: string[]): Pr
     for (const profileId of [...WINDOWS_ACCEPTANCE_PROFILE_IDS].reverse()) {
       await launcher.stop(profileId).catch(() => false);
     }
+    await tabServer.stop(true);
     store.close();
   }
 }
