@@ -189,9 +189,6 @@ jobs:
             ConvertTo-Json -Compress |
             Set-Content (Join-Path $appData "config.json")
           $descriptorPath = Join-Path $appData "agent-runtime.json"
-          $lifecycleTrace = Join-Path $env:RUNNER_TEMP "aliasmode-lifecycle.jsonl"
-          Remove-Item $lifecycleTrace -Force -ErrorAction SilentlyContinue
-          $env:ALIASMODE_CI_DIAGNOSTICS = $lifecycleTrace
 
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
           $helper = Join-Path $installRoot "aliasmode-mcp.exe"
@@ -295,27 +292,53 @@ jobs:
             if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
               throw "MCP host did not launch AliasMode in background mode"
             }
-            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AliasModeWindow { [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string windowName); [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr handle); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId); }'
-            $backgroundHidden = $false
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            public static class AliasModeWindow {
+              private delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
+              [StructLayout(LayoutKind.Sequential)]
+              private struct Rect { public int Left, Top, Right, Bottom; }
+              [DllImport("user32.dll")]
+              private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+              [DllImport("user32.dll")]
+              private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
+              [DllImport("user32.dll")]
+              private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
+              [DllImport("user32.dll")]
+              private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+              [DllImport("user32.dll")]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              public static extern bool IsWindowVisible(IntPtr handle);
+
+              public static IntPtr FindAppWindow(uint processId, bool visibleOnly) {
+                IntPtr found = IntPtr.Zero;
+                EnumWindows((handle, _) => {
+                  GetWindowThreadProcessId(handle, out uint owner);
+                  if (owner != processId || !GetWindowRect(handle, out Rect rect)) return true;
+                  if (rect.Right - rect.Left < 200 || rect.Bottom - rect.Top < 200) return true;
+                  if (visibleOnly && !IsWindowVisible(handle)) return true;
+                  found = handle;
+                  return false;
+                }, IntPtr.Zero);
+                return found;
+              }
+
+              public static bool CloseWindow(IntPtr handle) {
+                return PostMessage(handle, 0x0010, IntPtr.Zero, IntPtr.Zero);
+              }
+            }
+          '@
+            $backgroundVisible = $false
             for ($attempt = 0; $attempt -lt 20; $attempt++) {
-              $mainWindow = [AliasModeWindow]::FindWindow($null, "AliasMode")
-              [uint32]$windowPid = 0
-              [void][AliasModeWindow]::GetWindowThreadProcessId($mainWindow, [ref]$windowPid)
-              if (
-                $mainWindow -ne [IntPtr]::Zero -and
-                $windowPid -eq $descriptor.desktopPid -and
-                -not [AliasModeWindow]::IsWindowVisible($mainWindow)
-              ) {
-                $backgroundHidden = $true
+              $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
+              if ($mainWindow -ne [IntPtr]::Zero) {
+                $backgroundVisible = $true
                 break
               }
               Start-Sleep -Milliseconds 100
             }
-            if (-not $backgroundHidden) {
-              if (Test-Path $lifecycleTrace -PathType Leaf) {
-                Get-Content $lifecycleTrace | ForEach-Object { Write-Host "lifecycle trace: $_" }
-              }
-              Write-Host "window trace: handle=$([int64]$mainWindow) pid=$windowPid visible=$([AliasModeWindow]::IsWindowVisible($mainWindow))"
+            if ($backgroundVisible) {
               throw "background AliasMode exposed its main window"
             }
           } finally {
@@ -385,40 +408,28 @@ jobs:
                 Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
                 Select-Object -First 1
               if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
-              $mainWindow = [AliasModeWindow]::FindWindow($null, "AliasMode")
-              [uint32]$windowPid = 0
-              [void][AliasModeWindow]::GetWindowThreadProcessId($mainWindow, [ref]$windowPid)
-              if (
-                $sidecarPid -and
-                $windowPid -eq $descriptor.desktopPid -and
-                [AliasModeWindow]::IsWindowVisible($mainWindow)
-              ) { break }
+              $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
+              if ($sidecarPid -and $mainWindow -ne [IntPtr]::Zero) { break }
               Start-Sleep -Milliseconds 500
             }
             if (-not $sidecarPid) { throw "installed desktop did not start its packaged sidecar" }
-            if (
-              $windowPid -ne $descriptor.desktopPid -or
-              -not [AliasModeWindow]::IsWindowVisible($mainWindow)
-            ) {
+            if ($mainWindow -eq [IntPtr]::Zero) {
               throw "installed desktop did not show its main window"
             }
             Start-Sleep -Seconds 2
             $app.Refresh()
-            $mainWindow = [AliasModeWindow]::FindWindow($null, "AliasMode")
-            [uint32]$windowPid = 0
-            [void][AliasModeWindow]::GetWindowThreadProcessId($mainWindow, [ref]$windowPid)
+            $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
             if (
               $app.HasExited -or
               -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) -or
-              $windowPid -ne $descriptor.desktopPid -or
-              -not [AliasModeWindow]::IsWindowVisible($mainWindow)
+              $mainWindow -eq [IntPtr]::Zero
             ) {
               throw "installed desktop did not remain ready"
             }
           } finally {
             $app.Refresh()
             if (-not $app.HasExited) {
-              if (-not $app.CloseMainWindow()) {
+              if (-not [AliasModeWindow]::CloseWindow($mainWindow)) {
                 $shutdownFailure = "installed desktop rejected its main-window close request"
               } elseif (-not $app.WaitForExit(15000)) {
                 $shutdownFailure = "installed desktop did not exit after its main window closed"
