@@ -387,6 +387,28 @@ export function parseUpdateFile(text: string): UpdateFileSummary {
   return looksCsv ? parseCsvUpdates(text) : parseTxtUpdates(text);
 }
 
+/**
+ * Turn already-tabulated rows into profile updates. Shared by the CSV reader
+ * below and by the .xlsx reader in ui.ts so a spreadsheet re-upload obeys the
+ * same UPDATE_KEYMAP, the same id matching, and the same "identity columns are
+ * inert" rule as every other update file.
+ */
+export function rowsToUpdates(rows: Record<string, string>[]): UpdateFileSummary {
+  const updates: ProfileUpdate[] = [];
+  let skipped = 0;
+  for (const row of rows) {
+    const id = (row.id ?? "").trim();
+    if (!id) {
+      // A wholly blank row is padding (Excel emits plenty); only a row that
+      // carried data but no id is a row the operator will want to hear about.
+      if (Object.values(row).some((v) => (v ?? "").trim() !== "")) skipped++;
+      continue;
+    }
+    updates.push({ id, set: mapPresentFields(row) });
+  }
+  return { updates, skipped };
+}
+
 function mapPresentFields(src: Record<string, string>): Record<string, string> {
   const set: Record<string, string> = {};
   for (const [k, v] of Object.entries(src)) {
@@ -436,25 +458,19 @@ function parseCsvUpdates(text: string): UpdateFileSummary {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length < 2) return { updates: [], skipped: 0 };
   const header = splitCsvRow(lines[0]!).map((h) => h.toLowerCase());
-  const idCol = header.indexOf("id");
-  if (idCol === -1) return { updates: [], skipped: lines.length - 1 };
-  const updates: ProfileUpdate[] = [];
-  let skipped = 0;
-  for (let i = 1; i < lines.length; i++) {
-    const cells = splitCsvRow(lines[i]!);
-    const id = (cells[idCol] ?? "").trim();
-    if (!id) { skipped++; continue; }
-    const src: Record<string, string> = {};
+  if (!header.includes("id")) return { updates: [], skipped: lines.length - 1 };
+  const rows = lines.slice(1).map((line) => {
+    const cells = splitCsvRow(line);
+    const row: Record<string, string> = {};
     for (let c = 0; c < header.length; c++) {
-      if (c === idCol) continue;
       // A short row omits trailing fields; it does not explicitly clear them.
       // A present trailing comma still creates an empty cell and remains the
       // intentional-clear representation.
-      if (c < cells.length) src[header[c]!] = cells[c]!;
+      if (c < cells.length) row[header[c]!] = cells[c]!;
     }
-    updates.push({ id, set: mapPresentFields(src) });
-  }
-  return { updates, skipped };
+    return row;
+  });
+  return rowsToUpdates(rows);
 }
 
 // ===========================================================================
@@ -470,27 +486,69 @@ function proxyToString(p: Profile): string {
   return proxyLegacyString(px);
 }
 
+/**
+ * One profile as the flat `key=value` field map both full-fidelity exports are
+ * built from. Kept in one place so the .txt block and the .xlsx sheet cannot
+ * drift into encoding the same profile two different ways.
+ */
+function profileFields(p: Profile): Record<string, string> {
+  return {
+    acc_id: p.accId,
+    id: p.id,
+    group: p.group,
+    platform: p.platform ?? "",
+    name: p.name,
+    username: p.username,
+    password: p.password,
+    email: p.email ?? "",
+    emailpassword: p.emailPassword ?? "",
+    fakey: p.twofa,
+    cookie: JSON.stringify(p.cookies),
+    proxytype: p.proxy?.type ?? "",
+    proxy: proxyToString(p),
+    ua: p.ua,
+    resolution: `${p.screenWidth}*${p.screenHeight}`,
+  };
+}
+
+/** Field order of the `key=value` block export. */
+const TXT_KEYS = [
+  "acc_id", "id", "group", "platform", "name", "username", "password",
+  "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
+] as const;
+
+/**
+ * Columns of the Excel export. Same fields as the .txt block, but with `id`
+ * first: it is the column a re-upload matches rows on, so it belongs where a
+ * human editing the sheet will see it without scrolling.
+ */
+export const XLSX_COLUMNS = [
+  "id", "acc_id", "group", "platform", "name", "username", "password",
+  "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
+] as const;
+
 /** Serialize profiles to the AdsPower `key=value` export format. */
 export function serializeAdsTxt(profiles: Profile[]): string {
-  const blocks = profiles.map((p) => [
-    `acc_id=${p.accId}`,
-    `id=${p.id}`,
-    `group=${p.group}`,
-    `platform=${p.platform ?? ""}`,
-    `name=${p.name}`,
-    `username=${p.username}`,
-    `password=${p.password}`,
-    `email=${p.email ?? ""}`,
-    `emailpassword=${p.emailPassword ?? ""}`,
-    `fakey=${p.twofa}`,
-    `cookie=${JSON.stringify(p.cookies)}`,
-    `proxytype=${p.proxy?.type ?? ""}`,
-    `proxy=${proxyToString(p)}`,
-    `ua=${p.ua}`,
-    `resolution=${p.screenWidth}*${p.screenHeight}`,
-    "******************",
-  ].join("\n"));
+  const blocks = profiles.map((p) => {
+    const f = profileFields(p);
+    return [...TXT_KEYS.map((k) => `${k}=${f[k]}`), "******************"].join("\n");
+  });
   return blocks.join("\n") + (blocks.length ? "\n" : "");
+}
+
+/**
+ * Serialize profiles to the header + rows of a single spreadsheet sheet. The
+ * caller turns these into a workbook (xlsx.ts); keeping the shaping here means
+ * the sheet and the .txt block stay one decision, not two.
+ */
+export function serializeXlsxRows(profiles: Profile[]): { headers: string[]; rows: string[][] } {
+  return {
+    headers: [...XLSX_COLUMNS],
+    rows: profiles.map((p) => {
+      const f = profileFields(p);
+      return XLSX_COLUMNS.map((k) => f[k]!);
+    }),
+  };
 }
 
 function csvCell(v: string): string {

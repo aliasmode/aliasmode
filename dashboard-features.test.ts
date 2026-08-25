@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test";
-import { parseUpdateFile, serializeCsv, serializeAdsTxt } from "./parse.ts";
+import { parseUpdateFile, serializeCsv, serializeAdsTxt, serializeXlsxRows, rowsToUpdates, XLSX_COLUMNS } from "./parse.ts";
+import { writeXlsx, readXlsx } from "./xlsx.ts";
+
+const NEWLINE = String.fromCharCode(10);
 import { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
 
@@ -66,6 +69,78 @@ test("serializeCsv/AdsTxt round-trip through parseUpdateFile", () => {
   expect(fromTxt.set).toMatchObject({
     platform: "x.com", email: "a@b.com", emailPassword: "mail-pw", twofa: "JBSW", proxy: "1.2.3.4:8080:u:p",
   });
+});
+
+// ---- Excel export (full-fidelity sheet) ----
+
+test("serializeXlsxRows emits the documented columns in order", () => {
+  const { headers } = serializeXlsxRows([profile()]);
+  expect(headers).toEqual([...XLSX_COLUMNS]);
+  expect(headers[0]).toBe("id"); // first, so a re-upload can match rows
+});
+
+test("serializeXlsxRows carries the same values the .txt export writes", () => {
+  const p = profile({
+    id: "k1", accId: "476436", name: "alice", group: "Warmup", platform: "x.com",
+    username: "alice-user", password: "pw:1", email: "a@b.com", emailPassword: "mail-pw", twofa: "JBSW",
+    ua: "Mozilla/5.0 (Windows NT 10.0) Chrome/143.0.0.0",
+    screenWidth: 1680, screenHeight: 1050,
+    proxy: { type: "http", host: "1.2.3.4", port: "8080", user: "u", pass: "p" },
+    cookies: [{ name: "auth_token", value: "v1", domain: ".x.com", path: "/" }],
+  });
+  const { headers, rows } = serializeXlsxRows([p]);
+  const cell = (k: string) => rows[0]![headers.indexOf(k)];
+
+  // The .txt block is the reference encoding; the sheet must agree field for field.
+  const block = Object.fromEntries(
+    serializeAdsTxt([p]).split(NEWLINE).filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
+  );
+  for (const key of ["id", "acc_id", "group", "platform", "name", "username", "password", "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution"]) {
+    expect([key, cell(key)]).toEqual([key, block[key]!]);
+  }
+});
+
+test("a profile survives the full export-to-Excel and read-back trip", async () => {
+  const p = profile({
+    id: "k1", name: "alice", group: "Warmup", platform: "x.com", twofa: "JBSW",
+    proxy: { type: "socks5", host: "2001:db8::1", port: "1080", user: "u", pass: "p:ss" },
+    cookies: [{ name: "auth_token", value: "v&<1>", domain: ".x.com", path: "/" }],
+  });
+  const { headers, rows } = serializeXlsxRows([p]);
+  const back = await readXlsx(await writeXlsx(headers, rows));
+  expect(back[0]!.id).toBe("k1");
+  expect(back[0]!.proxy).toBe("[2001:db8::1]:1080:u:p:ss");
+  expect(JSON.parse(back[0]!.cookie!)).toEqual(p.cookies);
+});
+
+test("rowsToUpdates maps an Excel row to the same edits the CSV path produces", async () => {
+  const p = profile({
+    id: "k1", name: "alice", group: "Warmup", platform: "x.com",
+    username: "alice-user", password: "pw:1", email: "a@b.com", emailPassword: "mail-pw", twofa: "JBSW",
+    proxy: { type: "http", host: "1.2.3.4", port: "8080", user: "u", pass: "p" },
+  });
+  const { headers, rows } = serializeXlsxRows([p]);
+  const fromXlsx = rowsToUpdates(await readXlsx(await writeXlsx(headers, rows))).updates[0]!;
+
+  expect(fromXlsx.id).toBe("k1");
+  expect(fromXlsx.set).toMatchObject(parseUpdateFile(serializeCsv([p])).updates[0]!.set);
+});
+
+test("rowsToUpdates skips rows with no id instead of creating profiles", () => {
+  const summary = rowsToUpdates([
+    { id: "k1", name: "kept" },
+    { id: "", name: "dropped" },
+    { id: "   ", name: "dropped too" },
+  ]);
+  expect(summary.updates).toEqual([{ id: "k1", set: { name: "kept" } }]);
+  expect(summary.skipped).toBe(2);
+});
+
+test("rowsToUpdates ignores identity columns, matching the .txt and .csv rules", () => {
+  // cookie/ua/acc_id are exported for transfer, but "Edit from file" has never
+  // rewritten an identity — an edited cookie column must stay inert here too.
+  const { set } = rowsToUpdates([{ id: "k1", cookie: "[]", ua: "spoofed", acc_id: "9", name: "kept" }]).updates[0]!;
+  expect(set).toEqual({ name: "kept" });
 });
 
 // ---- Groups: rename + delete ----

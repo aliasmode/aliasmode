@@ -50,6 +50,7 @@ import {
   updateProfile,
   convertMobileProfile,
   exportProfiles,
+  type ExportFormat,
   updateFromFile,
   createGroup,
   renameGroup,
@@ -1434,7 +1435,7 @@ function App() {
   };
 
   // ---- Export selected → file ----
-  const exportSelected = async (format: "csv" | "txt") => {
+  const exportSelected = async (format: ExportFormat) => {
     setExportOpen(false);
     if (!selected.size) return;
     try { await exportProfiles([...selected], format); }
@@ -1801,8 +1802,9 @@ function App() {
           <button className="abtn" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>Export ▾</button>
           {exportOpen && selected.size > 0 && (
             <div className="exportmenu" onMouseLeave={() => setExportOpen(false)}>
-              <button onClick={() => exportSelected("csv")}>Export as CSV</button>
-              <button onClick={() => exportSelected("txt")}>Export as AdsPower .txt</button>
+              <button onClick={() => exportSelected("csv")}>Export as CSV (credentials)</button>
+              <button onClick={() => exportSelected("txt")}>Export as .txt (full profile)</button>
+              <button onClick={() => exportSelected("xlsx")}>Export as Excel (full profile)</button>
             </div>
           )}
         </div>
@@ -2422,7 +2424,7 @@ function App() {
               <ol className="steps">
                 <li><b>Export</b> the profiles you want to change — that gives you a file with each profile's <code>id</code> (how rows are matched).</li>
                 <li><b>Edit</b> the columns you want (name, username, password, 2FA, proxy…). Keep the <code>id</code> column; delete any column you don't want to touch.</li>
-                <li><b>Re-upload</b> the edited file below. Matched by <code>id</code>; cookies &amp; fingerprints are preserved.</li>
+                <li><b>Re-upload</b> the edited file below. Matched by <code>id</code>; cookies &amp; fingerprints are preserved — editing a <code>cookie</code> or <code>ua</code> column has no effect, an update never rewrites an identity.</li>
               </ol>
               <div className="updexport">
                 {selected.size > 0 ? (
@@ -2431,6 +2433,8 @@ function App() {
                     <button className="tlink" onClick={() => exportSelected("csv")}>⤓ CSV</button>
                     &nbsp;·&nbsp;
                     <button className="tlink" onClick={() => exportSelected("txt")}>⤓ .txt</button>
+                    &nbsp;·&nbsp;
+                    <button className="tlink" onClick={() => exportSelected("xlsx")}>⤓ Excel</button>
                   </span>
                 ) : (
                   <span className="hint" style={{ margin: 0 }}>Tip: select profiles first, then export here to get an editable file.</span>
@@ -2447,12 +2451,12 @@ function App() {
               >
                 <div className="big">⤒</div>
                 <div>Drag &amp; drop the edited file, or <b>click to choose</b></div>
-                <div className="sub">CSV or AdsPower <code>.txt</code> with an <code>id</code> column</div>
+                <div className="sub">CSV, <code>.txt</code> or Excel <code>.xlsx</code> with an <code>id</code> column</div>
               </div>
               <input
                 ref={updateFileRef}
                 type="file"
-                accept=".csv,.txt,text/plain,text/csv"
+                accept=".csv,.txt,.xlsx,text/plain,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 style={{ display: "none" }}
                 onChange={(e) => { if (e.target.files?.[0]) setUpdateFile(e.target.files[0]); e.target.value = ""; }}
               />
