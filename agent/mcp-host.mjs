@@ -1,4 +1,3 @@
-import { createReadStream } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -302,7 +301,6 @@ export function sanitizeEnvironment(env = process.env) {
   const allowed = new Set([
     "APPDATA", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH",
     "ALIASMODE_APP_VERSION", "ALIASMODE_DESKTOP_EXE", "ALIASMODE_MCP_DIAGNOSTICS",
-    "ALIASMODE_PARENT_WATCH_FD",
     "ALIASMODE_RUNTIME_DESCRIPTOR",
     "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE",
   ]);
@@ -320,19 +318,16 @@ async function main() {
     "AliasMode.exe",
   );
   const host = await createAliasModeMcp({ runtime: { desktopExecutable } });
+  let shuttingDown = false;
   const shutdown = (event = "signal") => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     diagnose(`shutdown requested event=${event}`);
     void host.close().finally(() => {
       diagnose("shutdown complete");
       process.exit(0);
     });
   };
-  if (process.env.ALIASMODE_PARENT_WATCH_FD === "3") {
-    const parentWatch = createReadStream("", { fd: 3, autoClose: true });
-    parentWatch.resume();
-    parentWatch.once("end", () => shutdown("parent-end"));
-    parentWatch.once("error", () => shutdown("parent-error"));
-  }
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
   process.stdin.once("end", () => shutdown("stdin-end"));

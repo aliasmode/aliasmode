@@ -75,7 +75,7 @@ function diagnose(message: string): void {
 async function runProcess(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   return await new Promise((resolveCode, reject) => {
     const child = spawn(command, args, {
-      stdio: ["pipe", "inherit", "inherit", "pipe"],
+      stdio: ["pipe", "inherit", "inherit"],
       windowsHide: true,
       env,
     });
@@ -108,7 +108,6 @@ async function serve(): Promise<never> {
   const code = await runProcess(node, [host], childEnvironment({
     ALIASMODE_APP_VERSION: VERSION,
     ALIASMODE_DESKTOP_EXE: desktopExecutable(),
-    ALIASMODE_PARENT_WATCH_FD: "3",
   }));
   process.exit(code);
 }
