@@ -1109,12 +1109,15 @@ export class Launcher {
     // opening a proxy connection.
     assertSafeProfileId(profileId);
     validateForwardedLaunchArgs(chromeArgs);
+    this.log("launch stage request validated");
     let profile = this.store.getProfile(profileId);
     if (!profile) throw new Error(`Unknown profile: ${profileId}`);
+    this.log("launch stage profile loaded");
     if (profile.proxyError) {
       throw new Error(`profile ${profileId} has a quarantined legacy proxy: ${profile.proxyError}; edit or clear the proxy before launch`);
     }
     let profileSnapshot = JSON.stringify(profile);
+    this.log("launch stage profile snapshot ready");
     let approvedBinarySha256: string;
     try {
       if (profile.proxy?.type === "https" && profile.proxy.user) {
