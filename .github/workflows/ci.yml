@@ -293,11 +293,11 @@ jobs:
             throw "installed generic MCP setup failed"
           }
           if (
-            $setup.result.mcp.command -ne $node -or
+            $setup.result.mcp.command -ne $helper -or
             $setup.result.mcp.args.Count -ne 1 -or
-            $setup.result.mcp.args[0] -ne $mcpHost -or
-            $setup.result.generic.mcpServers.aliasmode.command -ne $node -or
-            $setup.result.generic.mcpServers.aliasmode.args[0] -ne $mcpHost
+            $setup.result.mcp.args[0] -ne "serve" -or
+            $setup.result.generic.mcpServers.aliasmode.command -ne $helper -or
+            $setup.result.generic.mcpServers.aliasmode.args[0] -ne "serve"
           ) {
             throw "installed generic MCP setup returned incorrect paths"
           }
@@ -311,8 +311,8 @@ jobs:
           }
 
           $mcpStart = [System.Diagnostics.ProcessStartInfo]::new()
-          $mcpStart.FileName = $node
-          $mcpStart.ArgumentList.Add($mcpHost)
+          $mcpStart.FileName = $helper
+          $mcpStart.ArgumentList.Add("serve")
           $mcpStart.WorkingDirectory = $installRoot
           $mcpStart.UseShellExecute = $false
           $mcpStart.CreateNoWindow = $true

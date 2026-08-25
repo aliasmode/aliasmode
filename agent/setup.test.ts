@@ -94,6 +94,7 @@ test("setup is repeatable and reports clients that are not installed", async () 
   const second = await configureClients({ ...options, clients: [...options.clients] });
 
   expect(second).toEqual(first);
+  expect(first.mcp).toEqual({ command: options.helper, args: ["serve"] });
   expect(calls).toEqual(firstCalls);
   expect(first.clients[1]).toEqual({
     client: "codex",

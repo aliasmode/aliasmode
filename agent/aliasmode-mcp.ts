@@ -209,11 +209,8 @@ async function setup(args: string[]): Promise<unknown> {
   else if (requested === "generic") clients = [];
   else if (supported.includes(requested as SetupClient)) clients = [requested as SetupClient];
   else throw new Error("--client must be auto, claude, codex, openclaw, hermes, or generic");
-  const root = runtimeRoot();
   const result = await configureClients({
     helper: resolve(process.execPath),
-    command: nodeExecutable(root),
-    args: [join(root, "agent", "mcp-host.mjs")],
     clients,
   });
   if (result.clients.some((client) => client.status === "failed")) {
