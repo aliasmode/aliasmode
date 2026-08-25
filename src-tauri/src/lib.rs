@@ -21,7 +21,7 @@ use tauri::{
 };
 
 #[derive(Default)]
-struct PendingFocus(AtomicBool);
+struct RevealRequested(AtomicBool);
 
 fn boxed(error: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(error.into()).into()
@@ -132,17 +132,18 @@ mod tests {
 pub fn run() {
     let background = background_requested(std::env::args_os());
     let app = tauri::Builder::default()
-        .manage(PendingFocus::default())
+        .manage(RevealRequested::default())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if background_requested(argv) {
                 return;
             }
+            app.state::<RevealRequested>()
+                .0
+                .store(true, Ordering::Release);
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
-            } else {
-                app.state::<PendingFocus>().0.store(true, Ordering::Release);
             }
         }))
         .plugin(tauri_plugin_shell::init())
@@ -263,7 +264,14 @@ pub fn run() {
                     if !matches!(payload.event(), PageLoadEvent::Finished) {
                         return;
                     }
-                    if background && (window.hide().is_err() || window.is_visible().unwrap_or(true))
+                    let reveal_requested = window
+                        .app_handle()
+                        .state::<RevealRequested>()
+                        .0
+                        .load(Ordering::Acquire);
+                    if background
+                        && !reveal_requested
+                        && (window.hide().is_err() || window.is_visible().unwrap_or(true))
                     {
                         window.app_handle().exit(1);
                         return;
@@ -297,7 +305,7 @@ pub fn run() {
             };
 
             shutdown::install_close_handler(app.handle().clone(), window.clone(), sidecar, origin);
-            if app.state::<PendingFocus>().0.swap(false, Ordering::AcqRel) {
+            if app.state::<RevealRequested>().0.load(Ordering::Acquire) {
                 let _ = window.show();
                 let _ = window.set_focus();
             } else if background {

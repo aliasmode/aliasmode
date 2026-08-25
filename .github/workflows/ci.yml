@@ -292,11 +292,17 @@ jobs:
             if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
               throw "MCP host did not launch AliasMode in background mode"
             }
-            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AliasModeWindow { [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string windowName); [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr handle); }'
+            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AliasModeWindow { [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string windowName); [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr handle); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId); }'
             $backgroundHidden = $false
             for ($attempt = 0; $attempt -lt 20; $attempt++) {
               $mainWindow = [AliasModeWindow]::FindWindow($null, "AliasMode")
-              if (-not [AliasModeWindow]::IsWindowVisible($mainWindow)) {
+              [uint32]$windowPid = 0
+              [void][AliasModeWindow]::GetWindowThreadProcessId($mainWindow, [ref]$windowPid)
+              if (
+                $mainWindow -ne [IntPtr]::Zero -and
+                $windowPid -eq $descriptor.desktopPid -and
+                -not [AliasModeWindow]::IsWindowVisible($mainWindow)
+              ) {
                 $backgroundHidden = $true
                 break
               }
@@ -359,6 +365,9 @@ jobs:
             Stop-Process -Id $reveal.Id -Force
             throw "second normal AliasMode launch did not return to the background instance"
           }
+          if ($reveal.ExitCode -ne 0) {
+            throw "second normal AliasMode launch exited with code $($reveal.ExitCode)"
+          }
           $sidecarPid = $null
           $shutdownFailure = $null
           try {
@@ -370,16 +379,33 @@ jobs:
                 Select-Object -First 1
               if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
               $mainWindow = [AliasModeWindow]::FindWindow($null, "AliasMode")
-              if ($sidecarPid -and [AliasModeWindow]::IsWindowVisible($mainWindow)) { break }
+              [uint32]$windowPid = 0
+              [void][AliasModeWindow]::GetWindowThreadProcessId($mainWindow, [ref]$windowPid)
+              if (
+                $sidecarPid -and
+                $windowPid -eq $descriptor.desktopPid -and
+                [AliasModeWindow]::IsWindowVisible($mainWindow)
+              ) { break }
               Start-Sleep -Milliseconds 500
             }
             if (-not $sidecarPid) { throw "installed desktop did not start its packaged sidecar" }
-            if (-not [AliasModeWindow]::IsWindowVisible($mainWindow)) {
+            if (
+              $windowPid -ne $descriptor.desktopPid -or
+              -not [AliasModeWindow]::IsWindowVisible($mainWindow)
+            ) {
               throw "installed desktop did not show its main window"
             }
             Start-Sleep -Seconds 2
             $app.Refresh()
-            if ($app.HasExited -or -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue)) {
+            $mainWindow = [AliasModeWindow]::FindWindow($null, "AliasMode")
+            [uint32]$windowPid = 0
+            [void][AliasModeWindow]::GetWindowThreadProcessId($mainWindow, [ref]$windowPid)
+            if (
+              $app.HasExited -or
+              -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) -or
+              $windowPid -ne $descriptor.desktopPid -or
+              -not [AliasModeWindow]::IsWindowVisible($mainWindow)
+            ) {
               throw "installed desktop did not remain ready"
             }
           } finally {
