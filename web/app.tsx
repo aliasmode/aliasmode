@@ -405,6 +405,49 @@ function CopyField({ label, value, onChange }: { label: string; value: string; o
   );
 }
 
+const AUTOMATIC_FINGERPRINT_FIELDS = [
+  ["User agent", "Automatic"],
+  ["Browser version", "Automatic · latest installed"],
+  ["Operating system", "Automatic"],
+  ["GPU", "Automatic"],
+  ["CPU", "Automatic"],
+  ["RAM", "Automatic"],
+  ["Fingerprint seed", "Automatic · unique and stable"],
+  ["Timezone", "Automatic · from proxy"],
+  ["Canvas / WebGL / audio", "Automatic"],
+  ["WebRTC", "Automatic · proxy-aware"],
+] as const;
+
+function FingerprintSettings({
+  screen,
+  onScreenChange,
+}: {
+  screen: string;
+  onScreenChange: (value: string) => void;
+}) {
+  return (
+    <details className="fingerprint-settings">
+      <summary>
+        <span>Fingerprint settings</span>
+        <span className="automatic-badge">Automatic</span>
+      </summary>
+      <div className="fingerprint-grid">
+        <label className="fld">
+          <span>Screen</span>
+          <input value={screen} placeholder="Automatic · e.g. 1920x1080" onChange={(event) => onScreenChange(event.target.value)} />
+        </label>
+        {AUTOMATIC_FINGERPRINT_FIELDS.map(([label, value]) => (
+          <label className="fld" key={label}>
+            <span>{label}</span>
+            <input value={value} readOnly tabIndex={-1} className="ro" />
+          </label>
+        ))}
+        <div className="hint">CloakBrowser keeps the locked values coordinated. Screen is the only fingerprint setting you can override.</div>
+      </div>
+    </details>
+  );
+}
+
 type DesktopInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 type DesktopUpdateStatus =
   | { state: "upToDate"; currentVersion: string }
@@ -2223,17 +2266,7 @@ function App() {
                 <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
                 <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
               </div>
-              <div className="fld-row">
-                <label className="fld grow">
-                  <span>Screen</span>
-                  <input value={form.screen} placeholder="auto — e.g. 1920x1080" onChange={(e) => setF("screen", e.target.value)} />
-                </label>
-                <label className="fld grow">
-                  <span>Browser version</span>
-                  <input value="CloakBrowser · latest installed" readOnly className="ro" />
-                </label>
-              </div>
-              <div className="hint">A unique browser, user-agent &amp; fingerprint are generated from a fresh seed. Timezone is set from the proxy automatically.</div>
+              <FingerprintSettings screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
             </div>
             <div className="modal-foot">
               <button className="link" onClick={closeCreate}>Cancel</button>
@@ -2302,10 +2335,7 @@ function App() {
                 <CopyField label="Email" value={editForm.email ?? ""} onChange={(value) => setEF("email", value)} />
                 <CopyField label="Email password" value={editForm.emailPassword ?? ""} onChange={(value) => setEF("emailPassword", value)} />
               </div>
-              <div className="fld-row">
-                <CopyField label="2FA secret" value={editForm.twofa ?? ""} onChange={(value) => setEF("twofa", value)} />
-                <label className="fld grow"><span>Screen</span><input value={editForm.resolution ?? ""} placeholder="e.g. 1920x1080" onChange={(e) => setEF("resolution", e.target.value)} /></label>
-              </div>
+              <CopyField label="2FA secret" value={editForm.twofa ?? ""} onChange={(value) => setEF("twofa", value)} />
               {!isCloudMode && editTotp && (
                 <div className="authrow">
                   <span className="authlabel">Authenticator</span>
@@ -2314,6 +2344,7 @@ function App() {
                   <button className="tlink" onClick={() => navigator.clipboard?.writeText(editTotp.code)}>Copy</button>
                 </div>
               )}
+              <FingerprintSettings screen={editForm.resolution ?? ""} onScreenChange={(value) => setEF("resolution", value)} />
               {!isCloudMode && (
                 <div className="fld">
                   <span>Extensions</span>
@@ -2331,7 +2362,7 @@ function App() {
                 )}
                 </div>
               )}
-              <div className="hint">Cookies &amp; fingerprint are preserved — only the fields above change.{!isCloudMode && " Extensions load when the browser opens."}</div>
+              <div className="hint">Cookies and locked fingerprint values are preserved. Only editable fields change.{!isCloudMode && " Extensions load when the browser opens."}</div>
             </div>
             <div className="modal-foot">
               <button className="link" onClick={closeEdit}>Cancel</button>

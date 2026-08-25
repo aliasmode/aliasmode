@@ -68,6 +68,20 @@ function readOnlyStore(launch: unknown = null) {
   }) as any;
 }
 
+function timezoneFetch(timezones: Record<string, string>, calls?: string[][]) {
+  return async (_url: string, init: RequestInit) => {
+    const queries = (JSON.parse(String(init.body)) as Array<{ query: string }>).map((item) => item.query);
+    calls?.push(queries);
+    return {
+      async json() {
+        return queries.map((query) => timezones[query]
+          ? { query, timezone: timezones[query], status: "success" }
+          : { query, status: "fail" });
+      },
+    };
+  };
+}
+
 test("Cloud editor closedProfileVersion reuses authoritative and local open guards", async () => {
   const cloud = { getProfile: async () => response(9) } as any;
   await expect(new CloudProfileEditor(cloud, readOnlyStore()).closedProfileVersion("cloud1")).resolves.toBe(9);
@@ -132,7 +146,11 @@ test("Cloud editor save forwards the version once and preserves session and uned
     },
   }) as any;
 
-  await new CloudProfileEditor(cloud, readOnlyStore()).save("cloud1", 7, {
+  await new CloudProfileEditor(
+    cloud,
+    readOnlyStore(),
+    timezoneFetch({ "next-proxy.example": "Europe/Paris" }),
+  ).save("cloud1", 7, {
     name: "Renamed",
     resolution: "1920*1080",
     proxyType: "https",
@@ -147,7 +165,7 @@ test("Cloud editor save forwards the version once and preserves session and uned
     fingerprintSeed: 1234,
     screenWidth: 1920,
     screenHeight: 1080,
-    timezone: "",
+    timezone: "Europe/Paris",
     proxy: { type: "https", host: "next-proxy.example", port: "8443", user: "next-user", pass: "next-pass" },
     futureProfileField: "retained",
   });
@@ -201,19 +219,39 @@ test("Cloud editor does not move when the folder is unchanged", async () => {
 test("Cloud editor preserves timezone when the submitted proxy is unchanged", async () => {
   const authoritative = response();
   let updated: any;
+  const calls: string[][] = [];
   const cloud = {
     getProfile: async () => authoritative,
     updateProfile: async (_profileId: string, request: unknown) => { updated = request; },
   } as any;
 
-  await new CloudProfileEditor(cloud, readOnlyStore()).save("cloud1", 7, {
+  await new CloudProfileEditor(cloud, readOnlyStore(), timezoneFetch({}, calls)).save("cloud1", 7, {
     name: "Renamed",
     proxyType: "http",
     proxy: "proxy.example:8080:proxy-user:proxy-pass",
   });
 
+  expect(calls).toEqual([]);
   expect(updated.payload.profile.timezone).toBe("Etc/UTC");
   expect(updated.payload.profile.proxy).toEqual(authoritative.payload.profile.proxy);
+});
+
+test("Cloud editor clears timezone without lookup when the proxy is removed", async () => {
+  const authoritative = response();
+  let updated: any;
+  const calls: string[][] = [];
+  const cloud = {
+    getProfile: async () => authoritative,
+    updateProfile: async (_profileId: string, request: unknown) => { updated = request; },
+  } as any;
+
+  await new CloudProfileEditor(cloud, readOnlyStore(), timezoneFetch({}, calls)).save("cloud1", 7, {
+    proxy: "",
+  });
+
+  expect(calls).toEqual([]);
+  expect(updated.payload.profile.proxy).toBeNull();
+  expect(updated.payload.profile.timezone).toBe("");
 });
 
 test("Cloud editor does not retry a PATCH version conflict", async () => {
