@@ -100,7 +100,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $setup.ok) { throw "AliasMode automatic client setup failed" }
           foreach ($client in @("claude", "codex", "openclaw")) {
             $status = $setup.result.clients | Where-Object client -eq $client
-            if ($status.status -ne "configured") { throw "AliasMode did not configure $client" }
+            if ($status.status -ne "configured") {
+              throw "AliasMode did not configure ${client}: $($status.status)/$($status.reason)"
+            }
           }
 
           function Assert-ClientRegistration([string]$command, [string[]]$arguments) {

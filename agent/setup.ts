@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import spawn from "cross-spawn";
 
 export type SetupClient = "claude" | "codex" | "openclaw" | "hermes";
 
@@ -16,7 +16,7 @@ const CLIENTS: Record<SetupClient, {
 }> = {
   claude: {
     command: "claude",
-    remove: ["mcp", "remove", "--scope", "user", "aliasmode"],
+    remove: ["mcp", "remove", "aliasmode", "--scope", "user"],
     add: (command, args) => ["mcp", "add", "--scope", "user", "aliasmode", "--", command, ...args],
   },
   codex: {
@@ -46,8 +46,8 @@ export const defaultCommandRunner: CommandRunner = async (command, args) => {
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
     });
-    child.stdout.on("data", () => {});
-    child.stderr.on("data", () => {});
+    child.stdout?.on("data", () => {});
+    child.stderr?.on("data", () => {});
     child.once("error", (error: NodeJS.ErrnoException) => {
       resolve({ found: error.code !== "ENOENT", code: 1 });
     });

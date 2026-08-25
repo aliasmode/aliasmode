@@ -20,7 +20,7 @@ test("setup uses each client's supported MCP registration command", async () => 
   ]);
   expect(calls).toContainEqual([
     "claude",
-    ["mcp", "remove", "--scope", "user", "aliasmode"],
+    ["mcp", "remove", "aliasmode", "--scope", "user"],
   ]);
   expect(calls).toContainEqual(["codex", ["mcp", "remove", "aliasmode"]]);
   expect(calls).toContainEqual(["openclaw", ["mcp", "unset", "aliasmode"]]);
