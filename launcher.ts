@@ -1109,15 +1109,12 @@ export class Launcher {
     // opening a proxy connection.
     assertSafeProfileId(profileId);
     validateForwardedLaunchArgs(chromeArgs);
-    this.log("launch stage request validated");
     let profile = this.store.getProfile(profileId);
     if (!profile) throw new Error(`Unknown profile: ${profileId}`);
-    this.log("launch stage profile loaded");
     if (profile.proxyError) {
       throw new Error(`profile ${profileId} has a quarantined legacy proxy: ${profile.proxyError}; edit or clear the proxy before launch`);
     }
     let profileSnapshot = JSON.stringify(profile);
-    this.log("launch stage profile snapshot ready");
     let approvedBinarySha256: string;
     try {
       if (profile.proxy?.type === "https" && profile.proxy.user) {
@@ -1131,7 +1128,6 @@ export class Launcher {
     } catch (error) {
       return await this.rejectUnsafeExistingLaunch(profileId, "host/persona verification", error);
     }
-    this.log("launch stage profile validated");
 
     // Idempotent when CDP is healthy. If Chromium is still alive but CDP is
     // unavailable, fail AdsPower-style instead of returning a websocket we
@@ -1256,7 +1252,6 @@ export class Launcher {
     } catch {
       throw new BrowserLaunchError("binary_verification");
     }
-    this.log("launch stage binary ready");
     const launchBinaryPath = verifiedBinary.path;
 
     const userDataDir = this.userDataDir(profileId);
@@ -1296,7 +1291,6 @@ export class Launcher {
     if (SESSION_LAUNCH) {
       writeIdentityBookmark(userDataDir, `${profile.name || "profile"} · #${this.store.getSerial(profileId) ?? "?"}`, profileCardUrl(profileId));
     }
-    this.log("launch stage profile prepared");
 
     const port = allocatePort({
       ...this.portRange,
@@ -1304,7 +1298,6 @@ export class Launcher {
       ...(this.portProbeFn ? { probe: this.portProbeFn } : {}),
     });
     this.liveReserved.add(port);
-    this.log("launch stage debug port allocated");
 
     let proc: SpawnedProcess | undefined;
     let spawnAttempted = false;
@@ -1340,7 +1333,6 @@ export class Launcher {
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
       const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort, headless);
-      this.log("launch stage arguments prepared");
       this.log(`launching ${profileId} on port ${port} (seed ${profile.fingerprintSeed})`);
       launchStartedAt = Date.now();
       this.verifiedExternal.delete(profileId);
