@@ -12,7 +12,10 @@ use std::{
     ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicI32, Ordering},
+        Arc,
+    },
 };
 use tauri::{
     ipc::CapabilityBuilder,
@@ -317,12 +320,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("AliasMode desktop failed");
 
-    app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
+    let requested_exit_code = Arc::new(AtomicI32::new(0));
+    let exit_code = Arc::clone(&requested_exit_code);
+    app.run_return(move |app, event| match event {
+        tauri::RunEvent::ExitRequested {
+            code: Some(code), ..
+        } => exit_code.store(code, Ordering::Release),
+        tauri::RunEvent::Exit => {
             let _ = app
                 .state::<runtime_descriptor::RuntimeDescriptorState>()
                 .remove_owned();
             let _ = app.state::<sidecar::SidecarSupervisor>().kill_owned();
         }
+        _ => {}
     });
+
+    let exit_code = requested_exit_code.load(Ordering::Acquire);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 }
