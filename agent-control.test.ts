@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   AGENT_CONTROL_MAX_MESSAGE_BYTES,
   AGENT_CONTROL_PROTOCOL,
+  AgentControlHub,
   AgentControlSession,
   parseAgentControlRequest,
   validAgentAuthorization,
@@ -73,15 +74,21 @@ function harness(options: {
   const admission = {
     run: async (_operation: unknown, fn: () => Promise<unknown>) => await fn(),
   };
+  const deps = {
+    launcher: launcher as any,
+    store: store as any,
+    admission: admission as any,
+  };
   return {
+    deps,
     events,
-    session: new AgentControlSession({
-      launcher: launcher as any,
-      store: store as any,
-      admission: admission as any,
-    }),
+    session: new AgentControlSession(deps),
     temporary: () => temporary,
     profileExists: () => profileExists,
+    restoreTemporaryProfile: () => {
+      temporary = true;
+      profileExists = true;
+    },
   };
 }
 
@@ -101,6 +108,19 @@ test("agent protocol validates message shape, size, and authorization", () => {
   expect(validAgentAuthorization(`Bearer ${nonce}`, nonce)).toBe(true);
   expect(validAgentAuthorization(null, nonce)).toBe(false);
   expect(validAgentAuthorization(`Bearer ${"b".repeat(64)}`, nonce)).toBe(false);
+});
+
+test("hub cleanup runs at startup but not for each connection", async () => {
+  const h = harness({ temporary: true });
+  const hub = new AgentControlHub(h.deps);
+  await hub.cleanupTemporaryProfiles();
+  expect(h.profileExists()).toBe(false);
+
+  h.restoreTemporaryProfile();
+  hub.connect();
+  await Bun.sleep(0);
+  expect(h.profileExists()).toBe(true);
+  expect(h.temporary()).toBe(true);
 });
 
 test("disconnect closes a browser opened by this connection", async () => {

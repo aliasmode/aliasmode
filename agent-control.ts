@@ -446,7 +446,6 @@ export class AgentControlHub {
   constructor(private readonly deps: AgentControlDeps) {}
 
   connect(): AgentControlSession {
-    void this.cleanupTemporaryProfiles();
     return new AgentControlSession(this.deps);
   }
 
