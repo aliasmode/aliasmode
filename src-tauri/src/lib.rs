@@ -10,7 +10,8 @@ use rand::random;
 use std::{
     error::Error,
     ffi::OsStr,
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -22,6 +23,21 @@ use tauri::{
 
 #[derive(Default)]
 struct RevealRequested(AtomicBool);
+
+fn trace_ci_lifecycle(phase: &str, reveal_requested: bool, visible: Option<bool>) {
+    let Some(path) = std::env::var_os("ALIASMODE_CI_DIAGNOSTICS") else {
+        return;
+    };
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let event = serde_json::json!({
+        "phase": phase,
+        "revealRequested": reveal_requested,
+        "visible": visible,
+    });
+    let _ = writeln!(file, "{event}");
+}
 
 fn boxed(error: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(error.into()).into()
@@ -134,13 +150,28 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(RevealRequested::default())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if background_requested(argv) {
+            let background = background_requested(argv);
+            let reveal_requested = app.state::<RevealRequested>();
+            let window = app.get_webview_window("main");
+            trace_ci_lifecycle(
+                if background {
+                    "single_instance_background"
+                } else {
+                    "single_instance_normal"
+                },
+                reveal_requested.0.load(Ordering::Acquire),
+                window.as_ref().and_then(|window| window.is_visible().ok()),
+            );
+            if background {
                 return;
             }
-            app.state::<RevealRequested>()
-                .0
-                .store(true, Ordering::Release);
-            if let Some(window) = app.get_webview_window("main") {
+            reveal_requested.0.store(true, Ordering::Release);
+            trace_ci_lifecycle(
+                "single_instance_reveal_requested",
+                true,
+                window.as_ref().and_then(|window| window.is_visible().ok()),
+            );
+            if let Some(window) = window {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -269,6 +300,11 @@ pub fn run() {
                         .state::<RevealRequested>()
                         .0
                         .load(Ordering::Acquire);
+                    trace_ci_lifecycle(
+                        "page_load_finished_before_hide",
+                        reveal_requested,
+                        window.is_visible().ok(),
+                    );
                     if background
                         && !reveal_requested
                         && (window.hide().is_err() || window.is_visible().unwrap_or(true))
@@ -276,6 +312,11 @@ pub fn run() {
                         window.app_handle().exit(1);
                         return;
                     }
+                    trace_ci_lifecycle(
+                        "page_load_finished_after_hide",
+                        reveal_requested,
+                        window.is_visible().ok(),
+                    );
                     let runtime = window
                         .app_handle()
                         .state::<runtime_descriptor::RuntimeDescriptorState>();
@@ -305,12 +346,14 @@ pub fn run() {
             };
 
             shutdown::install_close_handler(app.handle().clone(), window.clone(), sidecar, origin);
-            if app.state::<RevealRequested>().0.load(Ordering::Acquire) {
+            let reveal_requested = app.state::<RevealRequested>().0.load(Ordering::Acquire);
+            if reveal_requested {
                 let _ = window.show();
                 let _ = window.set_focus();
             } else if background {
                 window.hide()?;
             }
+            trace_ci_lifecycle("setup_complete", reveal_requested, window.is_visible().ok());
             tauri::async_runtime::spawn(releases::check_for_release(app.handle().clone()));
             Ok(())
         })
@@ -318,6 +361,15 @@ pub fn run() {
         .expect("AliasMode desktop failed");
 
     app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Ready) {
+            let reveal_requested = app.state::<RevealRequested>().0.load(Ordering::Acquire);
+            trace_ci_lifecycle(
+                "run_event_ready",
+                reveal_requested,
+                app.get_webview_window("main")
+                    .and_then(|window| window.is_visible().ok()),
+            );
+        }
         if matches!(event, tauri::RunEvent::Exit) {
             let _ = app
                 .state::<runtime_descriptor::RuntimeDescriptorState>()

@@ -189,6 +189,9 @@ jobs:
             ConvertTo-Json -Compress |
             Set-Content (Join-Path $appData "config.json")
           $descriptorPath = Join-Path $appData "agent-runtime.json"
+          $lifecycleTrace = Join-Path $env:RUNNER_TEMP "aliasmode-lifecycle.jsonl"
+          Remove-Item $lifecycleTrace -Force -ErrorAction SilentlyContinue
+          $env:ALIASMODE_CI_DIAGNOSTICS = $lifecycleTrace
 
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
           $helper = Join-Path $installRoot "aliasmode-mcp.exe"
@@ -309,6 +312,10 @@ jobs:
               Start-Sleep -Milliseconds 100
             }
             if (-not $backgroundHidden) {
+              if (Test-Path $lifecycleTrace -PathType Leaf) {
+                Get-Content $lifecycleTrace | ForEach-Object { Write-Host "lifecycle trace: $_" }
+              }
+              Write-Host "window trace: handle=$([int64]$mainWindow) pid=$windowPid visible=$([AliasModeWindow]::IsWindowVisible($mainWindow))"
               throw "background AliasMode exposed its main window"
             }
           } finally {
