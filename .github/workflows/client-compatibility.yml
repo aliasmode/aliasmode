@@ -130,6 +130,8 @@ jobs:
             -OutFile $installer
           $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actualHash -ne $expectedHash) { throw "Hermes installer checksum did not match" }
+          git config --global core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw "Hermes git configuration failed" }
           & $installer -SkipSetup -Commit $commit
           if ($LASTEXITCODE -ne 0) { throw "pinned Hermes installation failed" }
 
