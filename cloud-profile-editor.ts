@@ -1,6 +1,7 @@
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
 import type { PortableProfileV1 } from "./contracts/cloud-v1.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
+import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseStrictProxy, parseStrictResolution } from "./parse.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
@@ -83,7 +84,8 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
   };
 }
 
-function applyEdits(profile: Profile, set: Record<string, unknown>): void {
+function applyEdits(profile: Profile, set: Record<string, unknown>): boolean {
+  let proxyChanged = false;
   if ("name" in set) profile.name = String(set.name ?? "");
   if ("group" in set) profile.group = String(set.group ?? "");
   if ("platform" in set) profile.platform = String(set.platform ?? "");
@@ -100,7 +102,8 @@ function applyEdits(profile: Profile, set: Record<string, unknown>): void {
   if ("proxy" in set) {
     const nextProxy = parseStrictProxy(set.proxyType ?? profile.proxy?.type ?? "http", set.proxy);
     const previousProxy = profile.proxy;
-    const proxyChanged = previousProxy?.type !== nextProxy?.type ||
+    proxyChanged = !!profile.proxyError ||
+      previousProxy?.type !== nextProxy?.type ||
       previousProxy?.host !== nextProxy?.host ||
       previousProxy?.port !== nextProxy?.port ||
       previousProxy?.user !== nextProxy?.user ||
@@ -117,12 +120,14 @@ function applyEdits(profile: Profile, set: Record<string, unknown>): void {
       ? set.tags.map(String)
       : String(set.tags ?? "").split(",").map((tag) => tag.trim()).filter(Boolean);
   }
+  return proxyChanged;
 }
 
 export class CloudProfileEditor {
   constructor(
     private readonly cloud: CloudProfileEditorClient,
     private readonly store: CloudProfileEditorStore,
+    private readonly timezoneFetch?: FetchLike,
   ) {}
 
   /** Check Cloud's current open state and this machine's launch cache before a destructive operation. */
@@ -166,7 +171,10 @@ export class CloudProfileEditor {
       const moved = await this.cloud.moveProfile(profileId, { destination, expectedVersion });
       updateVersion = moved.profile.version;
     }
-    applyEdits(profile, set);
+    const proxyChanged = applyEdits(profile, set);
+    if (proxyChanged && profile.proxy) {
+      await attachTimezones([profile], this.timezoneFetch).catch(() => {});
+    }
 
     const encoded = encodePortableProfile(profile, JSON.stringify(authoritative.payload.session));
     const encodedProfile = {

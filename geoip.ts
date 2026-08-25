@@ -3,7 +3,7 @@
 import { connect as netConnect, type Socket } from "node:net";
 import type { ProxySpec } from "./types.ts";
 
-type FetchLike = (url: string, init: RequestInit) => Promise<{ json(): Promise<any> }>;
+export type FetchLike = (url: string, init: RequestInit) => Promise<{ json(): Promise<any> }>;
 
 function readExactly(socket: Socket, length: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {

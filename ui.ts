@@ -30,7 +30,7 @@ import type { StatePaths } from "./paths.ts";
 import type { Profile } from "./types.ts";
 import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
-import { attachTimezones } from "./geoip.ts";
+import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
@@ -280,7 +280,8 @@ function profileEditView(p: Profile) {
  * change — everything else (cookies, fingerprint seed, seeded) is preserved.
  * This is what makes single-edit and file bulk-update safe. Shared by both.
  */
-function applyEdits(p: Profile, set: Record<string, unknown>): void {
+function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
+  let proxyChanged = false;
   if ("name" in set) p.name = String(set.name ?? "");
   if ("group" in set) p.group = String(set.group ?? "");
   if ("platform" in set) p.platform = String(set.platform ?? "");
@@ -295,11 +296,17 @@ function applyEdits(p: Profile, set: Record<string, unknown>): void {
     p.screenHeight = r.height;
   }
   if ("proxy" in set) {
-    p.proxy = parseStrictProxy(set.proxyType ?? p.proxy?.type ?? "http", set.proxy);
+    const nextProxy = parseStrictProxy(set.proxyType ?? p.proxy?.type ?? "http", set.proxy);
+    const previousProxy = p.proxy;
+    proxyChanged = !!p.proxyError ||
+      previousProxy?.type !== nextProxy?.type ||
+      previousProxy?.host !== nextProxy?.host ||
+      previousProxy?.port !== nextProxy?.port ||
+      previousProxy?.user !== nextProxy?.user ||
+      previousProxy?.pass !== nextProxy?.pass;
+    p.proxy = nextProxy;
     delete p.proxyError;
-    // A timezone belongs to a particular egress. Passing an empty value lets
-    // store persistence preserve it only when the canonical proxy is unchanged.
-    p.timezone = "";
+    if (proxyChanged) p.timezone = "";
   }
   if ("extensions" in set) {
     p.extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
@@ -309,6 +316,7 @@ function applyEdits(p: Profile, set: Record<string, unknown>): void {
       ? set.tags.map(String)
       : String(set.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean);
   }
+  return proxyChanged;
 }
 
 function legalAcceptanceIsCurrent(legal: {
@@ -330,6 +338,7 @@ export interface UiRuntimeOptions {
   pendingSync?: PendingSyncRuntime;
   cloudBrowser?: CloudBrowserLifecycle;
   health?: UiHealthMetadata | null;
+  timezoneFetch?: FetchLike;
   /** Mode whose runtimes were wired when this process started. */
   runtimeMode?: "unconfigured" | "local" | "cloud";
 }
@@ -719,7 +728,7 @@ export async function handleUiRequest(
         return Response.json({ ok: true, id });
       }
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
-      if (profile.proxy) await attachTimezones([profile]).catch(() => {}); // best-effort tz
+      if (profile.proxy) await attachTimezones([profile], options.timezoneFetch).catch(() => {}); // best-effort tz
       if (options.cloudBrowser) {
         return Response.json({ ok: true, ...await options.cloudBrowser.create(profile) });
       }
@@ -758,7 +767,7 @@ export async function handleUiRequest(
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
       if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
       if (options.cloudBrowser) {
-        const editor = new CloudProfileEditor(options.cloudConnection!.client, store);
+        const editor = new CloudProfileEditor(options.cloudConnection!.client, store, options.timezoneFetch);
         const locked: string[] = [];
         const failed: string[] = [];
         let deleted = 0;
@@ -909,6 +918,7 @@ export async function handleUiRequest(
       const notFound: string[] = [];
       const errors: Array<{ id: string; error: string }> = [];
       const pending = new Map<string, Profile>();
+      const proxyChanged = new Set<string>();
       for (const [, value] of form) {
         if (!(value instanceof File)) continue;
         const bytes = new Uint8Array(await value.arrayBuffer());
@@ -928,7 +938,7 @@ export async function handleUiRequest(
           const p = pending.get(u.id) ?? store.getProfile(u.id);
           if (!p) { notFound.push(u.id); continue; }
           try {
-            applyEdits(p, u.set);
+            if (applyEdits(p, u.set)) proxyChanged.add(u.id);
             pending.set(u.id, p);
           } catch (error) {
             errors.push({ id: u.id, error: msg(error) });
@@ -946,6 +956,12 @@ export async function handleUiRequest(
           { ok: false, error: `profile(s) ${liveIds.join(", ")} are currently open; no profiles were changed` },
           { status: 409 },
         );
+      }
+      const changedProxies = [...proxyChanged]
+        .map((id) => pending.get(id))
+        .filter((profile): profile is Profile => !!profile?.proxy);
+      if (changedProxies.length > 0) {
+        await attachTimezones(changedProxies, options.timezoneFetch).catch(() => {});
       }
       store.upsertProfiles([...pending.values()]);
       updated = pending.size;
@@ -1103,7 +1119,7 @@ export async function handleUiRequest(
         return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
       }
       try {
-        const editor = new CloudProfileEditor(options.cloudConnection.client, store);
+        const editor = new CloudProfileEditor(options.cloudConnection.client, store, options.timezoneFetch);
         return Response.json({ ok: true, profile: await editor.get(id) });
       } catch (error) {
         return Response.json(
@@ -1135,7 +1151,7 @@ export async function handleUiRequest(
         const set = body.set && typeof body.set === "object" && !Array.isArray(body.set)
           ? body.set as Record<string, unknown>
           : {};
-        const editor = new CloudProfileEditor(options.cloudConnection.client, store);
+        const editor = new CloudProfileEditor(options.cloudConnection.client, store, options.timezoneFetch);
         await editor.save(id, body.expectedVersion as number, set);
         return Response.json({ ok: true });
       }
@@ -1150,7 +1166,10 @@ export async function handleUiRequest(
           { status: 409 },
         );
       }
-      applyEdits(p, set);
+      const proxyChanged = applyEdits(p, set);
+      if (proxyChanged && p.proxy) {
+        await attachTimezones([p], options.timezoneFetch).catch(() => {});
+      }
       if (remote) await remote.saveProfile(p);
       else store.upsertProfile(p);
       return Response.json({ ok: true });

@@ -36,6 +36,20 @@ function store(): ProfileStore {
   return s;
 }
 
+function timezoneFetch(timezones: Record<string, string>, calls?: string[][]) {
+  return async (_url: string, init: RequestInit) => {
+    const queries = (JSON.parse(String(init.body)) as Array<{ query: string }>).map((item) => item.query);
+    calls?.push(queries);
+    return {
+      async json() {
+        return queries.map((query) => timezones[query]
+          ? { query, timezone: timezones[query], status: "success" }
+          : { query, status: "fail" });
+      },
+    };
+  };
+}
+
 test("listUiProfiles exposes metadata but redacts every secret", () => {
   const s = store();
   const list = listUiProfiles(s);
@@ -588,6 +602,38 @@ test("a short CSV update row preserves omitted trailing identity fields", async 
   s.close();
 });
 
+test("bulk proxy edits resolve changed timezones in one request", async () => {
+  const s = store();
+  const first = s.getProfile("k1d0cd11")!;
+  first.timezone = "America/Los_Angeles";
+  s.upsertProfile(first);
+  s.upsertProfile({ ...first, id: "k1d0cd22", name: "second" });
+  const form = new FormData();
+  form.append("files", new File([
+    "id,proxy,proxytype\n" +
+    "k1d0cd11,first-proxy.example:8080:u:p,http\n" +
+    "k1d0cd22,second-proxy.example:1080:u:p,socks5",
+  ], "updates.csv", { type: "text/csv" }));
+  const calls: string[][] = [];
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+    null,
+    { timezoneFetch: timezoneFetch({
+      "first-proxy.example": "Europe/London",
+      "second-proxy.example": "Asia/Tokyo",
+    }, calls) },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(calls).toEqual([["first-proxy.example", "second-proxy.example"]]);
+  expect(s.getProfile("k1d0cd11")!.timezone).toBe("Europe/London");
+  expect(s.getProfile("k1d0cd22")!.timezone).toBe("Asia/Tokyo");
+  s.close();
+});
+
 test("single edits reject malformed resolutions without changing stored identity", async () => {
   for (const resolution of ["", "0x0", "319x1080", "99999x1080", "1920xnope"]) {
     const s = store();
@@ -631,11 +677,74 @@ test("a malformed nonblank proxy edit is rejected without removing the existing 
   s.close();
 });
 
+test("a changed proxy resolves its replacement timezone before saving", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.timezone = "America/Los_Angeles";
+  s.upsertProfile(before);
+  const calls: string[][] = [];
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxyType: "socks5", proxy: "new-proxy.example:1080:user:pass" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { timezoneFetch: timezoneFetch({ "new-proxy.example": "Europe/Paris" }, calls) },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(calls).toEqual([["new-proxy.example"]]);
+  expect(s.getProfile("k1d0cd11")).toMatchObject({
+    proxy: { type: "socks5", host: "new-proxy.example", port: "1080", user: "user", pass: "pass" },
+    timezone: "Europe/Paris",
+  });
+  s.close();
+});
+
+test("legacy remote proxy edits resolve timezone before saving without changing the local cache", async () => {
+  const s = store();
+  const local = s.getProfile("k1d0cd11")!;
+  local.timezone = "America/Los_Angeles";
+  s.upsertProfile(local);
+  const remoteProfile = structuredClone(local);
+  let saved: typeof remoteProfile | null = null;
+  const remote = {
+    async getProfile() { return structuredClone(remoteProfile); },
+    async saveProfile(profile: typeof remoteProfile) { saved = structuredClone(profile); },
+  } as any;
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxyType: "http", proxy: "remote-proxy.example:8080:user:pass" } }),
+    }),
+    {} as any,
+    s,
+    remote,
+    { timezoneFetch: timezoneFetch({ "remote-proxy.example": "Asia/Singapore" }) },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(saved).toMatchObject({
+    proxy: { type: "http", host: "remote-proxy.example", port: "8080", user: "user", pass: "pass" },
+    timezone: "Asia/Singapore",
+  });
+  expect(s.getProfile("k1d0cd11")).toMatchObject({
+    proxy: local.proxy,
+    timezone: "America/Los_Angeles",
+  });
+  s.close();
+});
+
 test("an explicit blank proxy edit removes the proxy and clears its stale timezone", async () => {
   const s = store();
   const before = s.getProfile("k1d0cd11")!;
   before.timezone = "America/Los_Angeles";
   s.upsertProfile(before);
+  const calls: string[][] = [];
 
   const res = await handleUiRequest(
     new Request("http://x/ui/api/profiles/k1d0cd11/update", {
@@ -644,8 +753,11 @@ test("an explicit blank proxy edit removes the proxy and clears its stale timezo
     }),
     {} as any,
     s,
+    null,
+    { timezoneFetch: timezoneFetch({}, calls) },
   );
   expect(res!.status).toBe(200);
+  expect(calls).toEqual([]);
   expect(s.getProfile("k1d0cd11")!.proxy).toBeNull();
   expect(s.getProfile("k1d0cd11")!.timezone).toBe("");
   s.close();
@@ -657,6 +769,7 @@ test("an IPv6 proxy round-trips through the edit view without losing its identit
   before.proxy = { type: "socks5", host: "2001:db8::1", port: "1080", user: "user", pass: "p:ss" };
   before.timezone = "America/New_York";
   s.upsertProfile(before);
+  const calls: string[][] = [];
 
   const detail = await handleUiRequest(
     new Request("http://x/ui/api/profiles/k1d0cd11"),
@@ -673,8 +786,11 @@ test("an IPv6 proxy round-trips through the edit view without losing its identit
     }),
     {} as any,
     s,
+    null,
+    { timezoneFetch: timezoneFetch({}, calls) },
   );
   expect(saved!.status).toBe(200);
+  expect(calls).toEqual([]);
   expect(s.getProfile("k1d0cd11")!.proxy).toEqual(before.proxy);
   expect(s.getProfile("k1d0cd11")!.timezone).toBe("America/New_York");
   s.close();

@@ -450,6 +450,23 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .copyfield button:hover { filter: brightness(.97); }
 .modal-body .fld.port input { width: 84px; }
 .modal-body .fld input.ro { background: #f6f8fc; color: var(--muted); cursor: default; }
+.fingerprint-settings { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.fingerprint-settings > summary {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  color: var(--ink); background: #f9fafe; cursor: pointer; font-weight: 600; list-style: none;
+}
+.fingerprint-settings > summary::-webkit-details-marker { display: none; }
+.fingerprint-settings > summary::before { content: "▸"; color: var(--muted); font-size: 11px; transition: transform .15s; }
+.fingerprint-settings[open] > summary::before { transform: rotate(90deg); }
+.automatic-badge {
+  margin-left: auto; padding: 2px 8px; color: #166534; background: var(--green-soft);
+  border: 1px solid #b7e3c4; border-radius: 999px; font-size: 10.5px; font-weight: 600;
+}
+.fingerprint-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+  padding: 12px; border-top: 1px solid var(--line);
+}
+.fingerprint-grid .hint { grid-column: 1 / -1; margin: 0; }
 .proxy-paste-row { display: flex; align-items: flex-end; gap: 8px; }
 .proxy-paste-row .grow { flex: 1; }
 .proxy-paste-row button { height: 35px; padding: 0 12px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 8px; font-weight: 600; cursor: pointer; }
@@ -566,6 +583,6 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
   body { padding: 12px; }
   .onboarding { min-height: calc(100vh - 24px); }
   .onboarding-card { padding: 28px 22px; }
-  .mode-options { grid-template-columns: 1fr; }
+  .mode-options, .fingerprint-grid { grid-template-columns: 1fr; }
 }
 
