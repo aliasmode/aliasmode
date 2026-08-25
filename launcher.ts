@@ -1128,6 +1128,7 @@ export class Launcher {
     } catch (error) {
       return await this.rejectUnsafeExistingLaunch(profileId, "host/persona verification", error);
     }
+    this.log("launch stage profile validated");
 
     // Idempotent when CDP is healthy. If Chromium is still alive but CDP is
     // unavailable, fail AdsPower-style instead of returning a websocket we
@@ -1252,6 +1253,7 @@ export class Launcher {
     } catch {
       throw new BrowserLaunchError("binary_verification");
     }
+    this.log("launch stage binary ready");
     const launchBinaryPath = verifiedBinary.path;
 
     const userDataDir = this.userDataDir(profileId);
@@ -1291,6 +1293,7 @@ export class Launcher {
     if (SESSION_LAUNCH) {
       writeIdentityBookmark(userDataDir, `${profile.name || "profile"} · #${this.store.getSerial(profileId) ?? "?"}`, profileCardUrl(profileId));
     }
+    this.log("launch stage profile prepared");
 
     const port = allocatePort({
       ...this.portRange,
@@ -1298,6 +1301,7 @@ export class Launcher {
       ...(this.portProbeFn ? { probe: this.portProbeFn } : {}),
     });
     this.liveReserved.add(port);
+    this.log("launch stage debug port allocated");
 
     let proc: SpawnedProcess | undefined;
     let spawnAttempted = false;
@@ -1333,6 +1337,7 @@ export class Launcher {
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
       const args = this.buildArgs(profile, port, userDataDir, chromeArgs, relayPort, headless);
+      this.log("launch stage arguments prepared");
       this.log(`launching ${profileId} on port ${port} (seed ${profile.fingerprintSeed})`);
       launchStartedAt = Date.now();
       this.verifiedExternal.delete(profileId);
