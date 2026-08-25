@@ -269,6 +269,7 @@ function launchBackground(executable) {
   const child = spawn(executable, ["--background"], {
     detached: true,
     stdio: "ignore",
+    windowsHide: true,
   });
   child.unref();
   return child;
