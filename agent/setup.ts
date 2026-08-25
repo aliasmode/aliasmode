@@ -26,7 +26,7 @@ const CLIENTS: Record<SetupClient, {
   },
   openclaw: {
     command: "openclaw",
-    remove: ["mcp", "remove", "aliasmode"],
+    remove: ["mcp", "unset", "aliasmode"],
     add: (command, args) => [
       "mcp", "add", "aliasmode", "--command", command,
       ...args.flatMap((arg) => ["--arg", arg]),

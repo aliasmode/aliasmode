@@ -1,0 +1,161 @@
+name: Windows MCP client compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Client CI run containing aliasmode-windows-unsigned
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  clients:
+    name: Claude Code, Codex, OpenClaw, and Hermes
+    runs-on: windows-latest
+    steps:
+      - name: Validate installer run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:INSTALLER_RUN_ID" | ConvertFrom-Json
+          if ($run.name -ne "Client CI" -or $run.conclusion -ne "success") {
+            throw "installer run must be a successful Client CI run"
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-unsigned
+          path: artifact
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.15.0
+      - name: Install isolated AliasMode
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "aliasmode-client-compatibility"
+          $home = Join-Path $root "home"
+          $appData = Join-Path $home "AppData\Roaming"
+          $localAppData = Join-Path $home "AppData\Local"
+          $npmPrefix = Join-Path $root "npm"
+          $installRoot = Join-Path $root "AliasMode"
+          foreach ($path in @($home, $appData, $localAppData, $npmPrefix)) {
+            New-Item -ItemType Directory -Force $path | Out-Null
+          }
+          @(
+            "HOME=$home"
+            "USERPROFILE=$home"
+            "APPDATA=$appData"
+            "LOCALAPPDATA=$localAppData"
+            "NPM_CONFIG_PREFIX=$npmPrefix"
+            "ALIASMODE_INSTALL_ROOT=$installRoot"
+          ) | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $npmPrefix | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+
+          $installers = @(Get-ChildItem "$env:GITHUB_WORKSPACE\artifact" -Filter "*.exe" -File)
+          if ($installers.Count -ne 1) { throw "expected exactly one AliasMode installer" }
+          $checksumFile = Join-Path $env:GITHUB_WORKSPACE "artifact\SHA256SUMS.txt"
+          $checksum = (Get-Content $checksumFile -Raw).Trim() -split '\s+', 2
+          if ($checksum.Count -ne 2 -or $checksum[1] -ne $installers[0].Name) {
+            throw "AliasMode artifact checksum manifest is invalid"
+          }
+          $actual = (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $checksum[0].ToLowerInvariant()) {
+            throw "AliasMode installer checksum did not match"
+          }
+          if ((Get-AuthenticodeSignature $installers[0].FullName).Status -ne "NotSigned") {
+            throw "AliasMode compatibility artifact was expected to be unsigned"
+          }
+
+          $install = Start-Process -Wait -PassThru $installers[0].FullName -ArgumentList @(
+            "/S",
+            "/D=$installRoot"
+          )
+          if ($install.ExitCode -ne 0) { throw "AliasMode installer exited with code $($install.ExitCode)" }
+          $helper = Join-Path $installRoot "aliasmode-mcp.exe"
+          if (-not (Test-Path $helper -PathType Leaf)) { throw "AliasMode helper was not installed" }
+          $aliasData = Join-Path $appData "com.aliasmode.desktop"
+          New-Item -ItemType Directory -Force $aliasData | Out-Null
+          @{ version = 1; mode = "local"; localAnalytics = $false } |
+            ConvertTo-Json -Compress |
+            Set-Content (Join-Path $aliasData "config.json")
+      - name: Verify npm MCP clients
+        shell: pwsh
+        run: |
+          npm.cmd install --global --no-audit --no-fund `
+            "@anthropic-ai/claude-code@2.1.245" `
+            "@openai/codex@0.149.1" `
+            "openclaw@2026.7.1-2"
+          if ($LASTEXITCODE -ne 0) { throw "pinned MCP client installation failed" }
+
+          $helper = Join-Path $env:ALIASMODE_INSTALL_ROOT "aliasmode-mcp.exe"
+          $setup = (& $helper setup --client auto --yes | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or -not $setup.ok) { throw "AliasMode automatic client setup failed" }
+          foreach ($client in @("claude", "codex", "openclaw")) {
+            $status = $setup.result.clients | Where-Object client -eq $client
+            if ($status.status -ne "configured") { throw "AliasMode did not configure $client" }
+          }
+
+          function Assert-ClientRegistration([string]$command, [string[]]$arguments) {
+            $output = (& $command @arguments 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $output -notmatch "aliasmode") {
+              throw "MCP client did not recognize the AliasMode registration"
+            }
+          }
+          $claude = (Get-Command claude -ErrorAction Stop).Source
+          $codex = (Get-Command codex -ErrorAction Stop).Source
+          $openclaw = (Get-Command openclaw -ErrorAction Stop).Source
+          Assert-ClientRegistration $claude @("mcp", "get", "aliasmode")
+          Assert-ClientRegistration $claude @("mcp", "list")
+          Assert-ClientRegistration $codex @("mcp", "list")
+          Assert-ClientRegistration $openclaw @("mcp", "list", "--json")
+          Assert-ClientRegistration $openclaw @("mcp", "doctor", "aliasmode", "--probe", "--json")
+      - name: Verify Hermes MCP client
+        shell: pwsh
+        run: |
+          $commit = "fcbd1076a93841fa88855acce810e342a5b78101"
+          $expectedHash = "74225bf244253bfa5bc2b1d16fa3bb8618e199a53d1c0344b37ab9930696d3ba"
+          $installer = Join-Path $env:RUNNER_TEMP "hermes-install.ps1"
+          Invoke-WebRequest `
+            "https://raw.githubusercontent.com/NousResearch/hermes-agent/$commit/scripts/install.ps1" `
+            -OutFile $installer
+          $actualHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) { throw "Hermes installer checksum did not match" }
+          & $installer -SkipSetup -Commit $commit
+          if ($LASTEXITCODE -ne 0) { throw "pinned Hermes installation failed" }
+
+          $hermesBin = Join-Path $env:LOCALAPPDATA "hermes\bin"
+          $env:PATH = "$hermesBin;$env:PATH"
+          $hermes = (Get-Command hermes -ErrorAction Stop).Source
+          $helper = Join-Path $env:ALIASMODE_INSTALL_ROOT "aliasmode-mcp.exe"
+          $setup = (& $helper setup --client hermes --yes | ConvertFrom-Json)
+          if (
+            $LASTEXITCODE -ne 0 -or
+            -not $setup.ok -or
+            $setup.result.clients[0].status -ne "configured"
+          ) {
+            throw "AliasMode did not configure Hermes"
+          }
+          $list = (& $hermes mcp list 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $list -notmatch "aliasmode") {
+            throw "Hermes did not recognize the AliasMode registration"
+          }
+          $null = & $hermes mcp test aliasmode 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "Hermes could not start the AliasMode MCP server" }
+      - name: Stop isolated AliasMode
+        if: always()
+        shell: pwsh
+        run: |
+          $descriptor = Join-Path $env:APPDATA "com.aliasmode.desktop\agent-runtime.json"
+          if (Test-Path $descriptor -PathType Leaf) {
+            $runtime = Get-Content $descriptor | ConvertFrom-Json
+            Stop-Process -Id $runtime.desktopPid -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $runtime.sidecarPid -Force -ErrorAction SilentlyContinue
+          }

@@ -237,6 +237,14 @@ jobs:
             throw "installed generic MCP setup returned incorrect paths"
           }
 
+          function Read-McpResponse([System.Diagnostics.Process]$process, [int]$id) {
+            for ($attempt = 0; $attempt -lt 50; $attempt++) {
+              $response = $process.StandardOutput.ReadLine() | ConvertFrom-Json
+              if ($response.id -eq $id) { return $response }
+            }
+            throw "installed MCP host did not return response $id"
+          }
+
           $mcpStart = [System.Diagnostics.ProcessStartInfo]::new()
           $mcpStart.FileName = $node
           $mcpStart.ArgumentList.Add($mcpHost)
@@ -249,6 +257,8 @@ jobs:
           $mcp.StartInfo = $mcpStart
           if (-not $mcp.Start()) { throw "installed MCP host did not start" }
           $mcpShutdownFailure = $null
+          $preexistingProfileId = $null
+          $ownedProfileId = $null
           try {
             $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aliasmode-ci","version":"1"}}}')
             $initialize = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
@@ -341,6 +351,65 @@ jobs:
             if ($backgroundVisible) {
               throw "background AliasMode exposed its main window"
             }
+
+            $preexisting = (& $helper profiles create --name ci-preexisting | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or -not $preexisting.ok -or -not $preexisting.result.id) {
+              throw "installed helper could not create the pre-existing profile"
+            }
+            $preexistingProfileId = $preexisting.result.id
+            $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
+              throw "installed helper could not open the pre-existing browser"
+            }
+
+            $selectRequest = @{
+              jsonrpc = "2.0"
+              id = 3
+              method = "tools/call"
+              params = @{
+                name = "aliasmode_browser_select"
+                arguments = @{ profileId = $preexistingProfileId }
+              }
+            } | ConvertTo-Json -Compress -Depth 8
+            $mcp.StandardInput.WriteLine($selectRequest)
+            $selected = Read-McpResponse $mcp 3
+            if ($selected.result.isError -eq $true) {
+              throw "installed MCP host could not select the pre-existing browser"
+            }
+
+            $createRequest = @{
+              jsonrpc = "2.0"
+              id = 4
+              method = "tools/call"
+              params = @{
+                name = "aliasmode_profile_create"
+                arguments = @{ name = "ci-owned" }
+              }
+            } | ConvertTo-Json -Compress -Depth 8
+            $mcp.StandardInput.WriteLine($createRequest)
+            $created = Read-McpResponse $mcp 4
+            $ownedProfileId = $created.result.structuredContent.id
+            if ($created.result.isError -eq $true -or -not $ownedProfileId) {
+              throw "installed MCP host could not create its owned profile"
+            }
+
+            $openRequest = @{
+              jsonrpc = "2.0"
+              id = 5
+              method = "tools/call"
+              params = @{
+                name = "aliasmode_browser_open"
+                arguments = @{ profileId = $ownedProfileId; headless = $true }
+              }
+            } | ConvertTo-Json -Compress -Depth 8
+            $mcp.StandardInput.WriteLine($openRequest)
+            $ownedOpen = Read-McpResponse $mcp 5
+            if (
+              $ownedOpen.result.isError -eq $true -or
+              $ownedOpen.result.structuredContent.profileId -ne $ownedProfileId
+            ) {
+              throw "installed MCP host could not open its owned browser"
+            }
           } finally {
             $mcp.StandardInput.Close()
             if (-not $mcp.WaitForExit(15000)) {
@@ -355,6 +424,41 @@ jobs:
           }
           if (-not (Test-Path $descriptorPath -PathType Leaf)) {
             throw "runtime descriptor did not survive MCP disconnect"
+          }
+
+          $ownedStopped = $false
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            $ownedStatus = (& $helper browser status --profile $ownedProfileId | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or -not $ownedStatus.ok) {
+              throw "installed helper could not inspect the MCP-owned browser"
+            }
+            if (-not $ownedStatus.result.running) {
+              $ownedStopped = $true
+              break
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $ownedStopped) {
+            throw "MCP-owned browser survived its connection"
+          }
+          $preexistingStatus = (& $helper browser status --profile $preexistingProfileId | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or -not $preexistingStatus.ok -or -not $preexistingStatus.result.running) {
+            throw "pre-existing browser did not survive MCP disconnect"
+          }
+          $preexistingClosed = (& $helper browser close --profile $preexistingProfileId | ConvertFrom-Json)
+          if (
+            $LASTEXITCODE -ne 0 -or
+            -not $preexistingClosed.ok -or
+            -not $preexistingClosed.result.closed -or
+            $preexistingClosed.result.deleted
+          ) {
+            throw "installed helper could not close the preserved browser"
+          }
+          foreach ($persistentProfileId in @($preexistingProfileId, $ownedProfileId)) {
+            $deleted = (& $helper profiles delete --profile $persistentProfileId | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or -not $deleted.ok -or -not $deleted.result.deleted) {
+              throw "installed helper could not delete a lifecycle profile"
+            }
           }
 
           $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
