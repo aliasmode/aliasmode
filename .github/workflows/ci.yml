@@ -412,10 +412,10 @@ jobs:
             }
           } finally {
             $mcp.StandardInput.Close()
-            if (-not $mcp.WaitForExit(15000)) {
+            if (-not $mcp.WaitForExit(60000)) {
               Stop-Process -Id $mcp.Id -Force
               $mcp.WaitForExit()
-              $mcpShutdownFailure = "installed MCP host survived stdio disconnect"
+              $mcpShutdownFailure = "installed MCP host survived safe browser cleanup"
             }
           }
           if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
