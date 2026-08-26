@@ -232,9 +232,10 @@ jobs:
           $oldChecksums = Join-Path $env:RUNNER_TEMP "old-SHA256SUMS.txt"
           Invoke-WebRequest $oldInstallerAsset[0].browser_download_url -OutFile $oldInstaller
           Invoke-WebRequest $oldChecksumAsset[0].browser_download_url -OutFile $oldChecksums
-          $checksumLines = @(Get-Content $oldChecksums | Where-Object { $_ -match [regex]::Escape($oldInstallerAsset[0].name) })
+          $checksumPattern = '^([a-fA-F0-9]{64})  ' + [regex]::Escape($oldInstallerAsset[0].name) + '$'
+          $checksumLines = @(Get-Content $oldChecksums | Where-Object { $_ -match $checksumPattern })
           if ($checksumLines.Count -ne 1) { throw "previous installer checksum is missing or ambiguous" }
-          $checksumMatch = [regex]::Match($checksumLines[0], '^([a-fA-F0-9]{64})  ')
+          $checksumMatch = [regex]::Match($checksumLines[0], $checksumPattern)
           if (-not $checksumMatch.Success) { throw "previous installer checksum is malformed" }
           $expectedChecksum = $checksumMatch.Groups[1].Value.ToLowerInvariant()
           if ((Get-FileHash $oldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedChecksum) {
