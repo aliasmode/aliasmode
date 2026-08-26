@@ -71,6 +71,12 @@ export function assertValidProfile(value: unknown): asserts value is Profile {
   if (profile.proxyError !== undefined && typeof profile.proxyError !== "string") {
     throw new Error("profile proxyError must be a string");
   }
+  if (profile.customNo !== undefined) {
+    if (typeof profile.customNo !== "string") throw new Error("profile customNo must be a string");
+    if (profile.customNo && !/^\d{1,12}$/.test(profile.customNo)) {
+      throw new Error("profile customNo must be empty or 1-12 digits");
+    }
+  }
   for (const field of ["extensions", "tags"] as const) {
     const list = profile[field];
     if (list !== undefined && (!Array.isArray(list) || list.some((item) => typeof item !== "string"))) {

@@ -2410,3 +2410,70 @@ test("Cloud profile save rejects untrusted JSON before calling Cloud", async () 
   expect(response!.status).toBe(403);
   s.close();
 });
+
+test("the roster carries each profile's serial and custom NO.", () => {
+  const s = store();
+  const [before] = listUiProfiles(s);
+  expect(before!.serial).toBe(s.getSerial("k1d0cd11")!);
+  expect(before!.customNo).toBe(""); // unset -> the UI falls back to the serial
+
+  s.upsertProfile({ ...s.getProfile("k1d0cd11")!, customNo: "907341" });
+  expect(listUiProfiles(s)[0]!.customNo).toBe("907341");
+  s.close();
+});
+
+test("editing a custom NO. validates digits and survives a reopen of the editor", async () => {
+  const s = store();
+  const save = (customNo: string) => handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { customNo } }),
+    }),
+    {} as any,
+    s,
+  );
+
+  expect((await save("4421"))!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.customNo).toBe("4421");
+
+  const view = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11"), {} as any, s);
+  expect((await view!.json()).profile.customNo).toBe("4421");
+
+  const rejected = await save("44-21");
+  expect(rejected!.status).toBe(500);
+  expect((await rejected!.json()).error).toContain("digits only");
+  expect(s.getProfile("k1d0cd11")!.customNo).toBe("4421"); // rejected edit changed nothing
+
+  expect((await save(""))!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.customNo).toBe("");
+  s.close();
+});
+
+test("creating a profile stores the credentials supplied with it", async () => {
+  const s = store();
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "fresh", group: "Warmup", platform: "x.com", customNo: "5150",
+        username: "fresh_user", password: "fresh-pass",
+        email: "fresh@example.com", emailPassword: "mailbox-pass",
+        twofa: "JBSWY3DPEHPK3PXP",
+      }),
+    }),
+    {} as any,
+    s,
+  );
+  const { ok, id } = await response!.json();
+  expect(ok).toBe(true);
+
+  // The create endpoint has always accepted these; this pins that the dialog is
+  // not the only thing that can set them and that none are silently dropped.
+  expect(s.getProfile(id)).toMatchObject({
+    name: "fresh", group: "Warmup", platform: "x.com", customNo: "5150",
+    username: "fresh_user", password: "fresh-pass",
+    email: "fresh@example.com", emailPassword: "mailbox-pass",
+    twofa: "JBSWY3DPEHPK3PXP",
+  });
+  s.close();
+});

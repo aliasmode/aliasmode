@@ -12,7 +12,7 @@
 import type { Profile, ProxySpec } from "./types.ts";
 import { deterministicSeed } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
-import { parseStrictResolution } from "./parse.ts";
+import { parseStrictCustomNo, parseStrictResolution } from "./parse.ts";
 
 export interface NewProfileInput {
   name?: string;
@@ -27,6 +27,8 @@ export interface NewProfileInput {
   proxy?: { type?: string; host?: string; port?: string; user?: string; pass?: string } | null;
   /** "1920x1080" / "1920*1080"; empty → a random realistic resolution. */
   screen?: string;
+  /** Operator-chosen serial shown in the roster and the browser window title. */
+  customNo?: string;
 }
 
 // Realistic desktop resolutions, so each created profile gets a varied screen.
@@ -78,6 +80,7 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     emailPassword: input.emailPassword || "",
     twofa: (input.twofa || "").trim(),
     proxy,
+    customNo: parseStrictCustomNo(input.customNo),
     ua: "", // CloakBrowser derives a coherent UA from the seed at launch
     timezone: "", // resolved from the proxy's geoip by the caller
     screenWidth: selected.width,

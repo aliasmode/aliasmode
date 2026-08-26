@@ -310,3 +310,33 @@ test("count reflects imported profiles", () => {
   expect(store.count()).toBe(1);
   store.close();
 });
+
+test("custom NO. round-trips and listProfileMeta numbers every profile", () => {
+  const store = memStore();
+  const p = parseExport(SAMPLE).profiles[0]!;
+  store.upsertProfile({ ...p, customNo: "907341" });
+  expect(store.getProfile("k1d0cd11")!.customNo).toBe("907341");
+
+  // An unrelated edit must not silently drop the operator's number.
+  store.upsertProfile({ ...store.getProfile("k1d0cd11")!, name: "renamed" });
+  expect(store.getProfile("k1d0cd11")!.customNo).toBe("907341");
+
+  // Clearing it is an explicit empty string, which falls back to the serial.
+  store.upsertProfile({ ...store.getProfile("k1d0cd11")!, customNo: "" });
+  expect(store.getProfile("k1d0cd11")!.customNo).toBe("");
+
+  const meta = store.listProfileMeta();
+  expect(meta.get("k1d0cd11")!.serial).toBe(store.getSerial("k1d0cd11")!);
+  expect(meta.get("k1d0cd11")!.createdAt).toBeGreaterThan(0);
+  expect(meta.get("k1d0cd11")!.lastOpenAt).toBe(0); // never launched
+  store.close();
+});
+
+test("a profile stored before the custom_no column reads back as empty", () => {
+  const store = memStore();
+  const p = parseExport(SAMPLE).profiles[0]!;
+  delete (p as { customNo?: string }).customNo;
+  store.upsertProfile(p);
+  expect(store.getProfile("k1d0cd11")!.customNo).toBe("");
+  store.close();
+});

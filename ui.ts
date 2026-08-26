@@ -31,7 +31,7 @@ import type { Profile } from "./types.ts";
 import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
-import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictCustomNo, decodeText } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
 import { installExtension, removeExtensionFiles } from "./extensions.ts";
@@ -66,6 +66,14 @@ export interface UiProfile {
   mobilePersona?: boolean;
   /** Whether a 2FA secret is stored (drives the row's authenticator button). */
   has2fa: boolean;
+  /** Store serial (SQLite rowid) — the roster's default "No." for this profile. */
+  serial: number | null;
+  /** Creation time, ms. 0 for rows imported before the column existed. */
+  createdAt: number;
+  /** Most recent launch, ms. 0 when this profile has never been opened here. */
+  lastOpenAt: number;
+  /** Operator-chosen "custom NO.", or "" when the serial is used instead. */
+  customNo: string;
   running: boolean;
   debugPort?: number;
   startedAt?: number;
@@ -80,6 +88,7 @@ export interface UiProfile {
  */
 export function listUiProfiles(store: ProfileStore): UiProfile[] {
   const launches = new Map(store.listLaunches().map((l) => [l.profileId, l]));
+  const meta = store.listProfileMeta();
   return store.listProfiles().map((p) => {
     const l = launches.get(p.id);
     return {
@@ -95,6 +104,10 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
       seeded: p.seeded,
       screen: `${p.screenWidth}x${p.screenHeight}`,
       has2fa: !!(p.twofa && p.twofa.trim()),
+      serial: meta.get(p.id)?.serial ?? null,
+      createdAt: meta.get(p.id)?.createdAt ?? 0,
+      lastOpenAt: meta.get(p.id)?.lastOpenAt ?? 0,
+      customNo: p.customNo ?? "",
       mobilePersona: isMobileUserAgent(p.ua),
       running: !!l,
       debugPort: l?.debugPort,
@@ -263,6 +276,7 @@ function profileEditView(p: Profile) {
     resolution: `${p.screenWidth}*${p.screenHeight}`,
     extensions: p.extensions ?? [],
     tags: (p.tags ?? []).join(", "),
+    customNo: p.customNo ?? "",
     cookieCount: p.cookies.length, seeded: p.seeded,
     mobilePersona: !!conversion,
     ...(conversion ? {
@@ -316,6 +330,7 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
       ? set.tags.map(String)
       : String(set.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean);
   }
+  if ("customNo" in set) p.customNo = parseStrictCustomNo(set.customNo);
   return proxyChanged;
 }
 

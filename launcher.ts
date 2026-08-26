@@ -1340,7 +1340,11 @@ export class Launcher {
 
     // Identity bookmark (#2): `<name> · #<serial>` on a visible bookmark bar, pointing at the card.
     if (SESSION_LAUNCH) {
-      writeIdentityBookmark(userDataDir, `${profile.name || "profile"} · #${this.store.getSerial(profileId) ?? "?"}`, profileCardUrl(profileId));
+      writeIdentityBookmark(
+        userDataDir,
+        `${profile.name || "profile"} · #${profileDisplayNo(profile.customNo, this.store.getSerial(profileId)) ?? "?"}`,
+        profileCardUrl(profileId),
+      );
     }
 
     const port = allocatePort({
@@ -1456,8 +1460,8 @@ export class Launcher {
       // loads. Strictly best-effort — never fail or stall a launch on it.
       if (!this.skipDefaultWindowLabel) {
         try {
-          const serial = this.store.getSerial(profileId);
-          await this.labelWindowFn(ws, buildWindowLabel(profile.name, serial));
+          const displayNo = profileDisplayNo(profile.customNo, this.store.getSerial(profileId));
+          await this.labelWindowFn(ws, buildWindowLabel(profile.name, displayNo));
         } catch (err) {
           this.log(`window label failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
         }
@@ -3886,10 +3890,20 @@ const defaultNavigate: LaunchNavigator = async (ws, urls, replacePages = false) 
   });
 };
 
-/** The window-title prefix that identifies a profile: `<name> · #<serial> — `. */
-export function buildWindowLabel(name: string, serial: number | null): string {
+/**
+ * The number an operator sees for a profile: the custom NO. they set, falling
+ * back to the store serial (SQLite rowid). Null only when neither is known.
+ */
+export function profileDisplayNo(customNo: string | undefined, serial: number | null): string | null {
+  const custom = (customNo ?? "").trim();
+  if (custom) return custom;
+  return serial != null ? String(serial) : null;
+}
+
+/** The window-title prefix that identifies a profile: `<name> · #<no> — `. */
+export function buildWindowLabel(name: string, serial: number | string | null): string {
   const n = (name || "").trim() || "profile";
-  return serial != null ? `${n} · #${serial} — ` : `${n} — `;
+  return serial != null && serial !== "" ? `${n} · #${serial} — ` : `${n} — `;
 }
 
 /**
