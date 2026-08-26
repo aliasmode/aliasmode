@@ -195,6 +195,15 @@ test("Cloud Delete requires edit permission for every selected profile", () => {
   expect(app).toContain('r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`');
 });
 
+test("editable Cloud selections expose every profile export format", () => {
+  const actionbar = app.slice(app.indexOf('className={`actionbar'), app.indexOf('className="tablewrap"'));
+  expect(actionbar).toContain('(!isCloudMode || selectedEditable) && <>');
+  expect(actionbar).not.toContain('{!isCloudMode && <>');
+  expect(actionbar).toContain('!isCloudMode && selectedMobileCount > 0');
+  expect(actionbar).toContain('!isCloudMode && <button className="abtn" disabled={!selected.size} onClick={openUpdate}');
+  for (const format of ["csv", "txt", "xlsx"]) expect(actionbar).toContain(`exportSelected("${format}")`);
+});
+
 test("Local extension manager explains the supported ZIP/CRX workflow", () => {
   expect(app).toContain('{!isCloudMode && <button className="extbtn"');
   expect(app).toContain("Chrome Web Store installs are not supported");
