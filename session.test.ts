@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { join } from "node:path";
 import {
   applySessionToEndpoint,
   bundleHasRestorableLogin,
@@ -13,6 +14,7 @@ import {
   parseCapturedSessionBundle,
   playwrightTransportAttribution,
   readSessionFromBrowser,
+  readSessionWorkerCommand,
   restoreOriginStorage,
   SessionRestoreError,
   sessionBundleSignature,
@@ -35,6 +37,19 @@ test("playwrightTransportAttribution reads the shared transport counters", () =>
     if (prior === undefined) delete (globalThis as any)[key];
     else (globalThis as any)[key] = prior;
   }
+});
+
+test("session worker command follows source and packaged runtime layouts", () => {
+  expect(readSessionWorkerCommand("ws://browser")).toEqual([
+    "node",
+    join(import.meta.dir, "playwright-worker.mjs"),
+  ]);
+
+  const packaged = join("AliasMode", "playwright");
+  expect(readSessionWorkerCommand("ws://browser", packaged)).toEqual([
+    join(packaged, "node", "node.exe"),
+    join(packaged, "worker.mjs"),
+  ]);
 });
 
 function textStream(value: string): ReadableStream<Uint8Array> {

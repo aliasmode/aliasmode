@@ -9,8 +9,7 @@
 
 import type { CookieRecord } from "./types.ts";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
-import { PlaywrightWorkerError, runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
+import { PlaywrightWorkerError, resolvePlaywrightRuntime, runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
 
 const SESSION_URLS = [
   "https://x.com",
@@ -920,8 +919,8 @@ export function readSessionWorkerCommand(
   _ws: string,
   runtimeRoot?: string,
 ): string[] {
-  const root = runtimeRoot ?? process.env.ALIASMODE_PLAYWRIGHT_RUNTIME;
-  return root ? [join(root, "node", "node.exe"), join(root, "worker.mjs")] : [];
+  const runtime = resolvePlaywrightRuntime({ runtimeRoot });
+  return [runtime.nodeExecutable, runtime.workerPath];
 }
 
 /** Capture in the common one-shot official Node worker. */

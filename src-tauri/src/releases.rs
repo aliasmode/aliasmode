@@ -4,7 +4,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{ipc::Channel, AppHandle, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::Mutex;
@@ -12,6 +12,7 @@ use url::Url;
 
 const RELEASES_API: &str = "https://api.github.com/repos/aliasmode/aliasmode/releases?per_page=10";
 const UPDATE_TARGET: &str = "windows-x86_64";
+const MAX_RELEASE_HIGHLIGHTS: usize = 3;
 const UPDATE_BUSY: &str = "An update operation is already running.";
 const CHECK_FAILED: &str = "AliasMode could not check for updates. Try again.";
 const DOWNLOAD_FAILED: &str = "AliasMode could not download and verify the update. Try again.";
@@ -27,6 +28,7 @@ struct GithubRelease {
     tag_name: String,
     draft: bool,
     prerelease: bool,
+    body: Option<String>,
     assets: Vec<GithubAsset>,
 }
 
@@ -35,6 +37,12 @@ struct ReleaseCandidate {
     tag: String,
     version: Version,
     manifest_url: Url,
+    highlights: Vec<String>,
+}
+
+struct DiscoveredUpdate {
+    update: Update,
+    highlights: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -50,11 +58,49 @@ pub enum UpdateStatus {
         #[serde(rename = "currentVersion")]
         current_version: String,
         version: String,
+        highlights: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "phase", rename_all = "camelCase")]
+pub enum UpdateProgress {
+    Preparing,
+    Ready {
+        version: String,
+        highlights: Vec<String>,
+    },
+    Downloading {
+        percent: Option<u8>,
+    },
+    Verifying,
+    Installing,
 }
 
 #[derive(Default)]
 pub struct UpdateCoordinator(Mutex<()>);
+
+fn release_highlights(body: Option<&str>) -> Vec<String> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    let mut lines = body.lines().map(str::trim);
+    if lines.find(|line| *line == "## Highlights").is_none() {
+        return Vec::new();
+    }
+    lines
+        .take_while(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix("- ").map(str::trim))
+        .filter(|line| !line.is_empty())
+        .take(MAX_RELEASE_HIGHLIGHTS)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn download_percent(downloaded: u64, total: Option<u64>) -> Option<u8> {
+    let total = total.filter(|total| *total > 0)?;
+    Some((downloaded.saturating_mul(100) / total).min(100) as u8)
+}
 
 fn parse_canonical_tag(tag: &str) -> Option<Version> {
     let version = Version::parse(tag.strip_prefix('v')?).ok()?;
@@ -104,6 +150,7 @@ fn newest_release(current: &Version, releases: &[GithubRelease]) -> Option<Relea
                 tag: release.tag_name.clone(),
                 version,
                 manifest_url: release_manifest_url(release)?,
+                highlights: release_highlights(release.body.as_deref()),
             })
         })
         .max_by(|left, right| left.version.cmp(&right.version))
@@ -185,7 +232,7 @@ fn validate_manifest_result(
     Ok(())
 }
 
-async fn discover_update(app: &AppHandle) -> Result<Option<Update>, String> {
+async fn discover_update(app: &AppHandle) -> Result<Option<DiscoveredUpdate>, String> {
     let current = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
     let releases = fetch_releases().await?;
     let Some(candidate) = newest_release(&current, &releases) else {
@@ -220,7 +267,10 @@ async fn discover_update(app: &AppHandle) -> Result<Option<Update>, String> {
         &update.signature,
         &update.raw_json,
     )?;
-    Ok(Some(update))
+    Ok(Some(DiscoveredUpdate {
+        update,
+        highlights: candidate.highlights,
+    }))
 }
 
 #[tauri::command]
@@ -234,9 +284,10 @@ pub async fn check_for_updates(
         .map_err(|_| UPDATE_BUSY.to_owned())?;
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
     match discover_update(&app).await {
-        Ok(Some(update)) => Ok(UpdateStatus::Available {
+        Ok(Some(discovered)) => Ok(UpdateStatus::Available {
             current_version,
-            version: update.version,
+            version: discovered.update.version,
+            highlights: discovered.highlights,
         }),
         Ok(None) => Ok(UpdateStatus::UpToDate { current_version }),
         Err(error) => {
@@ -281,6 +332,7 @@ pub async fn update_now(
     window: WebviewWindow,
     sidecar: tauri::State<'_, SidecarSupervisor>,
     coordinator: tauri::State<'_, UpdateCoordinator>,
+    on_progress: Channel<UpdateProgress>,
 ) -> Result<(), String> {
     if !cfg!(target_os = "windows") {
         return Err("AliasMode updates are available only in the Windows desktop app.".to_owned());
@@ -289,23 +341,46 @@ pub async fn update_now(
         .0
         .try_lock()
         .map_err(|_| UPDATE_BUSY.to_owned())?;
-    let update = match discover_update(&app).await {
-        Ok(Some(update)) => update,
+    let _ = on_progress.send(UpdateProgress::Preparing);
+    let discovered = match discover_update(&app).await {
+        Ok(Some(discovered)) => discovered,
         Ok(None) => return Err("AliasMode is already up to date.".to_owned()),
         Err(error) => {
             eprintln!("AliasMode update recheck failed: {error}");
             return Err(CHECK_FAILED.to_owned());
         }
     };
+    let _ = on_progress.send(UpdateProgress::Ready {
+        version: discovered.update.version.clone(),
+        highlights: discovered.highlights,
+    });
+    let update = discovered.update;
     let sidecar = sidecar.inner().clone();
+    let download_progress = on_progress.clone();
+    let verifying_progress = on_progress.clone();
     let bytes = match prepare_verified_update(
         async {
+            let mut downloaded = 0_u64;
+            let mut last_reported = None;
             update
-                .download(|_, _| {}, || {})
+                .download(
+                    move |chunk_length, content_length| {
+                        downloaded = downloaded.saturating_add(chunk_length as u64);
+                        let percent = download_percent(downloaded, content_length);
+                        if last_reported != Some(percent) {
+                            let _ = download_progress.send(UpdateProgress::Downloading { percent });
+                            last_reported = Some(percent);
+                        }
+                    },
+                    move || {
+                        let _ = verifying_progress.send(UpdateProgress::Verifying);
+                    },
+                )
                 .await
                 .map_err(|error| error.to_string())
         },
         async {
+            let _ = on_progress.send(UpdateProgress::Installing);
             let _ = window.hide();
             shutdown::graceful_sidecar_cleanup(&sidecar).await
         },
@@ -332,9 +407,9 @@ pub async fn update_now(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_release_asset_url, newest_release, prepare_verified_update, validate_manifest_result,
-        GithubAsset, GithubRelease, ReleaseCandidate, UpdateCoordinator, UpdatePreparationError,
-        UpdateStatus, UPDATE_TARGET,
+        download_percent, is_release_asset_url, newest_release, prepare_verified_update,
+        release_highlights, validate_manifest_result, GithubAsset, GithubRelease, ReleaseCandidate,
+        UpdateCoordinator, UpdatePreparationError, UpdateProgress, UpdateStatus, UPDATE_TARGET,
     };
     use semver::Version;
     use serde_json::json;
@@ -350,6 +425,7 @@ mod tests {
             tag_name: tag.to_owned(),
             draft,
             prerelease,
+            body: None,
             assets: (0..manifest_count)
                 .map(|_| GithubAsset {
                     name: "latest.json".to_owned(),
@@ -365,6 +441,7 @@ mod tests {
             manifest_url: Url::parse(&manifest_url(&tag)).unwrap(),
             tag,
             version: Version::parse(version).unwrap(),
+            highlights: Vec::new(),
         }
     }
 
@@ -378,6 +455,38 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn extracts_only_curated_release_highlights() {
+        let body = "Intro text\n\n## Highlights\n- Faster updates\n- Clear progress\n- Better tabs\n- Hidden fourth item\n\n## Details\n- Internal work";
+        assert_eq!(
+            release_highlights(Some(body)),
+            ["Faster updates", "Clear progress", "Better tabs"]
+        );
+    }
+
+    #[test]
+    fn ignores_release_bodies_without_the_highlights_section() {
+        assert!(release_highlights(None).is_empty());
+        assert!(release_highlights(Some("## Changes\n- Not curated")).is_empty());
+        assert!(release_highlights(Some("## highlights\n- Wrong heading")).is_empty());
+    }
+
+    #[test]
+    fn selected_release_keeps_its_own_highlights() {
+        let current = Version::parse("0.1.0-beta.35").unwrap();
+        let mut older = release("v0.1.0-beta.36", false, true, 1);
+        older.body = Some("## Highlights\n- Older change".to_owned());
+        let mut newest = release("v0.1.0-beta.37", false, true, 1);
+        newest.body = Some("## Highlights\n- Newest change".to_owned());
+
+        assert_eq!(
+            newest_release(&current, &[newest, older])
+                .unwrap()
+                .highlights,
+            ["Newest change"]
+        );
     }
 
     #[test]
@@ -517,6 +626,50 @@ mod tests {
     }
 
     #[test]
+    fn calculates_bounded_download_percentages() {
+        assert_eq!(download_percent(25, Some(100)), Some(25));
+        assert_eq!(download_percent(150, Some(100)), Some(100));
+        assert_eq!(download_percent(25, Some(0)), None);
+        assert_eq!(download_percent(25, None), None);
+    }
+
+    #[test]
+    fn serializes_update_progress_for_the_ipc_channel() {
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Preparing).unwrap(),
+            json!({ "phase": "preparing" })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Ready {
+                version: "0.1.0-beta.37".to_owned(),
+                highlights: vec!["Newest change".to_owned()],
+            })
+            .unwrap(),
+            json!({
+                "phase": "ready",
+                "version": "0.1.0-beta.37",
+                "highlights": ["Newest change"],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Downloading { percent: Some(42) }).unwrap(),
+            json!({ "phase": "downloading", "percent": 42 })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Downloading { percent: None }).unwrap(),
+            json!({ "phase": "downloading", "percent": null })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Verifying).unwrap(),
+            json!({ "phase": "verifying" })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Installing).unwrap(),
+            json!({ "phase": "installing" })
+        );
+    }
+
+    #[test]
     fn coordinator_rejects_overlapping_operations() {
         let coordinator = UpdateCoordinator::default();
         let _operation = coordinator.0.try_lock().unwrap();
@@ -528,6 +681,7 @@ mod tests {
         let status = UpdateStatus::Available {
             current_version: "0.1.0-beta.35".to_owned(),
             version: "0.1.0-beta.36".to_owned(),
+            highlights: vec!["Faster updates".to_owned()],
         };
         assert_eq!(
             serde_json::to_value(status).unwrap(),
@@ -535,6 +689,7 @@ mod tests {
                 "state": "available",
                 "currentVersion": "0.1.0-beta.35",
                 "version": "0.1.0-beta.36",
+                "highlights": ["Faster updates"],
             }),
         );
     }

@@ -156,12 +156,20 @@ button.newgroup:disabled { color: var(--muted); cursor: default; background: non
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 9px 16px; color: #284a9e; background: var(--accent-soft); border-bottom: 1px solid var(--accent-line);
 }
-.update-banner span { min-width: 0; }
+.update-copy { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.update-copy > span { min-width: 0; }
 .update-banner button {
   flex: 0 0 auto; padding: 6px 12px; color: #fff; background: var(--accent);
   border: 1px solid var(--accent); border-radius: 8px; font-weight: 600; cursor: pointer;
 }
 .update-banner button:disabled { opacity: .55; cursor: default; }
+.update-highlights { color: #284a9e; font-size: 12px; }
+.update-highlights summary { width: max-content; max-width: 100%; cursor: pointer; font-weight: 600; }
+.update-highlights ul { margin: 5px 0 0; padding-left: 18px; }
+.update-highlights li + li { margin-top: 2px; }
+.update-progress { width: min(360px, 100%); display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.update-progress progress { width: 100%; height: 8px; accent-color: var(--accent); }
+.update-settings .update-progress { width: 100%; }
 /* Subtle, transient success pill (bottom-center) — not a full-width banner. */
 .notice {
   position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 60;
