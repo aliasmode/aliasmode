@@ -233,6 +233,36 @@ export const signOutCloud = () => cloudAuthAction("signout", {});
 export const acceptCloudLegal = () => cloudAuthAction("accept-legal", {});
 export const acceptCloudInvitation = (code: string) => cloudAuthAction("accept-invitation", { code });
 
+export type CloudConnectorState = "active" | "revoked" | "missing" | "disabled";
+
+export interface CloudConnectorResult {
+  ok: true;
+  state: CloudConnectorState;
+  connectorId?: string;
+  deviceId?: string;
+  url?: string;
+  token?: string;
+}
+
+async function cloudConnectorAction(
+  action: "create" | "status" | "revoke",
+  connectorId?: string,
+): Promise<CloudConnectorResult> {
+  const path = "/ui/api/cloud-connector";
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, ...(connectorId ? { connectorId } : {}) }),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Remote MCP settings are unavailable");
+  return body as CloudConnectorResult;
+}
+
+export const createCloudConnector = () => cloudConnectorAction("create");
+export const fetchCloudConnector = (connectorId: string) => cloudConnectorAction("status", connectorId);
+export const revokeCloudConnector = (connectorId: string) => cloudConnectorAction("revoke", connectorId);
+
 export interface CloudTeamState {
   folders: Array<{ name: string; archivedAt: number | null; permission: "view" | "edit" }>;
   members: Array<{

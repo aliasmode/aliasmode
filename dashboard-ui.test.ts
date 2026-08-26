@@ -72,6 +72,27 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("generation !== authGeneration.current");
 });
 
+test("Account settings prepares and protects one app-owned Remote MCP connector", () => {
+  expect(app).toContain('key: "remote_mcp_connector"');
+  expect(app).toContain('createCloudConnector()');
+  expect(app).toContain('fetchCloudConnector(stored.connectorId)');
+  expect(app).toContain('storeDesktopRemoteMcpCredential({ version: 1, state: "disabled" })');
+  expect(app).toContain('>Remote MCP</h2>');
+  expect(app).toContain('>MCP server URL</span>');
+  expect(app).toContain('>Access key</span>');
+  expect(app).toContain('remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"');
+  expect(app).toContain('Connect in three steps');
+  expect(app).toContain('Add a Streamable HTTP MCP server');
+  expect(app).toContain('Regenerate key');
+  expect(app).toContain('Enable Remote MCP');
+  expect(app).toContain('if (remoteMcpAccountExit.current) return Promise.resolve();');
+  expect(app).toContain('await prepareRemoteMcpForAccountExit(true);\n      await forgetCloudSession();');
+  expect(app).toContain('if (!showAccount || !isCloudMode || !workspaceReady || restartRequired) return;');
+  expect(app).toContain('await prepareRemoteMcpForAccountExit();\n      await signOutCloud();');
+  expect(styles).toContain('.remote-mcp-status.active');
+  expect(styles).toContain('.remote-mcp-value input');
+});
+
 test("dashboard recovers saved Cloud sessions without false sign-out", () => {
   expect(app).toContain('type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";');
   expect(app).toContain('useState<SavedSessionPhase>("restoring")');

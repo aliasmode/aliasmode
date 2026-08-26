@@ -530,6 +530,22 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 }
 .update-actions button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
 .update-actions button:disabled { opacity: .55; cursor: default; }
+.remote-mcp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.remote-mcp-status { padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: #f6f8fc; font-size: 10px; font-weight: 650; }
+.remote-mcp-status.active { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
+.remote-mcp-status.error { color: #9b1c1c; background: #fff7f7; border-color: #f6cfcf; }
+.remote-mcp-field { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
+.remote-mcp-value { display: flex; gap: 6px; }
+.remote-mcp-value input { min-width: 0; flex: 1; padding: 7px 8px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 7px; }
+.remote-mcp-value button, .remote-mcp-actions button, .remote-mcp-disabled button, .remote-mcp-settings > button { padding: 6px 9px; color: #344054; background: #fff; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; font: inherit; font-weight: 600; }
+.remote-mcp-guide { display: flex; flex-direction: column; gap: 5px; padding: 9px 10px; color: #344054; background: #f6f8fc; border: 1px solid var(--line); border-radius: 8px; font-size: 11px; }
+.remote-mcp-guide ol { display: flex; flex-direction: column; gap: 3px; margin: 0; padding-left: 18px; }
+.remote-mcp-guide details p { margin-top: 5px; }
+.remote-mcp-guide summary { color: var(--accent); cursor: pointer; }
+.remote-mcp-guide code { overflow-wrap: anywhere; }
+.remote-mcp-actions, .remote-mcp-disabled { display: flex; align-items: center; gap: 8px; }
+.remote-mcp-disabled { justify-content: space-between; }
+.remote-mcp-value input:focus, .remote-mcp-value button:focus, .remote-mcp-actions button:focus, .remote-mcp-disabled button:focus, .remote-mcp-settings > button:focus { outline: none; border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 .team-code { display: flex; gap: 6px; }
 .team-code input { min-width: 0; flex: 1; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; }
 .team-code select, .settings-row select { padding: 5px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }

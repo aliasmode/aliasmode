@@ -88,7 +88,9 @@ Setup configures Claude Code, Codex, OpenClaw, and Hermes when installed. Its JS
 
 Agents can create profiles, open several headful or headless browsers, select one browser, and use the full pinned Playwright MCP tool set. AliasMode remains responsible for browser processes, profile locks, Cloud sessions, capture, and safe close. Local mode needs no account and does not contact AliasMode Cloud.
 
-Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. AliasMode must stay open on that Windows device. Create one revocable connector per client:
+Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. Keep AliasMode open on that Windows device. Open **Account & Settings → Remote MCP** to automatically create the connection, then copy its pinned server URL and access key into the remote client's secret bearer-header fields.
+
+Advanced users can create additional independently revocable connectors from the packaged helper:
 
 ```powershell
 $aliasmode = "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe"
@@ -97,7 +99,7 @@ $aliasmode = "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe"
 & $aliasmode remote-mcp revoke --id <connector-id>
 ```
 
-`create` returns the pinned device URL and bearer token once. Store the token in the remote client's secret header setting. Do not put it in scripts or logs. This beta uses bearer headers; OAuth-only web connectors are not supported yet. An offline device returns an error and never redirects work to another machine.
+The Settings access key is stored in Windows Credential Manager. Extra keys created by the helper are returned once, so store them in the remote client's secret settings. Do not put keys in scripts or logs. This beta uses bearer headers; OAuth-only web connectors are not supported yet. An offline device returns an error and never redirects work to another machine.
 
 For the same installation session, the helper also provides JSON-only commands:
 

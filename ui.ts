@@ -227,6 +227,10 @@ function rejectUntrustedJsonMutation(req: Request): Response | null {
   }
   return null;
 }
+
+function noStoreJson(body: unknown, status = 200): Response {
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
 const APPLICATION_ROOT = resolve(import.meta.dir);
 
 let appVersionPromise: Promise<string> | null = null;
@@ -626,6 +630,59 @@ export async function handleUiRequest(
       return Response.json({ ok: false, error: "unknown Cloud auth action" }, { status: 404 });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+  }
+
+  if (pathname === "/ui/api/cloud-connector" && req.method === "POST") {
+    if (!options.cloudConnection) {
+      return noStoreJson({ ok: false, error: "AliasMode Cloud connection is unavailable" }, 503);
+    }
+    if (!options.cloudConnection.accountId() || !options.cloudConnection.deviceId()) {
+      return noStoreJson({ ok: false, error: "AliasMode Cloud authentication is required" }, 401);
+    }
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) {
+      rejected.headers.set("Cache-Control", "no-store");
+      return rejected;
+    }
+    try {
+      const body = await req.json() as { action?: unknown; connectorId?: unknown };
+      const cloud = options.cloudConnection.client;
+      if (body.action === "create") {
+        const created = await cloud.createMcpConnector("AliasMode Settings");
+        return noStoreJson({
+          ok: true,
+          state: "active",
+          connectorId: created.connector.id,
+          deviceId: created.connector.deviceId,
+          url: cloud.remoteMcpUrl(created.connector.deviceId),
+          token: created.token,
+        });
+      }
+      if (body.action !== "status" && body.action !== "revoke") {
+        return noStoreJson({ ok: false, error: "unknown Cloud connector action" }, 400);
+      }
+      if (typeof body.connectorId !== "string" || !body.connectorId) {
+        return noStoreJson({ ok: false, error: "connectorId is required" }, 400);
+      }
+      const listed = await cloud.listMcpConnectors();
+      const connector = listed.connectors.find((candidate) => candidate.id === body.connectorId);
+      if (body.action === "status") {
+        return noStoreJson({
+          ok: true,
+          state: !connector ? "missing" : connector.revokedAt === null ? "active" : "revoked",
+          url: cloud.remoteMcpUrl(options.cloudConnection.deviceId()!),
+        });
+      }
+      if (connector && connector.revokedAt === null) {
+        await cloud.revokeMcpConnector(connector.id);
+      }
+      return noStoreJson({ ok: true, state: "disabled" });
+    } catch (error) {
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 400;
+      return noStoreJson({ ok: false, error: msg(error) }, status);
     }
   }
 

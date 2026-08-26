@@ -3,6 +3,9 @@ import {
   acceptCloudLegal,
   CloudSessionRestoreError,
   cloudSessionContextReady,
+  createCloudConnector,
+  fetchCloudConnector,
+  revokeCloudConnector,
   cloudWorkspaceReady,
   fetchAppMode,
   fetchCloudAuth,
@@ -136,6 +139,38 @@ test("Cloud auth client reads status and sends credentials as JSON", async () =>
   await signOutCloud();
   expect(requests[4]?.input).toBe("/ui/api/cloud-auth/signout");
   expect(JSON.parse(String(requests[4]?.init?.body))).toEqual({});
+});
+
+test("Remote MCP settings client sends only explicit connector actions", async () => {
+  const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ input, init });
+    const request = JSON.parse(String(init?.body));
+    return Response.json(request.action === "create"
+      ? {
+          ok: true,
+          state: "active",
+          connectorId: "connector-1",
+          deviceId: "device-1",
+          url: "https://cloud.aliasmode.com/v1/mcp/devices/device-1",
+          token: "one-time-token",
+        }
+      : { ok: true, state: request.action === "status" ? "active" : "disabled" });
+  }) as unknown as typeof fetch;
+
+  expect(await createCloudConnector()).toMatchObject({ connectorId: "connector-1", token: "one-time-token" });
+  expect(await fetchCloudConnector("connector-1")).toMatchObject({ state: "active" });
+  expect(await revokeCloudConnector("connector-1")).toMatchObject({ state: "disabled" });
+  expect(requests.map((request) => request.input)).toEqual([
+    "/ui/api/cloud-connector",
+    "/ui/api/cloud-connector",
+    "/ui/api/cloud-connector",
+  ]);
+  expect(requests.map((request) => JSON.parse(String(request.init?.body)))).toEqual([
+    { action: "create" },
+    { action: "status", connectorId: "connector-1" },
+    { action: "revoke", connectorId: "connector-1" },
+  ]);
 });
 
 test("Cloud restore can request startup lifecycle recovery", async () => {
