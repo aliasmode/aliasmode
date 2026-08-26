@@ -27,19 +27,29 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain('invoke("restart_after_mode_change")');
 });
 
-test("dashboard checks and installs desktop updates through argument-free native commands", () => {
+test("dashboard shows curated desktop update notes and live progress", () => {
+  expect(app).toContain('import { Channel } from "@tauri-apps/api/core"');
   expect(app).toContain('type DesktopUpdateStatus =');
   expect(app).toContain('invoke("check_for_updates")');
-  expect(app).toContain('invoke("update_now")');
+  expect(app).toContain('invoke("update_now", { onProgress })');
+  expect(app).toContain('message.phase === "ready"');
+  expect(app).toContain('{ ...status, version: message.version, highlights: message.highlights }');
   expect(app).not.toContain('invoke("check_for_updates",');
-  expect(app).not.toContain('invoke("update_now",');
   expect(app).toContain("desktopUpdateCheckStarted.current = true");
   expect(app).toContain("AliasMode checks for updates when it starts.");
-  expect(app).toContain("Downloading and verifying the update");
+  expect(app).toContain('className="update-highlights"');
+  expect(app).toContain('<summary>What’s new in {version}</summary>');
+  expect(app).toContain('<progress max={100} value={percent ?? undefined}');
+  expect(app).toContain("Preparing update…");
+  expect(app).toContain("Downloading update…");
+  expect(app).toContain("Verifying update…");
+  expect(app).toContain("Installing and restarting…");
   expect(app).toContain('disabled={modeBusy || desktopUpdateInstalling}');
-  expect(app).toContain('className="update-banner" role="status"');
+  expect(app).toContain('className="update-banner"');
   expect(styles).toContain(".update-banner");
-  expect(styles).toContain(".update-actions");
+  expect(styles).toContain(".update-highlights");
+  expect(styles).toContain(".update-progress progress");
+  expect(styles).toContain("accent-color: var(--accent)");
 });
 
 test("dashboard contains long roster labels inside the window", () => {

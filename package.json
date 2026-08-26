@@ -30,6 +30,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "@playwright/mcp": "0.0.56",
+    "@tauri-apps/api": "2.11.1",
     "cross-spawn": "7.0.6",
     "playwright": "1.58.0-alpha-2026-01-16",
     "playwright-core": "1.58.2",
