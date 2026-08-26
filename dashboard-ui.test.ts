@@ -176,3 +176,13 @@ test("Cloud Delete requires edit permission for every selected profile", () => {
   expect(app).toContain('{(!isCloudMode || selectedEditable) && <button className="abtn danger" disabled={!selected.size} onClick={deleteSelected}>Delete</button>}');
   expect(app).toContain('r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`');
 });
+
+test("Local extension manager explains the supported ZIP/CRX workflow", () => {
+  expect(app).toContain('{!isCloudMode && <button className="extbtn"');
+  expect(app).toContain("Chrome Web Store installs are not supported");
+  expect(app).toContain("Switch to Chrome to install extensions and themes");
+  expect(app).toContain("Close the target profile");
+  expect(app).toContain("Edit &gt; Extensions");
+  expect(app).toContain("+ Upload ZIP/CRX");
+  expect(app).toContain('accept=".zip,.crx,application/zip,application/x-chrome-extension"');
+});
