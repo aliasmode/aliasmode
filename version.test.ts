@@ -20,7 +20,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
   const lockedVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "aliasmode-desktop"\r?\nversion = "([^"]+)"/)?.[1];
 
-  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.40");
+  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.41");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
   expect(tauriConfig.version).toBe(ALIASMODE_VERSION);
   expect(cargoVersion).toBe(ALIASMODE_VERSION);

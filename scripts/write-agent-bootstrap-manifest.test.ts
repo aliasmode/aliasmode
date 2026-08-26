@@ -3,23 +3,26 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { ALIASMODE_VERSION } from "../version.ts";
 import { buildAgentBootstrapManifest } from "./write-agent-bootstrap-manifest.ts";
 
 test("agent bootstrap manifest pins an exact installer URL and SHA-256", () => {
   const dir = mkdtempSync(join(tmpdir(), "aliasmode-agent-manifest-"));
+  const name = `AliasMode_${ALIASMODE_VERSION}_x64-setup.exe`;
+  const releaseBase = `https://github.com/aliasmode/aliasmode/releases/download/v${ALIASMODE_VERSION}`;
   try {
-    const installer = join(dir, "AliasMode_0.1.0-beta.40_x64-setup.exe");
+    const installer = join(dir, name);
     writeFileSync(installer, "installer");
     expect(buildAgentBootstrapManifest({
       installer,
-      releaseBase: "https://github.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.40",
+      releaseBase,
     })).toEqual({
       schema: 1,
-      version: "0.1.0-beta.40",
+      version: ALIASMODE_VERSION,
       wingetId: "AliasMode.AliasMode",
       installer: {
-        name: "AliasMode_0.1.0-beta.40_x64-setup.exe",
-        url: "https://github.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.40/AliasMode_0.1.0-beta.40_x64-setup.exe",
+        name,
+        url: `${releaseBase}/${name}`,
         sha256: createHash("sha256").update("installer").digest("hex"),
         size: 9,
       },

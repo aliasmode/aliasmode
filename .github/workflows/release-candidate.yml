@@ -121,6 +121,20 @@ jobs:
             throw "generated updater manifest is inconsistent"
           }
 
+          $bootstrapPath = Join-Path $artifact "aliasmode-agent-bootstrap.json"
+          $releaseBase = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$($env:ALIASMODE_CANDIDATE_TAG)"
+          bun scripts/write-agent-bootstrap-manifest.ts $installer $releaseBase $bootstrapPath
+          if ($LASTEXITCODE -ne 0) { throw "agent bootstrap manifest generation failed" }
+          $bootstrap = Get-Content $bootstrapPath | ConvertFrom-Json
+          $installerHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($bootstrap.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
+              $bootstrap.installer.name -ne $expectedName -or
+              $bootstrap.installer.url -ne $downloadUrl -or
+              $bootstrap.installer.sha256 -ne $installerHash -or
+              $bootstrap.installer.size -ne (Get-Item $installer).Length) {
+            throw "generated agent bootstrap manifest is inconsistent"
+          }
+
           $hashLines = Get-ChildItem $artifact -File |
             Sort-Object Name |
             ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }

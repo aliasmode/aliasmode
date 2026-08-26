@@ -3,7 +3,7 @@
   "product": "AliasMode",
   "platforms": ["windows-x64"],
   "wingetId": "AliasMode.AliasMode",
-  "releaseManifest": "https://github.com/Twitter-outreach/cloakpit/releases/download/v{version}/aliasmode-agent-bootstrap.json",
+  "releaseManifest": "https://github.com/aliasmode/aliasmode/releases/download/v{version}/aliasmode-agent-bootstrap.json",
   "bootstrapScript": "scripts/install-agent.ps1",
   "installedHelper": "%LOCALAPPDATA%\\AliasMode\\aliasmode-mcp.exe",
   "mcp": {
