@@ -2440,8 +2440,14 @@ function App() {
             <div className="modal-body">
               {extErr && <div className="modal-err">{extErr}</div>}
               <div className="hint" style={{ marginTop: 0 }}>
-                Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Assign it to profiles in each profile's <b>Edit</b> dialog — it loads when that browser opens.
+                Chrome Web Store installs are not supported in AliasMode. Profiles use CloakBrowser rather than Google Chrome, so “Switch to Chrome to install extensions and themes” is expected.
               </div>
+              <ol className="steps">
+                <li>Obtain a trusted extension as a <code>.zip</code> or <code>.crx</code>.</li>
+                <li>Upload it here.</li>
+                <li>Close the target profile, then use <b>Edit &gt; Extensions</b> to assign it.</li>
+                <li>Reopen the profile. AliasMode loads the extension when the browser starts.</li>
+              </ol>
               {extensions.length === 0 ? (
                 <div className="hint">No extensions uploaded yet.</div>
               ) : (
@@ -2466,7 +2472,7 @@ function App() {
             </div>
             <div className="modal-foot">
               <button className="link" onClick={() => setShowExts(false)}>Done</button>
-              <button className="primary" disabled={extBusy} onClick={() => extFileRef.current?.click()}>{extBusy ? "Uploading…" : "+ Upload extension"}</button>
+              <button className="primary" disabled={extBusy} onClick={() => extFileRef.current?.click()}>{extBusy ? "Uploading…" : "+ Upload ZIP/CRX"}</button>
             </div>
           </div>
         </div>
