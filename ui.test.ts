@@ -1413,6 +1413,112 @@ test("app mode API uses the packaged Cloud endpoint", async () => {
   s.close();
 });
 
+test("Cloud connector API creates, checks, and revokes only the selected connector", async () => {
+  const s = store();
+  const revoked: string[] = [];
+  const connectors = [
+    { id: "settings-connector", deviceId: "device-1", label: "AliasMode Settings", revokedAt: null },
+    { id: "cli-connector", deviceId: "device-1", label: "Linux Claude", revokedAt: null },
+  ];
+  const client = {
+    async createMcpConnector(label: string) {
+      expect(label).toBe("AliasMode Settings");
+      return {
+        ok: true,
+        connector: connectors[0],
+        token: "test-connector-secret",
+      };
+    },
+    async listMcpConnectors() { return { ok: true, connectors }; },
+    async revokeMcpConnector(id: string) { revoked.push(id); return { ok: true }; },
+    remoteMcpUrl(deviceId: string) { return `https://cloud.aliasmode.test/v1/mcp/devices/${deviceId}`; },
+  };
+  const options = {
+    cloudConnection: {
+      accountId: () => "account-1",
+      deviceId: () => "device-1",
+      client,
+    } as unknown as CloudConnectionRuntime,
+  };
+  const request = (body: unknown) => new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const created = await handleUiRequest(request({ action: "create" }), {} as any, s, null, options);
+  expect(created!.headers.get("cache-control")).toBe("no-store");
+  expect(await created!.json()).toEqual({
+    ok: true,
+    state: "active",
+    connectorId: "settings-connector",
+    deviceId: "device-1",
+    url: "https://cloud.aliasmode.test/v1/mcp/devices/device-1",
+    token: "test-connector-secret",
+  });
+
+  const active = await handleUiRequest(request({
+    action: "status", connectorId: "settings-connector",
+  }), {} as any, s, null, options);
+  expect(await active!.json()).toEqual({
+    ok: true,
+    state: "active",
+    url: "https://cloud.aliasmode.test/v1/mcp/devices/device-1",
+  });
+
+  const missing = await handleUiRequest(request({
+    action: "status", connectorId: "unknown-connector",
+  }), {} as any, s, null, options);
+  expect((await missing!.json()).state).toBe("missing");
+
+  const disabled = await handleUiRequest(request({
+    action: "revoke", connectorId: "settings-connector",
+  }), {} as any, s, null, options);
+  expect(await disabled!.json()).toEqual({ ok: true, state: "disabled" });
+  expect(revoked).toEqual(["settings-connector"]);
+  expect(revoked).not.toContain("cli-connector");
+  s.close();
+});
+
+test("Cloud connector API requires an authenticated trusted JSON request", async () => {
+  const s = store();
+  const unavailable = await handleUiRequest(new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"action":"create"}',
+  }), {} as any, s);
+  expect(unavailable!.status).toBe(503);
+  expect(unavailable!.headers.get("cache-control")).toBe("no-store");
+
+  const unauthenticated = await handleUiRequest(new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"action":"create"}',
+  }), {} as any, s, null, {
+    cloudConnection: {
+      accountId: () => null,
+      deviceId: () => null,
+      client: {},
+    } as unknown as CloudConnectionRuntime,
+  });
+  expect(unauthenticated!.status).toBe(401);
+  expect(unauthenticated!.headers.get("cache-control")).toBe("no-store");
+
+  const cloudConnection = {
+    accountId: () => "account-1",
+    deviceId: () => "device-1",
+    client: {},
+  } as unknown as CloudConnectionRuntime;
+  const rejected = await handleUiRequest(new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://outside.invalid" },
+    body: '{"action":"create"}',
+  }), {} as any, s, null, { cloudConnection });
+  expect(rejected!.status).toBe(403);
+  expect(rejected!.headers.get("cache-control")).toBe("no-store");
+  s.close();
+});
+
 test("Cloud workspace API returns editable folders to members without loading invitations", async () => {
   const s = store();
   let invitationCalls = 0;

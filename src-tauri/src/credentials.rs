@@ -8,6 +8,7 @@ pub enum CredentialKey {
     RefreshToken,
     DeviceCredential,
     QueueEncryptionKey,
+    RemoteMcpConnector,
 }
 
 impl CredentialKey {
@@ -16,6 +17,7 @@ impl CredentialKey {
             "refresh_token" => Ok(Self::RefreshToken),
             "device_credential" => Ok(Self::DeviceCredential),
             "queue_encryption_key" => Ok(Self::QueueEncryptionKey),
+            "remote_mcp_connector" => Ok(Self::RemoteMcpConnector),
             _ => Err("unsupported credential key".to_owned()),
         }
     }
@@ -25,6 +27,7 @@ impl CredentialKey {
             Self::RefreshToken => "AliasMode/refresh-token",
             Self::DeviceCredential => "AliasMode/device-credential",
             Self::QueueEncryptionKey => "AliasMode/queue-encryption-key",
+            Self::RemoteMcpConnector => "AliasMode/remote-mcp-connector",
         }
     }
 }
@@ -207,7 +210,7 @@ fn delete_secret(_key: CredentialKey) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialKey, MAX_SECRET_BYTES};
+    use super::{delete_cloud_credential, CredentialKey, MAX_SECRET_BYTES};
 
     #[test]
     fn maps_only_fixed_credential_keys() {
@@ -225,9 +228,16 @@ mod tests {
                 .target(),
             "AliasMode/queue-encryption-key"
         );
+        assert_eq!(
+            CredentialKey::parse("remote_mcp_connector")
+                .unwrap()
+                .target(),
+            "AliasMode/remote-mcp-connector"
+        );
         assert!(CredentialKey::parse("access_token").is_err());
         assert!(CredentialKey::parse("AliasMode/arbitrary").is_err());
         assert!(CredentialKey::parse("*").is_err());
+        assert!(delete_cloud_credential("remote_mcp_connector").is_err());
     }
 
     #[test]
