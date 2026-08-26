@@ -2266,6 +2266,20 @@ function App() {
                 <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
                 <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
               </div>
+              <div className="proxy-referral">
+                <div>
+                  <strong>Need a proxy?</strong>
+                  <span>Static residential proxies from $2.97/mo at OutreachProxy.</span>
+                </div>
+                <a
+                  href="https://outreachproxy.com/t/aliasmode"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="Get a proxy from OutreachProxy (opens externally)"
+                >
+                  Get a proxy <span aria-hidden="true">↗</span>
+                </a>
+              </div>
               <FingerprintSettings screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
             </div>
             <div className="modal-foot">

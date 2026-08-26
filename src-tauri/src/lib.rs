@@ -27,10 +27,11 @@ use tauri_plugin_shell::ShellExt;
 
 const IMPORT_RESTRICTION: &str = "Windows DPAPI protects persisted browser secrets, so this import works only for the same Windows machine and account. Persisted persona fields are preserved, but runtime or browser differences can change the account-visible fingerprint.";
 
-const LEGAL_URLS: [&str; 3] = [
+const ALLOWED_EXTERNAL_URLS: [&str; 4] = [
     "https://aliasmode.com/terms/",
     "https://aliasmode.com/privacy/",
     "https://aliasmode.com/acceptable-use/",
+    "https://outreachproxy.com/t/aliasmode",
 ];
 
 const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
@@ -40,8 +41,8 @@ fn windows_acceptance_browser_args(enabled: bool) -> Option<&'static str> {
     enabled.then_some(WINDOWS_ACCEPTANCE_BROWSER_ARGS)
 }
 
-fn allowed_legal_url(url: &str) -> bool {
-    LEGAL_URLS.contains(&url)
+fn allowed_external_url(url: &str) -> bool {
+    ALLOWED_EXTERNAL_URLS.contains(&url)
 }
 
 #[allow(deprecated)]
@@ -173,7 +174,7 @@ fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_legal_url, background_requested, cli_compatible_windows_path,
+        allowed_external_url, background_requested, cli_compatible_windows_path,
         configured_local_mode, parse_cloakpit_import_args, windows_acceptance_browser_args,
         CloakpitImportRequest,
     };
@@ -214,13 +215,14 @@ mod tests {
     }
 
     #[test]
-    fn allows_only_public_legal_pages() {
+    fn allows_only_explicit_external_pages() {
         for url in [
             "https://aliasmode.com/terms/",
             "https://aliasmode.com/privacy/",
             "https://aliasmode.com/acceptable-use/",
+            "https://outreachproxy.com/t/aliasmode",
         ] {
-            assert!(allowed_legal_url(url));
+            assert!(allowed_external_url(url));
         }
         for url in [
             "http://aliasmode.com/terms/",
@@ -228,8 +230,13 @@ mod tests {
             "https://aliasmode.com/terms/extra",
             "https://aliasmode.com/terms/?continue=https://example.com",
             "https://example.com/terms/",
+            "http://outreachproxy.com/t/aliasmode",
+            "https://outreachproxy.com/t/aliasmode/",
+            "https://outreachproxy.com/t/aliasmode?source=app",
+            "https://outreachproxy.com/t/another-campaign",
+            "https://example.com/t/aliasmode",
         ] {
-            assert!(!allowed_legal_url(url));
+            assert!(!allowed_external_url(url));
         }
     }
 
@@ -506,7 +513,7 @@ pub fn run() {
                         || (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
                 })
                 .on_new_window(move |url, _| {
-                    if allowed_legal_url(url.as_str()) {
+                    if allowed_external_url(url.as_str()) {
                         open_external_url(&shell_handle, url.as_str());
                     }
                     NewWindowResponse::Deny

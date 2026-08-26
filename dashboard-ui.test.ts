@@ -101,6 +101,24 @@ test("dashboard lists the supported profile platforms", () => {
   }
 });
 
+test("New Profile promotes the approved proxy provider after proxy credentials", () => {
+  const createModal = app.slice(app.indexOf("{showCreate && ("), app.indexOf("{editId && ("));
+  const credentials = createModal.indexOf("<span>Proxy pass</span>");
+  const referral = createModal.indexOf('className="proxy-referral"');
+  const fingerprint = createModal.indexOf("<FingerprintSettings");
+
+  expect(credentials).toBeGreaterThan(-1);
+  expect(referral).toBeGreaterThan(credentials);
+  expect(fingerprint).toBeGreaterThan(referral);
+  expect(createModal).toContain('href="https://outreachproxy.com/t/aliasmode"');
+  expect(createModal).toContain('target="_blank"');
+  expect(createModal).toContain('rel="noreferrer"');
+  expect(createModal).toContain('aria-label="Get a proxy from OutreachProxy (opens externally)"');
+  expect(createModal).toContain('aria-hidden="true"');
+  expect(styles).toContain(".proxy-referral {");
+  expect(styles).toContain(".proxy-referral a:focus-visible");
+});
+
 test("running profile rows expose Bring to front in Local and Cloud mode", () => {
   expect(app).toContain('p.running ? (');
   expect(app).toContain('className="btn raise"');
