@@ -1866,8 +1866,7 @@ function App() {
         <button className="btn open sm" disabled={!selected.size} onClick={openSelected}>Open</button>
         <button className="btn close sm" disabled={!selected.size} onClick={closeSelected}>Close</button>
         {(!isCloudMode || selectedEditable) && <>
-        {!isCloudMode && <>
-        {selectedMobileCount > 0 && <button className="abtn convert" onClick={convertSelectedMobile}>Convert mobile ({selectedMobileCount})</button>}
+        {!isCloudMode && selectedMobileCount > 0 && <button className="abtn convert" onClick={convertSelectedMobile}>Convert mobile ({selectedMobileCount})</button>}
         <div className="exportwrap">
           <button className="abtn" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>Export ▾</button>
           {exportOpen && selected.size > 0 && (
@@ -1878,8 +1877,7 @@ function App() {
             </div>
           )}
         </div>
-        <button className="abtn" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">Edit from file</button>
-        </>}
+        {!isCloudMode && <button className="abtn" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">Edit from file</button>}
         <span className="vsep" />
         <span className="movelbl">Move to</span>
         {newMode ? (
