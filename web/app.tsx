@@ -1,3 +1,4 @@
+import { Channel } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -451,8 +452,18 @@ function FingerprintSettings({
 type DesktopInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 type DesktopUpdateStatus =
   | { state: "upToDate"; currentVersion: string }
-  | { state: "available"; currentVersion: string; version: string };
+  | { state: "available"; currentVersion: string; version: string; highlights: string[] };
+type DesktopUpdateProgress =
+  | { phase: "preparing" | "verifying" | "installing" }
+  | { phase: "downloading"; percent: number | null };
+type DesktopUpdateMessage =
+  | DesktopUpdateProgress
+  | { phase: "ready"; version: string; highlights: string[] };
 type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";
+
+function isUpdateHighlights(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 3 && value.every((highlight) => typeof highlight === "string");
+}
 
 function parseDesktopUpdateStatus(value: unknown): DesktopUpdateStatus {
   if (!value || typeof value !== "object") throw new Error("AliasMode returned an invalid update status.");
@@ -460,14 +471,70 @@ function parseDesktopUpdateStatus(value: unknown): DesktopUpdateStatus {
   if (status.state === "upToDate" && typeof status.currentVersion === "string") {
     return { state: "upToDate", currentVersion: status.currentVersion };
   }
-  if (status.state === "available" && typeof status.currentVersion === "string" && typeof status.version === "string") {
-    return { state: "available", currentVersion: status.currentVersion, version: status.version };
+  if (
+    status.state === "available" &&
+    typeof status.currentVersion === "string" &&
+    typeof status.version === "string" &&
+    isUpdateHighlights(status.highlights)
+  ) {
+    return {
+      state: "available",
+      currentVersion: status.currentVersion,
+      version: status.version,
+      highlights: status.highlights,
+    };
   }
   throw new Error("AliasMode returned an invalid update status.");
 }
 
+function parseDesktopUpdateMessage(value: unknown): DesktopUpdateMessage {
+  if (!value || typeof value !== "object") throw new Error("AliasMode returned invalid update progress.");
+  const progress = value as Record<string, unknown>;
+  if (progress.phase === "ready" && typeof progress.version === "string" && isUpdateHighlights(progress.highlights)) {
+    return { phase: "ready", version: progress.version, highlights: progress.highlights };
+  }
+  if (progress.phase === "preparing" || progress.phase === "verifying" || progress.phase === "installing") {
+    return { phase: progress.phase };
+  }
+  if (
+    progress.phase === "downloading" &&
+    (progress.percent === null ||
+      (typeof progress.percent === "number" && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100))
+  ) {
+    return { phase: "downloading", percent: progress.percent as number | null };
+  }
+  throw new Error("AliasMode returned invalid update progress.");
+}
+
 function desktopInvoke(): DesktopInvoke | undefined {
   return (window as any).__TAURI_INTERNALS__?.invoke as DesktopInvoke | undefined;
+}
+
+function UpdateHighlights({ version, highlights }: { version: string; highlights: string[] }) {
+  if (highlights.length === 0) return null;
+  return (
+    <details className="update-highlights">
+      <summary>What’s new in {version}</summary>
+      <ul>{highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}</ul>
+    </details>
+  );
+}
+
+function DesktopUpdateProgressView({ progress }: { progress: DesktopUpdateProgress }) {
+  const percent = progress.phase === "downloading" ? progress.percent : null;
+  const label = progress.phase === "preparing"
+    ? "Preparing update…"
+    : progress.phase === "downloading"
+      ? percent === null ? "Downloading update…" : `Downloading update… ${percent}%`
+      : progress.phase === "verifying"
+        ? "Verifying update…"
+        : "Installing and restarting…";
+  return (
+    <div className="update-progress" role="status">
+      <span>{label}</span>
+      <progress max={100} value={percent ?? undefined} aria-label="Update progress" />
+    </div>
+  );
 }
 
 async function readDesktopCloudCredentials(): Promise<{
@@ -540,6 +607,7 @@ function App() {
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus | null>(null);
   const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
   const [desktopUpdateInstalling, setDesktopUpdateInstalling] = useState(false);
+  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<DesktopUpdateProgress | null>(null);
   const [desktopUpdateErr, setDesktopUpdateErr] = useState<string | null>(null);
   const [logDir, setLogDir] = useState<string | undefined>(undefined);
   const [logView, setLogView] = useState<{ file: string; content: string } | null>(null);
@@ -701,13 +769,27 @@ function App() {
   const installDesktopUpdate = async () => {
     const invoke = desktopInvoke();
     if (!invoke || desktopUpdate?.state !== "available") return;
+    const onProgress = new Channel<unknown>();
+    onProgress.onmessage = (value) => {
+      try {
+        const message = parseDesktopUpdateMessage(value);
+        if (message.phase === "ready") {
+          setDesktopUpdate((status) => status?.state === "available"
+            ? { ...status, version: message.version, highlights: message.highlights }
+            : status);
+        } else {
+          setDesktopUpdateProgress(message);
+        }
+      } catch { /* Ignore malformed native progress without interrupting the update. */ }
+    };
     setDesktopUpdateInstalling(true);
+    setDesktopUpdateProgress({ phase: "preparing" });
     setDesktopUpdateErr(null);
     try {
-      await invoke("update_now");
-      setDesktopUpdateInstalling(false);
+      await invoke("update_now", { onProgress });
     } catch (error) {
       setDesktopUpdateErr(error instanceof Error ? error.message : String(error));
+      setDesktopUpdateProgress(null);
       setDesktopUpdateInstalling(false);
     }
   };
@@ -1853,10 +1935,14 @@ function App() {
       )}
       {notice && <div className="notice" role="status" onClick={() => setNotice(null)}>{notice}</div>}
       {desktopUpdate?.state === "available" && (
-        <div className="update-banner" role="status">
-          <span><strong>AliasMode {desktopUpdate.version} is available.</strong> The update will save active browsers and restart the app.</span>
+        <div className="update-banner">
+          <div className="update-copy">
+            <span role="status"><strong>AliasMode {desktopUpdate.version} is available.</strong> The update will save active browsers and restart the app.</span>
+            <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
+            {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
+          </div>
           <button type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
-            {desktopUpdateInstalling ? "Downloading and verifying…" : "Update now"}
+            {desktopUpdateInstalling ? "Updating…" : "Update now"}
           </button>
         </div>
       )}
@@ -2046,10 +2132,13 @@ function App() {
                 <div className="settings-row"><span>Installed version</span><strong className="mono">{appVersion || desktopUpdate?.currentVersion || "—"}</strong></div>
                 {desktopUpdate?.state === "upToDate" && <p role="status">AliasMode is up to date.</p>}
                 {desktopUpdate?.state === "available" && (
-                  <p role="status">Version {desktopUpdate.version} is ready. Active browsers will be saved and closed.</p>
+                  <>
+                    <p role="status">Version {desktopUpdate.version} is ready. Active browsers will be saved and closed.</p>
+                    <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
+                  </>
                 )}
                 {!desktopUpdate && !desktopUpdateChecking && <p>AliasMode checks for updates when it starts.</p>}
-                {desktopUpdateInstalling && <p role="status">Downloading and verifying the update. AliasMode will save browsers and restart.</p>}
+                {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
                 {desktopUpdateErr && <div className="modal-err" role="alert">{desktopUpdateErr}</div>}
                 <div className="update-actions">
                   <button type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void checkDesktopUpdate(true)}>
