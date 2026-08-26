@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import {
   playwrightWorkerCommand,
   playwrightWorkerEnvironment,
+  resolvePlaywrightRuntime,
   runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
@@ -20,6 +21,16 @@ test("uses packaged Node bootstrap and keeps requests off argv", () => {
   expect(command.slice(1, 3)).toEqual(["--input-type=module", "--eval"]);
   expect(command[3]).toContain("await import");
   expect(command[4]).toBe(join(runtime, "worker.mjs"));
+});
+
+test("resolves source workers beside the Bun entrypoint under Node from PATH", () => {
+  const sourceRoot = join("source", "aliasmode");
+  expect(resolvePlaywrightRuntime({ env: {}, sourceRoot })).toEqual({
+    kind: "source",
+    root: sourceRoot,
+    nodeExecutable: "node",
+    workerPath: join(sourceRoot, "playwright-worker.mjs"),
+  });
 });
 
 test("worker inherits normal environment without Node hooks or app secrets", () => {
@@ -201,6 +212,12 @@ bunAsNodeTest("bootstrap returns a structured error when the worker cannot load"
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("source worker loads pinned dependencies under Node from PATH", async () => {
+  const error = await runPlaywrightWorker("page", {}, { timeoutMs: 10_000 })
+    .then(() => null, (failure) => failure);
+  expect(error).toMatchObject({ code: "invalid_request" });
 });
 
 test("installed Playwright storage source uses the supported direct export shape", async () => {
@@ -1381,6 +1398,10 @@ bunAsNodeTest("worker rejects capture when an attached Telegram page cannot be r
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("verifies the source Playwright runtime and Node version", async () => {
+  await expect(verifyPlaywrightRuntime()).resolves.toBeUndefined();
 });
 
 test("loads the installed Playwright ESM entrypoint", async () => {

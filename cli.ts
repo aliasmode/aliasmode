@@ -2476,7 +2476,8 @@ async function main() {
     process.exit(1);
   });
 
-  if (typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true) {
+  const compiled = typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true;
+  if (compiled) {
     const runtime = process.env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim() || defaultPlaywrightRuntimeRoot();
     process.env.ALIASMODE_PLAYWRIGHT_RUNTIME = runtime;
     await verifyPlaywrightRuntime(runtime);
@@ -2484,6 +2485,14 @@ async function main() {
   if (await dispatchReadSessionWorker(argv)) return;
 
   const [cmd, ...rest] = argv;
+  if (!compiled && (cmd === "start" || cmd === "serve")) {
+    try {
+      await verifyPlaywrightRuntime();
+    } catch (error) {
+      console.error(`[aliasmode] ${error instanceof Error ? error.message : "source Playwright runtime is unavailable"}`);
+      throw error;
+    }
+  }
   const paths = statePaths(resolveStateRoot(rest));
   const desktop = has(rest, "desktop-stdio");
   // The desktop sidecar's stdout/stderr are discarded by the Tauri shell, which

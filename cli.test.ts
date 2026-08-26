@@ -95,6 +95,65 @@ test("internal migration command exits before normal startup creates state", asy
   expect(existsSync(destination)).toBe(false);
 });
 
+test("source start reports when Node is unavailable", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "aliasmode-cli-source-node-"));
+  const stateRoot = join(parent, "state");
+  const child = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, "cli.ts"),
+    "start",
+    "--state-root", stateRoot,
+  ], {
+    stdout: "ignore",
+    stderr: "pipe",
+    env: { ...process.env, PATH: "", ALIASMODE_PLAYWRIGHT_RUNTIME: "" },
+  });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exitCode).toBe(1);
+  expect(stderr).toContain("source Playwright runtime requires Node.js 18 or newer on PATH");
+  expect(existsSync(stateRoot)).toBe(false);
+  await removeTemporaryRoot(parent);
+});
+
+test("source start serves the loopback dashboard", async () => {
+  const stateRoot = mkdtempSync(join(tmpdir(), "aliasmode-cli-source-start-"));
+  const port = await freeLoopbackPort();
+  const child = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, "cli.ts"),
+    "start",
+    "--port", String(port),
+    "--state-root", stateRoot,
+  ], {
+    stdout: "ignore",
+    stderr: "ignore",
+    env: {
+      ...process.env,
+      CLOAKBROWSER_BINARY_PATH: process.execPath,
+      CLOAKBROWSER_BINARY_SHA256: "0".repeat(64),
+    },
+  });
+  try {
+    let health: Response | undefined;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      try {
+        health = await fetch(`http://127.0.0.1:${port}/ui/api/health`);
+        if (health.ok) break;
+      } catch {}
+      if (await Promise.race([child.exited.then(() => true), Bun.sleep(100).then(() => false)])) break;
+    }
+    expect(health?.ok).toBe(true);
+    expect(await health?.json()).toMatchObject({ ok: true });
+  } finally {
+    child.kill();
+    await child.exited;
+    await removeTemporaryRoot(stateRoot);
+  }
+});
+
 test("compiled sidecar smoke restores before navigation and capture", async () => {
   const events: string[] = [];
   await runCompiledSidecarSmoke("http://127.0.0.1:9222", {

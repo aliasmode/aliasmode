@@ -40,6 +40,19 @@ bun cli.ts start
 
 The dashboard and compatibility API bind to loopback only.
 
+### macOS source run
+
+A supported macOS CloakBrowser executable can run through the local web dashboard without Tauri or a separate backend. Install Bun and Node.js 18 or newer (Node 22.23.2 is recommended), then run:
+
+```sh
+bun install --frozen-lockfile
+export CLOAKBROWSER_BINARY_PATH="/path/to/CloakBrowser.app/Contents/MacOS/CloakBrowser"
+export CLOAKBROWSER_BINARY_SHA256="$(shasum -a 256 "$CLOAKBROWSER_BINARY_PATH" | cut -d ' ' -f 1)"
+bun run start
+```
+
+Open `http://127.0.0.1:50400`, select AliasMode Cloud, and sign in. Source mode keeps Cloud credentials in process memory, so sign in again after restarting AliasMode. Browser data and processes remain on the Mac.
+
 ### Windows desktop beta
 
 Published installers support Windows 10 version 1809 or newer, Windows 11, and Windows Server 2019 or newer on x64 processors with SSE4.2. They install for the current user and remain unsigned while release signing is configured.
