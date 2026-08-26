@@ -204,9 +204,51 @@ export class AgentControlSession {
         return this.detachProfile(stringParam(params, "profileId"));
       case "browser.close":
         return await this.closeProfile(stringParam(params, "profileId"));
+      case "mcp.connectors.create":
+        return await this.createMcpConnector(stringParam(params, "label"));
+      case "mcp.connectors.list":
+        return await this.listMcpConnectors();
+      case "mcp.connectors.revoke":
+        return await this.revokeMcpConnector(stringParam(params, "connectorId"));
       default:
         throw agentError("unknown_method", `unknown agent method: ${method}`);
     }
+  }
+
+  private cloudMcpConnection(): { connection: CloudConnectionRuntime; deviceId: string } {
+    const connection = this.deps.cloudConnection;
+    const deviceId = connection?.deviceId();
+    if (!connection || !deviceId) {
+      throw agentError("cloud_unavailable", "Sign in to AliasMode Cloud on this device first");
+    }
+    return { connection, deviceId };
+  }
+
+  private async createMcpConnector(label: string) {
+    const { connection, deviceId } = this.cloudMcpConnection();
+    const created = await connection.client.createMcpConnector(label);
+    return {
+      connectorId: created.connector.id,
+      deviceId,
+      url: connection.client.remoteMcpUrl(deviceId),
+      token: created.token,
+    };
+  }
+
+  private async listMcpConnectors() {
+    const { connection, deviceId } = this.cloudMcpConnection();
+    const listed = await connection.client.listMcpConnectors();
+    return {
+      deviceId,
+      url: connection.client.remoteMcpUrl(deviceId),
+      connectors: listed.connectors,
+    };
+  }
+
+  private async revokeMcpConnector(connectorId: string) {
+    const { connection } = this.cloudMcpConnection();
+    await connection.client.revokeMcpConnector(connectorId);
+    return { connectorId, revoked: true as const };
   }
 
   private async listProfiles(): Promise<SafeProfile[]> {

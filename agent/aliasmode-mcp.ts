@@ -222,6 +222,24 @@ async function playwright(args: string[]): Promise<unknown> {
   });
 }
 
+async function remoteMcp(args: string[]): Promise<unknown> {
+  const [action, ...rest] = args;
+  if (action === "create") {
+    const label = value(rest, "name");
+    if (!label) throw new Error("remote-mcp create requires --name");
+    return await withRuntime((client) => client.call("mcp.connectors.create", { label }));
+  }
+  if (action === "list") {
+    return await withRuntime((client) => client.call("mcp.connectors.list"));
+  }
+  if (action === "revoke") {
+    const connectorId = value(rest, "id");
+    if (!connectorId) throw new Error("remote-mcp revoke requires --id");
+    return await withRuntime((client) => client.call("mcp.connectors.revoke", { connectorId }));
+  }
+  throw new Error("remote-mcp requires create, list, or revoke");
+}
+
 async function setup(args: string[]): Promise<unknown> {
   if (!has(args, "yes")) throw new Error("setup requires --yes for noninteractive configuration");
   const requested = value(args, "client") ?? "auto";
@@ -253,6 +271,7 @@ async function main(): Promise<void> {
   else if (command === "profiles") result = await profiles(args);
   else if (command === "browser") result = await browser(args);
   else if (command === "playwright") result = await playwright(args);
+  else if (command === "remote-mcp") result = await remoteMcp(args);
   else throw new Error(`unknown AliasMode MCP command: ${command}`);
   process.stdout.write(`${JSON.stringify({ ok: true, result })}\n`);
 }

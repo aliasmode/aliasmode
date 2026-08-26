@@ -1,5 +1,16 @@
 export const CLOUD_API_VERSION = 1 as const;
 export const CLOUD_API_BASE_PATH = "/v1" as const;
+export const MCP_TUNNEL_PROTOCOL = "aliasmode-mcp-tunnel-v1" as const;
+
+export type McpTunnelToDevice =
+  | { protocol: typeof MCP_TUNNEL_PROTOCOL; type: "open"; sessionId: string }
+  | { protocol: typeof MCP_TUNNEL_PROTOCOL; type: "message"; sessionId: string; payload: unknown }
+  | { protocol: typeof MCP_TUNNEL_PROTOCOL; type: "close"; sessionId: string };
+
+export type McpTunnelToCloud =
+  | { protocol: typeof MCP_TUNNEL_PROTOCOL; type: "message"; sessionId: string; payload: unknown }
+  | { protocol: typeof MCP_TUNNEL_PROTOCOL; type: "closed"; sessionId: string }
+  | { protocol: typeof MCP_TUNNEL_PROTOCOL; type: "error"; sessionId: string; code: string; message: string };
 
 export type WorkspaceRole = "owner" | "admin" | "member";
 export type FolderPermission = "view" | "edit";
@@ -94,6 +105,30 @@ export interface CloudDevice {
   lastSeenAt: number;
   revokedAt: number | null;
   current: boolean;
+}
+
+export interface CloudMcpConnector {
+  id: string;
+  deviceId: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+export interface CreateMcpConnectorRequest {
+  label: string;
+}
+
+export interface CreateMcpConnectorResponse {
+  ok: true;
+  connector: CloudMcpConnector;
+  token: string;
+}
+
+export interface ListMcpConnectorsResponse {
+  ok: true;
+  connectors: CloudMcpConnector[];
 }
 
 export interface CloudCookie {
