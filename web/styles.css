@@ -450,7 +450,7 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .copyfield button:hover { filter: brightness(.97); }
 .modal-body .fld.port input { width: 84px; }
 .modal-body .fld input.ro { background: #f6f8fc; color: var(--muted); cursor: default; }
-.fingerprint-settings { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.fingerprint-settings { flex-shrink: 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .fingerprint-settings > summary {
   display: flex; align-items: center; gap: 8px; padding: 10px 12px;
   color: var(--ink); background: #f9fafe; cursor: pointer; font-weight: 600; list-style: none;
@@ -472,6 +472,19 @@ td.act .btn.twofa.flash { background: var(--green-soft); border-color: #b7e3c4; 
 .proxy-paste-row button { height: 35px; padding: 0 12px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 8px; font-weight: 600; cursor: pointer; }
 .proxy-paste-row button:disabled { opacity: .45; cursor: default; }
 .proxy-paste-ok { margin-top: -6px; font-size: 12px; color: #15803d; }
+.proxy-referral {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  padding: 10px 11px; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: 9px;
+}
+.proxy-referral > div { display: flex; flex: 1 1 270px; min-width: 0; flex-direction: column; gap: 2px; }
+.proxy-referral strong { color: var(--ink); font-size: 12.5px; }
+.proxy-referral > div > span { color: var(--muted); font-size: 11.5px; line-height: 1.35; }
+.proxy-referral a {
+  flex: 0 0 auto; padding: 6px 10px; color: #fff; background: var(--accent); border: 1px solid var(--accent);
+  border-radius: 7px; font-size: 12px; font-weight: 650; text-decoration: none; white-space: nowrap;
+}
+.proxy-referral a:hover { filter: brightness(.95); }
+.proxy-referral a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .grouppick { display: flex; gap: 6px; }
 .grouppick input { flex: 1; min-width: 0; }
 .grouppick .gp-back {
