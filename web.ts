@@ -14,6 +14,7 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import {
@@ -51,6 +52,7 @@ export interface DashboardServerOptions {
   cloudConnection?: CloudConnectionRuntime;
   pendingSync?: PendingSyncRuntime;
   cloudBrowser?: CloudBrowserLifecycle;
+  mcpTunnel?: McpTunnelLifecycle;
   port?: number;
   /**
    * Bind address. Loopback only by default — the dashboard and API are
@@ -203,6 +205,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
           cloudConnection: opts.cloudConnection,
           pendingSync: opts.pendingSync,
           cloudBrowser: opts.cloudBrowser,
+          mcpTunnel: opts.mcpTunnel,
           health: opts.health,
           runtimeMode,
         });

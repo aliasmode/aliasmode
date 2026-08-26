@@ -2115,13 +2115,17 @@ test("Cloud sign-out keeps auth and account state when browsers cannot release",
   } as unknown as CloudConnectionRuntime;
   const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
   const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return false; } } as any;
+  const mcpTunnel = {
+    async disconnect() { calls.push("disconnectTunnel"); },
+    refresh() { calls.push("refreshTunnel"); },
+  };
 
   const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser, mcpTunnel });
 
   expect(response!.status).toBe(409);
-  expect(calls).toEqual(["releaseAll"]);
+  expect(calls).toEqual(["disconnectTunnel", "releaseAll", "refreshTunnel"]);
   expect(cloudConnection.accountId()).toBe("account1");
   s.close();
 });
@@ -2137,13 +2141,17 @@ test("Cloud sign-out releases browsers before queue, device, and credentials", a
   } as unknown as CloudConnectionRuntime;
   const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
   const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return true; } } as any;
+  const mcpTunnel = {
+    async disconnect() { calls.push("disconnectTunnel"); },
+    refresh() { calls.push("refreshTunnel"); },
+  };
 
   const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser, mcpTunnel });
 
   expect(response!.status).toBe(200);
-  expect(calls).toEqual(["releaseAll", "closeQueue", "clearDevice", "signOut"]);
+  expect(calls).toEqual(["disconnectTunnel", "releaseAll", "closeQueue", "clearDevice", "signOut"]);
   s.close();
 });
 

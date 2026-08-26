@@ -18,6 +18,7 @@ import {
   type CloudWorkspace,
   type FolderPermission,
   type CreateInvitationResponse,
+  type CreateMcpConnectorResponse,
   type CreateProfileRequest,
   type CreateProfileResponse,
   type GetProfileResponse,
@@ -26,6 +27,7 @@ import {
   type SetFolderGrantResponse,
   type ListFoldersResponse,
   type ListInvitationsResponse,
+  type ListMcpConnectorsResponse,
   type ListMembersResponse,
   type ListProfilesResponse,
   type ResendInvitationResponse,
@@ -275,6 +277,25 @@ export class CloudClient {
   acceptInvitation(code: string): Promise<{ ok: true; workspace: CloudWorkspace }> {
     const request: AcceptInvitationRequest = { code };
     return this.call("/invitations/accept", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  createMcpConnector(label: string): Promise<CreateMcpConnectorResponse> {
+    return this.call("/mcp/connectors", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    });
+  }
+
+  listMcpConnectors(): Promise<ListMcpConnectorsResponse> {
+    return this.call("/mcp/connectors");
+  }
+
+  revokeMcpConnector(connectorId: string): Promise<{ ok: true }> {
+    return this.call(`/mcp/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" });
+  }
+
+  remoteMcpUrl(deviceId: string): string {
+    return `${this.baseUrl}${CLOUD_API_BASE_PATH}/mcp/devices/${encodeURIComponent(deviceId)}`;
   }
 
   listProfiles(): Promise<ListProfilesResponse> {

@@ -53,6 +53,7 @@ import {
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudBrowserCoordinator, type CloudBrowserOptions } from "./cloud-browser.ts";
+import { McpTunnelRuntime } from "./mcp-tunnel.ts";
 import { PendingSyncQueue, PendingSyncRuntime } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
@@ -412,7 +413,10 @@ function makeCloudBrowser(
   });
 }
 
-function installCloudShutdown(cloudBrowser: CloudBrowserCoordinator): void {
+function installCloudShutdown(
+  cloudBrowser: CloudBrowserCoordinator,
+  mcpTunnel?: McpTunnelRuntime,
+): void {
   let shutdownInFlight: Promise<void> | null = null;
   const shutdown = (signal: NodeJS.Signals) => {
     if (shutdownInFlight) {
@@ -421,7 +425,10 @@ function installCloudShutdown(cloudBrowser: CloudBrowserCoordinator): void {
     }
     console.error(`received ${signal}; capturing and closing Cloud browsers`);
     shutdownInFlight = drainRemoteShutdown(
-      () => cloudBrowser.releaseAll(true),
+      async () => {
+        await mcpTunnel?.stop();
+        return cloudBrowser.releaseAll(true);
+      },
       { maxDrainMs: DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS },
     )
       .then(() => process.exit(0))
@@ -2552,6 +2559,15 @@ async function main() {
         },
       })
     : undefined;
+  const mcpTunnel = process.platform === "win32" && agentNonce && cloudAuth && cloudConfig && cloudConnection
+    ? new McpTunnelRuntime({
+        baseUrl: cloudConfig.apiUrl,
+        accessToken: () => cloudAuth.accessTokenOrRefresh(),
+        deviceId: () => cloudConnection.deviceId(),
+        deviceCredential: () => cloudConnection.deviceCredential(),
+        log: (message) => console.log(`[aliasmode] ${message}`),
+      })
+    : undefined;
   const pendingSync = cloudAuth ? new PendingSyncRuntime(paths.pendingSync) : undefined;
   const lifecycleAdmissionOptions = cmd === "start" || cmd === "serve"
     ? lifecycleAdmissionOptionsFromEnv()
@@ -2698,7 +2714,7 @@ async function main() {
       startMemoryAttributionLog();
       if (configuredMode.mode === "cloud") {
         console.log("cloud mode: waiting for verified authentication before loading profiles");
-        if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser);
+        if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser, mcpTunnel);
         const server = serveDashboard({
           launcher,
           store,
@@ -2711,9 +2727,11 @@ async function main() {
           cloudConnection,
           pendingSync,
           cloudBrowser,
+          mcpTunnel,
           health: desktopHealth,
           agentNonce: agentNonce ?? undefined,
         });
+        mcpTunnel?.start();
         if (desktopHealth) {
           const assignedPort = server.port;
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
@@ -2724,7 +2742,10 @@ async function main() {
             launcher,
             ...(cloudBrowser ? {
               remoteShutdown: (remainingMs: number) => drainRemoteShutdown(
-                () => cloudBrowser.releaseAll(true),
+                async () => {
+                  await mcpTunnel?.stop();
+                  return cloudBrowser.releaseAll(true);
+                },
                 { maxDrainMs: Math.min(DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS, remainingMs) },
               ),
             } : {}),

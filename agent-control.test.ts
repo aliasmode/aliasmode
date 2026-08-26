@@ -212,3 +212,48 @@ test("an unconfirmed close retains the temporary profile marker", async () => {
   expect(h.temporary()).toBe(true);
   expect(h.profileExists()).toBe(true);
 });
+
+test("MCP connector methods return the token once and use the current device URL", async () => {
+  const h = harness();
+  const calls: string[] = [];
+  const connector = {
+    id: "connector-id",
+    deviceId: "device-id",
+    label: "Linux Claude",
+    createdAt: 1,
+    lastUsedAt: null,
+    revokedAt: null,
+  };
+  const session = new AgentControlSession({
+    ...h.deps,
+    cloudConnection: {
+      deviceId: () => "device-id",
+      client: {
+        createMcpConnector: async (label: string) => {
+          calls.push(`create:${label}`);
+          return { ok: true, connector, token: "returned-once" };
+        },
+        listMcpConnectors: async () => ({ ok: true, connectors: [connector] }),
+        revokeMcpConnector: async (id: string) => { calls.push(`revoke:${id}`); return { ok: true }; },
+        remoteMcpUrl: (id: string) => `https://cloud.example.test/v1/mcp/devices/${id}`,
+      },
+    } as any,
+  });
+
+  const created = await session.enqueue(wire("mcp.connectors.create", { label: "Linux Claude" }));
+  expect(created).toMatchObject({
+    ok: true,
+    result: {
+      connectorId: "connector-id",
+      deviceId: "device-id",
+      url: "https://cloud.example.test/v1/mcp/devices/device-id",
+      token: "returned-once",
+    },
+  });
+  const listed = await session.enqueue(wire("mcp.connectors.list"));
+  expect(JSON.stringify(listed)).not.toContain("returned-once");
+  expect(listed).toMatchObject({ ok: true, result: { connectors: [connector] } });
+  const revoked = await session.enqueue(wire("mcp.connectors.revoke", { connectorId: "connector-id" }));
+  expect(revoked).toMatchObject({ ok: true, result: { connectorId: "connector-id", revoked: true } });
+  expect(calls).toEqual(["create:Linux Claude", "revoke:connector-id"]);
+});

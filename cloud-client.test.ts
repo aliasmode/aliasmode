@@ -103,6 +103,28 @@ test("Cloud client uses invitation and move request shapes", async () => {
   ]);
 });
 
+test("Cloud client manages device-scoped MCP connectors", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json(String(url).endsWith("/mcp/connectors") && init?.method === "POST"
+      ? { ok: true, connector: {}, token: "returned-once" }
+      : String(url).endsWith("/mcp/connectors")
+        ? { ok: true, connectors: [] }
+        : { ok: true });
+  });
+  await cloud.createMcpConnector("Linux Claude");
+  await cloud.listMcpConnectors();
+  await cloud.revokeMcpConnector("connector/1");
+  expect(cloud.remoteMcpUrl("device/1")).toBe("https://cloud.aliasmode.test/v1/mcp/devices/device%2F1");
+  expect(calls.map((call) => [call.url, call.init?.method ?? "GET"])).toEqual([
+    ["https://cloud.aliasmode.test/v1/mcp/connectors", "POST"],
+    ["https://cloud.aliasmode.test/v1/mcp/connectors", "GET"],
+    ["https://cloud.aliasmode.test/v1/mcp/connectors/connector%2F1", "DELETE"],
+  ]);
+  expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ label: "Linux Claude" });
+});
+
 test("Cloud client rejects calls without an in-memory access token", async () => {
   const cloud = new CloudClient({
     baseUrl: "https://cloud.aliasmode.test",

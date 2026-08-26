@@ -17,6 +17,7 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { EmailVerificationRequiredError, SupabaseAuthRequestError } from "./supabase-auth.ts";
@@ -337,6 +338,7 @@ export interface UiRuntimeOptions {
   cloudConnection?: CloudConnectionRuntime;
   pendingSync?: PendingSyncRuntime;
   cloudBrowser?: CloudBrowserLifecycle;
+  mcpTunnel?: McpTunnelLifecycle;
   health?: UiHealthMetadata | null;
   timezoneFetch?: FetchLike;
   /** Mode whose runtimes were wired when this process started. */
@@ -498,6 +500,7 @@ export async function handleUiRequest(
           } else {
             await options.cloudBrowser?.secureAfterAuthentication();
           }
+          options.mcpTunnel?.refresh();
           return Response.json({
             ok: true,
             authenticated: true,
@@ -511,6 +514,7 @@ export async function handleUiRequest(
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
+          await options.mcpTunnel?.disconnect();
           options.pendingSync.close();
           options.cloudAuth.clear();
           options.cloudConnection.clearDevice();
@@ -550,6 +554,7 @@ export async function handleUiRequest(
           } else {
             await options.cloudBrowser?.secureAfterAuthentication();
           }
+          options.mcpTunnel?.refresh();
           return Response.json({
             ok: true,
             authenticated: true,
@@ -563,6 +568,7 @@ export async function handleUiRequest(
         } catch (error) {
           const failure = cloudRestoreFailure(error, stage);
           if (!failure.retryable) {
+            await options.mcpTunnel?.disconnect();
             options.pendingSync.close();
             options.cloudConnection.clearDevice();
             await options.cloudAuth.clearStoredSession().catch(() => {});
@@ -583,13 +589,16 @@ export async function handleUiRequest(
         const status = await options.cloudConnection.client.status();
         const accepted = await options.cloudConnection.client.acceptLegal({ versions: status.legal.current });
         await options.cloudBrowser?.resumeAfterAuthentication();
+        options.mcpTunnel?.refresh();
         return Response.json({
           ok: true,
           legal: { current: status.legal.current, accepted: accepted.accepted },
         });
       }
       if (pathname === "/ui/api/cloud-auth/forget") {
+        await options.mcpTunnel?.disconnect();
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          options.mcpTunnel?.refresh();
           return Response.json(
             { ok: false, error: "Cloud browsers could not be closed safely" },
             { status: 409 },
@@ -601,7 +610,9 @@ export async function handleUiRequest(
         return Response.json({ ok: true });
       }
       if (pathname === "/ui/api/cloud-auth/signout") {
+        await options.mcpTunnel?.disconnect();
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          options.mcpTunnel?.refresh();
           return Response.json(
             { ok: false, error: "Cloud browsers could not be closed safely" },
             { status: 409 },

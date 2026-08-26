@@ -4,6 +4,7 @@
   "authorization": {
     "accessToken": "Authorization: Bearer <supabase-access-token>",
     "deviceCredential": "X-AliasMode-Device: <device-credential>",
+    "mcpConnector": "Authorization: Bearer <device-scoped-connector-token>",
     "requirements": [
       "verified_email",
       "current_legal_acceptance",
@@ -44,6 +45,9 @@
     "invitation": "POST /v1/workspace/invitations/:id/resend; POST /v1/workspace/invitations/:id/revoke",
     "acceptInvitation": "POST /v1/invitations/accept",
     "devices": "GET|POST|DELETE /v1/devices",
+    "mcpConnectors": "GET|POST /v1/mcp/connectors; DELETE /v1/mcp/connectors/:id",
+    "mcpTunnel": "GET (WebSocket) /v1/mcp/tunnel",
+    "remoteMcp": "GET|POST|DELETE /v1/mcp/devices/:deviceId",
     "profiles": "GET|POST /v1/profiles",
     "profile": "GET|PATCH /v1/profiles/:id",
     "open": "POST /v1/profiles/:id/open",
