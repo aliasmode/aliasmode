@@ -2385,16 +2385,16 @@ function App() {
                         </span>
                       </label>
                       <div className="remote-mcp-guide">
-                        <strong>Connect in three steps</strong>
+                        <strong>Connect Claude.ai or ChatGPT</strong>
                         <ol>
-                          <li>Add a Streamable HTTP MCP server in your AI client.</li>
-                          <li>Paste the MCP server URL.</li>
-                          <li>Add <code>Authorization: Bearer &lt;access key&gt;</code> in the client’s secret header setting.</li>
+                          <li>Add a custom MCP connector or app.</li>
+                          <li>Paste the MCP server URL and select Connect.</li>
+                          <li>Sign into AliasMode and select Allow.</li>
                         </ol>
                         <details>
                           <summary>Claude Code and other clients</summary>
-                          <p>Claude Code uses an HTTP entry in <code>.mcp.json</code>. Keep the access key in an environment variable. Other MCP clients can use their Add Server screen with the same URL and secret header.</p>
-                          <p>Claude.ai and ChatGPT web connectors are not supported in this beta because they require OAuth.</p>
+                          <p>Claude Code uses an HTTP entry in <code>.mcp.json</code>. Keep the access key in an environment variable. Other bearer-capable MCP clients can use the same URL and secret header.</p>
+                          <p>Claude.ai and ChatGPT use OAuth and do not need the access key.</p>
                         </details>
                       </div>
                       <div className="remote-mcp-actions">
