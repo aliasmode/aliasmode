@@ -2577,7 +2577,9 @@ async function main() {
         log: (message) => console.log(`[aliasmode] ${message}`),
       })
     : undefined;
-  const pendingSync = cloudAuth ? new PendingSyncRuntime(paths.pendingSync) : undefined;
+  const pendingSync = cloudAuth
+    ? new PendingSyncRuntime(paths.pendingSync, compiled ? undefined : paths.pendingSyncKey)
+    : undefined;
   const lifecycleAdmissionOptions = cmd === "start" || cmd === "serve"
     ? lifecycleAdmissionOptionsFromEnv()
     : undefined;

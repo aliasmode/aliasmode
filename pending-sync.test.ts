@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
@@ -346,6 +346,107 @@ test("pending sync runtime rejects a wrong key without replacing queued data", (
   const reopened = restored.initialize(initialized.createdKey);
   expect(reopened.queue.get(id, "account1")?.registrationId).toBe("registration1");
   restored.close();
+});
+
+test("pending sync runtime persists its key before encrypted state can escape", () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-pending-persisted-key-"));
+  const path = join(root, "pending.sqlite");
+  const keyPath = join(root, "pending.key");
+  const first = new PendingSyncRuntime(path, keyPath);
+  const initialized = first.initialize();
+  expect(initialized.createdKey).toBeUndefined();
+  expect(first.persistsQueueKey()).toBe(true);
+  const storedKey = readFileSync(keyPath, "utf8").trim();
+  expect(storedKey).toMatch(/^[A-Za-z0-9+/]{43}=$/);
+  if (process.platform !== "win32") expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+
+  const id = initialized.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 2,
+    payload: payload(),
+  });
+  initialized.queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile2",
+    registrationId: "registration2",
+    expectedVersion: 3,
+  });
+  first.close();
+
+  const restored = new PendingSyncRuntime(path, keyPath);
+  const reopened = restored.initialize();
+  expect(reopened.createdKey).toBeUndefined();
+  expect(reopened.queue.get(id, "account1")?.registrationId).toBe("registration1");
+  expect(reopened.queue.getOpen("profile2", "account1")?.registrationId).toBe("registration2");
+  restored.close();
+});
+
+test("pending sync runtime rejects a malformed or different persisted key without replacing it", () => {
+  const malformedRoot = mkdtempSync(join(tmpdir(), "aliasmode-pending-malformed-key-"));
+  const malformedPath = join(malformedRoot, "pending.sqlite");
+  const malformedKeyPath = join(malformedRoot, "pending.key");
+  writeFileSync(malformedKeyPath, "not-a-key\n", { mode: 0o600 });
+  const malformed = new PendingSyncRuntime(malformedPath, malformedKeyPath);
+  expect(() => malformed.initialize()).toThrow("base64-encoded AES-256");
+  expect(malformed.queue()).toBeUndefined();
+  expect(readFileSync(malformedKeyPath, "utf8")).toBe("not-a-key\n");
+
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-pending-wrong-stored-key-"));
+  const path = join(root, "pending.sqlite");
+  const keyPath = join(root, "pending.key");
+  const created = new PendingSyncRuntime(path);
+  const correctKey = created.initialize().createdKey!;
+  const id = created.queue()!.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 2,
+    payload: payload(),
+  });
+  created.close();
+
+  const wrongKey = Buffer.alloc(32, 9).toString("base64");
+  writeFileSync(keyPath, `${wrongKey}\n`, { mode: 0o600 });
+  const rejected = new PendingSyncRuntime(path, keyPath);
+  expect(() => rejected.initialize(correctKey)).toThrow("does not match");
+  expect(rejected.queue()).toBeUndefined();
+  expect(readFileSync(keyPath, "utf8").trim()).toBe(wrongKey);
+
+  const recovered = new PendingSyncRuntime(path);
+  expect(recovered.initialize(correctKey).queue.get(id, "account1")?.registrationId).toBe("registration1");
+  recovered.close();
+});
+
+test("pending sync runtime validates a supplied key before persisting it", () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-pending-key-backfill-"));
+  const path = join(root, "pending.sqlite");
+  const keyPath = join(root, "pending.key");
+  const created = new PendingSyncRuntime(path);
+  const correctKey = created.initialize().createdKey!;
+  const id = created.queue()!.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 2,
+    payload: payload(),
+  });
+  created.close();
+
+  const rejected = new PendingSyncRuntime(path, keyPath);
+  expect(() => rejected.initialize(Buffer.alloc(32, 5).toString("base64"))).toThrow();
+  expect(rejected.queue()).toBeUndefined();
+  expect(existsSync(keyPath)).toBe(false);
+
+  const backfilled = new PendingSyncRuntime(path, keyPath);
+  expect(backfilled.initialize(correctKey).createdKey).toBeUndefined();
+  expect(readFileSync(keyPath, "utf8").trim()).toBe(correctKey);
+  backfilled.close();
+
+  const restarted = new PendingSyncRuntime(path, keyPath);
+  expect(restarted.initialize().queue.get(id, "account1")?.registrationId).toBe("registration1");
+  restarted.close();
 });
 
 test("pending sync keeps captures unready until browser teardown is confirmed", async () => {

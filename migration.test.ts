@@ -167,6 +167,10 @@ test("initialized-empty local destination is accepted and harmless files are pre
   mkdirSync(destination.inbox, { recursive: true });
   mkdirSync(destination.reports, { recursive: true });
   mkdirSync(join(destination.root, "logs"), { recursive: true });
+  const pendingSyncKey = Buffer.alloc(32, 7).toString("base64");
+  const stalePendingSyncKey = `${destination.pendingSyncKey}.123.00000000-0000-4000-8000-000000000000.tmp`;
+  writeFileSync(destination.pendingSyncKey, `${pendingSyncKey}\n`, { mode: 0o600 });
+  writeFileSync(stalePendingSyncKey, `${pendingSyncKey}\n`, { mode: 0o600 });
   writeFileSync(join(destination.inbox, "keep.txt"), "keep");
   writeFileSync(join(destination.reports, "keep.txt"), "keep");
   writeFileSync(join(destination.root, "logs", "keep.log"), "keep");
@@ -176,6 +180,8 @@ test("initialized-empty local destination is accepted and harmless files are pre
   expect(readFileSync(join(destination.inbox, "keep.txt"), "utf8")).toBe("keep");
   expect(readFileSync(join(destination.reports, "keep.txt"), "utf8")).toBe("keep");
   expect(readFileSync(join(destination.root, "logs", "keep.log"), "utf8")).toBe("keep");
+  expect(readFileSync(destination.pendingSyncKey, "utf8").trim()).toBe(pendingSyncKey);
+  expect(existsSync(stalePendingSyncKey)).toBe(false);
   expect(readFileSync(destination.config, "utf8")).toContain('"mode":"local"');
 });
 

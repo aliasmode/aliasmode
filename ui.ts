@@ -512,6 +512,7 @@ export async function handleUiRequest(
             deviceId: bootstrap.device.id,
             deviceCredential: bootstrap.deviceCredential,
             ...(initialized.createdKey ? { queueKey: initialized.createdKey } : {}),
+            ...(options.pendingSync.persistsQueueKey() ? { queueKeyPersisted: true } : {}),
             expiresAt: result.expiresAt,
             legal: bootstrap.legal,
             workspace: bootstrap.workspace,

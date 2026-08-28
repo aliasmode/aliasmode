@@ -51,7 +51,7 @@ export CLOAKBROWSER_BINARY_SHA256="$(shasum -a 256 "$CLOAKBROWSER_BINARY_PATH" |
 bun run start
 ```
 
-Open `http://127.0.0.1:50400`, select AliasMode Cloud, and sign in. Source mode keeps Cloud credentials in process memory, so sign in again after restarting AliasMode. Browser data and processes remain on the Mac.
+Open `http://127.0.0.1:50400`, select AliasMode Cloud, and sign in. Source mode keeps Cloud refresh and device credentials in process memory, so sign in again after restarting AliasMode. It stores only the pending-sync encryption key in `pending-sync.key` with user-only permissions, allowing queued profile state to resume. Browser data and processes remain on the Mac.
 
 ### Windows desktop beta
 

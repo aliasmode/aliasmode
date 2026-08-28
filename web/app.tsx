@@ -1172,7 +1172,11 @@ function App() {
         if (typeof result.deviceCredential !== "string" || !result.deviceCredential) {
           throw new Error("Cloud did not return a device credential");
         }
-        if (!stored?.queueKey && (typeof result.queueKey !== "string" || !result.queueKey)) {
+        if (
+          !stored?.queueKey &&
+          result.queueKeyPersisted !== true &&
+          (typeof result.queueKey !== "string" || !result.queueKey)
+        ) {
           throw new Error("Cloud did not initialize encrypted pending sync");
         }
         const persisted = await storeDesktopCloudCredentials(

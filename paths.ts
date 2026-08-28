@@ -14,6 +14,7 @@ export interface StatePaths {
   config: string;
   operatorId: string;
   pendingSync: string;
+  pendingSyncKey: string;
   migration: string;
 }
 
@@ -45,6 +46,7 @@ export function statePaths(root: string): StatePaths {
     config: resolve(absolute, "config.json"),
     operatorId: resolve(absolute, ".operator-id"),
     pendingSync: resolve(absolute, "pending-sync.sqlite"),
+    pendingSyncKey: resolve(absolute, "pending-sync.key"),
     migration: resolve(absolute, "migration.json"),
   };
 }

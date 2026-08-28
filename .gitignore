@@ -19,6 +19,9 @@ src-tauri/resources/playwright/
 .env
 .env.*
 profiles.sqlite*
+pending-sync.sqlite*
+pending-sync.key
+pending-sync.key.*.tmp
 profiles/
 inbox/*.txt
 reports/

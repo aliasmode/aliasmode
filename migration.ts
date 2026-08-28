@@ -97,10 +97,12 @@ function validateDestination(destination: StatePaths): void {
   }
   const allowed = new Set([
     "profiles.sqlite", "profiles.sqlite-wal", "profiles.sqlite-shm", "profiles", "extensions",
-    "pending-sync.sqlite", "pending-sync.sqlite-wal", "pending-sync.sqlite-shm", "cloud-cache",
+    "pending-sync.sqlite", "pending-sync.sqlite-wal", "pending-sync.sqlite-shm", "pending-sync.key", "cloud-cache",
     "browser", "config.json", ".operator-id", "logs", "inbox", "reports",
   ]);
-  if (readdirSync(destination.root).some((name) => !allowed.has(name) && hasContent(join(destination.root, name)))) {
+  const allowedName = (name: string) => allowed.has(name)
+    || (name.startsWith("pending-sync.key.") && name.endsWith(".tmp"));
+  if (readdirSync(destination.root).some((name) => !allowedName(name) && hasContent(join(destination.root, name)))) {
     throw new Error("AliasMode destination contains unsupported existing state");
   }
 }
@@ -289,7 +291,7 @@ function copyPreservedDestination(destination: StatePaths, staging: StatePaths):
     const source = join(destination.root, name);
     if (existsSync(source)) cpSync(source, join(staging.root, name), { recursive: true, errorOnExist: true });
   }
-  for (const path of [destination.config, destination.operatorId]) {
+  for (const path of [destination.config, destination.operatorId, destination.pendingSyncKey]) {
     if (existsSync(path)) cpSync(path, join(staging.root, basename(path)), { errorOnExist: true });
   }
 }

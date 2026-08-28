@@ -72,6 +72,11 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("generation !== authGeneration.current");
 });
 
+test("dashboard accepts a server-persisted pending queue key", () => {
+  expect(app).toContain("result.queueKeyPersisted !== true");
+  expect(app).toContain('typeof result.queueKey === "string" ? result.queueKey : undefined');
+});
+
 test("Account settings prepares and protects one app-owned Remote MCP connector", () => {
   expect(app).toContain('key: "remote_mcp_connector"');
   expect(app).toContain('createCloudConnector()');
