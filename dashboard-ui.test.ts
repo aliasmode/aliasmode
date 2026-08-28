@@ -81,8 +81,11 @@ test("Account settings prepares and protects one app-owned Remote MCP connector"
   expect(app).toContain('>MCP server URL</span>');
   expect(app).toContain('>Access key</span>');
   expect(app).toContain('remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"');
-  expect(app).toContain('Connect in three steps');
-  expect(app).toContain('Add a Streamable HTTP MCP server');
+  expect(app).toContain('>Connect Claude.ai or ChatGPT</strong>');
+  expect(app).toContain('Paste the MCP server URL and select Connect.');
+  expect(app).toContain('Sign into AliasMode and select Allow.');
+  expect(app).toContain('Claude.ai and ChatGPT use OAuth and do not need the access key.');
+  expect(app).not.toContain('web connectors are not supported');
   expect(app).toContain('Regenerate key');
   expect(app).toContain('Enable Remote MCP');
   expect(app).toContain('if (remoteMcpAccountExit.current) return Promise.resolve();');

@@ -88,7 +88,7 @@ Setup configures Claude Code, Codex, OpenClaw, and Hermes when installed. Its JS
 
 Agents can create profiles, open several headful or headless browsers, select one browser, and use the full pinned Playwright MCP tool set. AliasMode remains responsible for browser processes, profile locks, Cloud sessions, capture, and safe close. Local mode needs no account and does not contact AliasMode Cloud.
 
-Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. Keep AliasMode open on that Windows device. Open **Account & Settings → Remote MCP** to automatically create the connection, then copy its pinned server URL and access key into the remote client's secret bearer-header fields.
+Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. Keep AliasMode open on that Windows device. Open **Account & Settings → Remote MCP** and copy its pinned server URL. Claude.ai and ChatGPT connect through AliasMode sign-in and OAuth. Claude Code and other bearer-capable clients can also use the displayed access key in a secret header.
 
 Advanced users can create additional independently revocable connectors from the packaged helper:
 
@@ -99,7 +99,7 @@ $aliasmode = "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe"
 & $aliasmode remote-mcp revoke --id <connector-id>
 ```
 
-The Settings access key is stored in Windows Credential Manager. Extra keys created by the helper are returned once, so store them in the remote client's secret settings. Do not put keys in scripts or logs. This beta uses bearer headers; OAuth-only web connectors are not supported yet. An offline device returns an error and never redirects work to another machine.
+The Settings access key is stored in Windows Credential Manager. Extra keys created by the helper are returned once, so store them in the remote client's secret settings. Do not put keys in scripts or logs. OAuth web connectors never need the access key. An offline device returns an error and never redirects work to another machine.
 
 For the same installation session, the helper also provides JSON-only commands:
 
