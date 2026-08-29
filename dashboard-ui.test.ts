@@ -45,7 +45,10 @@ test("dashboard checks and installs desktop updates through argument-free native
 
 test("dashboard contains long roster labels inside the window", () => {
   expect(app).toContain('className="profile-table"');
-  expect(app).toContain('<span className="n">{p.name}</span>');
+  // The name sits in its own truncatable span; the fingerprint badge rides
+  // alongside it inside that span, so match the wrapper rather than the whole
+  // element (which changes whenever anything is added next to the name).
+  expect(app).toContain('<span className="n">{p.name}');
   expect(app).toContain('<td className="col-group" title={p.group}>');
   expect(app).toContain('className="select move-group"');
   // Every truncatable cell carries its full value as a title, so hovering shows

@@ -88,3 +88,10 @@ test("generateId retries past collisions and never returns an existing id", () =
   const id = generateId(exists);
   expect(taken.has(id)).toBe(false);
 });
+
+test("a new profile records the host platform explicitly", () => {
+  // A blank UA used to mean no --fingerprint-platform flag at all, which let
+  // the browser inherit whatever host it ran on. Pin it at creation instead.
+  const p = buildNewProfile({ name: "n", group: "g" }, () => false);
+  expect(["windows", "macos", "linux"]).toContain(p.platformOs!);
+});

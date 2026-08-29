@@ -340,3 +340,87 @@ test("a profile stored before the custom_no column reads back as empty", () => {
   expect(store.getProfile("k1d0cd11")!.customNo).toBe("");
   store.close();
 });
+
+// --- full-fidelity identity: platform and the fingerprint attestation ---
+
+function fpProfile(id: string, overrides: Partial<Profile> = {}): Profile {
+  return { ...parseExport(SAMPLE).profiles[0]!, id, ...overrides };
+}
+
+test("a profile round-trips platformOs and both fingerprint records", () => {
+  const store = memStore();
+  store.upsertProfile(fpProfile("fp0001", {
+    platformOs: "windows",
+    fpObserved: { canvas: "a3f19c8e", hardwareConcurrency: 8, capturedAt: "2026-08-29T11:04:22Z" },
+    fpExpected: { canvas: "a3f19c8e" },
+    fpVerdict: { verdict: "match", differences: [] },
+  }));
+  const back = store.getProfile("fp0001")!;
+  expect(back.platformOs).toBe("windows");
+  expect(back.fpObserved).toEqual({ canvas: "a3f19c8e", hardwareConcurrency: 8, capturedAt: "2026-08-29T11:04:22Z" });
+  expect(back.fpExpected).toEqual({ canvas: "a3f19c8e" });
+  store.close();
+});
+
+test("an upsert cannot assert its own verdict — only a real comparison writes one", () => {
+  // Otherwise an import could hand itself a "verified" badge by putting one in
+  // the payload, which would make the badge worthless. The verdict is written
+  // ONLY by saveObservedFingerprint, from an actual measurement.
+  const store = memStore();
+  store.upsertProfile(fpProfile("fp0006", {
+    fpExpected: { canvas: "a3f19c8e" },
+    fpVerdict: { verdict: "match", differences: [] },
+  }));
+  expect(store.getProfile("fp0006")!.fpVerdict).toBeUndefined();
+  store.saveObservedFingerprint("fp0006", { canvas: "a3f19c8e" }, { verdict: "match", differences: [] });
+  expect(store.getProfile("fp0006")!.fpVerdict!.verdict).toBe("match");
+  store.close();
+});
+
+test("a profile with no fingerprint data reads back with the fields absent", () => {
+  const store = memStore();
+  store.upsertProfile(fpProfile("fp0002", { platformOs: undefined }));
+  const back = store.getProfile("fp0002")!;
+  expect(back.fpObserved).toBeUndefined();
+  expect(back.fpExpected).toBeUndefined();
+  expect(back.fpVerdict).toBeUndefined();
+  expect(back.platformOs).toBe("");
+  store.close();
+});
+
+test("saveObservedFingerprint updates the capture and verdict without touching the expectation", () => {
+  const store = memStore();
+  store.upsertProfile(fpProfile("fp0003", { fpExpected: { canvas: "a3f19c8e" } }));
+  store.saveObservedFingerprint(
+    "fp0003",
+    { canvas: "deadbeef" },
+    { verdict: "mismatch", differences: [{ field: "canvas", expected: "a3f19c8e", observed: "deadbeef" }] },
+  );
+  const back = store.getProfile("fp0003")!;
+  expect(back.fpObserved).toEqual({ canvas: "deadbeef" });
+  expect(back.fpExpected).toEqual({ canvas: "a3f19c8e" });
+  expect(back.fpVerdict!.verdict).toBe("mismatch");
+  store.close();
+});
+
+test("an upsert that carries no capture preserves the one already stored", () => {
+  const store = memStore();
+  store.upsertProfile(fpProfile("fp0004"));
+  store.saveObservedFingerprint("fp0004", { canvas: "a3f19c8e" }, null);
+  store.upsertProfile(fpProfile("fp0004", { name: "renamed" }));
+  const back = store.getProfile("fp0004")!;
+  expect(back.name).toBe("renamed");
+  expect(back.fpObserved).toEqual({ canvas: "a3f19c8e" });
+  store.close();
+});
+
+test("a new expectation clears a verdict computed against the previous one", () => {
+  const store = memStore();
+  store.upsertProfile(fpProfile("fp0005", { fpExpected: { canvas: "a3f19c8e" } }));
+  store.saveObservedFingerprint("fp0005", { canvas: "a3f19c8e" }, { verdict: "match", differences: [] });
+  store.upsertProfile(fpProfile("fp0005", { fpExpected: { canvas: "ffffffff" } }));
+  const back = store.getProfile("fp0005")!;
+  expect(back.fpExpected).toEqual({ canvas: "ffffffff" });
+  expect(back.fpVerdict).toBeUndefined();
+  store.close();
+});

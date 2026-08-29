@@ -93,6 +93,18 @@ export interface Profile {
   screenHeight: number;
   /** Deterministic per-profile CloakBrowser fingerprint seed. */
   fingerprintSeed: number;
+  /**
+   * Explicit desktop platform for --fingerprint-platform. Optional so existing
+   * Profile literals stay valid; when absent the launcher falls back to
+   * inferring it from `ua`, which is what it did before this field existed.
+   */
+  platformOs?: string;
+  /** Fingerprint measured after the most recent launch. */
+  fpObserved?: ObservedFingerprint;
+  /** Fingerprint an import claimed this profile has. Never written by a capture. */
+  fpExpected?: ObservedFingerprint;
+  /** Result of comparing the two. Absent when there is no expectation. */
+  fpVerdict?: FingerprintVerdict;
   cookies: CookieRecord[];
   /**
    * Legacy bookkeeping flag: set true the first time cookies were injected.
@@ -102,6 +114,44 @@ export interface Profile {
    * (re)injection for accounts whose session legitimately needs it.
    */
   seeded: boolean;
+}
+
+/**
+ * What a launched browser was measured to report. Every field is a string or
+ * number for a reason: these are compared for equality and round-tripped
+ * through a flat `key=value` export, so there is nowhere for a nested shape
+ * to hide a difference.
+ */
+export interface ObservedFingerprint {
+  ua?: string;
+  /** Chrome version as reported, e.g. "146.0.0.0". Informational only. */
+  chrome?: string;
+  platform?: string;
+  /** Comma-joined navigator.languages, e.g. "en-US,en". */
+  languages?: string;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  webglVendor?: string;
+  webglRenderer?: string;
+  canvas?: string;
+  audio?: string;
+  /** "1920*1080" — the spoofed screen, matching the export's resolution form. */
+  screen?: string;
+  /** WebRTC handling policy in force at capture. Informational only. */
+  webrtc?: string;
+  /** ISO-8601 instant of capture. */
+  capturedAt?: string;
+}
+
+export interface FingerprintDifference {
+  field: string;
+  expected: string;
+  observed: string;
+}
+
+export interface FingerprintVerdict {
+  verdict: "match" | "mismatch";
+  differences: FingerprintDifference[];
 }
 
 /** What a launched browser exposes back to automation. Mirrors AdsPower. */

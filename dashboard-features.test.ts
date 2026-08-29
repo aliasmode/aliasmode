@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test";
-import { parseUpdateFile, serializeCsv, serializeAdsTxt, serializeXlsxRows, rowsToUpdates, XLSX_COLUMNS } from "./parse.ts";
+import { parseUpdateFile, serializeCsv, serializeAdsTxt, serializeXlsxRows, rowsToUpdates, XLSX_COLUMNS, parseExport, recordToProfile } from "./parse.ts";
+import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
+import { deriveFingerprintFlags, deterministicSeed } from "./fingerprint.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 
 const NEWLINE = String.fromCharCode(10);
@@ -200,4 +202,81 @@ test("assignExtension: bulk add/remove across profiles (set semantics)", () => {
   expect(s.getProfile("a")!.extensions).toEqual([]);
   expect(s.getProfile("b")!.extensions).toEqual([]);
   s.close();
+});
+
+// ---- Full-fidelity identity export ----
+
+test("the export carries the restored identity fields", () => {
+  const txt = serializeAdsTxt([
+    profile({
+      id: "k1d0cd11", fingerprintSeed: 2847193055, timezone: "America/New_York",
+      platformOs: "windows", extensions: ["ext1"], tags: ["warm", "30day"],
+    }),
+  ]);
+  expect(txt).toContain("seed=2847193055");
+  expect(txt).toContain("timezone=America/New_York");
+  expect(txt).toContain("platform_os=windows");
+  expect(txt).toContain("extensions=ext1");
+  expect(txt).toContain("tags=warm,30day");
+});
+
+test("the export carries the measured fingerprint", () => {
+  const txt = serializeAdsTxt([
+    profile({
+      id: "k1d0cd11",
+      fpObserved: { canvas: "a3f19c8e", webglRenderer: "ANGLE (Intel, Mesa)", hardwareConcurrency: 8 },
+    }),
+  ]);
+  expect(txt).toContain("fp_canvas=a3f19c8e");
+  expect(txt).toContain("fp_webgl_renderer=ANGLE (Intel, Mesa)");
+  expect(txt).toContain("fp_hw_concurrency=8");
+});
+
+test("a never-launched profile exports blank fp_ fields, not missing ones", () => {
+  const txt = serializeAdsTxt([profile({ id: "k1d0cd11" })]);
+  for (const key of FP_BLOCK_KEYS) expect(txt).toContain(`${key}=${NEWLINE}`);
+});
+
+test("existing columns keep their positions so operators' sheets do not shift", () => {
+  expect(XLSX_COLUMNS.slice(0, 15)).toEqual([
+    "id", "acc_id", "group", "platform", "name", "username", "password",
+    "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
+  ]);
+});
+
+test("a full export -> import round trip reproduces the identity exactly", () => {
+  const original = profile({
+    id: "k1d0cd11",
+    // The marketplace case: a seed that is NOT derived from the id.
+    fingerprintSeed: deterministicSeed("marketplace:melaniecanlq"),
+    timezone: "America/New_York",
+    platformOs: "macos",
+    screenWidth: 1680,
+    screenHeight: 1050,
+    extensions: ["ext1"],
+    tags: ["warm"],
+  });
+  const restored = parseExport(serializeAdsTxt([original])).profiles[0]!;
+  expect(restored.fingerprintSeed).toBe(original.fingerprintSeed);
+  expect(restored.timezone).toBe("America/New_York");
+  expect(restored.platformOs).toBe("macos");
+  expect(restored.screenWidth).toBe(1680);
+  expect(restored.extensions).toEqual(["ext1"]);
+  expect(restored.tags).toEqual(["warm"]);
+  expect(deriveFingerprintFlags(restored)).toEqual(deriveFingerprintFlags(original));
+});
+
+test("the same round trip survives the spreadsheet, which is what operators edit", async () => {
+  const original = profile({
+    id: "k1d0cd11",
+    fingerprintSeed: deterministicSeed("marketplace:melaniecanlq"),
+    timezone: "Europe/London",
+    platformOs: "windows",
+  });
+  const { headers, rows } = serializeXlsxRows([original]);
+  const back = await readXlsx(await writeXlsx(headers, rows));
+  const restored = recordToProfile(back[0] as Record<string, string>)!.profile;
+  expect(restored.fingerprintSeed).toBe(original.fingerprintSeed);
+  expect(restored.timezone).toBe("Europe/London");
+  expect(restored.platformOs).toBe("windows");
 });

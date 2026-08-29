@@ -53,6 +53,7 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string):
       screenWidth: profile.screenWidth,
       screenHeight: profile.screenHeight,
       fingerprintSeed: profile.fingerprintSeed,
+      platformOs: profile.platformOs ?? "",
     },
     session,
   };
@@ -86,6 +87,9 @@ export function decodePortableProfile(payload: PortableProfileV1): {
     screenWidth: payload.profile.screenWidth,
     screenHeight: payload.profile.screenHeight,
     fingerprintSeed: payload.profile.fingerprintSeed,
+    // A measurement (fpObserved/fpExpected/fpVerdict) is local to the machine
+    // that made it and deliberately does NOT travel in the portable payload.
+    platformOs: payload.profile.platformOs ?? "",
     cookies: session.cookies.map((cookie) => ({ ...cookie })),
     seeded: false,
   };

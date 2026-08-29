@@ -22,9 +22,10 @@
  */
 
 import type { CookieRecord, Profile, ProxySpec } from "./types.ts";
-import { deterministicSeed, parseResolution } from "./fingerprint.ts";
+import { deterministicSeed, parseResolution, platformFromUA } from "./fingerprint.ts";
 import { normalizeProxyType, parseProxySpec, proxyLegacyString } from "./proxy.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
+import { attestationFields, FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
 
 /** Cookies on these domains belong to AdsPower's browser extension, not the account. */
 const EXTENSION_COOKIE_DOMAINS = ["adspower.net", "browserext.adspower.net"];
@@ -219,6 +220,48 @@ export interface ParsedProfileImport {
   validationErrors: string[];
 }
 
+const MAX_SEED = 4_294_967_295;
+
+/**
+ * Read an exported seed. Anything out of the range profile-validation.ts
+ * enforces falls back to the id-derived value rather than failing: one garbled
+ * column must not make an otherwise good export unimportable, and the fallback
+ * is exactly what every pre-existing file already gets.
+ */
+function parseSeed(raw: string | undefined): number | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_SEED) return null;
+  return n;
+}
+
+/** Accept only a platform CloakBrowser's --fingerprint-platform understands. */
+function parsePlatformOs(raw: string | undefined): "windows" | "macos" | "linux" | null {
+  const s = (raw ?? "").trim().toLowerCase();
+  return s === "windows" || s === "macos" || s === "linux" ? s : null;
+}
+
+/**
+ * Accept only an IANA-shaped zone name. The value goes straight onto the
+ * browser command line as --fingerprint-timezone, so a free-text column must
+ * not be able to put arbitrary text there; and a zone Chromium cannot resolve
+ * is worse than no flag at all. Anything else is treated as absent, which
+ * leaves geoip to resolve one exactly as it does today.
+ */
+function parseTimezone(raw: string | undefined): string {
+  const s = (raw ?? "").trim();
+  return /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+){0,2}$/.test(s) ? s : "";
+}
+
+/** Split a comma-separated export column, dropping blanks and surrounding space. */
+function splitList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 export function recordToProfile(
   rec: Record<string, string>,
 ): ParsedProfileImport | null {
@@ -282,10 +325,18 @@ export function recordToProfile(
     proxy,
     ...(proxyError ? { proxyError } : {}),
     ua: (rec.ua ?? "").trim(),
-    timezone: "", // resolved by geoip at import (see geoip.ts)
+    // An explicit platform beats inferring one from the UA, and both beat the
+    // old behaviour of emitting no --fingerprint-platform flag at all (which
+    // silently inherited the HOST os for any profile with a blank UA).
+    platformOs: parsePlatformOs(rec.platform_os) ?? platformFromUA(rec.ua ?? "") ?? "",
+    // An exported timezone is the profile's own resolved value; keep it. When
+    // absent or unparseable, geoip resolves one at import exactly as before.
+    timezone: parseTimezone(rec.timezone),
     screenWidth: width,
     screenHeight: height,
-    fingerprintSeed: deterministicSeed(id),
+    fingerprintSeed: parseSeed(rec.seed) ?? deterministicSeed(id),
+    extensions: splitList(rec.extensions),
+    tags: splitList(rec.tags),
     cookies,
     seeded: false,
   };
@@ -532,13 +583,31 @@ function profileFields(p: Profile): Record<string, string> {
     proxy: proxyToString(p),
     ua: p.ua,
     resolution: `${p.screenWidth}*${p.screenHeight}`,
+    // Restored fields: these DRIVE the launch on re-import. Without them the
+    // importer recomputes a seed from the id and re-resolves the timezone by
+    // geoip, which silently mints a DIFFERENT browser for any profile whose
+    // seed was not id-derived (see marketplace.ts).
+    seed: String(p.fingerprintSeed),
+    timezone: p.timezone,
+    platform_os: p.platformOs ?? "",
+    extensions: (p.extensions ?? []).join(","),
+    tags: (p.tags ?? []).join(","),
+    // Attested fields: a photograph of the identity, never an input to one.
+    ...attestationFields(p.fpObserved),
   };
 }
+
+/**
+ * Fields that are read back on import and change what the browser launches as.
+ * Distinct from the fp_* group, which is only ever compared against.
+ */
+const RESTORED_KEYS = ["seed", "timezone", "platform_os", "extensions", "tags"] as const;
 
 /** Field order of the `key=value` block export. */
 const TXT_KEYS = [
   "acc_id", "id", "group", "platform", "name", "username", "password",
   "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
+  ...RESTORED_KEYS, ...FP_BLOCK_KEYS,
 ] as const;
 
 /**
@@ -549,6 +618,7 @@ const TXT_KEYS = [
 export const XLSX_COLUMNS = [
   "id", "acc_id", "group", "platform", "name", "username", "password",
   "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
+  ...RESTORED_KEYS, ...FP_BLOCK_KEYS,
 ] as const;
 
 /** Serialize profiles to the AdsPower `key=value` export format. */

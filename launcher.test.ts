@@ -3649,3 +3649,72 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
   store.close();
   rmSync(dataRoot, { recursive: true, force: true });
 });
+
+// --- fingerprint capture: bookkeeping that must never fail a launch ---
+
+test("a fingerprint probe that throws does not fail the launch", async () => {
+  const store = seeded();
+  const f = fleet();
+  const launcher = new Launcher({
+    store, binaryPath: "/fake/cloak", dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true, spawn: f.spawn, fetch: f.fetchFn,
+    isPidAlive: f.isPidAlive, findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {}, labelWindow: async () => {},
+    killPid: async (pid) => f.killPid(pid),
+    browserClose: async () => false, cdpReadyTimeoutMs: 1000,
+    captureFingerprint: async () => {
+      throw new Error("probe exploded");
+    },
+  });
+  const result = await launcher.start("k1d0cd11");
+  expect(result.port).toBeGreaterThan(0);
+  expect(store.getProfile("k1d0cd11")!.fpObserved).toBeUndefined();
+  store.close();
+});
+
+test("a successful probe persists a sample on the profile", async () => {
+  const store = seeded();
+  const f = fleet();
+  const launcher = new Launcher({
+    store, binaryPath: "/fake/cloak", dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true, spawn: f.spawn, fetch: f.fetchFn,
+    isPidAlive: f.isPidAlive, findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {}, labelWindow: async () => {},
+    killPid: async (pid) => f.killPid(pid),
+    browserClose: async () => false, cdpReadyTimeoutMs: 1000,
+    captureFingerprint: async () => ({ canvasHash: "a3f19c8e", hardwareConcurrency: 8 }),
+  });
+  await launcher.start("k1d0cd11");
+  const back = store.getProfile("k1d0cd11")!;
+  expect(back.fpObserved!.canvas).toBe("a3f19c8e");
+  expect(back.fpObserved!.hardwareConcurrency).toBe(8);
+  expect(back.fpVerdict).toBeUndefined(); // nothing was imported to check against
+  store.close();
+});
+
+test("a launch verifies the profile against an imported attestation", async () => {
+  const store = seeded();
+  const imported = { ...store.getProfile("k1d0cd11")!, fpExpected: { canvas: "a3f19c8e" } };
+  store.upsertProfile(imported);
+  const f = fleet();
+  const launcher = new Launcher({
+    store, binaryPath: "/fake/cloak", dataRoot: "/tmp/cloak-launcher-test",
+    portProbe: () => true, spawn: f.spawn, fetch: f.fetchFn,
+    isPidAlive: f.isPidAlive, findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
+    ensureCookies: async () => ({ injected: true }),
+    navigate: async () => {}, labelWindow: async () => {},
+    killPid: async (pid) => f.killPid(pid),
+    browserClose: async () => false, cdpReadyTimeoutMs: 1000,
+    captureFingerprint: async () => ({ canvasHash: "deadbeef" }),
+  });
+  await launcher.start("k1d0cd11");
+  const verdict = store.getProfile("k1d0cd11")!.fpVerdict!;
+  expect(verdict.verdict).toBe("mismatch");
+  expect(verdict.differences[0]!.field).toBe("canvas");
+  store.close();
+});

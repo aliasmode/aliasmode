@@ -8,6 +8,7 @@ import {
   proxyServerFlag,
   isMobileUserAgent,
   convertMobilePersonaToDesktop,
+  hostPlatformOs,
 } from "./fingerprint.ts";
 import type { Profile } from "./types.ts";
 
@@ -156,4 +157,31 @@ test("proxyServerFlag url-encodes credentials and respects scheme", () => {
   expect(proxyServerFlag(profile({ proxy: { type: "socks5", host: "h", port: "1", user: "u", pass: "p@ss" } }))).toBe(
     "--proxy-server=socks5://u:p%40ss@h:1",
   );
+});
+
+// --- full-fidelity identity: an explicit desktop platform ---
+
+test("an explicit platformOs drives the platform flag", () => {
+  const flags = deriveFingerprintFlags(profile({ platformOs: "macos", ua: "" }));
+  expect(flags).toContain("--fingerprint-platform=macos");
+});
+
+test("platformOs wins over a UA that says otherwise", () => {
+  const flags = deriveFingerprintFlags(profile({ platformOs: "macos", ua: UA_WIN }));
+  expect(flags).toContain("--fingerprint-platform=macos");
+  expect(flags).not.toContain("--fingerprint-platform=windows");
+});
+
+test("without platformOs the UA still decides, as before", () => {
+  const flags = deriveFingerprintFlags(profile({ ua: UA_WIN }));
+  expect(flags).toContain("--fingerprint-platform=windows");
+});
+
+test("with neither, no platform flag is emitted", () => {
+  const flags = deriveFingerprintFlags(profile({ ua: "" }));
+  expect(flags.some((f) => f.startsWith("--fingerprint-platform="))).toBe(false);
+});
+
+test("hostPlatformOs reports one of the three CloakBrowser understands", () => {
+  expect(["windows", "macos", "linux"]).toContain(hostPlatformOs());
 });

@@ -2477,3 +2477,25 @@ test("creating a profile stores the credentials supplied with it", async () => {
   });
   s.close();
 });
+
+test("the dashboard profile payload carries the fingerprint verdict", () => {
+  const s = store();
+  s.saveObservedFingerprint(
+    "k1d0cd11",
+    { canvas: "deadbeef", capturedAt: "2026-08-29T11:04:22Z" },
+    { verdict: "mismatch", differences: [{ field: "canvas", expected: "a3f19c8e", observed: "deadbeef" }] },
+  );
+  const row = listUiProfiles(s).find((p) => p.id === "k1d0cd11")!;
+  expect(row.fpVerdict!.verdict).toBe("mismatch");
+  expect(row.fpVerdict!.differences[0]!.field).toBe("canvas");
+  expect(row.fpCapturedAt).toBe("2026-08-29T11:04:22Z");
+  s.close();
+});
+
+test("a profile that has never been probed carries no verdict", () => {
+  const s = store();
+  const row = listUiProfiles(s).find((p) => p.id === "k1d0cd11")!;
+  expect(row.fpVerdict).toBeNull();
+  expect(row.fpCapturedAt).toBe("");
+  s.close();
+});

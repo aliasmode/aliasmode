@@ -27,7 +27,7 @@ import {
 } from "./cloud-profile-editor.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
-import type { Profile } from "./types.ts";
+import type { FingerprintVerdict, Profile } from "./types.ts";
 import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
@@ -79,6 +79,14 @@ export interface UiProfile {
   startedAt?: number;
   healthStatus?: AutomationHealthStatus;
   healthObservedAt?: number | null;
+  /**
+   * Whether the last launch's measured fingerprint still matches the one an
+   * import claimed. Null when nothing was imported to check against — that is
+   * "unknown", not "verified", and the dashboard must render it as neither.
+   */
+  fpVerdict: FingerprintVerdict | null;
+  /** ISO-8601 instant of the last measurement; "" if never launched. */
+  fpCapturedAt: string;
 }
 
 /**
@@ -112,6 +120,9 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
       running: !!l,
       debugPort: l?.debugPort,
       startedAt: l?.startedAt,
+      // null when nothing was imported to check this profile against.
+      fpVerdict: p.fpVerdict ?? null,
+      fpCapturedAt: p.fpObserved?.capturedAt ?? "",
     };
   });
 }

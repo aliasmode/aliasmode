@@ -33,6 +33,8 @@ export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "./search-provider.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
+import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
+import type { FingerprintSample } from "./diagnose.ts";
 import { canonicalUserPageUrl, SessionRestoreError } from "./session.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
@@ -351,6 +353,11 @@ export interface LauncherOptions {
    * Injectable for tests.
    */
   browserClose?: (ws: string, timeoutMs: number) => Promise<boolean>;
+  /**
+   * Read the live fingerprint from a launched browser. Injectable for tests;
+   * defaults to the real CDP probe. Never allowed to fail a launch.
+   */
+  captureFingerprint?: (ws: string) => Promise<FingerprintSample | null>;
   /** Budget for the graceful close above before falling through to the force-kill. */
   gracefulStopMs?: number;
   /**
@@ -583,6 +590,7 @@ export class Launcher {
   private fetchFn: FetchFn;
   private ensureCookiesFn: CookieEnsurer;
   private ensureSearchProviderFn?: SearchProviderEnsurer;
+  private captureFingerprintFn: (ws: string) => Promise<FingerprintSample | null>;
   private navigateFn: LaunchNavigator;
   private enforceHostCompatibility: boolean;
   private hostPlatform: NodeJS.Platform;
@@ -670,6 +678,7 @@ export class Launcher {
     this.fetchFn = opts.fetch ?? ((url) => fetch(url, { signal: AbortSignal.timeout(800) }) as any);
     this.ensureCookiesFn = opts.ensureCookies ?? defaultEnsureCookies;
     this.ensureSearchProviderFn = opts.ensureSearchProvider;
+    this.captureFingerprintFn = opts.captureFingerprint ?? ((ws) => captureFingerprint(ws));
     this.navigateFn = opts.navigate ?? defaultNavigate;
     // Test spawners do not implicitly weaken production policy. Every disabled
     // identity gate must be requested through the conspicuous unsafe option.
@@ -1450,6 +1459,32 @@ export class Launcher {
       const ws = await this.waitForCdp(port, proc);
       this.log(`${profileId}: launch stage CDP ready`);
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser startup");
+
+      // Record what this browser actually reports, and check it against any
+      // attestation an import supplied. Best-effort by construction — see
+      // fingerprint-capture.ts. Placed here, before the window label, cookie
+      // injection and any navigation, so the probe runs on a blank page rather
+      // than an account one: reading canvas and WebGL inside a live x.com tab
+      // is exactly the behaviour a detection script watches for.
+      const capturedFingerprint = await recordCapture({
+        profile,
+        capture: () => this.captureFingerprintFn(ws),
+        save: (id, observed, verdict) => this.store.saveObservedFingerprint(id, observed, verdict),
+        log: (msg) => this.log(msg),
+        // Mirrors buildArgs exactly: aliasmode forces the policy whenever the
+        // profile has a proxy, so the recorded value must use the same test.
+        webrtc: profile.proxy ? "disable_non_proxied_udp" : "",
+      });
+      if (capturedFingerprint) {
+        // Our own bookkeeping write makes the identity snapshot stale, and the
+        // next requireUnchangedProfile would read it as a concurrent edit and
+        // abort an otherwise healthy launch. Re-baseline on the row we just
+        // wrote — exactly what the markSeeded path below does for the same
+        // reason. The window is one CDP evaluate wide.
+        profile = this.store.getProfile(profileId)!;
+        profileSnapshot = JSON.stringify(profile);
+      }
+
       const startupTargets = restoreLastSession || SESSION_LAUNCH
         ? await this.startupPageTargets(port, profileId, restoreLastSession && startupUrls.length === 0)
         : { userUrls: [], profileCardPresent: false };
