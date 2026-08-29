@@ -207,7 +207,7 @@ test("after a restart, a bootstrapped browser reattaches without rerunning searc
   const a = await launcherA.start("k1d0cd11", [], { sessionBaseVersion: 7 });
   expect(argsA.length).toBe(1);
   expect(prepared).toEqual([launcherA.userDataDir("k1d0cd11")]);
-  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(2);
   (launcherA as any).closeRelay("k1d0cd11");
 
   const argsB: string[][] = [];
@@ -231,30 +231,38 @@ test("after a restart, a bootstrapped browser reattaches without rerunning searc
   store.close();
 });
 
-test("Windows search bootstrap runs once and suppresses native restore for its generation", async () => {
+test("Windows search bootstrap runs once without suppressing native restore", async () => {
   const store = seeded();
   const f = fleet();
   const spawnedArgs: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
   let prepared = 0;
   const launcher = newLauncher(store, f, spawnedArgs, undefined, async () => {
     prepared++;
     return { status: "configured", engine: "DuckDuckGo" };
-  }, { hostPlatform: "win32" });
+  }, {
+    hostPlatform: "win32",
+    fetch: async (url) => url.endsWith("/json/list")
+      ? { ok: true, json: async () => [{ type: "page", url: "https://restored.example/account" }] }
+      : f.fetchFn(url),
+  });
 
   await launcher.start("k1d0cd11");
   expect(prepared).toBe(1);
-  expect(spawnedArgs[0]).not.toContain("--restore-last-session");
-  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(spawnedArgs[0]).toContain("--restore-last-session");
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(2);
   expect(await launcher.stop("k1d0cd11")).toBe(true);
 
   await launcher.start("k1d0cd11");
   expect(prepared).toBe(1);
-  expect(spawnedArgs[1]).not.toContain("--restore-last-session");
-  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(spawnedArgs[1]).toContain("--restore-last-session");
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(2);
   store.close();
 });
 
-test("Windows Local preserves native session artifacts and adds explicit URLs after restored tabs", async () => {
+test("Windows Local preserves native session artifacts without appending platform home", async () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   store.upsertProfile({ ...profile, platform: "x.com" });
@@ -284,24 +292,23 @@ test("Windows Local preserves native session artifacts and adds explicit URLs af
   });
 
   await launcher.start("k1d0cd11", ["https://explicit.example/start"], { restoreLastSession: true });
-  expect(prepared).toBe(0);
+  expect(prepared).toBe(1);
   expect(spawnedArgs[0]).toContain("--restore-last-session");
   expect(navigated).toEqual([["https://explicit.example/start"]]);
-  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(2);
   expect(await launcher.stop("k1d0cd11")).toBe(true);
 
   targets = [{ type: "page", url: "about:blank" }];
   await launcher.start("k1d0cd11");
-  expect(prepared).toBe(0);
+  expect(prepared).toBe(1);
   expect(spawnedArgs[1]).toContain("--restore-last-session");
   expect(navigated).toEqual([
     ["https://explicit.example/start"],
-    ["https://x.com/home"],
   ]);
   store.close();
 });
 
-test("Windows Local does not replace restored tabs with the platform home", async () => {
+test("Windows Local removes a legacy first-run tab without replacing restored tabs", async () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   store.upsertProfile({ ...profile, platform: "x.com" });
@@ -315,24 +322,102 @@ test("Windows Local does not replace restored tabs with the platform home", asyn
   }), {
     hostPlatform: "win32",
     fetch: async (url) => url.endsWith("/json/list")
-      ? { ok: true, json: async () => [{ type: "page", url: "https://restored.example/account" }] }
+      ? {
+          ok: true,
+          json: async () => [
+            { type: "page", url: "https://restored.example/account" },
+            { type: "page", url: "chrome://ungoogled-first-run/" },
+          ],
+        }
       : f.fetchFn(url),
     navigate: async (_ws, urls) => { navigated.push(urls); },
   });
 
   await launcher.start("k1d0cd11");
-  expect(navigated).toEqual([]);
+  expect(navigated).toEqual([[]]);
   store.close();
 });
 
-test("reattach safely recycles one legacy browser through prelaunch search setup", async () => {
+for (const hostPlatform of ["darwin", "linux"] as const) {
+  test(`${hostPlatform} Local restores native tabs instead of opening platform home`, async () => {
+    const store = seeded();
+    const profile = store.getProfile("k1d0cd11")!;
+    store.upsertProfile({ ...profile, platform: "x.com" });
+    const f = fleet();
+    const spawnedArgs: string[][] = [];
+    const navigated: string[][] = [];
+    const userDataDir = join(testDataRoot(store), "k1d0cd11");
+    mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+    writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+    const launcher = newLauncher(store, f, spawnedArgs, undefined, async () => ({
+      status: "already-default",
+      engine: "DuckDuckGo",
+    }), {
+      hostPlatform,
+      fetch: async (url) => url.endsWith("/json/list")
+        ? {
+            ok: true,
+            json: async () => [
+              { type: "page", url: "https://restored.example/account" },
+              { type: "page", url: "chrome://ungoogled-first-run/" },
+            ],
+          }
+        : f.fetchFn(url),
+      navigate: async (_ws, urls) => { navigated.push(urls); },
+    });
+
+    await launcher.start("k1d0cd11");
+
+    expect(spawnedArgs[0]).toContain("--restore-last-session");
+    expect(navigated).toEqual([[]]);
+    await launcher.stop("k1d0cd11");
+    store.close();
+  });
+}
+
+test("Local waits for delayed native tabs before opening platform home", async () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, platform: "x.com" });
+  const f = fleet();
+  const navigated: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+  let targetReads = 0;
+  const launcher = newLauncher(store, f, [], undefined, async () => ({
+    status: "already-default",
+    engine: "DuckDuckGo",
+  }), {
+    hostPlatform: "win32",
+    fetch: async (url) => url.endsWith("/json/list")
+      ? {
+          ok: true,
+          json: async () => ++targetReads >= 22
+            ? [{ type: "page", url: "https://restored.example/delayed" }]
+            : [{ type: "page", url: "about:blank" }],
+        }
+      : f.fetchFn(url),
+    navigate: async (_ws, urls) => { navigated.push(urls); },
+  });
+
+  await launcher.start("k1d0cd11");
+
+  expect(targetReads).toBeGreaterThanOrEqual(22);
+  expect(navigated).toEqual([]);
+  await launcher.stop("k1d0cd11");
+  store.close();
+});
+
+test("reattach safely migrates one revision-1 browser through managed search setup", async () => {
   const store = seeded();
   const f = fleet();
   const first = newLauncher(store, f, []);
   await first.start("k1d0cd11");
-  rmSync(join(first.userDataDir("k1d0cd11"), ".aliasmode-search-bootstrap-v1"), { force: true });
+  rmSync(join(first.userDataDir("k1d0cd11"), ".aliasmode-search-bootstrap-v2"), { force: true });
+  writeFileSync(join(first.userDataDir("k1d0cd11"), ".aliasmode-search-bootstrap-v1"), "1\n");
   const legacy = store.getLaunch("k1d0cd11")!;
-  store.recordLaunch({ ...legacy, searchBootstrapRevision: undefined });
+  store.recordLaunch({ ...legacy, searchBootstrapRevision: 1 });
   (first as any).closeRelay("k1d0cd11");
 
   const prepared: string[] = [];
@@ -348,7 +433,7 @@ test("reattach safely recycles one legacy browser through prelaunch search setup
   expect(opened.port).toBe(legacy.debugPort);
   expect(spawnedArgs).toHaveLength(1);
   expect(prepared).toEqual([launcher.userDataDir("k1d0cd11")]);
-  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(2);
   store.close();
 });
 
@@ -1129,6 +1214,8 @@ test("buildArgs never forwards startup URLs to chromium argv", () => {
   const profile = store.getProfile("k1d0cd11")!;
   const args = launcher.buildArgs(profile, 9333, "/data", ["--disable-sync", "https://x.com/home"]);
   expect(args).toContain("--disable-sync");
+  expect(args).toContain("--no-first-run");
+  expect(args).toContain("--no-default-browser-check");
   expect(args).not.toContain("https://x.com/home");
   store.close();
 });
@@ -1327,7 +1414,7 @@ test("proxied launch preserves stored timezone and routes through the relay", as
   });
 
   await launcher.start("k1d0cd11", ["https://x.com/home"]);
-  expect(events).toEqual(["search", "spawn", "cookies", "navigate"]);
+  expect(events).toEqual(["spawn", "search", "cookies", "navigate"]);
   expect(spawnedArgs[0]!.some((arg) => /^--proxy-server=http:\/\/127\.0\.0\.1:\d+$/.test(arg))).toBe(true);
   expect(spawnedArgs[0]!.some((arg) => arg.includes("u:p%40ss"))).toBe(false);
   expect(spawnedArgs[0]!.some((arg) => arg.startsWith("--fingerprint-webrtc-ip="))).toBe(false);
@@ -1572,11 +1659,12 @@ test("start injects cookies before navigating startup URLs", async () => {
     executablePath: "/fake/cloak",
     executableSha256: "0".repeat(64),
     userDataDir: launcher.userDataDir("k1d0cd11"),
+    endpoint: "ws://127.0.0.1:9333/devtools/browser/x",
   });
   store.close();
 });
 
-test("headless launches skip address-bar search provider setup", async () => {
+test("per-launch headless mode skips address-bar search provider setup", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
@@ -1586,7 +1674,6 @@ test("headless launches skip address-bar search provider setup", async () => {
     store,
     binaryPath: "/fake/cloak",
     dataRoot,
-    headless: true,
     portProbe: () => true,
     spawn: f.spawn,
     fetch: f.fetchFn,
@@ -1603,21 +1690,22 @@ test("headless launches skip address-bar search provider setup", async () => {
     cdpReadyTimeoutMs: 1000,
   });
 
-  const launch = await launcher.start("k1d0cd11");
+  const launch = await launcher.start("k1d0cd11", [], { headless: true });
   expect(attempts).toBe(0);
   expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBeUndefined();
-  expect(await launcher.start("k1d0cd11")).toEqual(launch);
+  expect(await launcher.start("k1d0cd11", [], { headless: true })).toEqual(launch);
   await expect(launcher.verifyRunningIdentity("k1d0cd11")).resolves.toBeUndefined();
 
   rmSync(dataRoot, { recursive: true, force: true });
   store.close();
 });
 
-test("search provider failure never fails an otherwise healthy browser launch", async () => {
+test("search provider failure keeps launch healthy and retries next time", async () => {
   const store = seeded();
   const f = fleet();
   const dataRoot = join(tmpdir(), `cloak-search-fail-${process.pid}`);
   const logs: string[] = [];
+  let attempts = 0;
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
@@ -1625,11 +1713,14 @@ test("search provider failure never fails an otherwise healthy browser launch", 
     portProbe: () => true,
     spawn: f.spawn,
     fetch: f.fetchFn,
-    ensureSearchProvider: async () => { throw new Error("settings unavailable"); },
+    ensureSearchProvider: async () => { attempts++; throw new Error("settings unavailable"); },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
     labelWindow: async () => {},
-    killPid: async () => {},
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    findProfileDirHolderPids: async () => [],
+    killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
     log: (message) => logs.push(message),
@@ -1638,10 +1729,16 @@ test("search provider failure never fails an otherwise healthy browser launch", 
   const launch = await launcher.start("k1d0cd11");
 
   expect(launch.ws).toContain("/devtools/browser/x");
-  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBe(1);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBeUndefined();
+  expect(attempts).toBe(1);
   expect(logs.some((message) =>
     message.includes("search provider setup failed") && message.includes("continuing")
   )).toBe(true);
+
+  expect(await launcher.stop("k1d0cd11")).toBe(true);
+  await launcher.start("k1d0cd11");
+  expect(attempts).toBe(2);
+  expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBeUndefined();
 
   rmSync(dataRoot, { recursive: true, force: true });
   store.close();
@@ -1707,18 +1804,22 @@ test("standalone Telegram launch preserves the historical Web K fallback", async
   store.close();
 });
 
-test("start with autoNavigate:false skips startup navigation (remote owns it)", async () => {
+test("remote launch disables native restoration and startup navigation", async () => {
   const store = seeded();
   const p = store.getProfile("k1d0cd11")!;
   store.upsertProfile({ ...p, platform: "x.com" });
   const f = fleet();
+  const args: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
   const events: string[] = [];
   const launcher = new Launcher({
     store,
     binaryPath: "/fake/cloak",
     dataRoot: testDataRoot(store),
     portProbe: () => true,
-    spawn: f.spawn,
+    spawn: (binary, launchArgs) => { args.push(launchArgs); return f.spawn(binary, launchArgs); },
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: true }),
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
@@ -1726,8 +1827,12 @@ test("start with autoNavigate:false skips startup navigation (remote owns it)", 
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
   });
-  await launcher.start("k1d0cd11", [], { autoNavigate: false });
-  expect(events).toEqual([]); // the launcher must not navigate; remote does it after writeSession
+  await launcher.start("k1d0cd11", [], {
+    autoNavigate: false,
+    restoreLastSession: false,
+  });
+  expect(args[0]).not.toContain("--restore-last-session");
+  expect(events).toEqual([]);
   store.close();
 });
 

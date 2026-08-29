@@ -57,6 +57,13 @@ const DEFAULT_RETAINED_CLEANUP_ATTEMPT_MS = 20_000;
  *  completed restore. Real hub session versions are non-negative. */
 const PENDING_SESSION_BASE_VERSION = -1;
 
+function sessionSyncSignature(bundle: string): string {
+  return JSON.stringify({
+    tabs: bundleTabUrls(bundle),
+    telegramAuth: telegramAuthSignature(bundle),
+  });
+}
+
 type HubLike = Pick<
   HubClient,
   "owner" | "getRoster" | "getProfile" | "saveProfile" | "claim" | "renew" | "release" | "getSession" | "putSession" | "importFiles" | "move" | "createProfile" | "renameProfile" | "deleteProfiles"
@@ -78,7 +85,7 @@ export interface RemoteDeps {
   log?: (msg: string) => void;
   /** Heartbeat interval; 0 disables the auto timer (tests drive heartbeatOnce). */
   heartbeatMs?: number;
-  /** Fast Telegram auth checkpoint interval. Defaults to 3s; 0 disables it. */
+  /** Fast ordered-tab and Telegram auth checkpoint interval. Defaults to 3s; 0 disables it. */
   sessionSyncMs?: number;
   /** Lease length the hub enforces; a wall-clock gap beyond this between heartbeats means a suspend
    *  (laptop sleep) during which our lock likely lapsed. Defaults to the hub's 5-min lease. */
@@ -152,8 +159,8 @@ export class RemoteCoordinator {
   private sessionCaptureBytes = 0;
   private largestSessionCaptureBytes = 0;
   private pushesInFlight = new Map<string, Promise<PushSessionOutcome>>();
-  private telegramSignatures = new Map<string, string>();
-  private telegramProfiles = new Set<string>(); // only these profiles pay the fast CDP checkpoint cost
+  private sessionSyncSignatures = new Map<string, string>();
+  private telegramProfiles = new Set<string>(); // diagnostics for profiles carrying Telegram state
   private sessionCaptureSeeds = new Map<string, SessionCaptureSeed>();
   private transitions = new Map<string, Promise<void>>(); // serialize open/close for each profile
   private opening = new Map<string, { promise: Promise<OpenResult>; generation: number }>();
@@ -333,7 +340,9 @@ export class RemoteCoordinator {
     const bundle = capturedBundle ?? await this.readSessionWithDeadline(profileId, ws);
     if (!stillCurrent() || this.advisoryLaunches.has(profileId)) return "declined";
     const r = await this.d.hub.putSession(profileId, bundle, base);
-    if (!stillCurrent()) return "declined";
+    // A successful PUT committed even if Close invalidated this producer while it
+    // was in flight. Acknowledge its version so the next serialized final push
+    // uses the hub's actual CAS base instead of conflicting with our own write.
     if (r.conflict) {
       // Leave our known base stale on purpose: keep declining to clobber until the operator reopens
       // (which re-pulls the authoritative session and resets the base).
@@ -346,14 +355,13 @@ export class RemoteCoordinator {
     }
     this.versions.set(profileId, r.version);
     this.d.store.updateLaunchSessionBaseVersion(profileId, r.version);
-    const signature = telegramAuthSignature(bundle);
-    if (signature) this.telegramSignatures.set(profileId, signature);
+    this.sessionSyncSignatures.set(profileId, sessionSyncSignature(bundle));
     return "stored";
   }
 
   /**
-   * Lightweight frequent checkpoint for the one state native window-close cannot save afterward.
-   * It uploads only when a complete Telegram A/K auth signature differs from the last acknowledged one.
+   * Lightweight frequent checkpoint for ordered tabs and Telegram A/K auth.
+   * It uploads only when that compact signature differs from the last acknowledged one.
    */
   async sessionSyncOnce(profileId: string, ws: string): Promise<void> {
     const generation = this.heartbeatGenerations.get(profileId) ?? 0;
@@ -391,11 +399,11 @@ export class RemoteCoordinator {
       const currentWs = this.d.store.getLaunch(profileId)?.ws ?? ws;
       const bundle = await this.readSessionWithDeadline(profileId, currentWs);
       if (!stillCurrent()) return;
-      const signature = telegramAuthSignature(bundle);
-      if (!signature || signature === this.telegramSignatures.get(profileId)) return;
+      const signature = sessionSyncSignature(bundle);
+      if (signature === this.sessionSyncSignatures.get(profileId)) return;
       if (await this.pushSession(profileId, currentWs, bundle, stillCurrent) !== "stored") return;
       if (!stillCurrent()) return;
-      this.log(`${profileId}: checkpointed new Telegram Web ${bundleTelegramClient(bundle)?.toUpperCase() ?? "A/K"} login`);
+      this.log(`${profileId}: checkpointed updated browser tabs/session state`);
     } catch (error) {
       if (error instanceof HubOwnershipLostError && stillCurrent()) {
         this.markAdvisory(
@@ -894,12 +902,11 @@ export class RemoteCoordinator {
       const bundle = session?.bundle ?? JSON.stringify({ cookies: profile.cookies });
       this.sessionCaptureSeeds.set(profileId, sessionCaptureSeed(bundle));
       const resetStorage = bundleHasRestorableLogin(bundle);
-      const startingTelegramSignature = telegramAuthSignature(bundle);
+      const startingSessionSyncSignature = sessionSyncSignature(bundle);
       const telegramProfile = isTelegramPlatform(profile.platform) || bundleHasTelegramOrigin(bundle);
       if (telegramProfile) this.telegramProfiles.add(profileId);
       else this.telegramProfiles.delete(profileId);
-      if (startingTelegramSignature) this.telegramSignatures.set(profileId, startingTelegramSignature);
-      else this.telegramSignatures.delete(profileId);
+      this.sessionSyncSignatures.set(profileId, startingSessionSyncSignature);
 
       // launchArgs may contain a platform URL. Do not pass that URL to Chromium
       // yet, and suppress the launcher's own startup navigation: remote mode must
@@ -978,7 +985,7 @@ export class RemoteCoordinator {
         this.versions.delete(profileId);
         this.staleReattached.delete(profileId);
         this.advisoryLaunches.delete(profileId);
-        this.telegramSignatures.delete(profileId);
+        this.sessionSyncSignatures.delete(profileId);
         this.telegramProfiles.delete(profileId);
         if (cleanupOwnsLock) {
           try {
@@ -1029,7 +1036,7 @@ export class RemoteCoordinator {
     this.versions.delete(profileId);
     this.staleReattached.delete(profileId);
     this.advisoryLaunches.delete(profileId);
-    this.telegramSignatures.delete(profileId);
+    this.sessionSyncSignatures.delete(profileId);
     this.telegramProfiles.delete(profileId);
     this.lastLeaseConfirmedAt.delete(profileId);
     // This is called only after browser teardown has been confirmed. A raw
@@ -1479,10 +1486,11 @@ export class RemoteCoordinator {
             launch.profileId,
             currentBundle ? sessionCaptureSeed(currentBundle) : { origins: [] },
           );
-          const signature = currentBundle ? telegramAuthSignature(currentBundle) : null;
           if (currentBundle && bundleHasTelegramOrigin(currentBundle)) this.telegramProfiles.add(launch.profileId);
-          if (signature) this.telegramSignatures.set(launch.profileId, signature);
-          else this.telegramSignatures.delete(launch.profileId);
+          this.sessionSyncSignatures.set(
+            launch.profileId,
+            sessionSyncSignature(currentBundle ?? '{"cookies":[]}'),
+          );
           this.log(`reattached ${launch.profileId}: reclaimed the lock + resumed heartbeat (session base v${this.versions.get(launch.profileId) ?? 0})`);
         }
         this.startHeartbeat(launch.profileId, currentWs);
@@ -1556,7 +1564,7 @@ export class RemoteCoordinator {
   private startHeartbeat(profileId: string, ws: string): void {
     this.stopHeartbeat(profileId); // clear any existing timer first — never leak a duplicate
     const generation = this.heartbeatGenerations.get(profileId)!;
-    if (this.telegramProfiles.has(profileId)) this.startSessionSync(profileId, ws, generation);
+    this.startSessionSync(profileId, ws, generation);
     const ms = this.d.heartbeatMs ?? 120_000;
     if (ms <= 0) {
       this.timers.set(profileId, null); // track ownership without a timer (tests)
@@ -1652,7 +1660,7 @@ export class RemoteCoordinator {
       void this.runSessionSyncTick(profileId, ws, generation).catch((e) => {
         // Transient reads are retried on the next 3-second tick. Keep this visible for field diagnosis,
         // but never tear down a healthy browser merely because one checkpoint failed.
-        this.log(`${profileId}: Telegram auth checkpoint failed (${msg(e)})`);
+        this.log(`${profileId}: fast session checkpoint failed (${msg(e)})`);
       });
     }, this.sessionSyncMs);
     if (timer && typeof timer.unref === "function") timer.unref();

@@ -117,6 +117,8 @@ const SESSION_URLS = [
   "https://www.tiktok.com", "https://tiktok.com", "https://www.reddit.com", "https://reddit.com",
 ];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
+const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
+const CHROME_NEW_TAB_URL = "chrome://newtab/";
 const LINKEDIN_DEVICE_COOKIES = new Set(["bcookie", "bscookie", "li_rm"]);
 const TELEGRAM_AUTH_INDEXEDDB_RULES = [
   { databaseName: "tt-passcode", stores: ["store"], presence: [{ stores: ["store"], allKeys: ["sessionEncrypted", "globalEncrypted"] }] },
@@ -676,12 +678,17 @@ async function captureSession(browser, payload) {
 async function navigatePages(context, urls, replacePages = false) {
   const targets = (Array.isArray(urls) ? urls : []).map(canonicalUserPageUrl).filter(Boolean);
   const existing = [...context.pages()];
+  const existingUserPage = existing.some((page) => {
+    try { return canonicalUserPageUrl(page.url()) !== undefined; } catch { return false; }
+  });
   let blank = existing.find((page) => {
     try { return page.url() === "about:blank"; } catch { return false; }
+  }) || existing.find((page) => {
+    try { return page.url() === CHROME_NEW_TAB_URL; } catch { return false; }
+  }) || existing.find((page) => {
+    try { return page.url() === UNGOOGLED_FIRST_RUN_URL; } catch { return false; }
   });
-  if (!replacePages && existing.some((page) => {
-    try { return canonicalUserPageUrl(page.url()) !== undefined; } catch { return false; }
-  })) blank = undefined;
+  if (!replacePages && existingUserPage) blank = undefined;
   let firstError;
 
   if (replacePages) {
@@ -689,8 +696,27 @@ async function navigatePages(context, urls, replacePages = false) {
     for (const page of existing) {
       let url = "";
       try { url = page.url(); } catch {}
-      const disposable = canonicalUserPageUrl(url) !== undefined || (url === "about:blank" && page !== blank);
+      const disposable = canonicalUserPageUrl(url) !== undefined
+        || (url === UNGOOGLED_FIRST_RUN_URL && page !== blank)
+        || (url === CHROME_NEW_TAB_URL && page !== blank)
+        || (url === "about:blank" && page !== blank);
       if (!disposable) continue;
+      try { await page.close(); } catch (error) { firstError ??= error; }
+    }
+  } else {
+    for (const page of existing) {
+      let url = "";
+      try { url = page.url(); } catch {}
+      if (url !== UNGOOGLED_FIRST_RUN_URL) continue;
+      if (page === blank && !existingUserPage) {
+        if (targets.length > 0) continue;
+        try {
+          await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 5_000 });
+        } catch (error) {
+          firstError ??= error;
+        }
+        continue;
+      }
       try { await page.close(); } catch (error) { firstError ??= error; }
     }
   }
@@ -798,47 +824,41 @@ async function searchProvider(chromium, payload) {
     || !/^[a-f0-9]{64}$/.test(payload.executableSha256)
     || typeof payload.userDataDir !== "string"
     || !payload.userDataDir
+    || typeof payload.endpoint !== "string"
+    || !/^https?:\/\/|^wss?:\/\//.test(payload.endpoint)
   ) throw typed("invalid_request");
 
   if (await sha256File(payload.executablePath) !== payload.executableSha256) {
     throw new Error("approved CloakBrowser binary changed before search setup");
   }
-  const context = await chromium.launchPersistentContext(payload.userDataDir, {
-    executablePath: payload.executablePath,
-    headless: true,
-    args: ["--no-first-run", "--no-default-browser-check"],
-    timeout: Math.max(1, Math.min(Number(payload.launchTimeoutMs) || 20_000, 120_000)),
-  });
-  try {
-    const page = context.pages()[0] || await context.newPage();
-    await page.goto("chrome://settings/searchEngines", { waitUntil: "domcontentloaded", timeout: 10_000 });
-    return await page.evaluate(async () => {
+  const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 20_000, 120_000));
+  return withBrowser(chromium, payload.endpoint, timeout, "search-provider", async (_browser, context) => {
+    const page = await context.newPage();
+    try {
+      await page.goto("chrome://settings/searchEngines", { waitUntil: "domcontentloaded", timeout: 10_000 });
+      return await page.evaluate(async () => {
       const cr = await import("chrome://resources/js/cr.js");
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const engines = async () => Object.values(
         await cr.sendWithPromise("getSearchEnginesList"),
       ).filter(Array.isArray).flat();
-      const identity = (engine) => [
-        engine.keyword,
-        engine.name,
-        engine.displayName,
-        engine.url,
-      ].filter(Boolean).join(" ").toLowerCase();
-      const findDuckDuckGo = (items) => items.find((engine) =>
-        identity(engine).includes("duckduckgo")
-      );
+      const isDuckDuckGo = (engine) => {
+        if (typeof engine.url !== "string") return false;
+        try {
+          const url = new URL(engine.url);
+          return url.protocol === "https:"
+            && (url.hostname === "duckduckgo.com" || url.hostname.endsWith(".duckduckgo.com"));
+        } catch {
+          return false;
+        }
+      };
+      const findDuckDuckGo = (items) => items.find(isDuckDuckGo);
       const initial = await engines();
       const current = initial.find((engine) => engine.default);
-      const noSearch = current && (
-        identity(current).includes("no search")
-        || /^https?:\/\/%s\/?$/.test(String(current.url || "").trim().toLowerCase())
-      );
-      if (current && !noSearch) {
+      if (current && isDuckDuckGo(current)) {
         return {
-          status: identity(current).includes("duckduckgo")
-            ? "already-default"
-            : "kept-existing",
-          engine: current.displayName || current.name || current.keyword || "Current search provider",
+          status: "already-default",
+          engine: current.displayName || current.name || current.keyword || "DuckDuckGo",
         };
       }
 
@@ -934,8 +954,9 @@ async function searchProvider(chromium, payload) {
         }
       }
       throw new Error("DuckDuckGo was not persisted as default");
-    });
-  } finally { await context.close().catch(() => {}); }
+      });
+    } finally { await page.close().catch(() => {}); }
+  });
 }
 
 async function operate(chromium, operation, payload) {

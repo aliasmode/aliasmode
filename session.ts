@@ -27,6 +27,8 @@ const SESSION_URLS = [
 ];
 const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
+const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
+const CHROME_NEW_TAB_URL = "chrome://newtab/";
 const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
 const SESSION_WRITE_TIMEOUT_MS = 240_000;
 const SESSION_CONNECT_TIMEOUT_MS = 30_000;
@@ -1333,6 +1335,10 @@ async function restorePortableTabs(context: any, urls: readonly string[]): Promi
   const existing = [...context.pages()];
   let blank = existing.find((page: any) => {
     try { return page.url() === "about:blank"; } catch { return false; }
+  }) ?? existing.find((page: any) => {
+    try { return page.url() === CHROME_NEW_TAB_URL; } catch { return false; }
+  }) ?? existing.find((page: any) => {
+    try { return page.url() === UNGOOGLED_FIRST_RUN_URL; } catch { return false; }
   });
   if (!blank) blank = await context.newPage();
 
@@ -1340,7 +1346,10 @@ async function restorePortableTabs(context: any, urls: readonly string[]): Promi
   for (const page of existing) {
     let url = "";
     try { url = page.url(); } catch {}
-    const disposable = canonicalUserPageUrl(url) !== null || (url === "about:blank" && page !== blank);
+    const disposable = canonicalUserPageUrl(url) !== null
+      || (url === UNGOOGLED_FIRST_RUN_URL && page !== blank)
+      || (url === CHROME_NEW_TAB_URL && page !== blank)
+      || (url === "about:blank" && page !== blank);
     if (!disposable) continue;
     try { await page.close(); } catch (error) { firstError ??= error; }
   }

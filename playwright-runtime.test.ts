@@ -283,8 +283,8 @@ bunAsNodeTest("worker retries until the persistent context appears without creat
   }
 });
 
-bunAsNodeTest("search provider uses a standalone headless profile and closes it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aliasmode-search-provider-headless-"));
+bunAsNodeTest("search provider uses the managed browser and closes only its temporary settings page", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-search-provider-managed-"));
   try {
     await mkdir(join(root, "node"), { recursive: true });
     await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
@@ -292,40 +292,42 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
     await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
     await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
     await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
-      let launched = false;
-      let closed = false;
-      process.on("beforeExit", () => {
-        if (launched && !closed) process.exitCode = 9;
-      });
+      import { appendFile } from "node:fs/promises";
+      let mode = "";
+      const log = (event) => appendFile(${JSON.stringify(join(root, "events.log"))}, event + "\\n");
+      const userPage = {
+        url: () => "https://restored.example/account",
+        async goto() { throw new Error("search setup navigated a user page"); },
+        async close() { throw new Error("search setup closed a user page"); },
+      };
+      const settingsPage = {
+        async goto(url) {
+          if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
+          await log("goto:settings");
+        },
+        async evaluate(configure) {
+          const source = String(configure);
+          if (source.includes("kept-existing")) throw new Error("non-DuckDuckGo default would be preserved");
+          if (!source.includes('hostname === "duckduckgo.com"')) throw new Error("DuckDuckGo URL was not verified");
+          if (mode === "failure") throw new Error("settings unavailable");
+          return mode === "configured"
+            ? { status: "configured", engine: "DuckDuckGo" }
+            : { status: "already-default", engine: "DuckDuckGo" };
+        },
+        async close() { await log("close:settings"); },
+      };
+      const context = {
+        pages: () => [userPage],
+        async newPage() { await log("new:settings"); return settingsPage; },
+      };
       export const chromium = {
-        async connectOverCDP() { throw new Error("search provider attached to a live browser"); },
-        async launchPersistentContext(userDataDir, options) {
-          launched = true;
-          const mode = userDataDir.split("/").at(-1);
-          if (!options?.executablePath.endsWith("/cloakbrowser.exe")
-            || options?.headless !== true
-            || !options.args.includes("--no-first-run")
-            || !options.args.includes("--no-default-browser-check")
-            || options.args.some((arg) => arg.startsWith("--load-extension=")
-              || arg.startsWith("--disable-extensions-except="))) {
-            throw new Error("wrong headless search launch");
-          }
-          const page = {
-            async goto(url) {
-              if (url !== "chrome://settings/searchEngines") throw new Error("wrong settings URL");
-            },
-            async evaluate() {
-              if (mode === "failure") throw new Error("settings unavailable");
-              return mode === "configured"
-                ? { status: "configured", engine: "DuckDuckGo" }
-                : { status: "already-default", engine: "DuckDuckGo" };
-            },
-          };
+        async launchPersistentContext() { throw new Error("search setup launched a second browser"); },
+        async connectOverCDP(endpoint) {
+          mode = endpoint.split("/").at(-1);
+          await log("connect:" + mode);
           return {
-            pages: () => [page],
-            async newPage() { throw new Error("initial headless page was ignored"); },
-            async newBrowserCDPSession() { throw new Error("hidden target was created"); },
-            async close() { closed = true; },
+            contexts: () => [context],
+            async close() { await log("detach:" + mode); },
           };
         },
       };
@@ -342,7 +344,8 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
       executablePath,
       executableSha256,
       userDataDir: "C:/Profiles/configured",
-      launchTimeoutMs: 2_000,
+      endpoint: "ws://browser/configured",
+      connectTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       status: "configured",
       engine: "DuckDuckGo",
@@ -351,7 +354,8 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
       executablePath,
       executableSha256,
       userDataDir: "C:/Profiles/existing",
-      launchTimeoutMs: 2_000,
+      endpoint: "ws://browser/existing",
+      connectTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toEqual({
       status: "already-default",
       engine: "DuckDuckGo",
@@ -360,16 +364,24 @@ bunAsNodeTest("search provider uses a standalone headless profile and closes it"
       executablePath,
       executableSha256: "0".repeat(64),
       userDataDir: "C:/Profiles/configured",
-      launchTimeoutMs: 2_000,
+      endpoint: "ws://browser/changed-binary",
+      connectTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
     expect(changedBinary).toMatchObject({ code: "operation_failed" });
     const failure = await runPlaywrightWorker("search-provider", {
       executablePath,
       executableSha256,
       userDataDir: "C:/Profiles/failure",
-      launchTimeoutMs: 2_000,
+      endpoint: "ws://browser/failure",
+      connectTimeoutMs: 2_000,
     }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (error) => error);
     expect(failure).toMatchObject({ code: "operation_failed" });
+
+    expect((await Bun.file(join(root, "events.log")).text()).trim().split("\n")).toEqual([
+      "connect:configured", "new:settings", "goto:settings", "close:settings", "detach:configured",
+      "connect:existing", "new:settings", "goto:settings", "close:settings", "detach:existing",
+      "connect:failure", "new:settings", "goto:settings", "close:settings", "detach:failure",
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -706,8 +718,11 @@ bunAsNodeTest("worker replaces stale pages and attempts every restored tab after
       const stale = makePage("https://stale.example/", "stale");
       const blank = makePage("about:blank", "blank");
       const extraBlank = makePage("about:blank", "extra-blank");
+      const firstRun = makePage("chrome://ungoogled-first-run/", "first-run");
+      const newTab = makePage("chrome://newtab/", "new-tab");
+      const settings = makePage("chrome://settings/privacy", "settings");
       const card = makePage("http://127.0.0.1:50400/card?id=profile1", "card");
-      const pages = [stale, blank, extraBlank, card];
+      const pages = [stale, blank, extraBlank, firstRun, newTab, settings, card];
       const context = {
         pages: () => pages,
         async newPage() { const page = makePage("about:blank", "created"); pages.push(page); return page; },
@@ -735,8 +750,96 @@ bunAsNodeTest("worker replaces stale pages and attempts every restored tab after
     ]);
     expect(events).toContain("close:stale");
     expect(events).toContain("close:extra-blank");
+    expect(events).toContain("close:first-run");
+    expect(events).toContain("close:new-tab");
+    expect(events).not.toContain("close:settings");
     expect(events).not.toContain("close:card");
     expect(events.at(-1)).toBe("detach");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+bunAsNodeTest("worker reuses startup pages and removes only the exact first-run page", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-first-run-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      const log = (event) => appendFile(${JSON.stringify(join(root, "events.log"))}, event + "\\n");
+      const firstRun = {
+        url: () => "chrome://ungoogled-first-run/",
+        async goto(url) { await log("goto:first-run:" + url); },
+        async close() { await log("close:first-run"); },
+      };
+      const settings = {
+        url: () => "chrome://settings/privacy",
+        async goto(url) { await log("goto:settings:" + url); },
+        async close() { await log("close:settings"); },
+      };
+      const restored = {
+        url: () => "https://restored.example/account",
+        async goto(url) { await log("goto:restored:" + url); },
+        async close() { await log("close:restored"); },
+      };
+      const newTab = {
+        url: () => "chrome://newtab/",
+        async goto(url) { await log("goto:new-tab:" + url); },
+        async close() { await log("close:new-tab"); },
+      };
+      export const chromium = { async connectOverCDP(endpoint) {
+        const pages = endpoint === "ws://restored"
+          ? [restored, firstRun, settings]
+          : endpoint === "ws://first-run-only"
+            ? [firstRun]
+            : endpoint === "ws://new-tab"
+              ? [newTab, settings]
+              : [firstRun, settings];
+        const context = {
+          pages: () => pages,
+          async newPage() { await log("new-page"); throw new Error("first-run page was not reused"); },
+          async clearCookies() {},
+        };
+        return { contexts: () => [context], async close() { await log("detach"); } };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    await expect(runPlaywrightWorker("session-restore", {
+      endpoint: "ws://browser",
+      bundle: JSON.stringify({ cookies: [], origins: [] }),
+      urls: ["https://x.com/home"],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+
+    await expect(runPlaywrightWorker("navigate", {
+      endpoint: "ws://restored",
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+
+    await expect(runPlaywrightWorker("navigate", {
+      endpoint: "ws://first-run-only",
+      urls: [],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+
+    await expect(runPlaywrightWorker("navigate", {
+      endpoint: "ws://new-tab",
+      urls: ["https://x.com/home"],
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+
+    expect((await Bun.file(join(root, "events.log")).text()).trim().split("\n")).toEqual([
+      "goto:first-run:https://x.com/home",
+      "detach",
+      "close:first-run",
+      "detach",
+      "goto:first-run:about:blank",
+      "detach",
+      "goto:new-tab:https://x.com/home",
+      "detach",
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,7 +1,7 @@
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 export type SearchProviderSetupResult = {
-  status: "already-default" | "configured" | "kept-existing";
+  status: "already-default" | "configured";
   engine: string;
 };
 
@@ -9,6 +9,7 @@ export type SearchProviderBootstrapOptions = {
   executablePath: string;
   executableSha256: string;
   userDataDir: string;
+  endpoint: string;
 };
 
 type SearchEngineSummary = {
@@ -21,28 +22,20 @@ type SearchEngineSummary = {
 
 const CONFIGURE_TIMEOUT_MS = 20_000;
 
-/**
- * Return the no-op result for a usable current default, or null when AliasMode
- * should repair the profile. Keeping a real provider protects an operator's
- * explicit choice; only Chromium's missing/"No Search" default is replaced.
- */
+/** Return the no-op result only when DuckDuckGo is already the default. */
 export function existingSearchProvider(
   engines: SearchEngineSummary[],
 ): SearchProviderSetupResult | null {
   const current = engines.find((engine) => engine.default);
-  if (!current || isNoSearchProvider(current)) return null;
+  if (!current || !isDuckDuckGo(current)) return null;
 
-  const engine = current.displayName || current.name || current.keyword || "Current search provider";
   return {
-    status: isDuckDuckGo(current) ? "already-default" : "kept-existing",
-    engine,
+    status: "already-default",
+    engine: current.displayName || current.name || current.keyword || "DuckDuckGo",
   };
 }
 
-/**
- * Configure the persistent profile in a separate headless CloakBrowser before
- * its managed, visible generation starts. This never opens or navigates a user tab.
- */
+/** Configure DuckDuckGo through a temporary page in the running managed browser. */
 export async function ensureDuckDuckGoDefault(
   options: SearchProviderBootstrapOptions,
 ): Promise<SearchProviderSetupResult> {
@@ -50,23 +43,18 @@ export async function ensureDuckDuckGoDefault(
     executablePath: options.executablePath,
     executableSha256: options.executableSha256,
     userDataDir: options.userDataDir,
-    launchTimeoutMs: CONFIGURE_TIMEOUT_MS,
+    endpoint: options.endpoint,
+    connectTimeoutMs: CONFIGURE_TIMEOUT_MS,
   }, { timeoutMs: CONFIGURE_TIMEOUT_MS + 15_000 });
 }
 
 function isDuckDuckGo(engine: SearchEngineSummary): boolean {
-  return [engine.keyword, engine.name, engine.displayName, engine.url]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase()
-    .includes("duckduckgo");
-}
-
-function isNoSearchProvider(engine: SearchEngineSummary): boolean {
-  const identity = [engine.keyword, engine.name, engine.displayName, engine.url]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  const url = String(engine.url || "").trim().toLowerCase();
-  return identity.includes("no search") || /^https?:\/\/%s\/?$/.test(url);
+  if (typeof engine.url !== "string") return false;
+  try {
+    const url = new URL(engine.url);
+    return url.protocol === "https:"
+      && (url.hostname === "duckduckgo.com" || url.hostname.endsWith(".duckduckgo.com"));
+  } catch {
+    return false;
+  }
 }

@@ -164,11 +164,12 @@ function targetFingerprintOrigins(fingerprint: string): string[] {
   }
 }
 
-function observeBrowserTargets(
+export function observeBrowserTargets(
   endpoint: string,
   onTarget: (origin: string | null) => void,
 ): { close(): void } {
   const socket = new WebSocket(endpoint);
+  const pageTargets = new Set<string>();
   const onOpen = () => {
     try {
       socket.send(JSON.stringify({ id: 1, method: "Target.setDiscoverTargets", params: { discover: true } }));
@@ -178,11 +179,20 @@ function observeBrowserTargets(
     if (typeof event.data !== "string") return;
     try {
       const message = JSON.parse(event.data);
+      if (message?.method === "Target.targetDestroyed") {
+        const targetId = message?.params?.targetId;
+        if (typeof targetId === "string" && pageTargets.delete(targetId)) onTarget(null);
+        return;
+      }
       if (message?.method !== "Target.targetCreated" && message?.method !== "Target.targetInfoChanged") return;
       const info = message?.params?.targetInfo;
-      if (info?.type !== "page" || typeof info.url !== "string") return;
-      const origin = canonicalTargetOrigin(info.url);
-      if (origin) onTarget(origin);
+      const targetId = info?.targetId;
+      if (info?.type !== "page") {
+        if (typeof targetId === "string" && pageTargets.delete(targetId)) onTarget(null);
+        return;
+      }
+      if (typeof targetId === "string") pageTargets.add(targetId);
+      onTarget(typeof info.url === "string" ? canonicalTargetOrigin(info.url) : null);
     } catch {}
   };
   socket.addEventListener("open", onOpen);
@@ -1435,8 +1445,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     this.dirtyMonitors.set(profileId, monitor);
     const onDirty = () => this.markCheckpointDirty(profileId, monitor);
     const onTarget = (origin: string | null) => {
-      if (this.dirtyMonitors.get(profileId) !== monitor || !origin || checkpoint.origins.has(origin)) return;
-      checkpoint.origins.add(origin);
+      if (this.dirtyMonitors.get(profileId) !== monitor) return;
+      if (origin) checkpoint.origins.add(origin);
       onDirty();
     };
     try {
