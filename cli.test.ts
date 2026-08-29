@@ -223,7 +223,7 @@ test("Cloud launcher smoke requires fresh and repeated cached opens to stay aliv
       events.push(`close:${opens}:${profileId}`);
       running = false;
       launch = null;
-      return true;
+      return { closed: true as const, sync: "complete" as const };
     },
     async releaseAll() { return true; },
   };

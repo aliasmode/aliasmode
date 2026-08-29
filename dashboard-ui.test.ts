@@ -122,8 +122,18 @@ test("Account settings exposes fixed Cloud diagnostics without raw server messag
   expect(app).toContain("fetchCloudEvents");
   expect(app).toContain("Recent diagnostics");
   expect(app).toContain("CLOUD_DIAGNOSTIC_LABELS[event.type]");
+  expect(app).toContain("Cloud lease ended after a version conflict");
+  expect(app).toContain("Browser teardown could not be confirmed");
+  expect(app).toContain("Session synchronization has a terminal conflict");
   expect(app).toContain("They exclude profile data and credentials");
   expect(styles).toContain(".diagnostics-list");
+});
+
+test("dashboard shows close warnings without an open-only prefix", () => {
+  expect(app).toContain("else if (r && r.warning) setActionErr(r.warning);");
+  expect(app).not.toContain("Opened — ${r.warning}");
+  expect(app).toContain("if (r?.ok === false) issues.push");
+  expect(app).toContain("else if (r?.warning) issues.push");
 });
 
 test("dashboard lists the supported profile platforms", () => {

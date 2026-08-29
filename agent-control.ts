@@ -412,22 +412,41 @@ export class AgentControlSession {
     };
   }
 
-  private async closeProfile(profileId: string): Promise<{ profileId: string; closed: true; deleted: boolean }> {
+  private async closeProfile(profileId: string): Promise<{
+    profileId: string;
+    closed: true;
+    sync?: "complete" | "pending" | "conflict";
+    deleted: boolean;
+  }> {
     return await this.deps.admission.run(
       { kind: "stop", profileIds: [profileId] },
       async () => {
         let closed: boolean;
-        if (this.deps.cloudBrowser) closed = await this.deps.cloudBrowser.close(profileId);
-        else if (this.deps.remote) closed = await this.deps.remote.close(profileId);
-        else closed = await this.deps.launcher.stop(profileId);
+        let sync: "complete" | "pending" | "conflict" | undefined;
+        if (this.deps.cloudBrowser) {
+          const result = await this.deps.cloudBrowser.close(profileId);
+          closed = result.closed;
+          if (result.closed) sync = result.sync;
+        } else if (this.deps.remote) {
+          closed = await this.deps.remote.close(profileId);
+        } else {
+          closed = await this.deps.launcher.stop(profileId);
+        }
         if (!closed) throw agentError("close_unconfirmed", `browser teardown is unconfirmed: ${profileId}`);
 
         this.openedByConnection.delete(profileId);
         this.attachedExisting.delete(profileId);
         const temporary = this.deps.store.listAgentTemporary().includes(profileId);
         let deleted = false;
-        if (temporary) deleted = await this.deleteClosedProfile(profileId);
-        return { profileId, closed: true as const, deleted };
+        if (temporary && (sync === undefined || sync === "complete")) {
+          deleted = await this.deleteClosedProfile(profileId);
+        }
+        return {
+          profileId,
+          closed: true as const,
+          ...(sync ? { sync } : {}),
+          deleted,
+        };
       },
     );
   }

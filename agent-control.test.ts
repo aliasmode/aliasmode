@@ -213,6 +213,46 @@ test("an unconfirmed close retains the temporary profile marker", async () => {
   expect(h.profileExists()).toBe(true);
 });
 
+test("Cloud close reports retained sync and preserves temporary profiles", async () => {
+  for (const sync of ["pending", "conflict"] as const) {
+    const h = harness({ active: true, temporary: true });
+    const session = new AgentControlSession({
+      ...h.deps,
+      cloudBrowser: {
+        async close() { return { closed: true as const, sync }; },
+      } as any,
+    });
+
+    const response = await session.enqueue(wire("browser.close", { profileId: "profile1" }));
+
+    expect(response).toEqual({
+      protocol: AGENT_CONTROL_PROTOCOL,
+      id: 1,
+      ok: true,
+      result: { profileId: "profile1", closed: true, sync, deleted: false },
+    });
+    expect(h.events).toEqual([]);
+    expect(h.temporary()).toBe(true);
+    expect(h.profileExists()).toBe(true);
+  }
+});
+
+test("Cloud teardown uncertainty retains agent ownership", async () => {
+  const h = harness({ active: true, temporary: true });
+  const session = new AgentControlSession({
+    ...h.deps,
+    cloudBrowser: {
+      async close() { return { closed: false as const, reason: "teardown_unconfirmed" as const }; },
+    } as any,
+  });
+
+  const response = await session.enqueue(wire("browser.close", { profileId: "profile1" }));
+
+  expect(response).toMatchObject({ ok: false, error: { code: "close_unconfirmed" } });
+  expect(h.temporary()).toBe(true);
+  expect(h.profileExists()).toBe(true);
+});
+
 test("MCP connector methods return the token once and use the current device URL", async () => {
   const h = harness();
   const calls: string[] = [];

@@ -40,6 +40,22 @@ function payload(): PortableProfileV1 {
   };
 }
 
+function instagramSession(marker: string): PortableProfileV1["session"] {
+  return {
+    cookies: [{
+      name: "sessionid",
+      value: `fake-instagram-${marker}`,
+      domain: ".instagram.com",
+      path: "/",
+    }],
+    origins: [{
+      origin: "https://www.instagram.com",
+      localStorage: [{ name: "fake-auth-state", value: marker }],
+    }],
+    tabs: ["https://www.instagram.com/"],
+  };
+}
+
 function setup(options: {
   stopResult?: boolean;
   activeResult?: boolean;
@@ -52,6 +68,7 @@ function setup(options: {
   startError?: unknown;
   verifyWebSockets?: string[];
   expectedHeadless?: boolean;
+  platform?: string;
   proxy?: PortableProfileV1["profile"]["proxy"];
   session?: PortableProfileV1["session"];
   accountId?: () => string;
@@ -82,6 +99,7 @@ function setup(options: {
   let reconcileHook: (() => void | Promise<void>) | undefined;
   let abandonHook: (() => void | Promise<void>) | undefined;
   const openedPayload = payload();
+  openedPayload.profile.platform = options.platform ?? openedPayload.profile.platform;
   openedPayload.profile.proxy = options.proxy ?? null;
   if (options.session) openedPayload.session = options.session;
   const opened: OpenProfileResponse = {
@@ -502,7 +520,7 @@ test("Cloud browser retains a verified launch when worker restore fails", async 
   ]);
 
   state.events.length = 0;
-  expect(await state.coordinator.close("profile1")).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
   expect(state.events).toEqual(["reconcile", "stop", "abandon"]);
   expect(state.closeCalls()).toBe(0);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
@@ -522,7 +540,10 @@ test("Cloud close does not stop a replacement for a retained restoring browser",
   });
   state.events.length = 0;
 
-  expect(await state.coordinator.close("profile1")).toBe(false);
+  expect(await state.coordinator.close("profile1")).toEqual({
+    closed: false,
+    reason: "teardown_unconfirmed",
+  });
 
   expect(state.events).toEqual([]);
   expect(state.store.getLaunch("profile1")).toMatchObject({ debugPort: 9333, startedAt: 2000 });
@@ -541,7 +562,7 @@ test("Cloud heartbeat never auto-closes a retained restoring browser", async () 
 
   await state.coordinator.heartbeatOnce("profile1");
 
-  expect(state.events).toEqual(["reconcile", "heartbeat"]);
+  expect(state.events).toEqual(["heartbeat", "reconcile"]);
   expect(state.store.getLaunch("profile1")).not.toBeNull();
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("restoring");
   state.queue.close();
@@ -556,7 +577,7 @@ test("Cloud heartbeat releases a retained restoring registration after manual br
 
   await state.coordinator.heartbeatOnce("profile1");
 
-  expect(state.events).toEqual(["reconcile", "abandon"]);
+  expect(state.events).toEqual(["heartbeat", "reconcile", "abandon"]);
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   expect(state.coordinator.diagnostics().map((event) => event.type)).toContain("manual_stop_detected");
@@ -643,7 +664,7 @@ test("Cloud close reconciles a manually closed browser before session capture", 
   state.events.length = 0;
   state.setReconcileHook(() => state.store.clearLaunch("profile1"));
 
-  expect(await state.coordinator.close("profile1")).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
 
   expect(state.events).toEqual(["reconcile", "cloud-close"]);
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
@@ -742,6 +763,20 @@ test("Cloud heartbeat retains an exactly alive browser after a transient active 
   state.store.close();
 });
 
+test("Cloud heartbeat records confirmed browser death", async () => {
+  const state = setup({ activeResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toContain("browser_death_confirmed");
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud heartbeat requires two consecutive no-page observations before closing", async () => {
   const state = setup({ hasPageTargets: false });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -759,6 +794,9 @@ test("Cloud heartbeat requires two consecutive no-page observations before closi
   expect(state.events.slice(-4)).toEqual(["reconcile", "capture", "stop", "cloud-close"]);
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toEqual(
+    expect.arrayContaining(["no_page_observed", "no_page_close_requested"]),
+  );
   state.queue.close();
   state.store.close();
 });
@@ -1198,7 +1236,7 @@ test("Cloud browser durably captures before confirmed stop and CAS close", async
     return originalStop(profileId);
   };
 
-  expect(await state.coordinator.close("profile1")).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
   expect(state.events).toEqual(["reconcile", "capture", "stop", "cloud-close"]);
   expect(state.closeCalls()).toBe(1);
   expect(state.queue.list("account1")).toEqual([]);
@@ -1217,7 +1255,10 @@ test("Cloud browser durably captures before confirmed stop and CAS close", async
 test("Cloud browser never submits a capture before browser teardown is confirmed", async () => {
   const state = setup({ stopResult: false });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  expect(await state.coordinator.close("profile1")).toBe(false);
+  expect(await state.coordinator.close("profile1")).toEqual({
+    closed: false,
+    reason: "teardown_unconfirmed",
+  });
   expect(state.closeCalls()).toBe(0);
   expect(state.queue.list("account1")).toMatchObject([{
     profileId: "profile1",
@@ -1225,7 +1266,7 @@ test("Cloud browser never submits a capture before browser teardown is confirmed
     status: "pending",
   }]);
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
-  expect(state.coordinator.diagnostics().at(-1)?.type).toBe("cleanup_retained");
+  expect(state.coordinator.diagnostics().at(-1)?.type).toBe("browser_teardown_unconfirmed");
   state.queue.close();
   state.store.close();
 });
@@ -1233,7 +1274,7 @@ test("Cloud browser never submits a capture before browser teardown is confirmed
 test("Cloud browser reopens the latest Cloud state while preserving a stale CAS close", async () => {
   const state = setup({ closeConflict: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  expect(await state.coordinator.close("profile1")).toBe(false);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "conflict" });
   expect(state.closeCalls()).toBe(1);
   const conflict = state.queue.list("account1")[0];
   expect(conflict).toMatchObject({
@@ -1277,7 +1318,7 @@ test("Cloud browser reopens the latest Cloud state while preserving a stale CAS 
   expect(state.queue.get(conflict!.id, "account1")?.status).toBe("conflict");
   expect(state.queue.list("account1")).toHaveLength(2);
 
-  expect(await state.coordinator.close("profile1")).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
   expect(state.queue.list("account1")).toEqual([conflict!]);
   expect(state.queue.get(conflict!.id, "account1")?.status).toBe("conflict");
   state.queue.close();
@@ -1288,7 +1329,7 @@ test("Cloud close diagnostics retain unsynchronized transport failures", async (
   const state = setup({ closeTransportFailure: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
 
-  expect(await state.coordinator.close("profile1")).toBe(false);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
 
   expect(state.queue.list("account1")).toMatchObject([{
     profileId: "profile1",
@@ -1296,6 +1337,214 @@ test("Cloud close diagnostics retain unsynchronized transport failures", async (
     status: "retrying",
   }]);
   expect(state.coordinator.diagnostics().at(-1)?.type).toBe("cleanup_retained");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Instagram authentication survives Cloud close and reopen", async () => {
+  const state = setup({
+    platform: "instagram.com",
+    session: { cookies: [], origins: [] },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  const captured = instagramSession("round-trip");
+  options.readSession = async () => {
+    state.events.push("capture");
+    return JSON.stringify(captured);
+  };
+  const originalStop = options.launcher.stop;
+  options.launcher.stop = async (profileId: string) => {
+    const summary = state.queue.list("account1").find((item) => item.profileId === profileId)!;
+    const checkpoint = state.queue.get(summary.id, "account1")!;
+    expect(checkpoint.readyToSubmit).toBe(false);
+    expect(checkpoint.payload.session).toEqual(captured);
+    return originalStop(profileId);
+  };
+  let acceptedPayload: PortableProfileV1 | undefined;
+  options.cloud.closeOpen = async (
+    registrationId: string,
+    request: { expectedVersion: number; payload: PortableProfileV1 },
+  ) => {
+    state.events.push("cloud-close");
+    expect(registrationId).toBe("registration1");
+    expect(request.expectedVersion).toBe(4);
+    acceptedPayload = structuredClone(request.payload);
+    return { ok: true, status: "accepted", version: 5 };
+  };
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+  expect(acceptedPayload?.session).toEqual(captured);
+
+  options.cloud.openProfile = async () => ({
+    ok: true,
+    registrationId: "registration2",
+    baseVersion: 5,
+    payload: structuredClone(acceptedPayload!),
+    activeOpens: [],
+  });
+  let restored: PortableProfileV1["session"] | undefined;
+  options.applySession = async (_endpoint: string, bundle: string) => {
+    restored = JSON.parse(bundle);
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(restored).toEqual(captured);
+  expect(restored?.cookies).toContainEqual(expect.objectContaining({
+    name: "sessionid",
+    domain: ".instagram.com",
+  }));
+  await state.coordinator.releaseAll(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Instagram checkpoint survives a failed Cloud close until retry", async () => {
+  const state = setup({
+    platform: "instagram.com",
+    session: { cookies: [], origins: [] },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  const captured = instagramSession("retry");
+  options.readSession = async () => JSON.stringify(captured);
+  const requests: PortableProfileV1[] = [];
+  let acceptClose = false;
+  let acceptedPayload: PortableProfileV1 | undefined;
+  options.cloud.closeOpen = async (
+    _registrationId: string,
+    request: { payload: PortableProfileV1 },
+  ) => {
+    requests.push(structuredClone(request.payload));
+    if (!acceptClose) throw new Error("offline");
+    acceptedPayload = structuredClone(request.payload);
+    return { ok: true, status: "accepted", version: 5 };
+  };
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+  const summary = state.queue.list("account1")[0]!;
+  expect(summary).toMatchObject({ readyToSubmit: true, status: "retrying" });
+  expect(state.queue.get(summary.id, "account1")?.payload.session).toEqual(captured);
+
+  let cloudOpenCalls = 0;
+  options.cloud.openProfile = async () => {
+    cloudOpenCalls++;
+    return {
+      ok: true,
+      registrationId: "registration2",
+      baseVersion: 4,
+      payload: payload(),
+      activeOpens: [],
+    };
+  };
+  expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toEqual({
+    ok: false,
+    error: "Pending Cloud synchronization must be resolved before reopening",
+  });
+  expect(cloudOpenCalls).toBe(0);
+  expect(state.queue.get(summary.id, "account1")?.payload.session).toEqual(captured);
+
+  acceptClose = true;
+  await state.coordinator.retryPending();
+  expect(state.queue.list("account1")).toEqual([]);
+  const firstRequest = requests[0]!;
+  expect(requests.slice(0, 3)).toEqual([firstRequest, firstRequest, firstRequest]);
+
+  options.cloud.openProfile = async () => {
+    cloudOpenCalls++;
+    return {
+      ok: true,
+      registrationId: "registration2",
+      baseVersion: 5,
+      payload: structuredClone(acceptedPayload!),
+      activeOpens: [],
+    };
+  };
+  let restored: PortableProfileV1["session"] | undefined;
+  options.applySession = async (_endpoint: string, bundle: string) => {
+    restored = JSON.parse(bundle);
+  };
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(cloudOpenCalls).toBe(1);
+  expect(restored).toEqual(captured);
+  await state.coordinator.releaseAll(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud close starts pending retry after confirmed teardown", async () => {
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  const state = setup({
+    closeTransportFailure: true,
+    heartbeatMs: 60_000,
+    setIntervalFn(fn) {
+      const timer = ++nextTimer;
+      timers.set(timer, fn);
+      return timer;
+    },
+    clearIntervalFn(handle) {
+      timers.delete(handle as number);
+    },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.listOpens("account1")).toEqual([]);
+  expect(timers.size).toBe(1);
+  expect(await state.coordinator.releaseAll()).toBe(false);
+  await state.coordinator.releaseAll(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll retries a pending-only close after recovery", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  let recovered = false;
+  options.cloud.closeOpen = async () => {
+    if (!recovered) throw new Error("offline");
+    return { ok: true, status: "accepted", version: 5 };
+  };
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+
+  recovered = true;
+  expect(await state.coordinator.releaseAll()).toBe(true);
+  expect(state.queue.list("account1")).toEqual([]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll succeeds when a close retry drains its early failure", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  let attempts = 0;
+  options.cloud.closeOpen = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error("offline");
+    return { ok: true, status: "accepted", version: 5 };
+  };
+
+  expect(await state.coordinator.releaseAll()).toBe(true);
+  expect(attempts).toBe(2);
+  expect(state.queue.list("account1")).toEqual([]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll remains incomplete for a conflicted confirmed close", async () => {
+  const state = setup({ closeConflict: true });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "conflict" });
+
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.listOpens("account1")).toEqual([]);
+  expect(await state.coordinator.releaseAll()).toBe(false);
+  await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();
 });
@@ -1316,6 +1565,124 @@ test("Cloud browser refuses reopen while an older close remains unsynchronized",
   });
   expect(state.events).toEqual(["cloud-close"]);
   expect(state.queue.list("account1")[0]).toMatchObject({ status: "retrying" });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser ignores only its new registration in legacy active-open warnings", async () => {
+  const state = setup();
+  const options = (state.coordinator as any).options;
+  options.cloud.openProfile = async () => {
+    state.events.push("cloud-open");
+    return {
+      ok: true,
+      registrationId: "registration2",
+      baseVersion: 4,
+      payload: payload(),
+      activeOpens: [{
+        registrationId: "registration2",
+        accountId: "account1",
+        memberEmail: "member@example.com",
+        deviceId: "device1",
+        deviceLabel: "This PC",
+        openedAt: 1,
+        heartbeatAt: 2,
+      }],
+    };
+  };
+
+  expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toMatchObject({
+    ok: true,
+    port: 9222,
+  });
+  expect(state.events).toEqual(["cloud-open", "start", "restore"]);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster excludes only the exact local registration", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  options.cloud.listProfiles = async () => ({
+    ok: true,
+    profiles: [{
+      id: "profile1",
+      name: "Profile",
+      group: "",
+      platform: "x.com",
+      tags: [],
+      version: 4,
+      trashedAt: null,
+      trashedBy: null,
+      updatedAt: 1,
+      permission: "edit",
+      activeOpens: [
+        {
+          registrationId: "registration1",
+          accountId: "account1",
+          memberEmail: "member@example.com",
+          deviceId: "device1",
+          deviceLabel: "This PC",
+          openedAt: 1,
+          heartbeatAt: 2,
+        },
+        {
+          registrationId: "registration-other",
+          accountId: "account1",
+          memberEmail: "member@example.com",
+          deviceId: "device1",
+          deviceLabel: "This PC",
+          openedAt: 1,
+          heartbeatAt: 2,
+        },
+      ],
+    }],
+  });
+
+  const roster = await state.coordinator.listRoster();
+
+  expect(roster.profiles[0]?.lockedBy).toBe("1 other session(s)");
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster excludes the exact registration retained for pending sync", async () => {
+  const state = setup({ closeTransportFailure: true });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+  const options = (state.coordinator as any).options;
+  options.cloud.listProfiles = async () => ({
+    ok: true,
+    profiles: [{
+      id: "profile1",
+      name: "Profile",
+      group: "",
+      platform: "x.com",
+      tags: [],
+      version: 4,
+      trashedAt: null,
+      trashedBy: null,
+      updatedAt: 1,
+      permission: "edit",
+      activeOpens: [{
+        registrationId: "registration1",
+        accountId: "account1",
+        memberEmail: "member@example.com",
+        deviceId: "device1",
+        deviceLabel: "This PC",
+        openedAt: 1,
+        heartbeatAt: 2,
+      }],
+    }],
+  });
+
+  const roster = await state.coordinator.listRoster();
+
+  expect(roster.profiles[0]?.lockedBy).toBeNull();
+  await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();
 });
@@ -1657,13 +2024,15 @@ test("folder access revocation stops without capturing or submitting", async () 
 
   await state.coordinator.heartbeatOnce("profile1");
 
-  expect(state.events).toEqual(["stop"]);
+  expect(state.events).toEqual(["reconcile", "stop"]);
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
   expect(state.queue.list("account1")).toEqual([]);
   expect(state.closeCalls()).toBe(0);
   expect(state.abandonCalls()).toBe(0);
-  expect(state.coordinator.diagnostics().map((event) => event.type)).toContain("access_ended");
+  const diagnostics = state.coordinator.diagnostics().map((event) => event.type);
+  expect(diagnostics).toContain("heartbeat_terminal_access_ended");
+  expect(diagnostics).toContain("access_ended");
   state.queue.close();
   state.store.close();
 });
@@ -1717,6 +2086,48 @@ test("terminal Cloud heartbeat errors capture and stop the browser", async () =>
     status: "conflict",
     error: "device_revoked",
   }]);
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toEqual(
+    expect.arrayContaining(["heartbeat_terminal_access_ended", "session_sync_conflict"]),
+  );
+  state.queue.close();
+  state.store.close();
+});
+
+test("version-conflict heartbeat records the terminal conflict class", async () => {
+  const state = setup({ closeConflict: true });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    throw new CloudApiError("stale", "version_conflict", 409);
+  };
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toContain(
+    "heartbeat_terminal_conflict",
+  );
+  state.queue.close();
+  state.store.close();
+});
+
+test("terminal heartbeat reconciles confirmed browser death before capture", async () => {
+  const state = setup({ closeConflict: true });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.events.length = 0;
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    throw new CloudApiError("stale", "version_conflict", 409);
+  };
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events).toEqual(["reconcile", "cloud-close"]);
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  expect(state.queue.list("account1")[0]).toMatchObject({ status: "conflict" });
+  expect(state.coordinator.diagnostics().map((event) => event.type)).toContain(
+    "browser_death_confirmed",
+  );
   state.queue.close();
   state.store.close();
 });
@@ -1831,4 +2242,90 @@ test("Cloud browser reports a safe restore stage and retains the verified browse
   expect(state.store.getLaunch("profile1")).not.toBeNull();
   state.queue.close();
   state.store.close();
+});
+
+test("Cloud lease renewal continues while checkpoint capture is blocked", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  let captureStarted!: () => void;
+  let releaseCapture!: () => void;
+  const started = new Promise<void>((resolve) => { captureStarted = resolve; });
+  const blocked = new Promise<void>((resolve) => { releaseCapture = resolve; });
+  (state.coordinator as any).options.readSession = async () => {
+    state.events.push("capture");
+    captureStarted();
+    await blocked;
+    return JSON.stringify({ ...payload().session, origins: [] });
+  };
+  state.events.length = 0;
+
+  const first = state.coordinator.heartbeatOnce("profile1");
+  await started;
+  const second = state.coordinator.heartbeatOnce("profile1");
+  try {
+    await Bun.sleep(0);
+    expect(state.events.filter((event) => event === "heartbeat")).toHaveLength(2);
+    expect(state.events.filter((event) => event === "capture")).toHaveLength(1);
+  } finally {
+    releaseCapture();
+    await Promise.allSettled([first, second]);
+    await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
+test("Cloud close renews its lease through capture and confirmed teardown", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  let captureStarted!: () => void;
+  let releaseCapture!: () => void;
+  let stopStarted!: () => void;
+  let releaseStop!: () => void;
+  const captureGate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+  const captureReady = new Promise<void>((resolve) => { captureStarted = resolve; });
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const stopReady = new Promise<void>((resolve) => { stopStarted = resolve; });
+  const options = (state.coordinator as any).options;
+  options.readSession = async () => {
+    state.events.push("capture");
+    captureStarted();
+    await captureGate;
+    return JSON.stringify({ ...payload().session, origins: [] });
+  };
+  options.launcher.stop = async (profileId: string) => {
+    state.events.push("stop");
+    stopStarted();
+    await stopGate;
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+  state.events.length = 0;
+
+  const closing = state.coordinator.close("profile1");
+  await captureReady;
+  const duringCapture = state.coordinator.heartbeatOnce("profile1");
+  let duringStop: Promise<void> | undefined;
+  try {
+    await Bun.sleep(0);
+    expect(state.events.filter((event) => event === "heartbeat")).toHaveLength(1);
+
+    releaseCapture();
+    await stopReady;
+    duringStop = state.coordinator.heartbeatOnce("profile1");
+    await Bun.sleep(0);
+    expect(state.events.filter((event) => event === "heartbeat")).toHaveLength(2);
+    expect(state.events).not.toContain("cloud-close");
+
+    releaseStop();
+    expect(await closing).toEqual({ closed: true, sync: "complete" });
+    await Promise.all([duringCapture, duringStop]);
+    expect(state.events.at(-1)).toBe("cloud-close");
+  } finally {
+    releaseCapture();
+    releaseStop();
+    await Promise.allSettled([closing, duringCapture, ...(duringStop ? [duringStop] : [])]);
+    state.queue.close();
+    state.store.close();
+  }
 });
