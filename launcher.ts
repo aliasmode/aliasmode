@@ -386,6 +386,8 @@ export interface LaunchStartResult {
   port: number;
 }
 
+export type LaunchGeneration = Pick<LaunchInfo, "debugPort" | "startedAt">;
+
 const DEFAULT_DATA_ROOT = "profiles";
 const DEFAULT_CDP_READY_TIMEOUT_MS = 180_000;
 const DEFAULT_PID_RECOVERY_GRACE_MS = 30_000;
@@ -2243,15 +2245,19 @@ export class Launcher {
 
   /**
    * Stop the browser for `profileId`; true only when teardown is confirmed.
+   * When `expected` is set, refuse a replacement launch generation.
    * Concurrent stops coalesce, and start() will wait for this full transition
    * (including its final launch-row cleanup) before reusing the profile.
    */
-  async stop(profileId: string): Promise<boolean> {
+  async stop(profileId: string, expected?: LaunchGeneration): Promise<boolean> {
     const existingStop = this.stopsInFlight.get(profileId);
     const starting = this.startsInFlight.get(profileId);
     const startQueuedAfterExistingStop = !!existingStop && !!starting &&
       this.startAfterStop.get(profileId) === existingStop;
-    if (existingStop && !startQueuedAfterExistingStop) return existingStop;
+    if (existingStop && !startQueuedAfterExistingStop) {
+      if (!expected) return existingStop;
+      return existingStop.then((stopped) => stopped && this.store.getLaunch(profileId) === null);
+    }
     // See start(): defer until this stop is discoverable, but wait only for the
     // start that was already registered when stop() was called.
     let promise!: Promise<boolean>;
@@ -2262,7 +2268,7 @@ export class Launcher {
           this.log(`stop ${profileId}: waiting for in-flight start to settle`);
           await starting.catch(() => {});
         }
-        return await this.doStop(profileId);
+        return await this.doStop(profileId, expected);
       })
       .finally(() => {
         if (this.stopsInFlight.get(profileId) === promise) {
@@ -2273,8 +2279,12 @@ export class Launcher {
     return promise;
   }
 
-  private async doStop(profileId: string): Promise<boolean> {
+  private async doStop(profileId: string, expected?: LaunchGeneration): Promise<boolean> {
     let launch = this.store.getLaunch(profileId);
+    if (
+      expected &&
+      (!launch || launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt)
+    ) return false;
     if (launch && (!launch.binaryPath || !launch.userDataDir)) {
       const adopted = await this.adoptLegacyLaunchIdentity(profileId, launch);
       if (!adopted) {

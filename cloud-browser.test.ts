@@ -1584,6 +1584,35 @@ test("Cloud releaseAll finishes retained cleanup without recapturing", async () 
   state.store.close();
 });
 
+test("Cloud releaseAll never submits retained cleanup after an account change", async () => {
+  let accountId = "account1";
+  const state = setup({
+    accountId: () => accountId,
+    stopResult: false,
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({
+    closed: false,
+    reason: "teardown_unconfirmed",
+  });
+  (state.coordinator as any).options.launcher.stop = async (profileId: string) => {
+    accountId = "account2";
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+
+  expect(await state.coordinator.releaseAll()).toBe(false);
+  expect(state.closeCalls()).toBe(0);
+  expect(state.queue.listOpens("account1")).toEqual([]);
+  expect(state.queue.list("account1")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: true,
+    status: "pending",
+  }]);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud releaseAll never stops a replacement during retained cleanup", async () => {
   const state = setup({ stopResult: false });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -1591,21 +1620,30 @@ test("Cloud releaseAll never stops a replacement during retained cleanup", async
     closed: false,
     reason: "teardown_unconfirmed",
   });
-  state.store.recordLaunch({
-    profileId: "profile1",
-    pid: 11,
-    debugPort: 9333,
-    ws: "ws://replacement",
-    startedAt: 2000,
-  });
-  let stopCalls = 0;
-  (state.coordinator as any).options.launcher.stop = async () => {
-    stopCalls++;
+  let stoppedGeneration: number | undefined;
+  (state.coordinator as any).options.launcher.stop = async (
+    profileId: string,
+    expected?: { debugPort: number; startedAt: number },
+  ) => {
+    state.store.recordLaunch({
+      profileId,
+      pid: 11,
+      debugPort: 9333,
+      ws: "ws://replacement",
+      startedAt: 2000,
+    });
+    const current = state.store.getLaunch(profileId)!;
+    if (
+      expected &&
+      (current.debugPort !== expected.debugPort || current.startedAt !== expected.startedAt)
+    ) return false;
+    stoppedGeneration = current.startedAt;
+    state.store.clearLaunch(profileId);
     return true;
   };
 
   expect(await state.coordinator.releaseAll()).toBe(false);
-  expect(stopCalls).toBe(0);
+  expect(stoppedGeneration).toBeUndefined();
   expect(state.store.getLaunch("profile1")).toMatchObject({
     debugPort: 9333,
     startedAt: 2000,

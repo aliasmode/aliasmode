@@ -2041,6 +2041,37 @@ test("stop-start-stop preserves generation order and tears down the queued repla
   store.close();
 });
 
+test("generation-fenced stop refuses a replacement before deferred teardown", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const killed: number[] = [];
+  const launcher = newLauncher(store, f, [], killed, undefined, { hostPlatform: "win32" });
+  await launcher.start("k1d0cd11");
+  const original = store.getLaunch("k1d0cd11")!;
+
+  const stopping = launcher.stop("k1d0cd11", {
+    debugPort: original.debugPort,
+    startedAt: original.startedAt,
+  });
+  const replacement = {
+    ...original,
+    pid: 7000,
+    debugPort: 9444,
+    ws: "ws://127.0.0.1:9444/devtools/browser/replacement",
+    startedAt: original.startedAt + 1,
+  };
+  f.aliveByPort.set(replacement.debugPort, true);
+  f.pidByPort.set(replacement.debugPort, replacement.pid);
+  f.aliveByPid.set(replacement.pid, true);
+  store.recordLaunch(replacement);
+
+  expect(await stopping).toBe(false);
+  expect(killed).toEqual([]);
+  expect(store.getLaunch("k1d0cd11")).toEqual(replacement);
+  store.close();
+});
+
 test("a synchronously reentrant start sees the registered single-flight transition", async () => {
   const store = seeded();
   const stored = store.getProfile("k1d0cd11")!;

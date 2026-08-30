@@ -969,7 +969,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       return this.closeResultForOpen(open, queue);
     }
     this.clearCheckpointSignature(open);
-    await retryPendingSync(queue, this.options.cloud, accountId);
+    if (this.options.accountId() === accountId) {
+      await retryPendingSync(queue, this.options.cloud, accountId);
+    }
     const result = this.closeResultForOpen(open, queue);
     this.diagnosticEvents.record(result.sync === "complete" ? "session_synced" : "cleanup_retained");
     return result;
@@ -1067,7 +1069,13 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (launch) {
       const exact = current.debugPort !== null && current.startedAt !== null &&
         launch.debugPort === current.debugPort && launch.startedAt === current.startedAt;
-      if (!exact || !await this.options.launcher.stop(open.profileId).catch(() => false)) {
+      if (
+        !exact ||
+        !await this.options.launcher.stop(open.profileId, {
+          debugPort: launch.debugPort,
+          startedAt: launch.startedAt,
+        }).catch(() => false)
+      ) {
         this.diagnosticEvents.record("cleanup_retained");
         return false;
       }
@@ -1095,7 +1103,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (captures.length > 0) {
       if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
       this.clearCheckpointSignature(open);
-      await retryPendingSync(queue, this.options.cloud, open.accountId);
+      if (this.options.accountId() === open.accountId) {
+        await retryPendingSync(queue, this.options.cloud, open.accountId);
+      }
       const retainedCaptures = this.pendingCapturesForOpen(open, queue);
       if (retainedCaptures.length > 0) {
         this.diagnosticEvents.record(
@@ -1726,8 +1736,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }
         if (closedThisPass === 0) break;
       }
-      await retryPendingSync(queue, this.options.cloud, accountId);
-      released = teardownConfirmed &&
+      if (this.options.accountId() === accountId) {
+        await retryPendingSync(queue, this.options.cloud, accountId);
+      }
+      released = this.options.accountId() === accountId &&
+        teardownConfirmed &&
         queue.listOpens(accountId).length === 0 &&
         queue.list(accountId).every((close) => close.readyToSubmit);
       return released;

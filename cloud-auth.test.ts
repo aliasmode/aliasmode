@@ -42,6 +42,35 @@ test("Cloud auth keeps access tokens only in runtime state", async () => {
   expect(runtime.state()).toMatchObject({ authenticated: true, expiresAt: 61_000 });
 });
 
+test("Cloud auth refuses to replace an active account session", async () => {
+  let signInCalls = 0;
+  const runtime = new CloudAuthRuntime(auth({
+    async signIn() {
+      signInCalls++;
+      return {
+        accessToken: `access-${signInCalls}`,
+        refreshToken: `refresh-${signInCalls}`,
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: `account${signInCalls}`, email_confirmed_at: "verified" },
+      };
+    },
+  }), () => 1_000);
+  await runtime.signIn("first@example.com", "password");
+
+  await expect(runtime.signIn("second@example.com", "password")).rejects.toThrow(
+    "Sign out before signing in to another Cloud account",
+  );
+  await expect(runtime.restore("replacement-refresh")).rejects.toThrow(
+    "Sign out before restoring another Cloud account",
+  );
+  expect(signInCalls).toBe(1);
+  expect(runtime.state()).toMatchObject({
+    authenticated: true,
+    user: { id: "account1" },
+  });
+});
+
 test("Cloud auth rejects expired in-memory access tokens", async () => {
   let now = 1_000;
   const runtime = new CloudAuthRuntime(auth(), () => now);
@@ -213,6 +242,35 @@ test("Cloud sign-out succeeds locally when remote logout fails", async () => {
 
   expect(runtime.state()).toEqual({ authenticated: false });
   expect(cleared).toBe(1);
+});
+
+test("Cloud sign-out clears durable credentials without waiting for remote logout", async () => {
+  let markRemoteStarted!: () => void;
+  const remoteStarted = new Promise<void>((resolve) => { markRemoteStarted = resolve; });
+  let finishRemote!: () => void;
+  const remotePending = new Promise<void>((resolve) => { finishRemote = resolve; });
+  let cleared = 0;
+  const runtime = new CloudAuthRuntime(auth({
+    async signOut() {
+      markRemoteStarted();
+      await remotePending;
+    },
+  }), () => 1_000, undefined, async () => { cleared++; });
+  await runtime.signIn("user@example.com", "password");
+
+  const signedOut = runtime.signOut();
+  let settled = false;
+  void signedOut.then(() => { settled = true; });
+  await remoteStarted;
+  try {
+    await Bun.sleep(0);
+    expect(cleared).toBe(1);
+    expect(settled).toBe(true);
+  } finally {
+    finishRemote();
+    await signedOut;
+  }
+  expect(runtime.state()).toEqual({ authenticated: false });
 });
 
 test("Cloud sign-out still rejects a durable credential clear failure", async () => {

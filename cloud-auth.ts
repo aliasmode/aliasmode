@@ -80,11 +80,17 @@ export class CloudAuthRuntime {
   }
 
   async signIn(email: string, password: string): Promise<CloudAuthResult> {
+    if (this.accessTokenValue || this.refreshTokenValue) {
+      throw new Error("Sign out before signing in to another Cloud account");
+    }
     const generation = this.generation;
     return this.acceptAndPersist(await this.auth.signIn(email, password), generation);
   }
 
   async restore(refreshToken: string): Promise<CloudAuthResult> {
+    if (this.accessTokenValue || this.refreshTokenValue) {
+      throw new Error("Sign out before restoring another Cloud account");
+    }
     const generation = this.generation;
     return this.acceptAndPersist(await this.auth.refresh(refreshToken), generation);
   }
@@ -94,20 +100,17 @@ export class CloudAuthRuntime {
     const accessToken = this.accessTokenValue;
     this.clear();
     const pending = (async () => {
-      try {
-        if (accessToken) {
-          try {
-            await this.auth.signOut(accessToken);
-          } catch {
-            // Local sign-out must not depend on the remote session being reachable.
-          }
-        }
-      } finally {
+      if (accessToken) {
         try {
-          await this.mutateCredentials(async () => { await this.onSignOut?.(); });
-        } finally {
-          this.clear();
+          void this.auth.signOut(accessToken).catch(() => {});
+        } catch {
+          // Local sign-out must not depend on the remote session being reachable.
         }
+      }
+      try {
+        await this.mutateCredentials(async () => { await this.onSignOut?.(); });
+      } finally {
+        this.clear();
       }
     })().finally(() => {
       if (this.signOutInFlight === pending) this.signOutInFlight = undefined;
