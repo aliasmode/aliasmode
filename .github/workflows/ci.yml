@@ -367,10 +367,25 @@ jobs:
               "aliasmode_browser_select",
               "aliasmode_browser_status",
               "aliasmode_browser_close",
-              "browser_close"
+              "browser_close",
+              "browser_evaluate",
+              "browser_press_key",
+              "browser_click",
+              "browser_run_code"
             )) {
               if ($toolNames -notcontains $name) { throw "installed MCP host did not expose $name" }
             }
+            foreach ($tool in @($toolResponse.result.tools)) {
+              if (-not $tool.annotations -or [string]::IsNullOrWhiteSpace([string]$tool.annotations.title)) {
+                throw "installed MCP tool $($tool.name) has no title annotation"
+              }
+              foreach ($hint in @("readOnlyHint", "destructiveHint", "openWorldHint")) {
+                if ($tool.annotations.PSObject.Properties.Name -notcontains $hint) {
+                  throw "installed MCP tool $($tool.name) has no $hint annotation"
+                }
+              }
+            }
+            $initialToolSchemas = ConvertTo-Json -InputObject @($toolResponse.result.tools) -Compress -Depth 100
 
             if (-not (Test-Path $descriptorPath -PathType Leaf)) { throw "background runtime descriptor is missing" }
             $descriptor = Get-Content $descriptorPath | ConvertFrom-Json
@@ -464,6 +479,30 @@ jobs:
             $selected = Read-McpResponse $mcp 3
             if ($selected.result.isError -eq $true) {
               throw "installed MCP host could not select the pre-existing browser"
+            }
+
+            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":30,"method":"tools/list","params":{}}')
+            $selectedTools = Read-McpResponse $mcp 30
+            $selectedToolSchemas = ConvertTo-Json -InputObject @($selectedTools.result.tools) -Compress -Depth 100
+            if ($selectedToolSchemas -cne $initialToolSchemas) {
+              throw "installed MCP tool schemas changed after browser selection"
+            }
+
+            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"browser_close","arguments":{}}}')
+            $closed = Read-McpResponse $mcp 31
+            if ($closed.result.isError -eq $true) {
+              throw "installed MCP host could not close the selected browser"
+            }
+            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":32,"method":"tools/list","params":{}}')
+            $closedTools = Read-McpResponse $mcp 32
+            $closedToolSchemas = ConvertTo-Json -InputObject @($closedTools.result.tools) -Compress -Depth 100
+            if ($closedToolSchemas -cne $initialToolSchemas) {
+              throw "installed MCP tool schemas changed after browser close"
+            }
+
+            $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
+            if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
+              throw "installed helper could not reopen the pre-existing browser"
             }
 
             $createRequest = @{

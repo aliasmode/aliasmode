@@ -6,7 +6,36 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
+const CAPABILITIES = ["core", "core-tabs", "vision", "pdf", "testing", "tracing"];
 const FILTERED_TOOLS = new Set(["browser_close", "browser_install"]);
+
+async function connectOfficial(version, contextGetter) {
+  const server = await createConnection({ capabilities: CAPABILITIES }, contextGetter);
+  const client = new Client(
+    { name: "aliasmode-playwright-proxy", version },
+    { capabilities: { roots: { listChanged: false } } },
+  );
+  client.setRequestHandler(ListRootsRequestSchema, async () => ({
+    roots: [{ uri: pathToFileURL(process.cwd()).href, name: "workspace" }],
+  }));
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([
+      server.connect(serverTransport),
+      client.connect(clientTransport),
+    ]);
+    const listed = await client.listTools();
+    return {
+      client,
+      server,
+      tools: listed.tools.filter((tool) => !FILTERED_TOOLS.has(tool.name)),
+    };
+  } catch (error) {
+    await client.close().catch(() => {});
+    await server.close().catch(() => {});
+    throw error;
+  }
+}
 
 function nonClosingContext(context) {
   return new Proxy(context, {
@@ -19,46 +48,41 @@ function nonClosingContext(context) {
 }
 
 export class PlaywrightToolProxy {
-  constructor(version) {
+  constructor(version, connectOverCDP = (...args) => chromium.connectOverCDP(...args)) {
     this.version = version;
+    this.connectOverCDP = connectOverCDP;
     this.tools = [];
+  }
+
+  async initialize() {
+    if (this.tools.length) return;
+    const official = await connectOfficial(this.version, async () => {
+      throw new Error("select an open AliasMode browser first");
+    });
+    this.tools = official.tools;
+    await official.client.close().catch(() => {});
+    await official.server.close().catch(() => {});
   }
 
   async attach(endpoint) {
     await this.detach();
-    const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
+    const browser = await this.connectOverCDP(endpoint, { timeout: 30_000 });
     const context = browser.contexts()[0];
     if (!context) {
       await browser.close();
       throw new Error("AliasMode browser did not expose a persistent context");
     }
 
-    const officialServer = await createConnection(
-      { capabilities: ["core", "core-tabs", "vision", "pdf", "testing", "tracing"] },
-      async () => nonClosingContext(context),
-    );
-    const officialClient = new Client(
-      { name: "aliasmode-playwright-proxy", version: this.version },
-      { capabilities: { roots: { listChanged: false } } },
-    );
-    officialClient.setRequestHandler(ListRootsRequestSchema, async () => ({
-      roots: [{ uri: pathToFileURL(process.cwd()).href, name: "workspace" }],
-    }));
-    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
-
     try {
-      await Promise.all([
-        officialServer.connect(serverTransport),
-        officialClient.connect(clientTransport),
-      ]);
-      const listed = await officialClient.listTools();
+      const official = await connectOfficial(
+        this.version,
+        async () => nonClosingContext(context),
+      );
       this.browser = browser;
-      this.officialServer = officialServer;
-      this.officialClient = officialClient;
-      this.tools = listed.tools.filter((tool) => !FILTERED_TOOLS.has(tool.name));
+      this.officialServer = official.server;
+      this.officialClient = official.client;
+      this.tools = official.tools;
     } catch (error) {
-      await officialClient.close().catch(() => {});
-      await officialServer.close().catch(() => {});
       await browser.close().catch(() => {});
       throw error;
     }
@@ -81,7 +105,6 @@ export class PlaywrightToolProxy {
     this.officialClient = undefined;
     this.officialServer = undefined;
     this.browser = undefined;
-    this.tools = [];
     await client?.close().catch(() => {});
     await server?.close().catch(() => {});
     // A CDP-connected Browser closes only its Playwright transport. The guarded

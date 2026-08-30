@@ -88,7 +88,7 @@ Setup configures Claude Code, Codex, OpenClaw, and Hermes when installed. Its JS
 
 Agents can create profiles, open several headful or headless browsers, select one browser, and use the full pinned Playwright MCP tool set. AliasMode remains responsible for browser processes, profile locks, Cloud sessions, capture, and safe close. Local mode needs no account and does not contact AliasMode Cloud.
 
-Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. Keep AliasMode open on that Windows device. Open **Account & Settings → Remote MCP** and copy its pinned server URL. Claude.ai and ChatGPT connect through AliasMode sign-in and OAuth. Claude Code and other bearer-capable clients can also use the displayed access key in a secret header.
+Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. Keep AliasMode open on that Windows device. Open **Account & Settings → Remote MCP** and copy its pinned server URL. Claude.ai and ChatGPT connect through AliasMode sign-in and OAuth. Claude Code and other bearer-capable clients can also use the displayed access key in a secret header. See the [Claude and ChatGPT connector guide](https://aliasmode.com/docs/connectors/) for the complete setup and Playwright workflow.
 
 Advanced users can create additional independently revocable connectors from the packaged helper:
 
