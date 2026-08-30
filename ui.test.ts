@@ -14,6 +14,7 @@ import { PendingSyncRuntime } from "./pending-sync.ts";
 import { EmailVerificationRequiredError, SupabaseAuthRequestError, type SupabaseAuthClient } from "./supabase-auth.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
+import type { Profile } from "./types.ts";
 
 const SAMPLE = `id=k1d0cd11
 name=sophia
@@ -2601,7 +2602,16 @@ test("Cloud profile open on this device is edited live through the local cache",
     }),
   } as any;
   const noted: string[] = [];
-  const cloudBrowser = { noteProfileEdited(id: string) { noted.push(id); } } as any;
+  const cloudBrowser = {
+    canEditLive(id: string) {
+      return id === "k1d0cd11";
+    },
+    async commitLiveEdit(profile: Profile) {
+      s.upsertProfile(profile);
+      noted.push(profile.id);
+      return true;
+    },
+  } as any;
   s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
 
   const getResponse = await handleUiRequest(
@@ -2663,6 +2673,53 @@ test("Cloud profile open on this device is edited live through the local cache",
   );
   expect(staleResponse!.status).toBe(409);
   expect((await staleResponse!.json()).error).toContain("reopen Edit");
+  s.close();
+});
+
+test("Cloud live edit rejects a save that loses the close race", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-live-edit-close-race-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const originalName = s.getProfile("k1d0cd11")!.name;
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
+  let live = true;
+  const cloudBrowser = {
+    canEditLive() {
+      return live;
+    },
+    async commitLiveEdit() {
+      return false;
+    },
+  } as any;
+  const saveRequest = () => new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ set: { name: "Too late" } }),
+  });
+
+  const duringCommit = await handleUiRequest(
+    saveRequest(),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(duringCommit!.status).toBe(409);
+  expect((await duringCommit!.json()).error).toContain("reopen Edit");
+  expect(s.getProfile("k1d0cd11")!.name).toBe(originalName);
+
+  live = false;
+  const afterCloseStarted = await handleUiRequest(
+    saveRequest(),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(afterCloseStarted!.status).toBe(409);
+  expect((await afterCloseStarted!.json()).error).toContain("reopen Edit");
+  expect(s.getProfile("k1d0cd11")!.name).toBe(originalName);
   s.close();
 });
 

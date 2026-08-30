@@ -78,9 +78,12 @@ export interface CloudBrowserProfile {
 
 export interface CloudBrowserLifecycle {
   listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }>;
+  canEditLive?(profileId: string): boolean;
+  /** Commit a prepared live edit only while the exact running Cloud generation
+      still owns the profile. The close transition uses the same fence. */
+  commitLiveEdit?(profile: Profile): Promise<boolean>;
   /** A live edit changed the cached profile of an open session — make the next
-      checkpoint re-encode it and happen promptly. Optional so partial fakes in
-      tests need not provide it. */
+      checkpoint re-encode it and happen promptly. Optional for partial fakes. */
   noteProfileEdited?(profileId: string): void;
   create(profile: Profile): Promise<{ id: string }>;
   importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse>;
@@ -324,6 +327,39 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
   diagnostics(): readonly CloudDiagnosticEvent[] {
     return this.diagnosticEvents.snapshot();
+  }
+
+  canEditLive(profileId: string): boolean {
+    return !this.draining &&
+      !this.shuttingDown &&
+      !this.closing.has(profileId) &&
+      this.hasLiveEditGeneration(profileId);
+  }
+
+  async commitLiveEdit(profile: Profile): Promise<boolean> {
+    return this.withProfileTransition(profile.id, async () => {
+      if (this.draining || this.shuttingDown || !this.hasLiveEditGeneration(profile.id)) {
+        return false;
+      }
+      this.options.store.upsertProfile(profile);
+      this.noteProfileEdited(profile.id);
+      return true;
+    });
+  }
+
+  private hasLiveEditGeneration(profileId: string): boolean {
+    let context: { queue: PendingSyncQueue; accountId: string };
+    try {
+      context = this.requireContext(false);
+    } catch {
+      return false;
+    }
+    const open = context.queue.getOpen(profileId, context.accountId);
+    const launch = this.options.store.getLaunch(profileId);
+    return !!open &&
+      !open.cleanupMode &&
+      !!launch &&
+      this.isExactRunningLaunch(open, launch);
   }
 
   async listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }> {
@@ -1685,7 +1721,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         queue.list(accountId).length === 0;
       return released;
     } finally {
-      if (!permanent && !this.shuttingDown && !released) {
+      if (permanent || this.shuttingDown || released) {
+        await this.stopPendingRetry();
+      } else {
         this.draining = false;
         this.startPendingRetry();
       }

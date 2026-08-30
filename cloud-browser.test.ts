@@ -726,6 +726,43 @@ test("a live profile edit forces the next checkpoint to re-encode the payload", 
   state.store.close();
 });
 
+test("a live profile edit cannot commit behind an in-flight close", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const original = state.store.getProfile("profile1")!;
+  let captureStarted!: () => void;
+  let releaseCapture!: () => void;
+  const captureReady = new Promise<void>((resolve) => { captureStarted = resolve; });
+  const captureGate = new Promise<void>((resolve) => { releaseCapture = resolve; });
+  (state.coordinator as any).options.readSession = async () => {
+    captureStarted();
+    await captureGate;
+    return JSON.stringify({ ...payload().session, origins: [] });
+  };
+
+  const closing = state.coordinator.close("profile1");
+  let committing: Promise<boolean> | undefined;
+  await captureReady;
+  try {
+    expect(state.coordinator.canEditLive("profile1")).toBe(false);
+    committing = state.coordinator.commitLiveEdit({ ...original, name: "Too late" });
+    let committed = false;
+    void committing.then(() => { committed = true; });
+    await Bun.sleep(0);
+    expect(committed).toBe(false);
+
+    releaseCapture();
+    expect(await closing).toEqual({ closed: true, sync: "complete" });
+    expect(await committing).toBe(false);
+    expect(state.store.getProfile("profile1")?.name).toBe(original.name);
+  } finally {
+    releaseCapture();
+    await Promise.allSettled([closing, ...(committing ? [committing] : [])]);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
 test("Cloud close reconciles a manually closed browser before session capture", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -1755,7 +1792,19 @@ test("Cloud releaseAll retries a pending-only close after recovery", async () =>
 });
 
 test("Cloud releaseAll succeeds when a close retry drains its early failure", async () => {
-  const state = setup();
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  const state = setup({
+    heartbeatMs: 60_000,
+    setIntervalFn(fn) {
+      const timer = ++nextTimer;
+      timers.set(timer, fn);
+      return timer;
+    },
+    clearIntervalFn(handle) {
+      timers.delete(handle as number);
+    },
+  });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   const options = (state.coordinator as any).options;
   let attempts = 0;
@@ -1768,6 +1817,7 @@ test("Cloud releaseAll succeeds when a close retry drains its early failure", as
   expect(await state.coordinator.releaseAll()).toBe(true);
   expect(attempts).toBe(2);
   expect(state.queue.list("account1")).toEqual([]);
+  expect(timers.size).toBe(0);
   state.queue.close();
   state.store.close();
 });

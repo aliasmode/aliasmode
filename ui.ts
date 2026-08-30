@@ -1241,7 +1241,7 @@ export async function handleUiRequest(
       // and close syncs push the whole profile — edited fields included — back
       // to Cloud. No expectedVersion handshake applies on this path, and no
       // Cloud connection is needed — so this branch stays ahead of that guard.
-      if (store.getLaunch(id)) {
+      if (options.cloudBrowser.canEditLive?.(id) === true) {
         const live = store.getProfile(id);
         if (!live) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
         return Response.json({ ok: true, profile: { ...profileEditView(live), liveEdit: true } });
@@ -1280,9 +1280,9 @@ export async function handleUiRequest(
           ? body.set as Record<string, unknown>
           : {};
         // Open on this device → live edit of the local cached copy; the running
-        // session's checkpoint/close sync carries the change to Cloud. Needs no
-        // Cloud connection, so it stays ahead of that guard.
-        if (store.getLaunch(id)) {
+        // session's checkpoint/close sync carries the change to Cloud. The
+        // coordinator commits through the same transition fence as close.
+        if (options.cloudBrowser.canEditLive?.(id) === true) {
           const live = store.getProfile(id);
           if (!live) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
           // The portable-profile contract carries no custom NO., so accepting
@@ -1293,15 +1293,14 @@ export async function handleUiRequest(
           if (liveProxyChanged && live.proxy) {
             await attachTimezones([live], options.timezoneFetch).catch(() => {});
           }
-          store.upsertProfile(live);
-          // Make the edit durable NOW: the checkpoint signature hashes only
-          // session data, so without this a metadata-only edit could be
-          // skipped as "unchanged" and lost to an X-button close or crash.
-          options.cloudBrowser.noteProfileEdited?.(id);
+          const committed = await (options.cloudBrowser.commitLiveEdit?.(live) ?? Promise.resolve(false));
+          if (!committed) {
+            return Response.json(
+              { ok: false, error: "the browser just closed; reopen Edit before saving" },
+              { status: 409 },
+            );
+          }
           return Response.json({ ok: true });
-        }
-        if (!options.cloudConnection) {
-          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
         }
         if (body.expectedVersion === undefined) {
           // The dialog was opened against a running profile that has since
@@ -1311,6 +1310,9 @@ export async function handleUiRequest(
             { ok: false, error: "the browser just closed; reopen Edit before saving" },
             { status: 409 },
           );
+        }
+        if (!options.cloudConnection) {
+          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
         }
         const editor = new CloudProfileEditor(options.cloudConnection.client, store, options.timezoneFetch);
         await editor.save(id, body.expectedVersion as number, set);
