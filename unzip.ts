@@ -8,7 +8,7 @@
  * inflate entries with Node's built-in zlib — no external `unzip`.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, createVerify } from "node:crypto";
 import { join, normalize } from "node:path";
 import { inflateRawSync } from "node:zlib";
 
@@ -65,6 +65,27 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((byte, index) => byte === b[index]);
 }
 
+function verifiesSignature(
+  algorithm: "sha1" | "sha256",
+  chunks: Uint8Array[],
+  publicKey: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  try {
+    const key = createPublicKey({
+      key: Buffer.from(publicKey),
+      format: "der",
+      type: "spki",
+    });
+    const verifier = createVerify(algorithm);
+    for (const chunk of chunks) verifier.update(chunk);
+    verifier.end();
+    return verifier.verify(key, signature);
+  } catch {
+    return false;
+  }
+}
+
 /** Parse a ZIP or signed Chrome extension archive without inflating its payload. */
 export function parseArchive(input: Uint8Array): ParsedArchive {
   const isCrx = input.length >= 4 && input[0] === 0x43 && input[1] === 0x72 && input[2] === 0x32 && input[3] === 0x34; // "Cr24"
@@ -78,12 +99,17 @@ export function parseArchive(input: Uint8Array): ParsedArchive {
     const signatureLength = u32(input, 12);
     const keyEnd = 16 + publicKeyLength;
     const zipOffset = keyEnd + signatureLength;
-    if (publicKeyLength === 0 || keyEnd > input.length || zipOffset > input.length) {
+    if (publicKeyLength === 0 || signatureLength === 0 || keyEnd > input.length || zipOffset > input.length) {
       throw new Error("truncated CRX2 header");
     }
     const publicKey = input.subarray(16, keyEnd);
+    const signature = input.subarray(keyEnd, zipOffset);
+    const zip = input.subarray(zipOffset);
+    if (!verifiesSignature("sha1", [zip], publicKey, signature)) {
+      throw new Error("CRX2 signature verification failed");
+    }
     return {
-      zip: input.subarray(zipOffset),
+      zip,
       crxVersion: 2,
       publicKey,
       extensionId: extensionId(publicKey),
@@ -103,15 +129,41 @@ export function parseArchive(input: Uint8Array): ParsedArchive {
     const crxId = lengthDelimitedFields(signedData).find((field) => field.number === 1)?.bytes;
     if (!crxId || crxId.length !== 16) throw new Error("CRX3 has an invalid signed extension id");
 
-    const publicKeys = header
+    const proofs = header
       .filter((field) => field.number === 2 || field.number === 3)
-      .map((field) => lengthDelimitedFields(field.bytes).find((proofField) => proofField.number === 1)?.bytes)
-      .filter((key): key is Uint8Array => !!key);
-    const publicKey = publicKeys.find((key) => sameBytes(createHash("sha256").update(key).digest().subarray(0, 16), crxId));
-    if (!publicKey) throw new Error("CRX3 has no public key matching its signed extension id");
+      .map((field) => {
+        const proofFields = lengthDelimitedFields(field.bytes);
+        return {
+          publicKey: proofFields.find((proofField) => proofField.number === 1)?.bytes,
+          signature: proofFields.find((proofField) => proofField.number === 2)?.bytes,
+        };
+      })
+      .filter((proof): proof is { publicKey: Uint8Array; signature: Uint8Array } =>
+        !!proof.publicKey && !!proof.signature,
+      );
+    const matchingProofs = proofs.filter((proof) =>
+      sameBytes(createHash("sha256").update(proof.publicKey).digest().subarray(0, 16), crxId),
+    );
+    if (matchingProofs.length === 0) {
+      throw new Error("CRX3 has no public key matching its signed extension id");
+    }
+
+    const signedDataLength = new Uint8Array(4);
+    new DataView(signedDataLength.buffer).setUint32(0, signedData.length, true);
+    const zip = input.subarray(zipOffset);
+    const signatureChunks = [
+      new TextEncoder().encode("CRX3 SignedData\0"),
+      signedDataLength,
+      signedData,
+      zip,
+    ];
+    const publicKey = matchingProofs.find((proof) =>
+      verifiesSignature("sha256", signatureChunks, proof.publicKey, proof.signature),
+    )?.publicKey;
+    if (!publicKey) throw new Error("CRX3 signature verification failed");
 
     return {
-      zip: input.subarray(zipOffset),
+      zip,
       crxVersion: 3,
       publicKey,
       extensionId: extensionId(publicKey),

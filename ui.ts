@@ -1121,6 +1121,8 @@ export async function handleUiRequest(
   }
 
   if (pathname === "/ui/api/extensions/web-store" && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
     if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
     let source: string;
     let id: string;

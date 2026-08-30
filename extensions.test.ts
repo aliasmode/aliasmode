@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   installWebStoreExtension,
   parseWebStoreExtensionId,
+  readManifestName,
 } from "./extensions.ts";
 
 function concat(...chunks: Uint8Array[]): Uint8Array {
@@ -70,14 +71,19 @@ function extensionId(publicKey: Uint8Array): string {
     .join("");
 }
 
-function crx2(zip: Uint8Array, publicKey: Uint8Array): Uint8Array {
-  const signature = new Uint8Array([1]);
+const fixtureKeys = generateKeyPairSync("rsa", { modulusLength: 1024 });
+const fixturePublicKey = new Uint8Array(
+  fixtureKeys.publicKey.export({ format: "der", type: "spki" }),
+);
+
+function crx2(zip: Uint8Array): Uint8Array {
+  const signature = new Uint8Array(sign("sha1", zip, fixtureKeys.privateKey));
   return concat(
     new TextEncoder().encode("Cr24"),
     uint32(2),
-    uint32(publicKey.length),
+    uint32(fixturePublicKey.length),
     uint32(signature.length),
-    publicKey,
+    fixturePublicKey,
     signature,
     zip,
   );
@@ -100,12 +106,11 @@ test("rejects malformed IDs and non-Store hosts", () => {
 });
 
 test("downloads an official CRX, preserves its ID, and resolves its localized name", async () => {
-  const publicKey = new Uint8Array([3, 1, 4, 1, 5, 9]);
-  const id = extensionId(publicKey);
+  const id = extensionId(fixturePublicKey);
   const bytes = crx2(storedZip({
     "manifest.json": JSON.stringify({ manifest_version: 3, name: "__MSG_extensionName__", version: "1", default_locale: "en" }),
     "_locales/en/messages.json": JSON.stringify({ extensionName: { message: "Fixture Extension" } }),
-  }), publicKey);
+  }));
   const root = mkdtempSync(join(tmpdir(), "aliasmode-extension-"));
   let requested = "";
 
@@ -121,17 +126,31 @@ test("downloads an official CRX, preserves its ID, and resolves its localized na
   expect(url.searchParams.get("x")).toBe(`id=${id}&uc`);
   expect(installed).toMatchObject({ id, name: "Fixture Extension" });
   expect(JSON.parse(readFileSync(join(installed.loadDir, "manifest.json"), "utf8")).key)
-    .toBe(Buffer.from(publicKey).toString("base64"));
+    .toBe(Buffer.from(fixturePublicKey).toString("base64"));
 });
 
 test("rejects a downloaded CRX with a different identity and removes its files", async () => {
-  const requestedKey = new Uint8Array([1, 2, 3]);
-  const downloadedKey = new Uint8Array([4, 5, 6]);
-  const requestedId = extensionId(requestedKey);
-  const bytes = crx2(storedZip({ "manifest.json": '{"manifest_version":3,"name":"Wrong","version":"1"}' }), downloadedKey);
+  const requestedId = "a".repeat(32);
+  expect(requestedId).not.toBe(extensionId(fixturePublicKey));
+  const bytes = crx2(storedZip({ "manifest.json": '{"manifest_version":3,"name":"Wrong","version":"1"}' }));
   const root = mkdtempSync(join(tmpdir(), "aliasmode-extension-"));
 
   await expect(installWebStoreExtension(requestedId, root, async () => new Response(bytes.buffer as ArrayBuffer)))
     .rejects.toThrow("does not match");
   expect(existsSync(join(root, requestedId))).toBe(false);
+});
+
+test("does not read localized names outside the extension directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-extension-locale-"));
+  const dir = join(root, "installed");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({
+    name: "__MSG_extensionName__",
+    default_locale: "../..",
+  }));
+  writeFileSync(join(root, "messages.json"), JSON.stringify({
+    extensionName: { message: "Outside Name" },
+  }));
+
+  expect(readManifestName(dir, "Fallback Name")).toBe("Fallback Name");
 });

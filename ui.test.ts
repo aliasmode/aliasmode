@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,24 +63,29 @@ function extensionId(publicKey: Uint8Array): string {
     .join("");
 }
 
-function extensionCrx(publicKey: Uint8Array): Uint8Array {
-  const signature = new Uint8Array([1]);
+const extensionKeys = generateKeyPairSync("rsa", { modulusLength: 1024 });
+const extensionPublicKey = new Uint8Array(
+  extensionKeys.publicKey.export({ format: "der", type: "spki" }),
+);
+
+function extensionCrx(): Uint8Array {
+  const signature = new Uint8Array(sign("sha1", EXTENSION_ZIP, extensionKeys.privateKey));
   const header = new Uint8Array(16);
   header.set(new TextEncoder().encode("Cr24"));
   const view = new DataView(header.buffer);
   view.setUint32(4, 2, true);
-  view.setUint32(8, publicKey.length, true);
+  view.setUint32(8, extensionPublicKey.length, true);
   view.setUint32(12, signature.length, true);
-  const out = new Uint8Array(header.length + publicKey.length + signature.length + EXTENSION_ZIP.length);
+  const out = new Uint8Array(header.length + extensionPublicKey.length + signature.length + EXTENSION_ZIP.length);
   out.set(header);
-  out.set(publicKey, header.length);
-  out.set(signature, header.length + publicKey.length);
-  out.set(EXTENSION_ZIP, header.length + publicKey.length + signature.length);
+  out.set(extensionPublicKey, header.length);
+  out.set(signature, header.length + extensionPublicKey.length);
+  out.set(EXTENSION_ZIP, header.length + extensionPublicKey.length + signature.length);
   return out;
 }
 
-function extensionResponse(publicKey: Uint8Array): Response {
-  const bytes = extensionCrx(publicKey);
+function extensionResponse(): Response {
+  const bytes = extensionCrx();
   return new Response(bytes.buffer as ArrayBuffer);
 }
 
@@ -833,8 +838,7 @@ test("an IPv6 proxy round-trips through the edit view without losing its identit
 test("Chrome Web Store endpoint installs once and reuses the registered extension", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-web-store-"));
-  const publicKey = new Uint8Array([2, 7, 1, 8, 2, 8]);
-  const id = extensionId(publicKey);
+  const id = extensionId(extensionPublicKey);
   let fetches = 0;
   const request = () => new Request("http://x/ui/api/extensions/web-store", {
     method: "POST",
@@ -844,7 +848,7 @@ test("Chrome Web Store endpoint installs once and reuses the registered extensio
 
   const first = await handleUiRequest(request(), {} as any, s, null, {
     paths: { extensions: root } as any,
-    extensionFetch: async () => { fetches++; return extensionResponse(publicKey); },
+    extensionFetch: async () => { fetches++; return extensionResponse(); },
   });
   expect(first!.status).toBe(200);
   expect(await first!.json()).toMatchObject({ ok: true, installed: { id, name: "Route Fixture" }, alreadyInstalled: false });
@@ -864,7 +868,8 @@ test("Chrome Web Store endpoint installs once and reuses the registered extensio
 test("Chrome Web Store endpoint leaves no registry or files after identity failure", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-web-store-"));
-  const requestedId = extensionId(new Uint8Array([1, 2, 3]));
+  const requestedId = "a".repeat(32);
+  expect(requestedId).not.toBe(extensionId(extensionPublicKey));
   const response = await handleUiRequest(
     new Request("http://x/ui/api/extensions/web-store", {
       method: "POST",
@@ -876,13 +881,42 @@ test("Chrome Web Store endpoint leaves no registry or files after identity failu
     null,
     {
       paths: { extensions: root } as any,
-      extensionFetch: async () => extensionResponse(new Uint8Array([4, 5, 6])),
+      extensionFetch: async () => extensionResponse(),
     },
   );
 
   expect(response!.status).toBe(500);
   expect(s.getExtension(requestedId)).toBeNull();
   expect(existsSync(join(root, requestedId))).toBe(false);
+  s.close();
+});
+
+test("Chrome Web Store endpoint rejects cross-origin simple requests", async () => {
+  const s = store();
+  let fetches = 0;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/extensions/web-store", {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+        Origin: "https://example.com",
+      },
+      body: JSON.stringify({ source: extensionId(extensionPublicKey) }),
+    }),
+    {} as any,
+    s,
+    null,
+    {
+      extensionFetch: async () => {
+        fetches++;
+        return extensionResponse();
+      },
+    },
+  );
+
+  expect(response!.status).toBe(415);
+  expect(fetches).toBe(0);
+  expect(s.listExtensions()).toEqual([]);
   s.close();
 });
 

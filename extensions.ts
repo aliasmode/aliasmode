@@ -75,7 +75,7 @@ export function readManifestName(dir: string, fallback: string): string {
     if (name && !name.startsWith("__MSG_")) return name;
     const messageKey = /^__MSG_(.+)__$/.exec(name)?.[1];
     const locale = typeof manifest.default_locale === "string" ? manifest.default_locale.trim() : "";
-    if (messageKey && locale) {
+    if (messageKey && /^[a-zA-Z0-9_-]+$/.test(locale)) {
       const messages = JSON.parse(readFileSync(join(dir, "_locales", locale, "messages.json"), "utf8"));
       const localized = typeof messages?.[messageKey]?.message === "string"
         ? messages[messageKey].message.trim()
