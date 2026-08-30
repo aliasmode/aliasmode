@@ -271,6 +271,13 @@ jobs:
             Set-Content (Join-Path $appData "config.json")
           $descriptorPath = Join-Path $appData "agent-runtime.json"
 
+          $automationPortBlocker = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 50400)
+          $automationPortBlocker.Server.ExclusiveAddressUse = $true
+          $automationPortBlocker.Start()
+          if (-not $automationPortBlocker.Server.IsBound) {
+            throw "fixed automation port conflict fixture did not bind"
+          }
+
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
           $helper = Join-Path $installRoot "aliasmode-mcp.exe"
           $playwrightRuntime = Join-Path $installRoot "playwright"
@@ -1366,6 +1373,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "installed deterministic proxy mismatch smoke exited with code $LASTEXITCODE"
           }
+          if (-not $automationPortBlocker.Server.IsBound) {
+            throw "fixed automation port conflict fixture released before installed acceptance completed"
+          }
+          $automationPortBlocker.Stop()
 
           foreach ($name in $liveProxyEnvironmentNames) {
             [Environment]::SetEnvironmentVariable($name, $savedLiveProxyEnvironment[$name], "Process")

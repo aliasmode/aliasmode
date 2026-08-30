@@ -2694,7 +2694,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
-            automationServer: automationServer!,
+            automationServer,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2783,7 +2783,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
-            automationServer: automationServer!,
+            automationServer,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2836,7 +2836,7 @@ async function main() {
         if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
         attachDesktopControl(new ManagedDesktopRuntime({
           server,
-          automationServer: automationServer!,
+          automationServer,
           admission: lifecycleAdmission!,
           store,
           launcher,

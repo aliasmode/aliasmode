@@ -3277,6 +3277,7 @@ function App() {
                 <Icon name="power" className="sm" />{authBusy ? "Signing out…" : "Sign out / Switch account"}
               </button>
             )}
+            {authErr && <p className="modal-err" role="alert">{authErr}</p>}
             </div>
           </section>
 

@@ -86,6 +86,12 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("setProfiles([]);");
   expect(app).toContain("setTeam(null);");
   expect(app).toContain("generation !== authGeneration.current");
+
+  const account = app.slice(
+    app.indexOf('<h2 className="sect-title">Account information</h2>'),
+    app.indexOf('className="settings-card remote-mcp-settings"'),
+  );
+  expect(account).toContain('{authErr && <p className="modal-err" role="alert">{authErr}</p>}');
 });
 
 test("dashboard accepts a server-persisted pending queue key", () => {

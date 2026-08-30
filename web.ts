@@ -193,7 +193,11 @@ export function serveAutomationApi(opts: Omit<DashboardServerOptions, "hostname"
 }
 
 export function serveDesktopAutomationApi(opts: Omit<DashboardServerOptions, "hostname" | "port">) {
-  return serveAutomationApi({ ...opts, port: 50400 });
+  try {
+    return serveAutomationApi({ ...opts, port: 50400 });
+  } catch {
+    return undefined;
+  }
 }
 
 export function serveDashboard(opts: DashboardServerOptions) {
