@@ -13,6 +13,32 @@ import { PlaywrightToolProxy } from "./playwright-proxy.mjs";
 const VERSION = process.env.ALIASMODE_APP_VERSION || "0.1.0-beta.32";
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
 const PROFILE_ID = { type: "string", minLength: 1 };
+const PROXY_REPLACEMENT_ROW = {
+  type: "object",
+  properties: {
+    profileId: PROFILE_ID,
+    username: { type: "string", minLength: 1, maxLength: 255 },
+    expectedVersion: { type: "integer", minimum: 1 },
+    proxy: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["http", "https", "socks5"] },
+        host: { type: "string" },
+        port: { type: "string" },
+        user: { type: "string" },
+        pass: { type: "string" },
+      },
+      required: ["type", "host", "port", "user", "pass"],
+      additionalProperties: false,
+    },
+  },
+  required: ["proxy"],
+  oneOf: [
+    { required: ["profileId"], not: { required: ["username"] } },
+    { required: ["username"], not: { required: ["profileId"] } },
+  ],
+  additionalProperties: false,
+};
 
 function diagnose(message) {
   if (process.env.ALIASMODE_MCP_DIAGNOSTICS === "1") {
@@ -25,6 +51,27 @@ const ALIAS_TOOLS = [
     name: "aliasmode_profiles_list",
     description: "List AliasMode profiles and their current browser state.",
     inputSchema: EMPTY_SCHEMA,
+  },
+  {
+    name: "aliasmode_profiles_replace_proxies",
+    description: "Dry-run or apply bulk proxy replacements to closed AliasMode Cloud profiles. Apply always preflights first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dryRun: { type: "boolean", default: true },
+        replacements: {
+          type: "array",
+          minItems: 1,
+          items: PROXY_REPLACEMENT_ROW,
+        },
+        csv: { type: "string", minLength: 1 },
+      },
+      oneOf: [
+        { required: ["replacements"], not: { required: ["csv"] } },
+        { required: ["csv"], not: { required: ["replacements"] } },
+      ],
+      additionalProperties: false,
+    },
   },
   {
     name: "aliasmode_profile_create",
@@ -213,6 +260,9 @@ export async function createAliasModeMcp(options = {}) {
     try {
       if (name === "aliasmode_profiles_list") {
         return toolResult(await runtime.call("profiles.list"));
+      }
+      if (name === "aliasmode_profiles_replace_proxies") {
+        return toolResult(await runtime.call("profiles.replaceProxies", args));
       }
       if (name === "aliasmode_profile_create") {
         return toolResult(await runtime.call("profiles.create", profileInput(args)));

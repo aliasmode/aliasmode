@@ -36,6 +36,8 @@ import {
   type OpenProfileRequest,
   type OpenProfileResponse,
   type ProfileMutationResponse,
+  type ProxyReplacementsRequest,
+  type ProxyReplacementsResponse,
   type PurgeProfileResponse,
   type RestoreProfileRequest,
   type TrashProfileRequest,
@@ -362,6 +364,15 @@ export class CloudClient {
       body: JSON.stringify(request),
     });
     this.profileRoster = undefined;
+    return response;
+  }
+
+  async replaceProfileProxies(request: ProxyReplacementsRequest): Promise<ProxyReplacementsResponse> {
+    const response = await this.call<ProxyReplacementsResponse>("/profiles/proxy-replacements", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    if (!request.dryRun) this.profileRoster = undefined;
     return response;
   }
 

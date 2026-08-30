@@ -5,11 +5,22 @@ import { createAliasModeMcp, sanitizeEnvironment } from "./mcp-host.mjs";
 
 class FakeRuntime {
   events: string[] = [];
+  calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   closed = false;
 
   async call(method: string, params: Record<string, unknown> = {}) {
     this.events.push(`${method}:${params.profileId ?? ""}`);
+    this.calls.push({ method, params: structuredClone(params) });
     if (method === "profiles.list") return { profiles: [] };
+    if (method === "profiles.replaceProxies") {
+      return {
+        ok: true,
+        dryRun: params.dryRun !== false,
+        counts: { received: 1, matched: 1, ready: 1, updated: 0, unchanged: 0, missing: 0, skipped: 0 },
+        results: [{ index: 0, status: "ready", profileId: "profile-1", currentVersion: 4 }],
+        missingUsernames: [],
+      };
+    }
     if (method === "browser.open") {
       const ownedByConnection = params.profileId !== "existing";
       return {
@@ -84,6 +95,57 @@ test("MCP host preserves Windows environment keys case-insensitively", () => {
   };
   sanitizeEnvironment(env);
   expect(env).toEqual({ APPDATA: "appdata", Path: "system path", TEMP: "temp" });
+});
+
+test("MCP host exposes strict proxy replacement input and forwards safe results", async () => {
+  const runtime = new FakeRuntime();
+  const host = await createAliasModeMcp({
+    discovered: { client: runtime },
+    playwright: new FakePlaywright(),
+  });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const listed = await client.listTools();
+  const tool = listed.tools.find((candidate) => candidate.name === "aliasmode_profiles_replace_proxies");
+  expect(tool?.inputSchema).toMatchObject({
+    type: "object",
+    properties: {
+      dryRun: { type: "boolean", default: true },
+      replacements: { type: "array", minItems: 1 },
+      csv: { type: "string", minLength: 1 },
+    },
+    additionalProperties: false,
+  });
+  expect((tool?.inputSchema as { oneOf?: unknown[] }).oneOf).toHaveLength(2);
+
+  const replacement = {
+    username: "exact-user",
+    proxy: { type: "socks5", host: "proxy.test", port: "1080", user: "proxy-user", pass: "private-pass" },
+  };
+  const structured = await client.callTool({
+    name: "aliasmode_profiles_replace_proxies",
+    arguments: { dryRun: true, replacements: [replacement] },
+  });
+  expect(structured.isError).not.toBe(true);
+  expect(runtime.calls.at(-1)).toEqual({
+    method: "profiles.replaceProxies",
+    params: { dryRun: true, replacements: [replacement] },
+  });
+  expect(JSON.stringify(structured)).not.toContain("private-pass");
+  expect(structured.structuredContent).toMatchObject({
+    dryRun: true,
+    counts: { ready: 1 },
+    results: [{ index: 0, status: "ready", profileId: "profile-1", currentVersion: 4 }],
+  });
+
+  const csv = "username,type,host,port,user,pass\nexact-user,http,proxy.test,8080,user,private-csv-pass";
+  await client.callTool({ name: "aliasmode_profiles_replace_proxies", arguments: { csv } });
+  expect(runtime.calls.at(-1)).toEqual({ method: "profiles.replaceProxies", params: { csv } });
+
+  await client.close();
+  await host.close();
 });
 
 test("MCP host adds Playwright tools after selection and uses safe close", async () => {

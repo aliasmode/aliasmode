@@ -166,6 +166,60 @@ export interface CloudProxy {
   pass: string;
 }
 
+export type ProxyReplacementSelector =
+  | { profileId: string; username?: never }
+  | { username: string; profileId?: never };
+
+export type ProxyReplacementRequestRow = ProxyReplacementSelector & {
+  proxy: CloudProxy;
+  expectedVersion?: number;
+};
+
+export interface ProxyReplacementsRequest {
+  dryRun: boolean;
+  replacements: ProxyReplacementRequestRow[];
+}
+
+export type ProxyReplacementStatus = "ready" | "updated" | "unchanged" | "missing" | "skipped";
+
+export type ProxyReplacementCode =
+  | "invalid_row"
+  | "invalid_proxy"
+  | "expected_version_required"
+  | "duplicate_selector"
+  | "no_editable_match"
+  | "ambiguous_username"
+  | "duplicate_target"
+  | "profile_trashed"
+  | "profile_open"
+  | "version_conflict";
+
+export interface ProxyReplacementResult {
+  index: number;
+  status: ProxyReplacementStatus;
+  code?: ProxyReplacementCode;
+  profileId?: string;
+  currentVersion?: number;
+  previousVersion?: number;
+  version?: number;
+}
+
+export interface ProxyReplacementsResponse {
+  ok: true;
+  dryRun: boolean;
+  counts: {
+    received: number;
+    matched: number;
+    ready: number;
+    updated: number;
+    unchanged: number;
+    missing: number;
+    skipped: number;
+  };
+  results: ProxyReplacementResult[];
+  missingUsernames: string[];
+}
+
 /** Complete portable state. The server stores this only as an encrypted envelope. */
 export interface PortableProfileV1 {
   schemaVersion: 1;

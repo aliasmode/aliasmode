@@ -207,6 +207,54 @@ test("Cloud client imports one profile batch and invalidates its roster cache", 
   expect(rosterRequests).toEqual([null, null]);
 });
 
+test("Cloud client replaces proxies and invalidates its roster only after apply", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const rosterRequests: Array<string | null> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/profiles/proxy-replacements")) {
+      const request = JSON.parse(String(init?.body));
+      return Response.json({
+        ok: true,
+        dryRun: request.dryRun,
+        counts: {
+          received: 1,
+          matched: 1,
+          ready: request.dryRun ? 1 : 0,
+          updated: request.dryRun ? 0 : 1,
+          unchanged: 0,
+          missing: 0,
+          skipped: 0,
+        },
+        results: request.dryRun
+          ? [{ index: 0, status: "ready", profileId: "profile1", currentVersion: 1 }]
+          : [{ index: 0, status: "updated", profileId: "profile1", previousVersion: 1, version: 2 }],
+        missingUsernames: [],
+      });
+    }
+    rosterRequests.push(new Headers(init?.headers).get("if-none-match"));
+    return Response.json({ ok: true, profiles: [] }, { headers: { etag: '"roster-1"' } });
+  });
+  const replacement = {
+    profileId: "profile1",
+    expectedVersion: 1,
+    proxy: { type: "socks5" as const, host: "proxy.test", port: "1080", user: "user", pass: "secret" },
+  };
+
+  await cloud.listProfiles();
+  await cloud.replaceProfileProxies({ dryRun: true, replacements: [replacement] });
+  await cloud.listProfiles();
+  await cloud.replaceProfileProxies({ dryRun: false, replacements: [replacement] });
+  await cloud.listProfiles();
+
+  const replacementCalls = calls.filter((call) => call.url.endsWith("/profiles/proxy-replacements"));
+  expect(replacementCalls.map((call) => [call.init?.method, JSON.parse(String(call.init?.body))])).toEqual([
+    ["POST", { dryRun: true, replacements: [replacement] }],
+    ["POST", { dryRun: false, replacements: [replacement] }],
+  ]);
+  expect(rosterRequests).toEqual([null, '"roster-1"', null]);
+});
+
 test("Cloud profile roster reuses its per-client ETag cache", async () => {
   const requests: Array<string | null> = [];
   const roster = { ok: true as const, profiles: [] };

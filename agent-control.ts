@@ -14,6 +14,7 @@ import {
 } from "./launcher.ts";
 import type { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import type { RemoteCoordinator } from "./remote.ts";
+import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import type { ProfileStore } from "./store.ts";
 
 export const AGENT_CONTROL_PROTOCOL = "aliasmode-agent-v1";
@@ -83,12 +84,15 @@ function agentError(code: string, message: string): AgentControlError {
 }
 
 function errorResponse(id: number, error: unknown): AgentControlResponse {
-  if (error instanceof AgentControlError) {
+  if (error instanceof AgentControlError || error instanceof ProxyReplacementInputError) {
     return {
       protocol: AGENT_CONTROL_PROTOCOL,
       id,
       ok: false,
-      error: { code: error.code, message: error.message },
+      error: {
+        code: error instanceof AgentControlError ? error.code : "invalid_request",
+        message: error.message,
+      },
     };
   }
   if (error instanceof BrowserLaunchError) {
@@ -192,6 +196,8 @@ export class AgentControlSession {
     switch (method) {
       case "profiles.list":
         return { profiles: await this.listProfiles() };
+      case "profiles.replaceProxies":
+        return await this.replaceProfileProxies(params);
       case "profiles.create":
         return await this.createProfile(params);
       case "profiles.delete":
@@ -249,6 +255,14 @@ export class AgentControlSession {
     const { connection } = this.cloudMcpConnection();
     await connection.client.revokeMcpConnector(connectorId);
     return { connectorId, revoked: true as const };
+  }
+
+  private async replaceProfileProxies(params: Record<string, unknown>) {
+    if (!this.deps.cloudBrowser) {
+      throw agentError("cloud_unavailable", "Switch to AliasMode Cloud and sign in on this device first");
+    }
+    const { connection } = this.cloudMcpConnection();
+    return runProxyReplacements(connection.client, params);
   }
 
   private async listProfiles(): Promise<SafeProfile[]> {

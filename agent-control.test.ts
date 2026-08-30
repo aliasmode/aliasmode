@@ -7,6 +7,7 @@ import {
   parseAgentControlRequest,
   validAgentAuthorization,
 } from "./agent-control.ts";
+import type { ProxyReplacementsRequest } from "./contracts/cloud-v1.ts";
 
 function wire(method: string, params: Record<string, unknown> = {}, id = 1): string {
   return JSON.stringify({ protocol: AGENT_CONTROL_PROTOCOL, id, method, params });
@@ -256,4 +257,80 @@ test("MCP connector methods return the token once and use the current device URL
   const revoked = await session.enqueue(wire("mcp.connectors.revoke", { connectorId: "connector-id" }));
   expect(revoked).toMatchObject({ ok: true, result: { connectorId: "connector-id", revoked: true } });
   expect(calls).toEqual(["create:Linux Claude", "revoke:connector-id"]);
+});
+
+test("proxy replacement Agent Control method is Cloud-only and returns safe results", async () => {
+  const h = harness();
+  const calls: ProxyReplacementsRequest[] = [];
+  const session = new AgentControlSession({
+    ...h.deps,
+    cloudBrowser: {} as any,
+    cloudConnection: {
+      deviceId: () => "device-id",
+      client: {
+        replaceProfileProxies: async (request: ProxyReplacementsRequest) => {
+          calls.push(structuredClone(request));
+          return {
+            ok: true as const,
+            dryRun: true,
+            counts: { received: 1, matched: 1, ready: 1, updated: 0, unchanged: 0, missing: 0, skipped: 0 },
+            results: [{ index: 0, status: "ready" as const, profileId: "profile-1", currentVersion: 4 }],
+            missingUsernames: [],
+          };
+        },
+      },
+    } as any,
+  });
+  const replacement = {
+    username: "exact-user",
+    proxy: { type: "socks5" as const, host: "proxy.test", port: "1080", user: "proxy-user", pass: "private-pass" },
+  };
+
+  const result = await session.enqueue(wire("profiles.replaceProxies", { replacements: [replacement] }));
+
+  expect(calls).toEqual([{ dryRun: true, replacements: [replacement] }]);
+  expect(result).toMatchObject({
+    ok: true,
+    result: {
+      dryRun: true,
+      counts: { ready: 1 },
+      results: [{ index: 0, status: "ready", profileId: "profile-1", currentVersion: 4 }],
+    },
+  });
+  expect(JSON.stringify(result)).not.toContain("private-pass");
+});
+
+test("proxy replacement Agent Control method rejects non-Cloud and malformed calls", async () => {
+  const h = harness();
+  let calls = 0;
+  const connection = {
+    deviceId: () => "device-id",
+    client: {
+      replaceProfileProxies: async () => {
+        calls++;
+        throw new Error("must not call Cloud");
+      },
+    },
+  } as any;
+  for (const deps of [
+    h.deps,
+    { ...h.deps, cloudConnection: connection },
+    { ...h.deps, cloudBrowser: {} as any },
+  ]) {
+    const result = await new AgentControlSession(deps).enqueue(wire("profiles.replaceProxies", {
+      replacements: [{ username: "user", proxy: {} }],
+    }));
+    expect(result).toMatchObject({ ok: false, error: { code: "cloud_unavailable" } });
+  }
+
+  const malformed = await new AgentControlSession({
+    ...h.deps,
+    cloudBrowser: {} as any,
+    cloudConnection: connection,
+  }).enqueue(wire("profiles.replaceProxies", {
+    dryRun: "false",
+    replacements: [{ username: "user", proxy: {} }],
+  }));
+  expect(malformed).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+  expect(calls).toBe(0);
 });
