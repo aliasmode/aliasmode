@@ -209,6 +209,28 @@ jobs:
           }
           $hashLines = @(Get-Content (Join-Path $artifact "SHA256SUMS.txt"))
           if ($hashLines.Count -ne 5) { throw "release checksum manifest must hash exactly five files" }
+      - name: Test public beta.45 through the real in-app updater
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifact = Resolve-Path ".\artifacts\windows-update-candidate"
+          $installer = Join-Path $artifact.Path "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
+          $signature = "$installer.sig"
+          $manifest = Join-Path $artifact.Path "latest.json"
+          $diagnostics = Join-Path $env:RUNNER_TEMP "aliasmode-windows-updater-acceptance.json"
+          & ".\scripts\windows-in-app-update-acceptance.ps1" `
+            -CandidateVersion $env:ALIASMODE_CANDIDATE_VERSION `
+            -CandidateInstallerPath $installer `
+            -CandidateSignaturePath $signature `
+            -CandidateManifestPath $manifest `
+            -DiagnosticsPath $diagnostics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aliasmode-windows-in-app-update-diagnostics
+          path: ${{ runner.temp }}/aliasmode-windows-updater-acceptance.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Test previous-version upgrade and data preservation
         shell: pwsh
         env:
