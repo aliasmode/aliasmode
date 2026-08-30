@@ -876,6 +876,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
     this.stopDirtyMonitor(profileId);
     this.missingPageObservations.delete(profileId);
+    if (open.cleanupMode) {
+      await this.retryCleanup(open, queue);
+      const current = queue.getOpen(profileId, accountId);
+      if (current?.registrationId === open.registrationId) {
+        this.startHeartbeat(profileId);
+        return this.teardownUnconfirmed();
+      }
+      return this.closeResultForOpen(open, queue);
+    }
     if (launch && open.phase !== "running") {
       if (
         open.debugPort === null ||

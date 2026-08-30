@@ -2451,6 +2451,50 @@ test("Cloud sign-out releases browsers before queue, device, and credentials", a
   s.close();
 });
 
+test("Cloud sign-out returns success after a remote logout failure", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email_confirmed_at: "verified" },
+      };
+    },
+    async signOut() { throw new Error("offline"); },
+  } as unknown as SupabaseAuthClient, () => 1_000, undefined, () => {
+    calls.push("clearCredentials");
+  });
+  await cloudAuth.signIn("user@example.com", "password");
+  const cloudConnection = {
+    clearDevice() { calls.push("clearDevice"); },
+  } as unknown as CloudConnectionRuntime;
+  const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
+  const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return true; } } as any;
+  const mcpTunnel = {
+    async disconnect() { calls.push("disconnectTunnel"); },
+    refresh() { calls.push("refreshTunnel"); },
+  };
+
+  const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser, mcpTunnel });
+
+  expect(response!.status).toBe(200);
+  expect(cloudAuth.state()).toEqual({ authenticated: false });
+  expect(calls).toEqual([
+    "disconnectTunnel",
+    "releaseAll",
+    "closeQueue",
+    "clearDevice",
+    "clearCredentials",
+  ]);
+  s.close();
+});
+
 test("Cloud profile routes use the Cloud browser coordinator without local fallback", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-browser-"));

@@ -95,7 +95,13 @@ export class CloudAuthRuntime {
     this.clear();
     const pending = (async () => {
       try {
-        if (accessToken) await this.auth.signOut(accessToken);
+        if (accessToken) {
+          try {
+            await this.auth.signOut(accessToken);
+          } catch {
+            // Local sign-out must not depend on the remote session being reachable.
+          }
+        }
       } finally {
         try {
           await this.mutateCredentials(async () => { await this.onSignOut?.(); });

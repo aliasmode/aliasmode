@@ -202,13 +202,28 @@ test("Cloud sign-out waits for an accepted refresh write before clearing credent
   ]);
 });
 
-test("Cloud sign-out clears memory and durable credentials even when remote logout fails", async () => {
+test("Cloud sign-out succeeds locally when remote logout fails", async () => {
   let cleared = 0;
   const runtime = new CloudAuthRuntime(auth({
     async signOut() { throw new Error("offline"); },
   }), () => 1_000, undefined, async () => { cleared++; });
   await runtime.signIn("user@example.com", "password");
-  await expect(runtime.signOut()).rejects.toThrow("offline");
+
+  await expect(runtime.signOut()).resolves.toBeUndefined();
+
   expect(runtime.state()).toEqual({ authenticated: false });
   expect(cleared).toBe(1);
+});
+
+test("Cloud sign-out still rejects a durable credential clear failure", async () => {
+  const runtime = new CloudAuthRuntime(
+    auth({ async signOut() { throw new Error("offline"); } }),
+    () => 1_000,
+    undefined,
+    async () => { throw new Error("credential clear failed"); },
+  );
+  await runtime.signIn("user@example.com", "password");
+
+  await expect(runtime.signOut()).rejects.toThrow("credential clear failed");
+  expect(runtime.state()).toEqual({ authenticated: false });
 });

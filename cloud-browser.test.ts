@@ -1544,6 +1544,83 @@ test("Cloud browser never submits a capture before browser teardown is confirmed
   state.store.close();
 });
 
+test("Cloud releaseAll finishes retained cleanup without recapturing", async () => {
+  const state = setup({ closeConflict: true, stopResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  (state.coordinator as any).options.cloud.heartbeat = async () => {
+    throw new CloudApiError("stale", "version_conflict", 409);
+  };
+
+  await state.coordinator.heartbeatOnce("profile1");
+
+  expect(state.events.filter((event) => event === "capture")).toHaveLength(1);
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
+    registrationId: "registration1",
+    cleanupMode: "sync",
+  });
+  expect(state.queue.list("account1")).toMatchObject([{
+    readyToSubmit: false,
+    status: "pending",
+  }]);
+
+  (state.coordinator as any).options.launcher.stop = async (profileId: string) => {
+    state.events.push("stop-retry");
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+
+  expect(await state.coordinator.releaseAll()).toBe(true);
+  expect(state.events.filter((event) => event === "capture")).toHaveLength(1);
+  expect(state.events).toContain("stop-retry");
+  expect(state.store.getLaunch("profile1")).toBeNull();
+  expect(state.queue.listOpens("account1")).toEqual([]);
+  expect(state.queue.list("account1")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: true,
+    status: "conflict",
+  }]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll never stops a replacement during retained cleanup", async () => {
+  const state = setup({ stopResult: false });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({
+    closed: false,
+    reason: "teardown_unconfirmed",
+  });
+  state.store.recordLaunch({
+    profileId: "profile1",
+    pid: 11,
+    debugPort: 9333,
+    ws: "ws://replacement",
+    startedAt: 2000,
+  });
+  let stopCalls = 0;
+  (state.coordinator as any).options.launcher.stop = async () => {
+    stopCalls++;
+    return true;
+  };
+
+  expect(await state.coordinator.releaseAll()).toBe(false);
+  expect(stopCalls).toBe(0);
+  expect(state.store.getLaunch("profile1")).toMatchObject({
+    debugPort: 9333,
+    startedAt: 2000,
+  });
+  expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
+    registrationId: "registration1",
+    cleanupMode: "sync",
+  });
+  expect(state.queue.list("account1")).toMatchObject([{
+    readyToSubmit: false,
+  }]);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud browser reopens the latest Cloud state while preserving a stale CAS close", async () => {
   const state = setup({ closeConflict: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
