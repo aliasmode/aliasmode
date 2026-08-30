@@ -35,7 +35,13 @@ import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictCustomNo, decodeText } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
-import { installExtension, removeExtensionFiles } from "./extensions.ts";
+import {
+  installExtension,
+  installWebStoreExtension,
+  parseWebStoreExtensionId,
+  removeExtensionFiles,
+  type ExtensionFetch,
+} from "./extensions.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
@@ -360,6 +366,7 @@ export interface UiRuntimeOptions {
   mcpTunnel?: McpTunnelLifecycle;
   health?: UiHealthMetadata | null;
   timezoneFetch?: FetchLike;
+  extensionFetch?: ExtensionFetch;
   /** Mode whose runtimes were wired when this process started. */
   runtimeMode?: "unconfigured" | "local" | "cloud";
 }
@@ -761,6 +768,7 @@ export async function handleUiRequest(
   // writes the extensions field).
   const cloudExtensionRoute =
     (pathname === "/ui/api/extensions" && req.method === "GET") ||
+    (pathname === "/ui/api/extensions/web-store" && req.method === "POST") ||
     (pathname === "/ui/api/extensions/upload" && req.method === "POST") ||
     (pathname === "/ui/api/extensions/delete" && req.method === "POST");
   if (
@@ -1110,6 +1118,49 @@ export async function handleUiRequest(
   // --- Extensions registry (upload / list / delete) ---
   if (pathname === "/ui/api/extensions" && req.method === "GET") {
     return Response.json({ ok: true, extensions: store.listExtensions().map((e) => ({ id: e.id, name: e.name })) });
+  }
+
+  if (pathname === "/ui/api/extensions/web-store" && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    let source: string;
+    let id: string;
+    try {
+      const body = (await req.json()) as { source?: unknown };
+      source = String(body.source ?? "").trim();
+      id = parseWebStoreExtensionId(source);
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+    const existing = store.getExtension(id);
+    if (existing) {
+      return Response.json({
+        ok: true,
+        installed: { id: existing.id, name: existing.name },
+        alreadyInstalled: true,
+      });
+    }
+    try {
+      const installed = await installWebStoreExtension(
+        source,
+        options.paths?.extensions,
+        options.extensionFetch,
+      );
+      try {
+        store.addExtension({ id, name: installed.name, loadDir: installed.loadDir });
+      } catch (error) {
+        removeExtensionFiles(id, options.paths?.extensions);
+        throw error;
+      }
+      return Response.json({
+        ok: true,
+        installed: { id, name: installed.name },
+        alreadyInstalled: false,
+      });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 500 });
+    }
   }
 
   if (pathname === "/ui/api/extensions/upload" && req.method === "POST") {
