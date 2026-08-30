@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-// @ts-expect-error ws does not bundle TypeScript declarations.
 import WebSocket from "ws";
 import {
   AGENT_CONTROL_PATH,

@@ -2,23 +2,44 @@ name: Windows update candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Client CI run containing aliasmode-windows-candidate
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  verify:
-    uses: ./.github/workflows/ci.yml
-
   candidate:
     name: Sign and test private update candidate
-    needs: verify
     runs-on: windows-latest
     environment: windows-release
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Validate candidate source run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne "refs/heads/main") {
+            throw "update candidates must run from main"
+          }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:INSTALLER_RUN_ID" | ConvertFrom-Json
+          if ($run.name -ne "Client CI" -or $run.conclusion -ne "success") {
+            throw "installer run must be a successful Client CI run"
+          }
+          $source = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$($run.head_sha)" | ConvertFrom-Json
+          $current = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$env:GITHUB_SHA" | ConvertFrom-Json
+          if ($source.tree.sha -ne $current.tree.sha) {
+            throw "installer run source tree does not match current main"
+          }
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
@@ -30,6 +51,9 @@ jobs:
         with:
           name: aliasmode-windows-candidate
           path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
       - name: Validate candidate version
         shell: pwsh
         env:
@@ -208,9 +232,13 @@ jobs:
           $oldChecksums = Join-Path $env:RUNNER_TEMP "old-SHA256SUMS.txt"
           Invoke-WebRequest $oldInstallerAsset[0].browser_download_url -OutFile $oldInstaller
           Invoke-WebRequest $oldChecksumAsset[0].browser_download_url -OutFile $oldChecksums
-          $checksumLine = Get-Content $oldChecksums | Where-Object { $_ -match [regex]::Escape($oldInstallerAsset[0].name) }
-          if ($checksumLine -notmatch '^([a-fA-F0-9]{64})  ') { throw "previous installer checksum is missing" }
-          if ((Get-FileHash $oldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Matches[1].ToLowerInvariant()) {
+          $checksumPattern = '^([a-fA-F0-9]{64})  ' + [regex]::Escape($oldInstallerAsset[0].name) + '$'
+          $checksumLines = @(Get-Content $oldChecksums | Where-Object { $_ -match $checksumPattern })
+          if ($checksumLines.Count -ne 1) { throw "previous installer checksum is missing or ambiguous" }
+          $checksumMatch = [regex]::Match($checksumLines[0], $checksumPattern)
+          if (-not $checksumMatch.Success) { throw "previous installer checksum is malformed" }
+          $expectedChecksum = $checksumMatch.Groups[1].Value.ToLowerInvariant()
+          if ((Get-FileHash $oldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedChecksum) {
             throw "previous installer checksum mismatch"
           }
 

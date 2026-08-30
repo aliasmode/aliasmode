@@ -1,6 +1,6 @@
 {
   "name": "aliasmode",
-  "version": "0.1.0-beta.41",
+  "version": "0.1.0-beta.42",
   "description": "Local-first browser profile manager with optional cloud synchronization",
   "module": "cli.ts",
   "type": "module",
@@ -21,7 +21,8 @@
     "@types/bun": "latest",
     "@types/cross-spawn": "6.0.6",
     "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "8.18.1"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -29,6 +30,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "@playwright/mcp": "0.0.56",
+    "@tauri-apps/api": "2.11.1",
     "cross-spawn": "7.0.6",
     "playwright": "1.58.0-alpha-2026-01-16",
     "playwright-core": "1.58.2",

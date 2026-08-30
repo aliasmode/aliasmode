@@ -48,8 +48,9 @@ function needsProxyRelay(profile: Profile): boolean {
   );
 }
 
-const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 1;
+const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 2;
 const SEARCH_PROVIDER_BOOTSTRAP_MARKER = `.aliasmode-search-bootstrap-v${SEARCH_PROVIDER_BOOTSTRAP_REVISION}`;
+const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
 const NATIVE_SESSION_ARTIFACTS = [
   "Default/Sessions",
   "Default/Current Session",
@@ -114,7 +115,7 @@ export type OwnedBrowserProcessFinder = (identity: BrowserProcessIdentity) => Pr
  * a failure here must never fail (or slow) the launch. Injectable for tests.
  */
 export type WindowLabeler = (ws: string, label: string) => Promise<void>;
-/** Best-effort omnibox-provider setup in a separate prelaunch browser. */
+/** Best-effort omnibox-provider setup in the running managed browser. */
 export type SearchProviderEnsurer = (
   options: SearchProviderBootstrapOptions,
 ) => Promise<SearchProviderSetupResult>;
@@ -371,7 +372,7 @@ export interface BrowserOpenOptions {
 
 export interface LaunchStartOptions extends BrowserOpenOptions {
   autoNavigate?: boolean;
-  /** Use Chromium's on-disk last session. Defaults on for Windows Local launches. */
+  /** Use Chromium's on-disk last session. Defaults on for Local launches. */
   restoreLastSession?: boolean;
   resetStorage?: boolean;
   /** Override the launcher's default mode for this launch generation. */
@@ -894,6 +895,8 @@ export class Launcher {
       `--user-data-dir=${userDataDir}`,
       `--window-size=${winW},${winH}`,
       `--window-position=0,0`,
+      `--no-first-run`,
+      `--no-default-browser-check`,
       // The session launcher opens the window MINIMIZED (/MIN) so it doesn't steal focus, and a
       // minimized/occluded Chromium window is treated as backgrounded — it throttles JS timers and
       // deprioritizes the renderer. That makes the CDP-driven login crawl and blow the 180s reconnect
@@ -1187,7 +1190,7 @@ export class Launcher {
           // Exact scan proved the recorded launch is gone; continue to a fresh
           // allocation (the unrelated responding port remains OS-reserved).
         } else if (
-          !this.headless
+          !headless
           && !trackedProc
           && existing.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
         ) {
@@ -1292,9 +1295,11 @@ export class Launcher {
     // scan before any repair or cleanup touches their files.
     if (existingUserDataDir) await this.reapForeignProfileDirHolders(profileId, userDataDir);
 
-    const nativeRestoreRequested = this.hostPlatform === "win32" && opts.restoreLastSession !== false;
+    const nativeRestoreRequested = opts.restoreLastSession !== false;
     // Only existence is inspected. Chromium owns the opaque session bytes.
     const nativeSessionAvailable = nativeRestoreRequested && this.hasNativeSessionArtifacts(userDataDir);
+    const restoreLastSession = nativeSessionAvailable;
+    let searchBootstrapRevision: number | undefined;
 
     // Repair a corrupt Preferences before launch. A previous unclean exit (force-kill
     // mid-write, or two Chromes racing the same persistent dir when a browser leaked)
@@ -1318,24 +1323,6 @@ export class Launcher {
     // e.g. a first-migration Telegram open with no hub session — so we never wipe the only local auth).
     this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
 
-    const searchPreparation = await this.ensureSearchProvider(profileId, {
-      executablePath: launchBinaryPath,
-      executableSha256: verifiedBinary.sha256,
-      userDataDir,
-    }, nativeRestoreRequested);
-    const searchBootstrapRevision = searchPreparation.prepared
-      ? SEARCH_PROVIDER_BOOTSTRAP_REVISION
-      : undefined;
-    if (searchPreparation.helperRan) {
-      // A failed helper can leave Chromium children or unclean-exit markers.
-      // Confirm exclusive profile ownership and repair those leftovers before
-      // the managed headful generation starts.
-      await this.reapForeignProfileDirHolders(profileId, userDataDir);
-      this.repairCorruptPrefs(profileId);
-      this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
-      profile = this.requireUnchangedProfile(profileId, profileSnapshot, "search provider setup");
-    }
-    const restoreLastSession = nativeSessionAvailable && !searchPreparation.helperRan;
     if (profile.proxy) this.persistWebRtcPolicyPreference(profileId);
 
     // Identity bookmark (#2): `<name> · #<serial>` on a visible bookmark bar, pointing at the card.
@@ -1452,7 +1439,33 @@ export class Launcher {
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "browser startup");
       const startupTargets = restoreLastSession || SESSION_LAUNCH
         ? await this.startupPageTargets(port, profileId, restoreLastSession && startupUrls.length === 0)
-        : { userUrls: [], profileCardPresent: false };
+        : { userUrls: [], profileCardPresent: false, firstRunPresent: false };
+
+      if (startupTargets?.firstRunPresent) {
+        try {
+          await this.navigateFn(ws, [], false);
+        } catch (err) {
+          this.log(`first-run page cleanup failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      if (await this.ensureSearchProvider(profileId, {
+        executablePath: launchBinaryPath,
+        executableSha256: verifiedBinary.sha256,
+        userDataDir,
+        endpoint: ws,
+      }, headless)) {
+        searchBootstrapRevision = SEARCH_PROVIDER_BOOTSTRAP_REVISION;
+        const current = this.store.getLaunch(profileId);
+        if (current?.debugPort === port && current.startedAt === launchStartedAt) {
+          this.store.recordLaunch({
+            ...current,
+            ws,
+            searchBootstrapRevision,
+          });
+        }
+      }
+      profile = this.requireUnchangedProfile(profileId, profileSnapshot, "search provider setup");
 
       // Label the window so the operator can tell which account this browser is
       // among many open profiles (the cue AdsPower's panel gave). Registered
@@ -1519,10 +1532,12 @@ export class Launcher {
         // Standalone mode has no roamed bundle carrying the last A/K choice, so platformHomeUrl keeps
         // its historical K fallback. Remote mode passes the captured client explicitly (defaulting A).
         const home = platformHomeUrl(profile.platform);
-        const restoredUserPages = restoreLastSession ? startupTargets?.userUrls.length ?? null : 0;
+        // Native artifacts remain authoritative even when the bounded target
+        // probe sees no user page. A late restore must not race a platform-home
+        // fallback and leave an extra tab beside the restored session.
         const urlsToOpen = startupUrls.length > 0
           ? startupUrls
-          : restoredUserPages === 0 && home
+          : !restoreLastSession && home
             ? [home]
             : [];
         if (urlsToOpen.length > 0) {
@@ -1860,9 +1875,17 @@ export class Launcher {
     port: number,
     profileId: string,
     waitForRestoredUserPage = false,
-  ): Promise<{ userUrls: string[]; profileCardPresent: boolean } | null> {
-    const deadline = Date.now() + (waitForRestoredUserPage ? 1_000 : 0);
-    let latest: { userUrls: string[]; profileCardPresent: boolean } | null = null;
+  ): Promise<{
+    userUrls: string[];
+    profileCardPresent: boolean;
+    firstRunPresent: boolean;
+  } | null> {
+    const deadline = Date.now() + (waitForRestoredUserPage ? 3_000 : 0);
+    let latest: {
+      userUrls: string[];
+      profileCardPresent: boolean;
+      firstRunPresent: boolean;
+    } | null = null;
     do {
       try {
         const response = await this.fetchFn(`http://127.0.0.1:${port}/json/list`);
@@ -1872,13 +1895,15 @@ export class Launcher {
             const cardUrl = profileCardUrl(profileId);
             const userUrls: string[] = [];
             let profileCardPresent = false;
+            let firstRunPresent = false;
             for (const target of raw) {
               if (target?.type !== "page" || typeof target.url !== "string") continue;
               if (target.url === cardUrl) profileCardPresent = true;
+              if (target.url === UNGOOGLED_FIRST_RUN_URL) firstRunPresent = true;
               const userUrl = canonicalUserPageUrl(target.url);
               if (userUrl) userUrls.push(userUrl);
             }
-            latest = { userUrls, profileCardPresent };
+            latest = { userUrls, profileCardPresent, firstRunPresent };
             if (!waitForRestoredUserPage || userUrls.length > 0) return latest;
           }
         }
@@ -1903,7 +1928,7 @@ export class Launcher {
       return true;
     } catch (err) {
       try { rmSync(temporary, { force: true }); } catch {}
-      this.log(`search provider marker failed for ${profileId} (setup skipped): ${err instanceof Error ? err.message : err}`);
+      this.log(`search provider marker failed for ${profileId} (will retry): ${err instanceof Error ? err.message : err}`);
       return false;
     }
   }
@@ -1911,37 +1936,25 @@ export class Launcher {
   private async ensureSearchProvider(
     profileId: string,
     options: SearchProviderBootstrapOptions,
-    protectNativeSession: boolean,
-  ): Promise<{ prepared: boolean; helperRan: boolean }> {
-    if (this.headless || !this.ensureSearchProviderFn) return { prepared: false, helperRan: false };
+    headless: boolean,
+  ): Promise<boolean> {
+    if (headless || !this.ensureSearchProviderFn) return false;
 
-    if (this.hostPlatform === "win32") {
-      const marker = join(options.userDataDir, SEARCH_PROVIDER_BOOTSTRAP_MARKER);
-      if (existsSync(marker)) return { prepared: true, helperRan: false };
-      if (!this.writeSearchBootstrapMarker(profileId, options.userDataDir)) {
-        // Never launch a helper that can run again when its one-shot marker was
-        // not made durable. The managed browser can still launch normally.
-        return { prepared: true, helperRan: false };
-      }
-      if (protectNativeSession && this.hasNativeSessionArtifacts(options.userDataDir)) {
-        this.log(`${profileId}: existing Chromium session kept; search helper skipped`);
-        return { prepared: true, helperRan: false };
-      }
-    }
+    const marker = join(options.userDataDir, SEARCH_PROVIDER_BOOTSTRAP_MARKER);
+    if (existsSync(marker)) return true;
 
     try {
       const result = await this.ensureSearchProviderFn(options);
       if (result.status === "configured") {
         this.log(`${profileId}: configured ${result.engine} as the address-bar search provider`);
-      } else if (result.status === "already-default") {
-        this.log(`${profileId}: ${result.engine} is already the address-bar search provider`);
       } else {
-        this.log(`${profileId}: kept existing address-bar search provider ${result.engine}`);
+        this.log(`${profileId}: ${result.engine} is already the address-bar search provider`);
       }
+      return this.writeSearchBootstrapMarker(profileId, options.userDataDir);
     } catch (err) {
       this.log(`search provider setup failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
+      return false;
     }
-    return { prepared: true, helperRan: true };
   }
 
   /**
@@ -2518,7 +2531,7 @@ export class Launcher {
     const launch = this.store.getLaunch(profileId);
     if (!launch) throw new Error(`cannot verify survivor ${profileId}: launch record is missing`);
     if (
-      !this.headless
+      launch.headless !== true
       && !this.procs.has(profileId)
       && launch.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
     ) {
@@ -2556,7 +2569,7 @@ export class Launcher {
       if (!launch || `${launch.debugPort}:${launch.startedAt}` !== generation) return null;
       this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
       if (
-        !this.headless
+        launch.headless !== true
         && !this.procs.has(profileId)
         && launch.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
       ) {

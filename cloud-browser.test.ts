@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
-import { CloudBrowserCoordinator } from "./cloud-browser.ts";
+import { CloudBrowserCoordinator, observeBrowserTargets } from "./cloud-browser.ts";
 import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v1.ts";
 import { BrowserLaunchError } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
@@ -851,6 +851,82 @@ test("Cloud heartbeat resets no-page confirmation after a visible page returns",
   state.store.close();
 });
 
+test("Cloud target observer reports page creates, navigations, and destruction", () => {
+  const originalWebSocket = globalThis.WebSocket;
+  class FakeWebSocket {
+    static latest: FakeWebSocket;
+    readonly listeners = new Map<string, Set<(event: any) => void>>();
+    readonly sent: string[] = [];
+    closed = false;
+
+    constructor(readonly endpoint: string) {
+      FakeWebSocket.latest = this;
+    }
+
+    addEventListener(type: string, listener: (event: any) => void) {
+      const listeners = this.listeners.get(type) ?? new Set();
+      listeners.add(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    removeEventListener(type: string, listener: (event: any) => void) {
+      this.listeners.get(type)?.delete(listener);
+    }
+
+    send(message: string) { this.sent.push(message); }
+    close() { this.closed = true; }
+    emit(type: string, event: any) {
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+  }
+
+  try {
+    (globalThis as any).WebSocket = FakeWebSocket;
+    const events: Array<string | null> = [];
+    const observer = observeBrowserTargets("ws://browser", (origin) => events.push(origin));
+    const socket = FakeWebSocket.latest!;
+    socket.emit("open", {});
+    expect(socket.sent.map((message) => JSON.parse(message))).toEqual([{
+      id: 1,
+      method: "Target.setDiscoverTargets",
+      params: { discover: true },
+    }]);
+
+    const emitMessage = (message: unknown) => socket.emit("message", { data: JSON.stringify(message) });
+    emitMessage({ method: "Target.targetCreated", params: { targetInfo: {
+      targetId: "page-1", type: "page", url: "https://x.com/home",
+    } } });
+    emitMessage({ method: "Target.targetInfoChanged", params: { targetInfo: {
+      targetId: "page-1", type: "page", url: "https://x.com/messages",
+    } } });
+    emitMessage({ method: "Target.targetCreated", params: { targetInfo: {
+      targetId: "internal", type: "page", url: "chrome://ungoogled-first-run/",
+    } } });
+    emitMessage({ method: "Target.targetCreated", params: { targetInfo: {
+      targetId: "worker", type: "service_worker", url: "https://x.com/sw.js",
+    } } });
+    emitMessage({ method: "Target.targetDestroyed", params: { targetId: "worker" } });
+    emitMessage({ method: "Target.targetDestroyed", params: { targetId: "internal" } });
+    emitMessage({ method: "Target.targetDestroyed", params: { targetId: "page-1" } });
+
+    expect(events).toEqual([
+      "https://x.com",
+      "https://x.com",
+      null,
+      null,
+      null,
+    ]);
+    observer.close();
+    expect(socket.closed).toBe(true);
+    emitMessage({ method: "Target.targetCreated", params: { targetInfo: {
+      targetId: "late", type: "page", url: "https://late.example/",
+    } } });
+    expect(events).toHaveLength(5);
+  } finally {
+    (globalThis as any).WebSocket = originalWebSocket;
+  }
+});
+
 test("Cloud dirty monitor coalesces storage changes and captures target changes without Cloud calls", async () => {
   const state = setup();
   const storageDirty: Array<() => void> = [];
@@ -1113,7 +1189,7 @@ test("Cloud checkpoint probes every origin from the durable open bundle", async 
   state.store.close();
 });
 
-test("Cloud target observation retains a new origin after its tab closes", async () => {
+test("Cloud target observation checkpoints destruction and repeated same-origin events", async () => {
   let onTarget!: (origin: string | null) => void;
   let observerCloses = 0;
   const state = setup({
@@ -1137,26 +1213,118 @@ test("Cloud target observation retains a new origin after its tab closes", async
   });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
 
-  onTarget(null);
-  onTarget("https://closed.example");
-  await Bun.sleep(10);
-  expect(state.captureSeeds).toEqual([]);
+  const emitAndWait = async (origin: string | null, count: number) => {
+    onTarget(origin);
+    for (let attempt = 0; attempt < 20 && state.captureSeeds.length < count; attempt++) {
+      await Bun.sleep(5);
+    }
+    expect(state.captureSeeds).toHaveLength(count);
+  };
 
-  onTarget("https://new.example");
-  for (let attempt = 0; attempt < 20; attempt++) {
-    if (state.captureSeeds.length) break;
-    await Bun.sleep(5);
-  }
+  await emitAndWait(null, 1);
+  expect(state.captureSeeds.at(-1)).toEqual({ origins: ["https://closed.example"] });
 
+  await emitAndWait("https://closed.example", 2);
+  expect(state.captureSeeds.at(-1)).toEqual({ origins: ["https://closed.example"] });
+
+  await emitAndWait("https://new.example", 3);
   expect(state.captureSeeds.at(-1)).toEqual({
     origins: ["https://closed.example", "https://new.example"],
   });
-  const captures = state.captureSeeds.length;
-  onTarget("https://new.example");
-  await Bun.sleep(10);
-  expect(state.captureSeeds).toHaveLength(captures);
+
+  await emitAndWait("https://new.example", 4);
   await state.coordinator.releaseAll(true);
   expect(observerCloses).toBe(1);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud target checkpoints preserve ordered duplicate tabs through manual browser death", async () => {
+  let onTarget!: (origin: string | null) => void;
+  const state = setup({
+    session: {
+      ...payload().session,
+      origins: [{ origin: "https://x.com", localStorage: [] }],
+      tabs: ["https://initial.example/"],
+    },
+    heartbeatMs: 60_000,
+    dirtyMonitorMs: 2_000,
+    checkpointDebounceMs: 0,
+    checkpointMinIntervalMs: 0,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+    observeTargets(_endpoint, target) {
+      onTarget = target;
+      return { close() {} };
+    },
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+
+  let tabs = ["https://same.example/a", "https://same.example/a"];
+  let captures = 0;
+  const options = (state.coordinator as any).options;
+  options.readSession = async () => {
+    captures++;
+    return JSON.stringify({
+      cookies: payload().session.cookies,
+      origins: [{ origin: "https://x.com", localStorage: [] }],
+      tabs,
+    });
+  };
+  const waitForTabs = async (expected: string[]) => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const summary = state.queue.list("account1")[0];
+      const captured = summary ? state.queue.get(summary.id, "account1") : null;
+      if (JSON.stringify(captured?.payload.session.tabs) === JSON.stringify(expected)) return;
+      await Bun.sleep(5);
+    }
+    const summary = state.queue.list("account1")[0];
+    expect(summary).toBeDefined();
+    expect(summary && state.queue.get(summary.id, "account1")?.payload.session.tabs).toEqual(expected);
+  };
+
+  onTarget("https://x.com");
+  await waitForTabs(tabs);
+
+  tabs = ["https://same.example/b", "https://same.example/a", "https://same.example/b"];
+  onTarget("https://x.com");
+  await waitForTabs(tabs);
+
+  tabs = ["https://same.example/a", "https://same.example/a"];
+  onTarget(null);
+  await waitForTabs(tabs);
+  expect(captures).toBe(3);
+
+  let submitted: PortableProfileV1 | undefined;
+  const originalClose = options.cloud.closeOpen;
+  options.cloud.closeOpen = async (registrationId: string, request: { payload: PortableProfileV1 }) => {
+    submitted = structuredClone(request.payload);
+    return originalClose(registrationId, request);
+  };
+  state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+
+  await state.coordinator.listRoster();
+
+  expect(submitted?.session.tabs).toEqual([
+    "https://same.example/a",
+    "https://same.example/a",
+  ]);
+  expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+
+  options.cloud.openProfile = async () => ({
+    ok: true,
+    registrationId: "registration2",
+    baseVersion: 5,
+    payload: submitted!,
+    activeOpens: [],
+  });
+  state.setReconcileHook(() => {});
+  state.navigatedUrls.length = 0;
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.navigatedUrls).toEqual([[]]);
+
+  await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();
 });

@@ -40,6 +40,19 @@ bun cli.ts start
 
 The dashboard and compatibility API bind to loopback only.
 
+### macOS source run
+
+A supported macOS CloakBrowser executable can run through the local web dashboard without Tauri or a separate backend. Install Bun and Node.js 18 or newer (Node 22.23.2 is recommended), then run:
+
+```sh
+bun install --frozen-lockfile
+export CLOAKBROWSER_BINARY_PATH="/path/to/CloakBrowser.app/Contents/MacOS/CloakBrowser"
+export CLOAKBROWSER_BINARY_SHA256="$(shasum -a 256 "$CLOAKBROWSER_BINARY_PATH" | cut -d ' ' -f 1)"
+bun run start
+```
+
+Open `http://127.0.0.1:50400`, select AliasMode Cloud, and sign in. Source mode keeps Cloud refresh and device credentials in process memory, so sign in again after restarting AliasMode. It stores only the pending-sync encryption key in `pending-sync.key` with user-only permissions, allowing queued profile state to resume. Browser data and processes remain on the Mac.
+
 ### Windows desktop beta
 
 Published installers support Windows 10 version 1809 or newer, Windows 11, and Windows Server 2019 or newer on x64 processors with SSE4.2. They install for the current user and remain unsigned while release signing is configured.
@@ -74,6 +87,19 @@ The Windows installer includes `aliasmode-mcp.exe`. It connects AI agents to the
 Setup configures Claude Code, Codex, OpenClaw, and Hermes when installed. Its JSON result also includes generic stdio MCP configuration. Restart an active agent harness after setup so it loads the new server.
 
 Agents can create profiles, open several headful or headless browsers, select one browser, and use the full pinned Playwright MCP tool set. AliasMode remains responsible for browser processes, profile locks, Cloud sessions, capture, and safe close. Local mode needs no account and does not contact AliasMode Cloud.
+
+Cloud mode can also expose one specific Windows installation to a remote Streamable HTTP MCP client. Keep AliasMode open on that Windows device. Open **Account & Settings → Remote MCP** and copy its pinned server URL. Claude.ai and ChatGPT connect through AliasMode sign-in and OAuth. Claude Code and other bearer-capable clients can also use the displayed access key in a secret header.
+
+Advanced users can create additional independently revocable connectors from the packaged helper:
+
+```powershell
+$aliasmode = "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe"
+& $aliasmode remote-mcp create --name "Linux Claude"
+& $aliasmode remote-mcp list
+& $aliasmode remote-mcp revoke --id <connector-id>
+```
+
+The Settings access key is stored in Windows Credential Manager. Extra keys created by the helper are returned once, so store them in the remote client's secret settings. Do not put keys in scripts or logs. OAuth web connectors never need the access key. An offline device returns an error and never redirects work to another machine.
 
 For the same installation session, the helper also provides JSON-only commands:
 

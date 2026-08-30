@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { join } from "node:path";
 import {
   applySessionToEndpoint,
   bundleHasRestorableLogin,
@@ -13,6 +14,7 @@ import {
   parseCapturedSessionBundle,
   playwrightTransportAttribution,
   readSessionFromBrowser,
+  readSessionWorkerCommand,
   restoreOriginStorage,
   SessionRestoreError,
   sessionBundleSignature,
@@ -35,6 +37,19 @@ test("playwrightTransportAttribution reads the shared transport counters", () =>
     if (prior === undefined) delete (globalThis as any)[key];
     else (globalThis as any)[key] = prior;
   }
+});
+
+test("session worker command follows source and packaged runtime layouts", () => {
+  expect(readSessionWorkerCommand("ws://browser")).toEqual([
+    "node",
+    join(import.meta.dir, "playwright-worker.mjs"),
+  ]);
+
+  const packaged = join("AliasMode", "playwright");
+  expect(readSessionWorkerCommand("ws://browser", packaged)).toEqual([
+    join(packaged, "node", "node.exe"),
+    join(packaged, "worker.mjs"),
+  ]);
 });
 
 function textStream(value: string): ReadableStream<Uint8Array> {
@@ -1284,8 +1299,11 @@ test("applySessionToEndpoint replaces stale pages and attempts every ordered dup
   const stale = page("https://stale.example/");
   const reusableBlank = page("about:blank");
   const extraBlank = page("about:blank");
+  const firstRun = page("chrome://ungoogled-first-run/");
+  const newTab = page("chrome://newtab/");
+  const settings = page("chrome://settings/privacy");
   const card = page("http://127.0.0.1:50400/card?id=profile1");
-  const pages = [stale, reusableBlank, extraBlank, card];
+  const pages = [stale, reusableBlank, extraBlank, firstRun, newTab, settings, card];
   const context = {
     pages: () => pages,
     async newPage() {
@@ -1309,6 +1327,9 @@ test("applySessionToEndpoint replaces stale pages and attempts every ordered dup
   expect(navigated).toEqual(["https://fails.example/", "https://ok.example/", "https://fails.example/"]);
   expect(closed).toContain("https://stale.example/");
   expect(closed.filter((url) => url === "about:blank")).toHaveLength(1);
+  expect(closed).toContain("chrome://ungoogled-first-run/");
+  expect(closed).toContain("chrome://newtab/");
+  expect(closed).not.toContain("chrome://settings/privacy");
   expect(closed).not.toContain("http://127.0.0.1:50400/card?id=profile1");
   expect(closed.at(-1)).toBe("browser");
 });

@@ -20,6 +20,7 @@ describe("state paths", () => {
 
   test("Local and Cloud profile data use separate stores", () => {
     const paths = statePaths("/tmp/aliasmode-state");
+    expect(paths.pendingSyncKey).toBe(resolve("/tmp/aliasmode-state", "pending-sync.key"));
     const local = profileDataPaths(paths, false);
     const cloud = profileDataPaths(paths, true);
     expect(local).toEqual({ database: paths.database, profiles: paths.profiles });

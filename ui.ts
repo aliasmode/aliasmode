@@ -17,6 +17,7 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { EmailVerificationRequiredError, SupabaseAuthRequestError } from "./supabase-auth.ts";
@@ -239,6 +240,10 @@ function rejectUntrustedJsonMutation(req: Request): Response | null {
   }
   return null;
 }
+
+function noStoreJson(body: unknown, status = 200): Response {
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
 const APPLICATION_ROOT = resolve(import.meta.dir);
 
 let appVersionPromise: Promise<string> | null = null;
@@ -352,6 +357,7 @@ export interface UiRuntimeOptions {
   cloudConnection?: CloudConnectionRuntime;
   pendingSync?: PendingSyncRuntime;
   cloudBrowser?: CloudBrowserLifecycle;
+  mcpTunnel?: McpTunnelLifecycle;
   health?: UiHealthMetadata | null;
   timezoneFetch?: FetchLike;
   /** Mode whose runtimes were wired when this process started. */
@@ -513,6 +519,7 @@ export async function handleUiRequest(
           } else {
             await options.cloudBrowser?.secureAfterAuthentication();
           }
+          options.mcpTunnel?.refresh();
           return Response.json({
             ok: true,
             authenticated: true,
@@ -520,12 +527,14 @@ export async function handleUiRequest(
             deviceId: bootstrap.device.id,
             deviceCredential: bootstrap.deviceCredential,
             ...(initialized.createdKey ? { queueKey: initialized.createdKey } : {}),
+            ...(options.pendingSync.persistsQueueKey() ? { queueKeyPersisted: true } : {}),
             expiresAt: result.expiresAt,
             legal: bootstrap.legal,
             workspace: bootstrap.workspace,
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
+          await options.mcpTunnel?.disconnect();
           options.pendingSync.close();
           options.cloudAuth.clear();
           options.cloudConnection.clearDevice();
@@ -565,6 +574,7 @@ export async function handleUiRequest(
           } else {
             await options.cloudBrowser?.secureAfterAuthentication();
           }
+          options.mcpTunnel?.refresh();
           return Response.json({
             ok: true,
             authenticated: true,
@@ -578,6 +588,7 @@ export async function handleUiRequest(
         } catch (error) {
           const failure = cloudRestoreFailure(error, stage);
           if (!failure.retryable) {
+            await options.mcpTunnel?.disconnect();
             options.pendingSync.close();
             options.cloudConnection.clearDevice();
             await options.cloudAuth.clearStoredSession().catch(() => {});
@@ -598,13 +609,16 @@ export async function handleUiRequest(
         const status = await options.cloudConnection.client.status();
         const accepted = await options.cloudConnection.client.acceptLegal({ versions: status.legal.current });
         await options.cloudBrowser?.resumeAfterAuthentication();
+        options.mcpTunnel?.refresh();
         return Response.json({
           ok: true,
           legal: { current: status.legal.current, accepted: accepted.accepted },
         });
       }
       if (pathname === "/ui/api/cloud-auth/forget") {
+        await options.mcpTunnel?.disconnect();
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          options.mcpTunnel?.refresh();
           return Response.json(
             { ok: false, error: "Cloud browsers could not be closed safely" },
             { status: 409 },
@@ -616,7 +630,9 @@ export async function handleUiRequest(
         return Response.json({ ok: true });
       }
       if (pathname === "/ui/api/cloud-auth/signout") {
+        await options.mcpTunnel?.disconnect();
         if (options.cloudBrowser && !await options.cloudBrowser.releaseAll()) {
+          options.mcpTunnel?.refresh();
           return Response.json(
             { ok: false, error: "Cloud browsers could not be closed safely" },
             { status: 409 },
@@ -630,6 +646,59 @@ export async function handleUiRequest(
       return Response.json({ ok: false, error: "unknown Cloud auth action" }, { status: 404 });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+  }
+
+  if (pathname === "/ui/api/cloud-connector" && req.method === "POST") {
+    if (!options.cloudConnection) {
+      return noStoreJson({ ok: false, error: "AliasMode Cloud connection is unavailable" }, 503);
+    }
+    if (!options.cloudConnection.accountId() || !options.cloudConnection.deviceId()) {
+      return noStoreJson({ ok: false, error: "AliasMode Cloud authentication is required" }, 401);
+    }
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) {
+      rejected.headers.set("Cache-Control", "no-store");
+      return rejected;
+    }
+    try {
+      const body = await req.json() as { action?: unknown; connectorId?: unknown };
+      const cloud = options.cloudConnection.client;
+      if (body.action === "create") {
+        const created = await cloud.createMcpConnector("AliasMode Settings");
+        return noStoreJson({
+          ok: true,
+          state: "active",
+          connectorId: created.connector.id,
+          deviceId: created.connector.deviceId,
+          url: cloud.remoteMcpUrl(created.connector.deviceId),
+          token: created.token,
+        });
+      }
+      if (body.action !== "status" && body.action !== "revoke") {
+        return noStoreJson({ ok: false, error: "unknown Cloud connector action" }, 400);
+      }
+      if (typeof body.connectorId !== "string" || !body.connectorId) {
+        return noStoreJson({ ok: false, error: "connectorId is required" }, 400);
+      }
+      const listed = await cloud.listMcpConnectors();
+      const connector = listed.connectors.find((candidate) => candidate.id === body.connectorId);
+      if (body.action === "status") {
+        return noStoreJson({
+          ok: true,
+          state: !connector ? "missing" : connector.revokedAt === null ? "active" : "revoked",
+          url: cloud.remoteMcpUrl(options.cloudConnection.deviceId()!),
+        });
+      }
+      if (connector && connector.revokedAt === null) {
+        await cloud.revokeMcpConnector(connector.id);
+      }
+      return noStoreJson({ ok: true, state: "disabled" });
+    } catch (error) {
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 400;
+      return noStoreJson({ ok: false, error: msg(error) }, status);
     }
   }
 

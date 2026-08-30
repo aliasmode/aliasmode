@@ -26,7 +26,7 @@ import {
   runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
-import { serveDashboard } from "./web.ts";
+import { serveDashboard, serveDesktopAutomationApi } from "./web.ts";
 import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
 import { RemoteCoordinator } from "./remote.ts";
@@ -53,6 +53,7 @@ import {
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudBrowserCoordinator, type CloudBrowserOptions } from "./cloud-browser.ts";
+import { McpTunnelRuntime } from "./mcp-tunnel.ts";
 import { PendingSyncQueue, PendingSyncRuntime } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
 import type { Profile } from "./types.ts";
@@ -412,7 +413,10 @@ function makeCloudBrowser(
   });
 }
 
-function installCloudShutdown(cloudBrowser: CloudBrowserCoordinator): void {
+function installCloudShutdown(
+  cloudBrowser: CloudBrowserCoordinator,
+  mcpTunnel?: McpTunnelRuntime,
+): void {
   let shutdownInFlight: Promise<void> | null = null;
   const shutdown = (signal: NodeJS.Signals) => {
     if (shutdownInFlight) {
@@ -421,7 +425,10 @@ function installCloudShutdown(cloudBrowser: CloudBrowserCoordinator): void {
     }
     console.error(`received ${signal}; capturing and closing Cloud browsers`);
     shutdownInFlight = drainRemoteShutdown(
-      () => cloudBrowser.releaseAll(true),
+      async () => {
+        await mcpTunnel?.stop();
+        return cloudBrowser.releaseAll(true);
+      },
       { maxDrainMs: DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS },
     )
       .then(() => process.exit(0))
@@ -2469,7 +2476,8 @@ async function main() {
     process.exit(1);
   });
 
-  if (typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true) {
+  const compiled = typeof ALIASMODE_COMPILED !== "undefined" && ALIASMODE_COMPILED === true;
+  if (compiled) {
     const runtime = process.env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim() || defaultPlaywrightRuntimeRoot();
     process.env.ALIASMODE_PLAYWRIGHT_RUNTIME = runtime;
     await verifyPlaywrightRuntime(runtime);
@@ -2477,6 +2485,14 @@ async function main() {
   if (await dispatchReadSessionWorker(argv)) return;
 
   const [cmd, ...rest] = argv;
+  if (!compiled && (cmd === "start" || cmd === "serve")) {
+    try {
+      await verifyPlaywrightRuntime();
+    } catch (error) {
+      console.error(`[aliasmode] ${error instanceof Error ? error.message : "source Playwright runtime is unavailable"}`);
+      throw error;
+    }
+  }
   const paths = statePaths(resolveStateRoot(rest));
   const desktop = has(rest, "desktop-stdio");
   // The desktop sidecar's stdout/stderr are discarded by the Tauri shell, which
@@ -2552,7 +2568,18 @@ async function main() {
         },
       })
     : undefined;
-  const pendingSync = cloudAuth ? new PendingSyncRuntime(paths.pendingSync) : undefined;
+  const mcpTunnel = process.platform === "win32" && agentNonce && cloudAuth && cloudConfig && cloudConnection
+    ? new McpTunnelRuntime({
+        baseUrl: cloudConfig.apiUrl,
+        accessToken: () => cloudAuth.accessTokenOrRefresh(),
+        deviceId: () => cloudConnection.deviceId(),
+        deviceCredential: () => cloudConnection.deviceCredential(),
+        log: (message) => console.log(`[aliasmode] ${message}`),
+      })
+    : undefined;
+  const pendingSync = cloudAuth
+    ? new PendingSyncRuntime(paths.pendingSync, compiled ? undefined : paths.pendingSyncKey)
+    : undefined;
   const lifecycleAdmissionOptions = cmd === "start" || cmd === "serve"
     ? lifecycleAdmissionOptionsFromEnv()
     : undefined;
@@ -2620,6 +2647,15 @@ async function main() {
           ? Math.max(1_000, Math.floor(configuredShutdownTimeout))
           : DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS;
         console.log(`remote mode: hub ${hubUrl} (authenticated operator identity is token-derived)`);
+        const automationServer = desktopHealth
+          ? serveDesktopAutomationApi({
+              launcher,
+              store,
+              remote: coord,
+              lifecycleAdmission: lifecycleAdmission!,
+              appConfig,
+            })
+          : undefined;
         const server = serveDashboard({
           launcher,
           store,
@@ -2641,6 +2677,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
+            automationServer: automationServer!,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2698,7 +2735,15 @@ async function main() {
       startMemoryAttributionLog();
       if (configuredMode.mode === "cloud") {
         console.log("cloud mode: waiting for verified authentication before loading profiles");
-        if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser);
+        if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser, mcpTunnel);
+        const automationServer = desktopHealth
+          ? serveDesktopAutomationApi({
+              launcher,
+              store,
+              lifecycleAdmission: lifecycleAdmission!,
+              appConfig,
+            })
+          : undefined;
         const server = serveDashboard({
           launcher,
           store,
@@ -2711,20 +2756,26 @@ async function main() {
           cloudConnection,
           pendingSync,
           cloudBrowser,
+          mcpTunnel,
           health: desktopHealth,
           agentNonce: agentNonce ?? undefined,
         });
+        mcpTunnel?.start();
         if (desktopHealth) {
           const assignedPort = server.port;
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
+            automationServer: automationServer!,
             admission: lifecycleAdmission!,
             store,
             launcher,
             ...(cloudBrowser ? {
               remoteShutdown: (remainingMs: number) => drainRemoteShutdown(
-                () => cloudBrowser.releaseAll(true),
+                async () => {
+                  await mcpTunnel?.stop();
+                  return cloudBrowser.releaseAll(true);
+                },
                 { maxDrainMs: Math.min(DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS, remainingMs) },
               ),
             } : {}),
@@ -2741,6 +2792,14 @@ async function main() {
       });
       if (r) console.log(`imported ${r.profiles} profile(s) from ${r.files} file(s); store holds ${store.count()}`);
       const stopInbox = watchInbox(store, paths.inbox);
+      const automationServer = desktopHealth
+        ? serveDesktopAutomationApi({
+            launcher,
+            store,
+            lifecycleAdmission: lifecycleAdmission!,
+            appConfig,
+          })
+        : undefined;
       const server = serveDashboard({
         launcher,
         store,
@@ -2760,6 +2819,7 @@ async function main() {
         if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
         attachDesktopControl(new ManagedDesktopRuntime({
           server,
+          automationServer: automationServer!,
           admission: lifecycleAdmission!,
           store,
           launcher,

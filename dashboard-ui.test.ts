@@ -38,19 +38,29 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain('invoke("restart_after_mode_change")');
 });
 
-test("dashboard checks and installs desktop updates through argument-free native commands", () => {
+test("dashboard shows curated desktop update notes and live progress", () => {
+  expect(app).toContain('import { Channel } from "@tauri-apps/api/core"');
   expect(app).toContain('type DesktopUpdateStatus =');
   expect(app).toContain('invoke("check_for_updates")');
-  expect(app).toContain('invoke("update_now")');
+  expect(app).toContain('invoke("update_now", { onProgress })');
+  expect(app).toContain('message.phase === "ready"');
+  expect(app).toContain('{ ...status, version: message.version, highlights: message.highlights }');
   expect(app).not.toContain('invoke("check_for_updates",');
-  expect(app).not.toContain('invoke("update_now",');
   expect(app).toContain("desktopUpdateCheckStarted.current = true");
   expect(app).toContain("AliasMode checks for updates when it starts.");
-  expect(app).toContain("Downloading and verifying the update");
+  expect(app).toContain('className="update-highlights"');
+  expect(app).toContain('<summary>What’s new in {version}</summary>');
+  expect(app).toContain('<progress max={100} value={percent ?? undefined}');
+  expect(app).toContain("Preparing update…");
+  expect(app).toContain("Downloading update…");
+  expect(app).toContain("Verifying update…");
+  expect(app).toContain("Installing and restarting…");
   expect(app).toContain('disabled={modeBusy || desktopUpdateInstalling}');
-  expect(app).toContain('className="update-banner" role="status"');
+  expect(app).toContain('className="update-banner"');
   expect(styles).toContain(".update-banner");
-  expect(styles).toContain(".update-actions");
+  expect(styles).toContain(".update-highlights");
+  expect(styles).toContain(".update-progress progress");
+  expect(styles).toContain("accent-color: var(--accent)");
 });
 
 test("dashboard contains long roster labels inside the window", () => {
@@ -76,6 +86,35 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("setProfiles([]);");
   expect(app).toContain("setTeam(null);");
   expect(app).toContain("generation !== authGeneration.current");
+});
+
+test("dashboard accepts a server-persisted pending queue key", () => {
+  expect(app).toContain("result.queueKeyPersisted !== true");
+  expect(app).toContain('typeof result.queueKey === "string" ? result.queueKey : undefined');
+});
+
+test("Account settings prepares and protects one app-owned Remote MCP connector", () => {
+  expect(app).toContain('key: "remote_mcp_connector"');
+  expect(app).toContain('createCloudConnector()');
+  expect(app).toContain('fetchCloudConnector(stored.connectorId)');
+  expect(app).toContain('storeDesktopRemoteMcpCredential({ version: 1, state: "disabled" })');
+  expect(app).toContain('>Remote MCP</h2>');
+  expect(app).toContain('>MCP server URL</span>');
+  expect(app).toContain('>Access key</span>');
+  expect(app).toContain('remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"');
+  expect(app).toContain('>Connect Claude.ai or ChatGPT</strong>');
+  expect(app).toContain('Paste the MCP server URL and select Connect.');
+  expect(app).toContain('Sign into AliasMode and select Allow.');
+  expect(app).toContain('Claude.ai and ChatGPT use OAuth and do not need the access key.');
+  expect(app).not.toContain('web connectors are not supported');
+  expect(app).toContain('Regenerate key');
+  expect(app).toContain('Enable Remote MCP');
+  expect(app).toContain('if (remoteMcpAccountExit.current) return Promise.resolve();');
+  expect(app).toContain('await prepareRemoteMcpForAccountExit(true);\n      await forgetCloudSession();');
+  expect(app).toContain('if (view !== "settings" || !isCloudMode || !workspaceReady || restartRequired) return;');
+  expect(app).toContain('await prepareRemoteMcpForAccountExit();\n      await signOutCloud();');
+  expect(styles).toContain('.remote-mcp-status.active');
+  expect(styles).toContain('.remote-mcp-value input');
 });
 
 test("dashboard recovers saved Cloud sessions without false sign-out", () => {
@@ -115,6 +154,24 @@ test("dashboard lists the supported profile platforms", () => {
   ]) {
     expect(app).toContain(`value: "${platform}"`);
   }
+});
+
+test("New Profile promotes the approved proxy provider after proxy credentials", () => {
+  const createModal = app.slice(app.indexOf("{showCreate && ("), app.indexOf("{editId && ("));
+  const credentials = createModal.indexOf("<span>Proxy pass</span>");
+  const referral = createModal.indexOf('className="proxy-referral"');
+  const fingerprint = createModal.indexOf("<FingerprintSettings");
+
+  expect(credentials).toBeGreaterThan(-1);
+  expect(referral).toBeGreaterThan(credentials);
+  expect(fingerprint).toBeGreaterThan(referral);
+  expect(createModal).toContain('href="https://outreachproxy.com/t/aliasmode"');
+  expect(createModal).toContain('target="_blank"');
+  expect(createModal).toContain('rel="noreferrer"');
+  expect(createModal).toContain('aria-label="Get a proxy from OutreachProxy (opens externally)"');
+  expect(createModal).toContain('aria-hidden="true"');
+  expect(styles).toContain(".proxy-referral {");
+  expect(styles).toContain(".proxy-referral a:focus-visible");
 });
 
 test("running profile rows expose Bring to front in Local and Cloud mode", () => {
@@ -500,4 +557,40 @@ test("the sidebar offers extension management in both modes and a support link",
   expect(app).toContain('href="https://t.me/aliasmode"');
   expect(app).toContain('<Icon name="help" /><span className="navlabel">Support</span>');
   expect(styles).toContain("a.navitem");
+});
+
+test("editable Cloud selections expose every profile export format", () => {
+  const toolbar = app.slice(app.indexOf('className="toolbar active"'), app.indexOf("className={`tablewrap"));
+  expect(toolbar).toContain("(!isCloudMode || selectedEditable) && <>");
+  // Export is deliberately NOT Local-gated (the Cloud editor decrypts the
+  // selected profiles server-side); Convert and Edit-from-file remain Local.
+  expect(toolbar).not.toContain("{!isCloudMode && <>");
+  expect(toolbar).toContain("!isCloudMode && selectedMobileCount > 0");
+  for (const format of ["csv", "txt", "xlsx"]) expect(toolbar).toContain(`exportSelected("${format}")`);
+});
+
+test("the extension manager explains the supported ZIP/CRX workflow", () => {
+  expect(app).toContain("Chrome Web Store installs are not supported");
+  expect(app).toContain("Switch to Chrome to install extensions and themes");
+  expect(app).toContain("Edit &gt; Extensions");
+  expect(app).toContain("Upload ZIP/CRX");
+  expect(app).toContain('accept=".zip,.crx,application/zip,application/x-chrome-extension"');
+});
+
+test("Settings carries the Remote MCP connector card in Cloud mode", () => {
+  expect(app).toContain('className="settings-card remote-mcp-settings"');
+  expect(app).toContain("MCP server URL");
+  expect(app).toContain('aria-label="Remote MCP access key"');
+  // Leaving the account (sign out, forget session) always revokes and forgets
+  // the connector so a stale key cannot outlive the session that made it.
+  expect(app).toContain("prepareRemoteMcpForAccountExit");
+  expect(app).toContain("deleteDesktopRemoteMcpCredential");
+  expect(styles).toContain(".remote-mcp-value");
+});
+
+test("the update banner shows release highlights and native install progress", () => {
+  expect(app).toContain("<UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />");
+  expect(app).toContain("function DesktopUpdateProgressView(");
+  expect(app).toContain('invoke("update_now", { onProgress })');
+  expect(styles).toContain(".update-progress progress");
 });

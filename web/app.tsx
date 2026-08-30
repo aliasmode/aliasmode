@@ -1,3 +1,4 @@
+import { Channel } from "@tauri-apps/api/core";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -15,6 +16,9 @@ import {
   type CloudTeamState,
   acceptCloudInvitation,
   acceptCloudLegal,
+  createCloudConnector,
+  fetchCloudConnector,
+  revokeCloudConnector,
   cloudSessionContextReady,
   cloudWorkspaceReady,
   fetchAppMode,
@@ -738,8 +742,70 @@ function FingerprintSettings({
 type DesktopInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 type DesktopUpdateStatus =
   | { state: "upToDate"; currentVersion: string }
-  | { state: "available"; currentVersion: string; version: string };
+  | { state: "available"; currentVersion: string; version: string; highlights: string[] };
+type DesktopUpdateProgress =
+  | { phase: "preparing" | "verifying" | "installing" }
+  | { phase: "downloading"; percent: number | null };
+type DesktopUpdateMessage =
+  | DesktopUpdateProgress
+  | { phase: "ready"; version: string; highlights: string[] };
 type SavedSessionPhase = "restoring" | "manual-signin" | "retryable-failure";
+type RemoteMcpCredential =
+  | { version: 1; state: "active"; connectorId: string; deviceId: string; token: string }
+  | { version: 1; state: "disabled" };
+interface RemoteMcpSettings {
+  state: "idle" | "loading" | "active" | "disabled" | "error";
+  connectorId?: string;
+  deviceId?: string;
+  url?: string;
+  token?: string;
+  error?: string;
+}
+
+function parseRemoteMcpCredential(value: string): RemoteMcpCredential {
+  const parsed = JSON.parse(value) as Record<string, unknown>;
+  if (parsed.version !== 1) throw new Error("Stored Remote MCP settings are invalid.");
+  if (parsed.state === "disabled") return { version: 1, state: "disabled" };
+  if (
+    parsed.state === "active" &&
+    typeof parsed.connectorId === "string" && parsed.connectorId &&
+    typeof parsed.deviceId === "string" && parsed.deviceId &&
+    typeof parsed.token === "string" && parsed.token
+  ) {
+    return {
+      version: 1,
+      state: "active",
+      connectorId: parsed.connectorId,
+      deviceId: parsed.deviceId,
+      token: parsed.token,
+    };
+  }
+  throw new Error("Stored Remote MCP settings are invalid.");
+}
+
+async function readDesktopRemoteMcpCredential(): Promise<RemoteMcpCredential | null | undefined> {
+  const invoke = desktopInvoke();
+  if (!invoke) return undefined;
+  const value = await invoke("credential_get", { key: "remote_mcp_connector" });
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new Error("Stored Remote MCP settings are invalid.");
+  return parseRemoteMcpCredential(value);
+}
+
+async function storeDesktopRemoteMcpCredential(value: RemoteMcpCredential): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) throw new Error("Remote MCP settings are available in the Windows app.");
+  await invoke("credential_set", { key: "remote_mcp_connector", secret: JSON.stringify(value) });
+}
+
+async function deleteDesktopRemoteMcpCredential(): Promise<void> {
+  const invoke = desktopInvoke();
+  if (invoke) await invoke("credential_delete", { key: "remote_mcp_connector" });
+}
+
+function isUpdateHighlights(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 3 && value.every((highlight) => typeof highlight === "string");
+}
 
 function parseDesktopUpdateStatus(value: unknown): DesktopUpdateStatus {
   if (!value || typeof value !== "object") throw new Error("AliasMode returned an invalid update status.");
@@ -747,14 +813,70 @@ function parseDesktopUpdateStatus(value: unknown): DesktopUpdateStatus {
   if (status.state === "upToDate" && typeof status.currentVersion === "string") {
     return { state: "upToDate", currentVersion: status.currentVersion };
   }
-  if (status.state === "available" && typeof status.currentVersion === "string" && typeof status.version === "string") {
-    return { state: "available", currentVersion: status.currentVersion, version: status.version };
+  if (
+    status.state === "available" &&
+    typeof status.currentVersion === "string" &&
+    typeof status.version === "string" &&
+    isUpdateHighlights(status.highlights)
+  ) {
+    return {
+      state: "available",
+      currentVersion: status.currentVersion,
+      version: status.version,
+      highlights: status.highlights,
+    };
   }
   throw new Error("AliasMode returned an invalid update status.");
 }
 
+function parseDesktopUpdateMessage(value: unknown): DesktopUpdateMessage {
+  if (!value || typeof value !== "object") throw new Error("AliasMode returned invalid update progress.");
+  const progress = value as Record<string, unknown>;
+  if (progress.phase === "ready" && typeof progress.version === "string" && isUpdateHighlights(progress.highlights)) {
+    return { phase: "ready", version: progress.version, highlights: progress.highlights };
+  }
+  if (progress.phase === "preparing" || progress.phase === "verifying" || progress.phase === "installing") {
+    return { phase: progress.phase };
+  }
+  if (
+    progress.phase === "downloading" &&
+    (progress.percent === null ||
+      (typeof progress.percent === "number" && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100))
+  ) {
+    return { phase: "downloading", percent: progress.percent as number | null };
+  }
+  throw new Error("AliasMode returned invalid update progress.");
+}
+
 function desktopInvoke(): DesktopInvoke | undefined {
   return (window as any).__TAURI_INTERNALS__?.invoke as DesktopInvoke | undefined;
+}
+
+function UpdateHighlights({ version, highlights }: { version: string; highlights: string[] }) {
+  if (highlights.length === 0) return null;
+  return (
+    <details className="update-highlights">
+      <summary>What’s new in {version}</summary>
+      <ul>{highlights.map((highlight) => <li key={highlight}>{highlight}</li>)}</ul>
+    </details>
+  );
+}
+
+function DesktopUpdateProgressView({ progress }: { progress: DesktopUpdateProgress }) {
+  const percent = progress.phase === "downloading" ? progress.percent : null;
+  const label = progress.phase === "preparing"
+    ? "Preparing update…"
+    : progress.phase === "downloading"
+      ? percent === null ? "Downloading update…" : `Downloading update… ${percent}%`
+      : progress.phase === "verifying"
+        ? "Verifying update…"
+        : "Installing and restarting…";
+  return (
+    <div className="update-progress" role="status">
+      <span>{label}</span>
+      <progress max={100} value={percent ?? undefined} aria-label="Update progress" />
+    </div>
+  );
 }
 
 async function readDesktopCloudCredentials(): Promise<{
@@ -809,6 +931,9 @@ function App() {
   const [view, setView] = useState<"profiles" | "settings" | "extensions">("profiles");
   const [showCreate, setShowCreate] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
+  const [remoteMcp, setRemoteMcp] = useState<RemoteMcpSettings>({ state: "idle" });
+  const [remoteMcpTokenVisible, setRemoteMcpTokenVisible] = useState(false);
+  const [remoteMcpCopied, setRemoteMcpCopied] = useState<"url" | "token" | null>(null);
   const [cloudEvents, setCloudEvents] = useState<CloudDiagnosticEvent[]>([]);
   const [cloudEventsBusy, setCloudEventsBusy] = useState(false);
   const [cloudEventsErr, setCloudEventsErr] = useState<string | null>(null);
@@ -834,6 +959,7 @@ function App() {
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus | null>(null);
   const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
   const [desktopUpdateInstalling, setDesktopUpdateInstalling] = useState(false);
+  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<DesktopUpdateProgress | null>(null);
   const [desktopUpdateErr, setDesktopUpdateErr] = useState<string | null>(null);
   const [logDir, setLogDir] = useState<string | undefined>(undefined);
   const [logView, setLogView] = useState<{ file: string; content: string } | null>(null);
@@ -919,6 +1045,8 @@ function App() {
   const [bulkSource, setBulkSource] = useState<"file" | "paste">("file");
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const authGeneration = useRef(0);
+  const remoteMcpInFlight = useRef<Promise<void> | null>(null);
+  const remoteMcpAccountExit = useRef(false);
   const publishedRuntimeReadiness = useRef<string | null>(null);
   const [runtimeReadinessAttempt, setRuntimeReadinessAttempt] = useState(0);
   const restoreInFlight = useRef(false);
@@ -1049,22 +1177,191 @@ function App() {
   const installDesktopUpdate = async () => {
     const invoke = desktopInvoke();
     if (!invoke || desktopUpdate?.state !== "available") return;
+    const onProgress = new Channel<unknown>();
+    onProgress.onmessage = (value) => {
+      try {
+        const message = parseDesktopUpdateMessage(value);
+        if (message.phase === "ready") {
+          setDesktopUpdate((status) => status?.state === "available"
+            ? { ...status, version: message.version, highlights: message.highlights }
+            : status);
+        } else {
+          setDesktopUpdateProgress(message);
+        }
+      } catch { /* Ignore malformed native progress without interrupting the update. */ }
+    };
     setDesktopUpdateInstalling(true);
+    setDesktopUpdateProgress({ phase: "preparing" });
     setDesktopUpdateErr(null);
     try {
-      await invoke("update_now");
-      setDesktopUpdateInstalling(false);
+      await invoke("update_now", { onProgress });
     } catch (error) {
       setDesktopUpdateErr(error instanceof Error ? error.message : String(error));
+      setDesktopUpdateProgress(null);
       setDesktopUpdateInstalling(false);
+    }
+  };
+
+  const provisionRemoteMcp = async (): Promise<RemoteMcpSettings> => {
+    const created = await createCloudConnector();
+    if (
+      created.state !== "active" ||
+      typeof created.connectorId !== "string" || !created.connectorId ||
+      typeof created.deviceId !== "string" || !created.deviceId ||
+      typeof created.url !== "string" || !created.url ||
+      typeof created.token !== "string" || !created.token
+    ) {
+      throw new Error("AliasMode Cloud returned invalid Remote MCP settings.");
+    }
+    try {
+      await storeDesktopRemoteMcpCredential({
+        version: 1,
+        state: "active",
+        connectorId: created.connectorId,
+        deviceId: created.deviceId,
+        token: created.token,
+      });
+    } catch {
+      await revokeCloudConnector(created.connectorId).catch(() => undefined);
+      throw new Error("The Remote MCP access key could not be stored securely.");
+    }
+    return {
+      state: "active",
+      connectorId: created.connectorId,
+      deviceId: created.deviceId,
+      url: created.url,
+      token: created.token,
+    };
+  };
+
+  const runRemoteMcpTask = (work: () => Promise<void>): Promise<void> => {
+    if (remoteMcpAccountExit.current) return Promise.resolve();
+    if (remoteMcpInFlight.current) return remoteMcpInFlight.current;
+    const task = work().finally(() => {
+      if (remoteMcpInFlight.current === task) remoteMcpInFlight.current = null;
+    });
+    remoteMcpInFlight.current = task;
+    return task;
+  };
+
+  const loadRemoteMcp = (): Promise<void> => runRemoteMcpTask(async () => {
+    if (!isCloudMode || !cloudWorkspaceReady(cloudAuth)) {
+      setRemoteMcp({ state: "idle" });
+      return;
+    }
+    setRemoteMcpTokenVisible(false);
+    setRemoteMcpCopied(null);
+    setRemoteMcp({ state: "loading" });
+    try {
+      const stored = await readDesktopRemoteMcpCredential();
+      if (stored === undefined) {
+        throw new Error("Remote MCP settings are available in the Windows desktop app.");
+      }
+      if (stored?.state === "disabled") {
+        setRemoteMcp({ state: "disabled" });
+        return;
+      }
+      if (stored?.state === "active") {
+        const status = await fetchCloudConnector(stored.connectorId);
+        if (status.state === "active" && status.url) {
+          setRemoteMcp({
+            state: "active",
+            connectorId: stored.connectorId,
+            deviceId: stored.deviceId,
+            url: status.url,
+            token: stored.token,
+          });
+          return;
+        }
+      }
+      setRemoteMcp(await provisionRemoteMcp());
+    } catch (error) {
+      setRemoteMcp({ state: "error", error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  const enableRemoteMcp = (): Promise<void> => runRemoteMcpTask(async () => {
+    setRemoteMcp({ state: "loading" });
+    setRemoteMcpTokenVisible(false);
+    try {
+      setRemoteMcp(await provisionRemoteMcp());
+    } catch (error) {
+      setRemoteMcp({ state: "error", error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  const disableRemoteMcp = async () => {
+    if (remoteMcp.state !== "active" || !remoteMcp.connectorId) return;
+    if (!window.confirm("Disable this Remote MCP connection? Connected clients will stop working.")) return;
+    await runRemoteMcpTask(async () => {
+      setRemoteMcp({ state: "loading" });
+      setRemoteMcpTokenVisible(false);
+      try {
+        await revokeCloudConnector(remoteMcp.connectorId!);
+        await storeDesktopRemoteMcpCredential({ version: 1, state: "disabled" });
+        setRemoteMcp({ state: "disabled" });
+      } catch (error) {
+        setRemoteMcp({ state: "error", error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  };
+
+  const regenerateRemoteMcp = async () => {
+    if (remoteMcp.state !== "active" || !remoteMcp.connectorId) return;
+    if (!window.confirm("Generate a new Remote MCP access key? Existing clients will disconnect.")) return;
+    await runRemoteMcpTask(async () => {
+      setRemoteMcp({ state: "loading" });
+      setRemoteMcpTokenVisible(false);
+      try {
+        await revokeCloudConnector(remoteMcp.connectorId!);
+        await storeDesktopRemoteMcpCredential({ version: 1, state: "disabled" });
+        setRemoteMcp(await provisionRemoteMcp());
+      } catch (error) {
+        setRemoteMcp({ state: "error", error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  };
+
+  const copyRemoteMcp = async (kind: "url" | "token", value: string) => {
+    try {
+      await copyPlainText(value);
+      setRemoteMcpCopied(kind);
+      window.setTimeout(() => setRemoteMcpCopied((current) => current === kind ? null : current), 1200);
+    } catch {
+      setRemoteMcp((current) => ({ ...current, error: "Remote MCP connection details could not be copied." }));
+    }
+  };
+
+  const prepareRemoteMcpForAccountExit = async (bestEffort = false) => {
+    remoteMcpAccountExit.current = true;
+    try {
+      if (remoteMcpInFlight.current) await remoteMcpInFlight.current;
+      const connector = await readDesktopRemoteMcpCredential();
+      if (connector?.state === "active") {
+        await revokeCloudConnector(connector.connectorId);
+        await storeDesktopRemoteMcpCredential({ version: 1, state: "disabled" });
+        setRemoteMcp({ state: "disabled" });
+        setRemoteMcpTokenVisible(false);
+      }
+    } catch (error) {
+      if (!bestEffort) throw error;
     }
   };
 
   const openAccountSettings = () => {
     setModeErr(null);
     setView("settings");
+    setRemoteMcpTokenVisible(false);
+    void loadRemoteMcp();
     void loadCloudEvents();
     void loadTeam();
+  };
+
+  /** Leaving Settings must never keep a revealed Remote MCP key on screen. */
+  const closeAccountSettings = () => {
+    setRemoteMcpTokenVisible(false);
+    setRemoteMcpCopied(null);
+    setView("profiles");
   };
 
   const chooseMode = async (mode: "local" | "cloud"): Promise<boolean> => {
@@ -1095,7 +1392,7 @@ function App() {
     if (!pendingMode) return;
     if (await chooseMode(pendingMode)) {
       setPendingMode(null);
-      setView("profiles");
+      closeAccountSettings();
     }
   };
 
@@ -1145,6 +1442,9 @@ function App() {
         } catch (error) {
           if (generation !== authGeneration.current || !savedSessionRestoreEnabled.current) return;
           if (error instanceof CloudSessionRestoreError && !error.retryable) {
+            await deleteDesktopRemoteMcpCredential().catch(() => undefined);
+            setRemoteMcp({ state: "idle" });
+            setRemoteMcpTokenVisible(false);
             setCloudAuth({ authenticated: false });
             setSavedSessionPhase("manual-signin");
             setScheduledRefreshPending(false);
@@ -1172,7 +1472,10 @@ function App() {
     setAuthBusy(true);
     setAuthErr(null);
     try {
+      await prepareRemoteMcpForAccountExit(true);
       await forgetCloudSession();
+      await deleteDesktopRemoteMcpCredential().catch(() => undefined);
+      setRemoteMcp({ state: "idle" });
       if (generation !== authGeneration.current) return;
       setCloudAuth({ authenticated: false });
       setSavedSessionPhase("manual-signin");
@@ -1190,6 +1493,7 @@ function App() {
         setAuthErr(error instanceof Error ? error.message : String(error));
       }
     } finally {
+      remoteMcpAccountExit.current = false;
       if (generation === authGeneration.current) setAuthBusy(false);
     }
   };
@@ -1217,7 +1521,11 @@ function App() {
         if (typeof result.deviceCredential !== "string" || !result.deviceCredential) {
           throw new Error("Cloud did not return a device credential");
         }
-        if (!stored?.queueKey && (typeof result.queueKey !== "string" || !result.queueKey)) {
+        if (
+          !stored?.queueKey &&
+          result.queueKeyPersisted !== true &&
+          (typeof result.queueKey !== "string" || !result.queueKey)
+        ) {
           throw new Error("Cloud did not initialize encrypted pending sync");
         }
         const persisted = await storeDesktopCloudCredentials(
@@ -1252,7 +1560,10 @@ function App() {
     setAuthBusy(true);
     setAuthErr(null);
     try {
+      await prepareRemoteMcpForAccountExit();
       await signOutCloud();
+      await deleteDesktopRemoteMcpCredential().catch(() => undefined);
+      setRemoteMcp({ state: "idle" });
       authGeneration.current++;
       setCloudAuth({ authenticated: false });
       setSavedSessionPhase("manual-signin");
@@ -1264,10 +1575,11 @@ function App() {
       setCloudEvents([]);
       setAuthPassword("");
       setAuthNotice(null);
-      setView("profiles");
+      closeAccountSettings();
     } catch (error) {
       setAuthErr(error instanceof Error ? error.message : String(error));
     } finally {
+      remoteMcpAccountExit.current = false;
       setAuthBusy(false);
     }
   };
@@ -1406,6 +1718,11 @@ function App() {
     if (!isCloudMode || !workspaceReady || restartRequired) return;
     void loadTeam();
   }, [isCloudMode, restartRequired, workspaceReady]);
+
+  useEffect(() => {
+    if (view !== "settings" || !isCloudMode || !workspaceReady || restartRequired) return;
+    void loadRemoteMcp();
+  }, [view, isCloudMode, restartRequired, workspaceReady]);
 
   useEffect(() => {
     if (!appMode || !workspaceReady || restartRequired) return;
@@ -2487,11 +2804,15 @@ function App() {
         </div>
       )}
       {desktopUpdate?.state === "available" && (
-        <div className="update-banner" role="status">
+        <div className="update-banner">
           <Icon name="import" />
-          <span><strong>AliasMode {desktopUpdate.version} is available.</strong> The update will save active browsers and restart the app.</span>
+          <div className="update-copy">
+            <span role="status"><strong>AliasMode {desktopUpdate.version} is available.</strong> The update will save active browsers and restart the app.</span>
+            <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
+            {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
+          </div>
           <button className="btn primary" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
-            {desktopUpdateInstalling ? "Downloading and verifying…" : "Update now"}
+            {desktopUpdateInstalling ? "Updating…" : "Update now"}
           </button>
         </div>
       )}
@@ -2536,13 +2857,14 @@ function App() {
             <Icon name="power" className="sm" />Close
           </button>
           {(!isCloudMode || selectedEditable) && <>
-          {!isCloudMode && <>
           <span className="vsep" />
-          {selectedMobileCount > 0 && (
+          {!isCloudMode && selectedMobileCount > 0 && (
             <button className="btn warn" onClick={convertSelectedMobile}>
               <Icon name="laptop" className="sm" />Convert mobile ({selectedMobileCount})
             </button>
           )}
+          {/* Export works in Cloud mode too (the server decrypts the selected
+              profiles); Convert and Edit-from-file remain Local-only. */}
           <div className="menuwrap" ref={exportRef}>
             <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>
               <Icon name="export" className="sm" />Export<Icon name="chevronDown" className="sm" />
@@ -2555,10 +2877,11 @@ function App() {
               </div>
             )}
           </div>
-          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
-            <Icon name="edit" className="sm" />Edit from file
-          </button>
-          </>}
+          {!isCloudMode && (
+            <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
+              <Icon name="edit" className="sm" />Edit from file
+            </button>
+          )}
           <span className="vsep" />
           <div className="movewrap">
             {newMode ? (
@@ -2809,27 +3132,22 @@ function App() {
           <h2 className="sect-title">Uploaded extensions</h2>
           {extErr && <div className="modal-err"><Icon name="alert" className="sm" />{extErr}</div>}
           <p className="formnote">
-            {isCloudMode ? (
-              <>
-                Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Uploads stay on
-                this computer; a Cloud profile that carries an assignment for an uploaded extension loads it
-                when its browser opens here.
-              </>
-            ) : (
-              <>
-                Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Assign it per
-                profile from the <b>Extensions</b> tab when you edit that profile, or to many at once from
-                the <b>Extension</b> control in the roster toolbar — it loads when that browser opens.
-              </>
-            )}
+            Chrome Web Store installs are not supported in AliasMode. Profiles use CloakBrowser rather than
+            Google Chrome, so “Switch to Chrome to install extensions and themes” is expected.
           </p>
+          <ol className="steps">
+            <li>Obtain a trusted extension as a <code>.zip</code> or <code>.crx</code>.</li>
+            <li>Upload it here.</li>
+            <li>Close the target profile, then use <b>Edit &gt; Extensions</b> to assign it{!isCloudMode && ", or assign many at once from the roster toolbar"}.</li>
+            <li>Reopen the profile. AliasMode loads the extension when the browser starts.</li>
+          </ol>
           {extensions.length === 0 ? (
             <div className="emptystate">
               <span className="glyph"><Icon name="puzzle" /></span>
               <b>No extensions yet</b>
               <p>Uploaded extensions appear here, ready to assign to any profile.</p>
               <button className="btn primary" disabled={extBusy} onClick={() => extFileRef.current?.click()}>
-                <Icon name="plus" className="sm" />{extBusy ? "Uploading…" : "Upload extension"}
+                <Icon name="plus" className="sm" />{extBusy ? "Uploading…" : "Upload ZIP/CRX"}
               </button>
             </div>
           ) : (
@@ -2857,7 +3175,7 @@ function App() {
           <span className="spacer" />
           {extensions.length > 0 && (
             <button className="btn primary" type="button" disabled={extBusy} onClick={() => extFileRef.current?.click()}>
-              <Icon name="plus" className="sm" />{extBusy ? "Uploading…" : "Upload extension"}
+              <Icon name="plus" className="sm" />{extBusy ? "Uploading…" : "Upload ZIP/CRX"}
             </button>
           )}
         </footer>
@@ -2906,7 +3224,66 @@ function App() {
             )}
             </div>
           </section>
-          
+
+          {isCloudMode && cloudAuth?.authenticated && (
+            <section className="settings-card remote-mcp-settings">
+              <header>
+                <Icon name="cloud" className="sm" /><h2>Remote MCP</h2>
+                <span className={`remote-mcp-status ${remoteMcp.state}`}>
+                  {remoteMcp.state === "active" ? "Ready" : remoteMcp.state === "disabled" ? "Disabled" : remoteMcp.state === "loading" ? "Preparing" : remoteMcp.state === "error" ? "Unavailable" : "Not ready"}
+                </span>
+              </header>
+              <div className="card-body">
+                <p>Connect an AI client on another computer. Browser windows open on this Windows PC, so keep AliasMode running.</p>
+                {remoteMcp.state === "loading" && <p className="hint" role="status">Preparing your secure connection…</p>}
+                {remoteMcp.state === "active" && remoteMcp.url && remoteMcp.token && (
+                  <>
+                    <label className="fld remote-mcp-field">
+                      <span>MCP server URL</span>
+                      <span className="remote-mcp-value">
+                        <input className="mono" value={remoteMcp.url} readOnly />
+                        <button className="btn" type="button" disabled={authBusy} onClick={() => void copyRemoteMcp("url", remoteMcp.url!)}>{remoteMcpCopied === "url" ? "Copied" : "Copy"}</button>
+                      </span>
+                    </label>
+                    <label className="fld remote-mcp-field">
+                      <span>Access key</span>
+                      <span className="remote-mcp-value">
+                        <input className="mono" value={remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"} readOnly aria-label="Remote MCP access key" />
+                        <button className="btn" type="button" disabled={authBusy} onClick={() => setRemoteMcpTokenVisible((visible) => !visible)}>{remoteMcpTokenVisible ? "Hide" : "Reveal"}</button>
+                        <button className="btn" type="button" disabled={authBusy} onClick={() => void copyRemoteMcp("token", remoteMcp.token!)}>{remoteMcpCopied === "token" ? "Copied" : "Copy"}</button>
+                      </span>
+                    </label>
+                    <div className="hint remote-mcp-guide">
+                      <strong>Connect Claude.ai or ChatGPT</strong>
+                      <ol>
+                        <li>Add a custom MCP connector or app.</li>
+                        <li>Paste the MCP server URL and select Connect.</li>
+                        <li>Sign into AliasMode and select Allow.</li>
+                      </ol>
+                      <details>
+                        <summary>Claude Code and other clients</summary>
+                        <p>Claude Code uses an HTTP entry in <code>.mcp.json</code>. Keep the access key in an environment variable. Other bearer-capable MCP clients can use the same URL and secret header.</p>
+                        <p>Claude.ai and ChatGPT use OAuth and do not need the access key.</p>
+                      </details>
+                    </div>
+                    <div className="update-actions">
+                      <button className="btn" type="button" disabled={authBusy} onClick={() => void regenerateRemoteMcp()}>Regenerate key</button>
+                      <button className="btn danger" type="button" disabled={authBusy} onClick={() => void disableRemoteMcp()}>Disable</button>
+                    </div>
+                  </>
+                )}
+                {remoteMcp.state === "disabled" && (
+                  <>
+                    <p>Remote connections are disabled for this Windows device.</p>
+                    <button className="btn" type="button" disabled={authBusy} onClick={() => void enableRemoteMcp()}>Enable Remote MCP</button>
+                  </>
+                )}
+                {remoteMcp.error && <div className="modal-err" role="alert">{remoteMcp.error}</div>}
+                {remoteMcp.state === "error" && <button className="btn" type="button" disabled={authBusy} onClick={() => void loadRemoteMcp()}>Try again</button>}
+              </div>
+            </section>
+          )}
+
 <section className="settings-card">
             <header><Icon name="sun" className="sm" /><h2>Appearance</h2></header>
             <div className="card-body">
@@ -3019,10 +3396,13 @@ function App() {
             <div className="settings-row"><span>Installed version</span><strong className="mono">{appVersion || desktopUpdate?.currentVersion || "—"}</strong></div>
             {desktopUpdate?.state === "upToDate" && <p role="status">AliasMode is up to date.</p>}
             {desktopUpdate?.state === "available" && (
-              <p role="status">Version {desktopUpdate.version} is ready. Active browsers will be saved and closed.</p>
+              <>
+                <p role="status">Version {desktopUpdate.version} is ready. Active browsers will be saved and closed.</p>
+                <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
+              </>
             )}
             {!desktopUpdate && !desktopUpdateChecking && <p>AliasMode checks for updates when it starts.</p>}
-            {desktopUpdateInstalling && <p role="status">Downloading and verifying the update. AliasMode will save browsers and restart.</p>}
+            {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
             {desktopUpdateErr && <div className="modal-err" role="alert">{desktopUpdateErr}</div>}
             <div className="update-actions">
               <button className="btn" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void checkDesktopUpdate(true)}>
@@ -3196,6 +3576,20 @@ function App() {
               <div className="fld-row">
                 <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
                 <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
+              </div>
+              <div className="proxy-referral">
+                <div>
+                  <strong>Need a proxy?</strong>
+                  <span>Static residential proxies from $2.97/mo at OutreachProxy.</span>
+                </div>
+                <a
+                  href="https://outreachproxy.com/t/aliasmode"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="Get a proxy from OutreachProxy (opens externally)"
+                >
+                  Get a proxy <span aria-hidden="true">↗</span>
+                </a>
               </div>
               <FingerprintSettings screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
             </div>

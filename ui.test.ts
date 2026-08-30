@@ -1415,6 +1415,112 @@ test("app mode API uses the packaged Cloud endpoint", async () => {
   s.close();
 });
 
+test("Cloud connector API creates, checks, and revokes only the selected connector", async () => {
+  const s = store();
+  const revoked: string[] = [];
+  const connectors = [
+    { id: "settings-connector", deviceId: "device-1", label: "AliasMode Settings", revokedAt: null },
+    { id: "cli-connector", deviceId: "device-1", label: "Linux Claude", revokedAt: null },
+  ];
+  const client = {
+    async createMcpConnector(label: string) {
+      expect(label).toBe("AliasMode Settings");
+      return {
+        ok: true,
+        connector: connectors[0],
+        token: "test-connector-secret",
+      };
+    },
+    async listMcpConnectors() { return { ok: true, connectors }; },
+    async revokeMcpConnector(id: string) { revoked.push(id); return { ok: true }; },
+    remoteMcpUrl(deviceId: string) { return `https://cloud.aliasmode.test/v1/mcp/devices/${deviceId}`; },
+  };
+  const options = {
+    cloudConnection: {
+      accountId: () => "account-1",
+      deviceId: () => "device-1",
+      client,
+    } as unknown as CloudConnectionRuntime,
+  };
+  const request = (body: unknown) => new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const created = await handleUiRequest(request({ action: "create" }), {} as any, s, null, options);
+  expect(created!.headers.get("cache-control")).toBe("no-store");
+  expect(await created!.json()).toEqual({
+    ok: true,
+    state: "active",
+    connectorId: "settings-connector",
+    deviceId: "device-1",
+    url: "https://cloud.aliasmode.test/v1/mcp/devices/device-1",
+    token: "test-connector-secret",
+  });
+
+  const active = await handleUiRequest(request({
+    action: "status", connectorId: "settings-connector",
+  }), {} as any, s, null, options);
+  expect(await active!.json()).toEqual({
+    ok: true,
+    state: "active",
+    url: "https://cloud.aliasmode.test/v1/mcp/devices/device-1",
+  });
+
+  const missing = await handleUiRequest(request({
+    action: "status", connectorId: "unknown-connector",
+  }), {} as any, s, null, options);
+  expect((await missing!.json()).state).toBe("missing");
+
+  const disabled = await handleUiRequest(request({
+    action: "revoke", connectorId: "settings-connector",
+  }), {} as any, s, null, options);
+  expect(await disabled!.json()).toEqual({ ok: true, state: "disabled" });
+  expect(revoked).toEqual(["settings-connector"]);
+  expect(revoked).not.toContain("cli-connector");
+  s.close();
+});
+
+test("Cloud connector API requires an authenticated trusted JSON request", async () => {
+  const s = store();
+  const unavailable = await handleUiRequest(new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"action":"create"}',
+  }), {} as any, s);
+  expect(unavailable!.status).toBe(503);
+  expect(unavailable!.headers.get("cache-control")).toBe("no-store");
+
+  const unauthenticated = await handleUiRequest(new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: '{"action":"create"}',
+  }), {} as any, s, null, {
+    cloudConnection: {
+      accountId: () => null,
+      deviceId: () => null,
+      client: {},
+    } as unknown as CloudConnectionRuntime,
+  });
+  expect(unauthenticated!.status).toBe(401);
+  expect(unauthenticated!.headers.get("cache-control")).toBe("no-store");
+
+  const cloudConnection = {
+    accountId: () => "account-1",
+    deviceId: () => "device-1",
+    client: {},
+  } as unknown as CloudConnectionRuntime;
+  const rejected = await handleUiRequest(new Request("http://x/ui/api/cloud-connector", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://outside.invalid" },
+    body: '{"action":"create"}',
+  }), {} as any, s, null, { cloudConnection });
+  expect(rejected!.status).toBe(403);
+  expect(rejected!.headers.get("cache-control")).toBe("no-store");
+  s.close();
+});
+
 test("Cloud workspace API returns editable folders to members without loading invitations", async () => {
   const s = store();
   let invitationCalls = 0;
@@ -1659,6 +1765,53 @@ test("Cloud auth API creates a pending-sync key only for a new queue", async () 
   const body = await response!.json();
   expect(body.queueKey).toMatch(/^[A-Za-z0-9+/]{43}=$/);
   expect(pendingSync.queue()).toBeDefined();
+  pendingSync.close();
+  s.close();
+});
+
+test("Cloud auth API reports a server-persisted queue key without returning it", async () => {
+  const s = store();
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  const cloudConnection = {
+    async bootstrap() {
+      return {
+        device: { id: "device1" },
+        deviceCredential: "device-credential",
+        legal: { current: { terms: "1", privacy: "1", acceptableUse: "1" }, accepted: null },
+      };
+    },
+    clearDevice() {},
+  } as unknown as CloudConnectionRuntime;
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-persisted-key-"));
+  const pendingSync = new PendingSyncRuntime(
+    join(root, "pending.sqlite"),
+    join(root, "pending.key"),
+  );
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/cloud-auth/signin", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "user@example.com", password: "password" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { cloudAuth, cloudConnection, pendingSync },
+  );
+  const body = await response!.json();
+  expect(body.queueKey).toBeUndefined();
+  expect(body.queueKeyPersisted).toBe(true);
+  expect(existsSync(join(root, "pending.key"))).toBe(true);
   pendingSync.close();
   s.close();
 });
@@ -2117,13 +2270,17 @@ test("Cloud sign-out keeps auth and account state when browsers cannot release",
   } as unknown as CloudConnectionRuntime;
   const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
   const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return false; } } as any;
+  const mcpTunnel = {
+    async disconnect() { calls.push("disconnectTunnel"); },
+    refresh() { calls.push("refreshTunnel"); },
+  };
 
   const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser, mcpTunnel });
 
   expect(response!.status).toBe(409);
-  expect(calls).toEqual(["releaseAll"]);
+  expect(calls).toEqual(["disconnectTunnel", "releaseAll", "refreshTunnel"]);
   expect(cloudConnection.accountId()).toBe("account1");
   s.close();
 });
@@ -2139,13 +2296,17 @@ test("Cloud sign-out releases browsers before queue, device, and credentials", a
   } as unknown as CloudConnectionRuntime;
   const pendingSync = { close() { calls.push("closeQueue"); } } as unknown as PendingSyncRuntime;
   const cloudBrowser = { async releaseAll() { calls.push("releaseAll"); return true; } } as any;
+  const mcpTunnel = {
+    async disconnect() { calls.push("disconnectTunnel"); },
+    refresh() { calls.push("refreshTunnel"); },
+  };
 
   const response = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser, mcpTunnel });
 
   expect(response!.status).toBe(200);
-  expect(calls).toEqual(["releaseAll", "closeQueue", "clearDevice", "signOut"]);
+  expect(calls).toEqual(["disconnectTunnel", "releaseAll", "closeQueue", "clearDevice", "signOut"]);
   s.close();
 });
 

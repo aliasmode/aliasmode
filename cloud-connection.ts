@@ -39,6 +39,10 @@ export class CloudConnectionRuntime {
     return this.deviceIdValue;
   }
 
+  deviceCredential(): string | undefined {
+    return this.deviceCredentialValue;
+  }
+
   async bootstrap(): Promise<BootstrapResponse> {
     const response = await this.client.bootstrap({ device: this.installation });
     this.accountIdValue = response.account.id;

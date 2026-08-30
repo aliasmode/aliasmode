@@ -551,6 +551,97 @@ test("close reads the session back, pushes it, stops, and releases", async () =>
   expect(h.store.getLaunch("k1d0cd11")).toBeNull();
 });
 
+test("fast session checkpoint saves ordered duplicate tab changes without version churn", async () => {
+  const hub = fakeHub();
+  hub.sessions.set("k1d0cd11", JSON.stringify({
+    cookies: [],
+    origins: [],
+    tabs: ["https://initial.example/"],
+  }));
+  let tabs = ["https://one.example/", "https://one.example/", "https://two.example/"];
+  const h = harness(hub, async () => JSON.stringify({ cookies: [], origins: [], tabs }));
+  await h.coord.open("k1d0cd11");
+
+  await h.coord.sessionSyncOnce("k1d0cd11", "ws://x/k1d0cd11");
+  expect(JSON.parse(hub.sessions.get("k1d0cd11")!).tabs).toEqual(tabs);
+  expect(hub.calls.filter((call) => call === "putSession:k1d0cd11")).toHaveLength(1);
+
+  await h.coord.sessionSyncOnce("k1d0cd11", "ws://x/k1d0cd11");
+  expect(hub.calls.filter((call) => call === "putSession:k1d0cd11")).toHaveLength(1);
+
+  tabs = ["https://two.example/", "https://one.example/", "https://one.example/"];
+  await h.coord.sessionSyncOnce("k1d0cd11", "ws://x/k1d0cd11");
+  expect(JSON.parse(hub.sessions.get("k1d0cd11")!).tabs).toEqual(tabs);
+  expect(hub.calls.filter((call) => call === "putSession:k1d0cd11")).toHaveLength(2);
+});
+
+test("close advances past an in-flight checkpoint before saving newer tabs", async () => {
+  const hub = fakeHub();
+  hub.sessions.set("k1d0cd11", JSON.stringify({
+    cookies: [],
+    origins: [],
+    tabs: ["https://initial.example/"],
+  }));
+  let tabs = ["https://checkpoint.example/"];
+  let putCalls = 0;
+  let putEntered!: () => void;
+  let releasePut!: () => void;
+  const entered = new Promise<void>((resolve) => { putEntered = resolve; });
+  const blocked = new Promise<void>((resolve) => { releasePut = resolve; });
+  const originalPut = hub.putSession.bind(hub);
+  hub.putSession = async (...args: Parameters<typeof originalPut>) => {
+    putCalls++;
+    if (putCalls === 1) {
+      putEntered();
+      await blocked;
+    }
+    return originalPut(...args);
+  };
+  const h = harness(hub, async () => JSON.stringify({ cookies: [], origins: [], tabs }));
+  await h.coord.open("k1d0cd11");
+
+  const checkpoint = h.coord.sessionSyncOnce("k1d0cd11", "ws://x/k1d0cd11");
+  await entered;
+  tabs = ["https://close.example/a", "https://close.example/b", "https://close.example/a"];
+  const closing = h.coord.close("k1d0cd11");
+  releasePut();
+
+  await checkpoint;
+  expect(await closing).toBe(true);
+  expect(JSON.parse(hub.sessions.get("k1d0cd11")!).tabs).toEqual(tabs);
+  expect(putCalls).toBe(2);
+  expect(hub.versionOf.get("k1d0cd11")).toBe(3);
+});
+
+test("fast tab checkpoint restores after native browser-window close", async () => {
+  const hub = fakeHub();
+  hub.sessions.set("k1d0cd11", JSON.stringify({
+    cookies: [],
+    origins: [],
+    tabs: ["https://initial.example/"],
+  }));
+  const checkpointTabs = [
+    "https://restored.example/a",
+    "https://restored.example/b",
+    "https://restored.example/a",
+  ];
+  const h = harness(hub, async () => JSON.stringify({
+    cookies: [],
+    origins: [],
+    tabs: checkpointTabs,
+  }));
+  await h.coord.open("k1d0cd11");
+
+  await h.coord.sessionSyncOnce("k1d0cd11", "ws://x/k1d0cd11");
+  h.setAlive(false);
+  await h.coord.heartbeatOnce("k1d0cd11", "ws://x/k1d0cd11");
+  expect(hub.locks.has("k1d0cd11")).toBe(false);
+
+  h.setAlive(true);
+  expect((await h.coord.open("k1d0cd11")).ok).toBe(true);
+  expect(h.navigated.at(-1)).toEqual(checkpointTabs);
+});
+
 test("fast Telegram checkpoint saves a new login before a native browser-window close", async () => {
   const telegramA = JSON.stringify({
     cookies: [], telegramClient: "a",
@@ -844,7 +935,7 @@ test("managed Close completes on a version conflict because the hub already has 
   expect(hub.locks.has("k1d0cd11")).toBe(false);
 });
 
-test("fast session checkpoint timer is armed only for Telegram profiles", async () => {
+test("fast session checkpoint timer is armed for every writer-owned profile", async () => {
   const openWithPlatform = async (platform: string, bundle?: string) => {
     const hub = fakeHub();
     const getProfile = hub.getProfile;
@@ -877,8 +968,8 @@ test("fast session checkpoint timer is armed only for Telegram profiles", async 
     return intervals;
   };
 
-  expect(await openWithPlatform("x.com")).toEqual([120_000]);
-  expect(await openWithPlatform("linkedin.com")).toEqual([120_000]);
+  expect(await openWithPlatform("x.com")).toEqual([3_000, 120_000]);
+  expect(await openWithPlatform("linkedin.com")).toEqual([3_000, 120_000]);
   expect(await openWithPlatform("web.telegram.org")).toEqual([3_000, 120_000]);
   expect(await openWithPlatform("", JSON.stringify({
     cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "theme", value: "dark" }] }],
@@ -1337,6 +1428,7 @@ test("reopen drains an old heartbeat put before reading and injecting the author
     readSession: async () => '{"cookies":[{"name":"auth_token","value":"OLD_TICK","domain":".x.com","path":"/"}],"origins":[]}',
     writeSession: async (_ws, bundle) => { injected.push(bundle); events.push(`inject:${injected.length}`); },
     heartbeatMs: 1_000,
+    sessionSyncMs: 0,
     heartbeatDrainMs: 1_000,
     setIntervalFn: (fn) => { ticks.push(fn); return ticks.length; },
     clearIntervalFn: () => {},
@@ -1398,6 +1490,7 @@ test("reopen becomes advisory when a fresh writer claim fails after heartbeat dr
     readSession: async () => '{"cookies":[{"name":"auth_token","value":"OLD_TICK","domain":".x.com","path":"/"}],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 1_000,
+    sessionSyncMs: 0,
     heartbeatDrainMs: 1_000,
     retainedCleanupRetryMs: 1,
     retainedCleanupRenewMs: 1,
@@ -1456,6 +1549,7 @@ test("reopen fails closed on heartbeat-drain timeout and keeps the lock behind t
     readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => { injections++; },
     heartbeatMs: 1_000,
+    sessionSyncMs: 0,
     heartbeatDrainMs: 5,
     setIntervalFn: (fn) => { ticks.push(fn); return ticks.length; },
     clearIntervalFn: () => {},
@@ -1843,6 +1937,7 @@ test("reclaimSurvivors arms heartbeat only after survivor session state is seede
     readSession: async () => '{"cookies":[],"origins":[]}',
     writeSession: async () => {},
     heartbeatMs: 1,
+    sessionSyncMs: 0,
     setIntervalFn: (fn) => {
       fn(); // fire immediately; if heartbeat was armed too early this would push before getSession returns
       return 1;

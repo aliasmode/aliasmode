@@ -81,8 +81,39 @@ export interface PlaywrightWorkerOptions {
   spawn?: (argv: string[]) => WorkerProcess;
 }
 
-function runtimeRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim() || defaultPlaywrightRuntimeRoot();
+export interface PlaywrightRuntimeResolutionOptions {
+  runtimeRoot?: string;
+  env?: NodeJS.ProcessEnv;
+  sourceRoot?: string;
+}
+
+export interface PlaywrightRuntimeLayout {
+  kind: "source" | "packaged";
+  root: string;
+  nodeExecutable: string;
+  workerPath: string;
+}
+
+export function resolvePlaywrightRuntime(
+  options: PlaywrightRuntimeResolutionOptions = {},
+): PlaywrightRuntimeLayout {
+  const env = options.env ?? process.env;
+  const packagedRoot = options.runtimeRoot?.trim() || env.ALIASMODE_PLAYWRIGHT_RUNTIME?.trim();
+  if (packagedRoot) {
+    return {
+      kind: "packaged",
+      root: packagedRoot,
+      nodeExecutable: join(packagedRoot, "node", "node.exe"),
+      workerPath: join(packagedRoot, "worker.mjs"),
+    };
+  }
+  const root = options.sourceRoot ?? dirname(Bun.main);
+  return {
+    kind: "source",
+    root,
+    nodeExecutable: "node",
+    workerPath: join(root, "playwright-worker.mjs"),
+  };
 }
 
 export function playwrightWorkerEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -93,13 +124,14 @@ export function playwrightWorkerEnvironment(env: NodeJS.ProcessEnv = process.env
   )) as Record<string, string>;
 }
 
-export function playwrightWorkerCommand(root = runtimeRoot()): string[] {
+export function playwrightWorkerCommand(root?: string): string[] {
+  const runtime = resolvePlaywrightRuntime({ runtimeRoot: root });
   return [
-    join(root, "node", "node.exe"),
+    runtime.nodeExecutable,
     "--input-type=module",
     "--eval",
     PLAYWRIGHT_WORKER_BOOTSTRAP,
-    join(root, "worker.mjs"),
+    runtime.workerPath,
   ];
 }
 
@@ -165,7 +197,6 @@ export async function runPlaywrightWorker<T>(
   if (Buffer.byteLength(request) > PLAYWRIGHT_MAX_MESSAGE_BYTES) {
     throw new PlaywrightWorkerError("invalid_request", "Playwright worker request exceeded its limit");
   }
-  const root = options.runtimeRoot ?? runtimeRoot();
   const spawn = options.spawn ?? ((argv: string[]) => Bun.spawn(argv, {
     stdin: "pipe",
     stdout: "pipe",
@@ -174,7 +205,7 @@ export async function runPlaywrightWorker<T>(
   }) as unknown as WorkerProcess);
   let child: WorkerProcess;
   try {
-    child = spawn(playwrightWorkerCommand(root));
+    child = spawn(playwrightWorkerCommand(options.runtimeRoot));
   } catch {
     throw new PlaywrightWorkerError("runtime_unavailable", "Playwright worker could not start");
   }
@@ -233,16 +264,50 @@ export async function runPlaywrightWorker<T>(
   return response.result;
 }
 
-export async function verifyPlaywrightRuntime(root: string): Promise<void> {
-  const playwright = JSON.parse(await readFile(join(root, "node_modules", "playwright-core", "package.json"), "utf8"));
-  const ws = JSON.parse(await readFile(join(root, "node_modules", "ws", "package.json"), "utf8"));
+async function verifySourceNode(nodeExecutable: string): Promise<void> {
+  try {
+    const child = Bun.spawn([nodeExecutable, "--version"], {
+      stdout: "pipe",
+      stderr: "ignore",
+      env: playwrightWorkerEnvironment(),
+    });
+    const [raw, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.exited,
+    ]);
+    const major = Number(/^v?(\d+)(?:\.|$)/.exec(raw.trim())?.[1]);
+    if (exitCode === 0 && Number.isInteger(major) && major >= 18) return;
+  } catch {}
+  throw new Error("source Playwright runtime requires Node.js 18 or newer on PATH");
+}
+
+export async function verifyPlaywrightRuntime(root?: string): Promise<void> {
+  const runtime = resolvePlaywrightRuntime({ runtimeRoot: root });
+  let playwright: any;
+  let ws: any;
+  try {
+    playwright = JSON.parse(await readFile(join(runtime.root, "node_modules", "playwright-core", "package.json"), "utf8"));
+    ws = JSON.parse(await readFile(join(runtime.root, "node_modules", "ws", "package.json"), "utf8"));
+  } catch {
+    const action = runtime.kind === "source" ? "; run `bun install --frozen-lockfile`" : "";
+    throw new Error(`${runtime.kind} Playwright runtime is incomplete${action}`);
+  }
   if (playwright?.name !== "playwright-core" || playwright?.version !== "1.58.2"
       || ws?.name !== "ws" || ws?.version !== "8.21.0") {
-    throw new Error("packaged Playwright runtime has unexpected dependencies");
+    throw new Error(`${runtime.kind} Playwright runtime has unexpected dependencies`);
   }
-  for (const path of [join(root, "worker.mjs"), join(root, "node", "node.exe")]) {
-    try { await readFile(path); } catch { throw new Error("packaged Playwright runtime is incomplete"); }
+  const files = runtime.kind === "packaged"
+    ? [runtime.workerPath, runtime.nodeExecutable]
+    : [runtime.workerPath];
+  for (const path of files) {
+    try {
+      await readFile(path);
+    } catch {
+      const action = runtime.kind === "source" ? "; run `bun install --frozen-lockfile`" : "";
+      throw new Error(`${runtime.kind} Playwright runtime is incomplete${action}`);
+    }
   }
+  if (runtime.kind === "source") await verifySourceNode(runtime.nodeExecutable);
 }
 
 export function defaultPlaywrightRuntimeRoot(): string {

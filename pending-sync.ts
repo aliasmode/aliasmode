@@ -5,7 +5,19 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fchmodSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
 import type {
@@ -577,13 +589,82 @@ function decodeQueueKey(encodedKey: string): Buffer {
   return Buffer.from(encodedKey, "base64");
 }
 
+function syncFile(path: string): void {
+  const file = openSync(path, "r");
+  try {
+    fsyncSync(file);
+  } finally {
+    closeSync(file);
+  }
+}
+
+function syncParentDirectory(path: string): void {
+  if (process.platform === "win32") return;
+  const directory = openSync(dirname(path), "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
+}
+
+function readQueueKey(path: string): string {
+  const encodedKey = readFileSync(path, "utf8").trim();
+  const key = decodeQueueKey(encodedKey);
+  key.fill(0);
+  if (process.platform !== "win32") chmodSync(path, 0o600);
+  syncFile(path);
+  syncParentDirectory(path);
+  return encodedKey;
+}
+
+function persistQueueKey(path: string, encodedKey: string): void {
+  if (existsSync(path)) {
+    if (readQueueKey(path) !== encodedKey) {
+      throw new Error("stored pending sync encryption key does not match the supplied key");
+    }
+    return;
+  }
+
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const file = openSync(temporary, "wx", 0o600);
+    try {
+      writeFileSync(file, `${encodedKey}\n`, { encoding: "utf8" });
+      if (process.platform !== "win32") fchmodSync(file, 0o600);
+      fsyncSync(file);
+    } finally {
+      closeSync(file);
+    }
+    try {
+      linkSync(temporary, path);
+    } catch (error) {
+      if (!existsSync(path)) throw error;
+      if (readQueueKey(path) !== encodedKey) {
+        throw new Error("stored pending sync encryption key does not match the supplied key");
+      }
+    }
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  syncParentDirectory(path);
+}
+
 export class PendingSyncRuntime {
   private queueValue: PendingSyncQueue | undefined;
 
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly keyPath?: string,
+  ) {}
 
   queue(): PendingSyncQueue | undefined {
     return this.queueValue;
+  }
+
+  persistsQueueKey(): boolean {
+    return this.keyPath !== undefined;
   }
 
   hasStoredState(): boolean {
@@ -591,19 +672,30 @@ export class PendingSyncRuntime {
   }
 
   initialize(encodedKey?: string): PendingSyncInitialization {
-    if (!encodedKey && queueStateExists(this.path) && queueHasEncryptedState(this.path)) {
+    const storedKey = this.keyPath && existsSync(this.keyPath)
+      ? readQueueKey(this.keyPath)
+      : undefined;
+    if (storedKey && encodedKey && storedKey !== encodedKey) {
+      throw new Error("stored pending sync encryption key does not match the supplied key");
+    }
+    const selectedKey = storedKey ?? encodedKey;
+    if (!selectedKey && queueStateExists(this.path) && queueHasEncryptedState(this.path)) {
       throw new Error("an existing pending queue requires its stored encryption key");
     }
 
-    const key = encodedKey ? decodeQueueKey(encodedKey) : randomBytes(32);
-    const createdKey = encodedKey ? undefined : key.toString("base64");
+    const key = selectedKey ? decodeQueueKey(selectedKey) : randomBytes(32);
+    const generatedKey = selectedKey ? undefined : key.toString("base64");
     let candidate: PendingSyncQueue | undefined;
     try {
       candidate = new PendingSyncQueue(this.path, key);
       candidate.assertEncryptionKey();
+      if (this.keyPath && !storedKey) persistQueueKey(this.keyPath, selectedKey ?? generatedKey!);
       this.queueValue?.close();
       this.queueValue = candidate;
-      return { queue: candidate, createdKey };
+      return {
+        queue: candidate,
+        ...(!this.keyPath && generatedKey ? { createdKey: generatedKey } : {}),
+      };
     } catch (error) {
       candidate?.close();
       throw error;

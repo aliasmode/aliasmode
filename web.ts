@@ -14,6 +14,7 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import {
@@ -22,6 +23,7 @@ import {
   handleAutomationHealthSnapshot,
   isAdsPowerBrowserControl,
   isLoopbackAddress,
+  type BrowserLifecycleContext,
 } from "./server.ts";
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
 import { handleUserApi } from "./adspower-users.ts";
@@ -51,6 +53,7 @@ export interface DashboardServerOptions {
   cloudConnection?: CloudConnectionRuntime;
   pendingSync?: PendingSyncRuntime;
   cloudBrowser?: CloudBrowserLifecycle;
+  mcpTunnel?: McpTunnelLifecycle;
   port?: number;
   /**
    * Bind address. Loopback only by default — the dashboard and API are
@@ -121,6 +124,78 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
   return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 }
 
+function cloudAuthenticationError(opts: DashboardServerOptions): Response | null {
+  if (opts.appConfig?.read().mode !== "cloud" || opts.remote) return null;
+  return Response.json(
+    { ok: false, error: "AliasMode Cloud authentication is required" },
+    { status: 503 },
+  );
+}
+
+function automationHealthResponse(
+  req: Request,
+  clientAddress: string | undefined,
+  remote: RemoteCoordinator | null | undefined,
+): Response | Promise<Response> | null {
+  if (new URL(req.url).pathname !== "/api/xactions/health-snapshot") return null;
+  if (!isLoopbackAddress(clientAddress)) {
+    return Response.json({ ok: false, error: "loopback access only" }, { status: 403 });
+  }
+  if (!remote) {
+    return Response.json({ ok: false, error: "remote hub is not configured" }, { status: 503 });
+  }
+  return handleAutomationHealthSnapshot(req, remote);
+}
+
+async function handleAutomationRequest(
+  req: Request,
+  opts: DashboardServerOptions,
+  lifecycle: BrowserLifecycleContext,
+): Promise<Response> {
+  const { launcher, store } = opts;
+  const users = await handleUserApi(req, launcher, store, opts.remote);
+  if (users) return users;
+  if (opts.remote && isAdsPowerBrowserControl(new URL(req.url).pathname)) {
+    return handleRemoteBrowserControl(req, opts.remote, launcher, store, lifecycle);
+  }
+  return handleRequest(req, launcher, store, lifecycle);
+}
+
+export function serveAutomationApi(opts: Omit<DashboardServerOptions, "hostname">) {
+  const { port = 50400 } = opts;
+  const hostname = "127.0.0.1";
+  const log = opts.log ?? ((m) => console.log(`[aliasmode] ${m}`));
+  const admission = opts.lifecycleAdmission ?? new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
+  const lifecycle = { admission };
+  try {
+    const server = Bun.serve({
+      port,
+      hostname,
+      idleTimeout: 240,
+      fetch: async (req, server) => {
+        const health = automationHealthResponse(req, server.requestIP(req)?.address, opts.remote);
+        if (health) return health;
+        return dispatchWithLifecycleAdmission(req, admission, async () => {
+          const authentication = cloudAuthenticationError(opts);
+          if (authentication) return authentication;
+          return handleAutomationRequest(req, opts, lifecycle);
+        });
+      },
+    });
+    log(`automation API on http://${hostname}:${server.port}`);
+    return server;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const message = `automation API could not bind to http://${hostname}:${port}: ${detail}`;
+    log(message);
+    throw new Error(message);
+  }
+}
+
+export function serveDesktopAutomationApi(opts: Omit<DashboardServerOptions, "hostname" | "port">) {
+  return serveAutomationApi({ ...opts, port: 50400 });
+}
+
 export function serveDashboard(opts: DashboardServerOptions) {
   const { launcher, store, port = 50400, hostname = "127.0.0.1" } = opts;
   const runtimeMode = opts.appConfig?.read().mode;
@@ -186,15 +261,8 @@ export function serveDashboard(opts: DashboardServerOptions) {
       // The automation client publishes through this local coordinator without entering the
       // browser lifecycle admission queue. Even if the dashboard is deliberately
       // bound beyond loopback, this ingestion route remains local-only.
-      if (reqUrl.pathname === "/api/xactions/health-snapshot") {
-        if (!isLoopbackAddress(server.requestIP(req)?.address)) {
-          return Response.json({ ok: false, error: "loopback access only" }, { status: 403 });
-        }
-        if (!opts.remote) {
-          return Response.json({ ok: false, error: "remote hub is not configured" }, { status: 503 });
-        }
-        return handleAutomationHealthSnapshot(req, opts.remote);
-      }
+      const health = automationHealthResponse(req, server.requestIP(req)?.address, opts.remote);
+      if (health) return health;
 
       return dispatchWithLifecycleAdmission(req, admission, async () => {
         const ui = await handleUiRequest(req, launcher, store, opts.remote, {
@@ -205,34 +273,17 @@ export function serveDashboard(opts: DashboardServerOptions) {
           cloudConnection: opts.cloudConnection,
           pendingSync: opts.pendingSync,
           cloudBrowser: opts.cloudBrowser,
+          mcpTunnel: opts.mcpTunnel,
           health: opts.health,
           runtimeMode,
         });
         if (ui) return ui;
-        if (opts.appConfig?.read().mode === "cloud" && !opts.remote) {
-          return Response.json(
-            { ok: false, error: "AliasMode Cloud authentication is required" },
-            { status: 503 },
-          );
-        }
+        const authentication = cloudAuthenticationError(opts);
+        if (authentication) return authentication;
         // Per-profile identity "card" (AdsPower-style landing page). Opened as a tab and
         // pointed to by the bookmark, so an operator can always see which account a window is.
         if (reqUrl.pathname === "/card") return renderProfileCard(store, reqUrl.searchParams.get("id") ?? "");
-        // AdsPower-compatible profile management (create/list/delete/update +
-        // group/list) so a full AdsPower REST client works by repointing its base
-        // URL alone. Served in BOTH modes: in remote mode it routes create/list/
-        // delete/group through the hub coordinator (the same central roster as the
-        // dashboard + automation), not the local launch cache.
-        const users = await handleUserApi(req, launcher, store, opts.remote);
-        if (users) return users;
-        // In remote mode, route automation AdsPower browser-control calls through
-        // the hub coordinator so every launch restores the roamed session and only
-        // the current writer lease owner checkpoints changes. status/delete-cache
-        // aren't control routes, so they pass through.
-        if (opts.remote && isAdsPowerBrowserControl(new URL(req.url).pathname)) {
-          return handleRemoteBrowserControl(req, opts.remote, launcher, store, lifecycle);
-        }
-        return handleRequest(req, launcher, store, lifecycle);
+        return handleAutomationRequest(req, opts, lifecycle);
       });
     },
   });
