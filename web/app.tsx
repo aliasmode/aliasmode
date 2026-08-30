@@ -755,7 +755,7 @@ type DesktopUpdateStatus =
   | { state: "upToDate"; currentVersion: string }
   | { state: "available"; currentVersion: string; version: string; highlights: string[] };
 type DesktopUpdateProgress =
-  | { phase: "preparing" | "verifying" | "installing" }
+  | { phase: "preparing" | "verifying" | "closingBrowsers" | "installing" }
   | { phase: "downloading"; percent: number | null };
 type DesktopUpdateMessage =
   | DesktopUpdateProgress
@@ -846,7 +846,12 @@ function parseDesktopUpdateMessage(value: unknown): DesktopUpdateMessage {
   if (progress.phase === "ready" && typeof progress.version === "string" && isUpdateHighlights(progress.highlights)) {
     return { phase: "ready", version: progress.version, highlights: progress.highlights };
   }
-  if (progress.phase === "preparing" || progress.phase === "verifying" || progress.phase === "installing") {
+  if (
+    progress.phase === "preparing" ||
+    progress.phase === "verifying" ||
+    progress.phase === "closingBrowsers" ||
+    progress.phase === "installing"
+  ) {
     return { phase: progress.phase };
   }
   if (
@@ -881,7 +886,9 @@ function DesktopUpdateProgressView({ progress }: { progress: DesktopUpdateProgre
       ? percent === null ? "Downloading update…" : `Downloading update… ${percent}%`
       : progress.phase === "verifying"
         ? "Verifying update…"
-        : "Installing and restarting…";
+        : progress.phase === "closingBrowsers"
+          ? "Saving and closing browsers…"
+          : "Installing and restarting…";
   return (
     <div className="update-progress" role="status">
       <span>{label}</span>
@@ -2850,6 +2857,7 @@ function App() {
             <span role="status"><strong>AliasMode {desktopUpdate.version} is available.</strong> The update will save active browsers and restart the app.</span>
             <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
             {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
+            {desktopUpdateErr && <span className="modal-err" role="alert">{desktopUpdateErr}</span>}
           </div>
           <button className="btn primary" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
             {desktopUpdateInstalling ? "Updating…" : "Update now"}

@@ -16,6 +16,10 @@ const MAX_RELEASE_HIGHLIGHTS: usize = 3;
 const UPDATE_BUSY: &str = "An update operation is already running.";
 const CHECK_FAILED: &str = "AliasMode could not check for updates. Try again.";
 const DOWNLOAD_FAILED: &str = "AliasMode could not download and verify the update. Try again.";
+const CLEANUP_FAILED: &str =
+    "The update was not installed because AliasMode could not safely close browser services. The current version remains installed.";
+const INSTALL_FAILED: &str =
+    "AliasMode could not start the verified update. The current version will restart.";
 
 #[derive(Debug, Deserialize)]
 struct GithubAsset {
@@ -74,6 +78,7 @@ pub enum UpdateProgress {
         percent: Option<u8>,
     },
     Verifying,
+    ClosingBrowsers,
     Installing,
 }
 
@@ -311,19 +316,22 @@ fn restart_after_install_failure(app: AppHandle, error: impl std::fmt::Display) 
 enum UpdatePreparationError {
     Download(String),
     Cleanup(String),
+    Install(String),
 }
 
-async fn prepare_verified_update<Download, Cleanup>(
+async fn run_verified_update<Download, Cleanup, Install>(
     download: Download,
     cleanup: Cleanup,
-) -> Result<Vec<u8>, UpdatePreparationError>
+    install: Install,
+) -> Result<(), UpdatePreparationError>
 where
     Download: std::future::Future<Output = Result<Vec<u8>, String>>,
     Cleanup: std::future::Future<Output = Result<(), String>>,
+    Install: FnOnce(&[u8]) -> Result<(), String>,
 {
     let bytes = download.await.map_err(UpdatePreparationError::Download)?;
     cleanup.await.map_err(UpdatePreparationError::Cleanup)?;
-    Ok(bytes)
+    install(&bytes).map_err(UpdatePreparationError::Install)
 }
 
 #[tauri::command]
@@ -358,7 +366,10 @@ pub async fn update_now(
     let sidecar = sidecar.inner().clone();
     let download_progress = on_progress.clone();
     let verifying_progress = on_progress.clone();
-    let bytes = match prepare_verified_update(
+    let cleanup_progress = on_progress.clone();
+    let install_progress = on_progress.clone();
+    let install_window = window.clone();
+    match run_verified_update(
         async {
             let mut downloaded = 0_u64;
             let mut last_reported = None;
@@ -380,36 +391,43 @@ pub async fn update_now(
                 .map_err(|error| error.to_string())
         },
         async {
-            let _ = on_progress.send(UpdateProgress::Installing);
-            let _ = window.hide();
+            let _ = cleanup_progress.send(UpdateProgress::ClosingBrowsers);
             shutdown::graceful_sidecar_cleanup(&sidecar).await
+        },
+        |bytes| {
+            let _ = install_progress.send(UpdateProgress::Installing);
+            let _ = install_window.hide();
+            update.install(bytes).map_err(|error| error.to_string())
         },
     )
     .await
     {
-        Ok(bytes) => bytes,
+        Ok(()) => Ok(()),
         Err(UpdatePreparationError::Download(error)) => {
             eprintln!("AliasMode update download or signature verification failed: {error}");
-            return Err(DOWNLOAD_FAILED.to_owned());
+            Err(DOWNLOAD_FAILED.to_owned())
         }
         Err(UpdatePreparationError::Cleanup(error)) => {
-            shutdown::exit_after_cleanup_failure(app, &sidecar, error);
-            return Ok(());
+            eprintln!("AliasMode update browser cleanup failed: {error}");
+            shutdown::exit_after_update_cleanup_failure(app, &sidecar, error);
+            Err(CLEANUP_FAILED.to_owned())
         }
-    };
-
-    if let Err(error) = update.install(&bytes) {
-        restart_after_install_failure(app, error);
+        Err(UpdatePreparationError::Install(error)) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            restart_after_install_failure(app, error);
+            Err(INSTALL_FAILED.to_owned())
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        download_percent, is_release_asset_url, newest_release, prepare_verified_update,
-        release_highlights, validate_manifest_result, GithubAsset, GithubRelease, ReleaseCandidate,
-        UpdateCoordinator, UpdatePreparationError, UpdateProgress, UpdateStatus, UPDATE_TARGET,
+        download_percent, is_release_asset_url, newest_release, release_highlights,
+        run_verified_update, validate_manifest_result, GithubAsset, GithubRelease,
+        ReleaseCandidate, UpdateCoordinator, UpdatePreparationError, UpdateProgress, UpdateStatus,
+        UPDATE_TARGET,
     };
     use semver::Version;
     use serde_json::json;
@@ -591,12 +609,17 @@ mod tests {
     }
 
     #[test]
-    fn failed_verified_download_cannot_start_cleanup() {
+    fn failed_verified_download_cannot_start_cleanup_or_install() {
         let cleanup_started = Cell::new(false);
-        let result = tauri::async_runtime::block_on(prepare_verified_update(
+        let install_started = Cell::new(false);
+        let result = tauri::async_runtime::block_on(run_verified_update(
             async { Err::<Vec<u8>, String>("bad signature".to_owned()) },
             async {
                 cleanup_started.set(true);
+                Ok(())
+            },
+            |_| {
+                install_started.set(true);
                 Ok(())
             },
         ));
@@ -605,12 +628,13 @@ mod tests {
             Err(UpdatePreparationError::Download("bad signature".to_owned()))
         );
         assert!(!cleanup_started.get());
+        assert!(!install_started.get());
     }
 
     #[test]
-    fn cleanup_starts_only_after_verified_download() {
+    fn cleanup_and_install_run_only_after_verified_download() {
         let stage = Cell::new(0);
-        let result = tauri::async_runtime::block_on(prepare_verified_update(
+        let result = tauri::async_runtime::block_on(run_verified_update(
             async {
                 stage.set(1);
                 Ok(vec![1, 2, 3])
@@ -620,9 +644,50 @@ mod tests {
                 stage.set(2);
                 Ok(())
             },
+            |bytes| {
+                assert_eq!(stage.get(), 2);
+                assert_eq!(bytes, [1, 2, 3]);
+                stage.set(3);
+                Ok(())
+            },
         ));
-        assert_eq!(result.unwrap(), vec![1, 2, 3]);
-        assert_eq!(stage.get(), 2);
+        assert_eq!(result, Ok(()));
+        assert_eq!(stage.get(), 3);
+    }
+
+    #[test]
+    fn cleanup_failure_cannot_start_install() {
+        let install_started = Cell::new(false);
+        let result = tauri::async_runtime::block_on(run_verified_update(
+            async { Ok(vec![1, 2, 3]) },
+            async { Err("browser cleanup unconfirmed".to_owned()) },
+            |_| {
+                install_started.set(true);
+                Ok(())
+            },
+        ));
+        assert_eq!(
+            result,
+            Err(UpdatePreparationError::Cleanup(
+                "browser cleanup unconfirmed".to_owned(),
+            ))
+        );
+        assert!(!install_started.get());
+    }
+
+    #[test]
+    fn install_failure_is_not_reported_as_success() {
+        let result = tauri::async_runtime::block_on(run_verified_update(
+            async { Ok(vec![1, 2, 3]) },
+            async { Ok(()) },
+            |_| Err("installer could not start".to_owned()),
+        ));
+        assert_eq!(
+            result,
+            Err(UpdatePreparationError::Install(
+                "installer could not start".to_owned(),
+            ))
+        );
     }
 
     #[test]
@@ -662,6 +727,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(UpdateProgress::Verifying).unwrap(),
             json!({ "phase": "verifying" })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::ClosingBrowsers).unwrap(),
+            json!({ "phase": "closingBrowsers" })
         );
         assert_eq!(
             serde_json::to_value(UpdateProgress::Installing).unwrap(),

@@ -68,12 +68,39 @@ pub(crate) fn exit_after_cleanup_failure(
     sidecar: &SidecarSupervisor,
     error: String,
 ) {
+    exit_after_cleanup_failure_message(
+        app,
+        sidecar,
+        "AliasMode shutdown failed",
+        format!("AliasMode could not confirm safe browser cleanup. {error}"),
+    );
+}
+
+pub(crate) fn exit_after_update_cleanup_failure(
+    app: AppHandle,
+    sidecar: &SidecarSupervisor,
+    error: String,
+) {
+    exit_after_cleanup_failure_message(
+        app,
+        sidecar,
+        "AliasMode update not installed",
+        format!(
+            "AliasMode could not confirm safe browser cleanup, so the update was not installed. The current version remains installed. {error}"
+        ),
+    );
+}
+
+fn exit_after_cleanup_failure_message(
+    app: AppHandle,
+    sidecar: &SidecarSupervisor,
+    title: &str,
+    message: String,
+) {
     let _ = sidecar.kill_owned();
     app.dialog()
-        .message(format!(
-            "AliasMode could not confirm safe browser cleanup. {error}"
-        ))
-        .title("AliasMode shutdown failed")
+        .message(message)
+        .title(title)
         .kind(MessageDialogKind::Error)
         .buttons(MessageDialogButtons::Ok)
         .show(move |_| app.exit(1));
