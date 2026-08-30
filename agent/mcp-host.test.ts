@@ -53,21 +53,29 @@ class FakeRuntime {
 
 class FakePlaywright {
   events: string[] = [];
-  tools: any[] = [];
+  tools = [{
+    name: "browser_snapshot",
+    description: "snapshot",
+    inputSchema: { type: "object", properties: {} },
+    annotations: {
+      title: "Browser snapshot",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
+  }];
   failNextAttach = false;
+
+  async initialize() {
+    this.events.push("initialize");
+  }
 
   async attach(endpoint: string) {
     this.events.push(`attach:${endpoint}`);
     if (this.failNextAttach) {
       this.failNextAttach = false;
-      this.tools = [];
       throw new Error("attach failed");
     }
-    this.tools = [{
-      name: "browser_snapshot",
-      description: "snapshot",
-      inputSchema: { type: "object", properties: {} },
-    }];
   }
 
   listTools() {
@@ -81,7 +89,6 @@ class FakePlaywright {
 
   async detach() {
     this.events.push("detach");
-    this.tools = [];
   }
 }
 
@@ -95,6 +102,46 @@ test("MCP host preserves Windows environment keys case-insensitively", () => {
   };
   sanitizeEnvironment(env);
   expect(env).toEqual({ APPDATA: "appdata", Path: "system path", TEMP: "temp" });
+});
+
+test("MCP lifecycle tools include directory annotations", async () => {
+  const host = await createAliasModeMcp({
+    discovered: { client: new FakeRuntime() },
+    playwright: new FakePlaywright(),
+  });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const tools = (await client.listTools()).tools;
+  const annotated = tools.filter((tool) => tool.name.startsWith("aliasmode_") || tool.name === "browser_close");
+  for (const tool of annotated) {
+    expect(typeof tool.annotations?.title).toBe("string");
+    expect(typeof tool.annotations?.readOnlyHint).toBe("boolean");
+    expect(typeof tool.annotations?.destructiveHint).toBe("boolean");
+    expect(typeof tool.annotations?.openWorldHint).toBe("boolean");
+  }
+  expect(tools.find((tool) => tool.name === "aliasmode_profiles_list")?.annotations).toMatchObject({
+    readOnlyHint: false,
+    destructiveHint: false,
+    openWorldHint: false,
+  });
+  expect(tools.find((tool) => tool.name === "aliasmode_profile_delete")?.annotations?.destructiveHint).toBe(true);
+  expect(tools.find((tool) => tool.name === "aliasmode_profiles_replace_proxies")?.annotations?.destructiveHint).toBe(true);
+  expect(tools.find((tool) => tool.name === "aliasmode_browser_open")?.annotations).toMatchObject({
+    destructiveHint: true,
+    openWorldHint: true,
+  });
+  expect(tools.find((tool) => tool.name === "aliasmode_browser_select")?.annotations?.destructiveHint).toBe(true);
+  expect(tools.find((tool) => tool.name === "aliasmode_browser_status")?.annotations).toMatchObject({
+    readOnlyHint: false,
+    destructiveHint: true,
+  });
+  expect(tools.find((tool) => tool.name === "aliasmode_browser_close")?.annotations?.destructiveHint).toBe(true);
+  expect(tools.find((tool) => tool.name === "browser_close")?.annotations?.destructiveHint).toBe(true);
+
+  await client.close();
+  await host.close();
 });
 
 test("MCP host exposes strict proxy replacement input and forwards safe results", async () => {
@@ -148,7 +195,7 @@ test("MCP host exposes strict proxy replacement input and forwards safe results"
   await host.close();
 });
 
-test("MCP host adds Playwright tools after selection and uses safe close", async () => {
+test("MCP host exposes Playwright tools before selection and uses safe close", async () => {
   const runtime = new FakeRuntime();
   const playwright = new FakePlaywright();
   const host = await createAliasModeMcp({
@@ -163,7 +210,7 @@ test("MCP host adds Playwright tools after selection and uses safe close", async
   ]);
 
   const initial = await client.listTools();
-  expect(initial.tools.some((tool) => tool.name === "browser_snapshot")).toBe(false);
+  expect(initial.tools.some((tool) => tool.name === "browser_snapshot")).toBe(true);
   expect(initial.tools.some((tool) => tool.name === "browser_install")).toBe(false);
   expect(initial.tools.some((tool) => tool.name === "browser_close")).toBe(true);
 
@@ -180,12 +227,13 @@ test("MCP host adds Playwright tools after selection and uses safe close", async
   const closed = await client.callTool({ name: "browser_close", arguments: {} });
   expect(closed.isError).not.toBe(true);
   expect(playwright.events).toEqual([
+    "initialize",
     "attach:ws://127.0.0.1:9333/devtools/browser/test",
     "call:browser_snapshot",
     "detach",
   ]);
   expect(runtime.events).toContain("browser.close:profile1");
-  expect((await client.listTools()).tools.some((tool) => tool.name === "browser_snapshot")).toBe(false);
+  expect((await client.listTools()).tools.some((tool) => tool.name === "browser_snapshot")).toBe(true);
 
   await client.close();
   await host.close();
@@ -236,7 +284,7 @@ test("a failed profile switch clears the stale selection", async () => {
     arguments: { profileId: "profile2" },
   });
   expect(switched.isError).toBe(true);
-  expect((await client.listTools()).tools.some((tool) => tool.name === "browser_snapshot")).toBe(false);
+  expect((await client.listTools()).tools.some((tool) => tool.name === "browser_snapshot")).toBe(true);
   const status = await client.callTool({ name: "aliasmode_browser_status", arguments: {} });
   expect(status.isError).toBe(true);
 
@@ -247,7 +295,6 @@ test("a failed profile switch clears the stale selection", async () => {
 test("browser actions require one selected profile", async () => {
   const runtime = new FakeRuntime();
   const playwright = new FakePlaywright();
-  playwright.tools = [{ name: "browser_snapshot", inputSchema: { type: "object" } }];
   const host = await createAliasModeMcp({ discovered: { client: runtime }, playwright });
   const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();

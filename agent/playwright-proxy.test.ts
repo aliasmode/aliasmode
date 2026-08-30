@@ -1,29 +1,41 @@
 import { expect, test } from "bun:test";
-import { createConnection } from "@playwright/mcp";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { PlaywrightToolProxy } from "./playwright-proxy.mjs";
 
-test("pinned official Playwright MCP exposes full action capabilities", async () => {
-  const server = await createConnection(
-    { capabilities: ["core", "core-tabs", "vision", "pdf", "testing", "tracing"] },
-    async () => { throw new Error("browser context should not be needed to list tools"); },
-  );
-  const client = new Client({ name: "schema-test", version: "1" }, { capabilities: {} });
-  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-  const names = new Set((await client.listTools()).tools.map((tool) => tool.name));
+test("Playwright proxy exposes stable annotated actions without a browser", async () => {
+  let browserClosed = false;
+  const proxy = new PlaywrightToolProxy("1", async () => ({
+    contexts: () => [{}],
+    close: async () => { browserClosed = true; },
+  }) as any);
+  await proxy.initialize();
+  const tools = structuredClone(proxy.listTools());
+  const names = new Set(tools.map((tool) => tool.name));
 
   for (const name of [
     "browser_run_code",
     "browser_file_upload",
     "browser_tabs",
     "browser_evaluate",
+    "browser_press_key",
+    "browser_click",
     "browser_start_tracing",
     "browser_stop_tracing",
   ]) {
     expect(names.has(name)).toBe(true);
   }
+  expect(names.has("browser_close")).toBe(false);
+  expect(names.has("browser_install")).toBe(false);
+  for (const tool of tools) {
+    expect(typeof tool.annotations?.title).toBe("string");
+    expect(typeof tool.annotations?.readOnlyHint).toBe("boolean");
+    expect(typeof tool.annotations?.destructiveHint).toBe("boolean");
+    expect(typeof tool.annotations?.openWorldHint).toBe("boolean");
+  }
 
-  await client.close();
-  await server.close();
+  await proxy.attach("ws://127.0.0.1:9333/devtools/browser/test");
+  expect(proxy.listTools()).toEqual(tools);
+
+  await proxy.detach();
+  expect(proxy.listTools()).toEqual(tools);
+  expect(browserClosed).toBe(true);
 });

@@ -46,15 +46,26 @@ function diagnose(message) {
   }
 }
 
+function toolAnnotations(title, { readOnly = false, destructive = false, openWorld = false } = {}) {
+  return {
+    title,
+    readOnlyHint: readOnly,
+    destructiveHint: destructive,
+    openWorldHint: openWorld,
+  };
+}
+
 const ALIAS_TOOLS = [
   {
     name: "aliasmode_profiles_list",
     description: "List AliasMode profiles and their current browser state.",
+    annotations: toolAnnotations("List AliasMode profiles"),
     inputSchema: EMPTY_SCHEMA,
   },
   {
     name: "aliasmode_profiles_replace_proxies",
     description: "Dry-run or apply bulk proxy replacements to closed AliasMode Cloud profiles. Apply always preflights first.",
+    annotations: toolAnnotations("Replace AliasMode profile proxies", { destructive: true }),
     inputSchema: {
       type: "object",
       properties: {
@@ -76,6 +87,7 @@ const ALIAS_TOOLS = [
   {
     name: "aliasmode_profile_create",
     description: "Create a persistent AliasMode profile, or an explicit temporary profile.",
+    annotations: toolAnnotations("Create an AliasMode profile"),
     inputSchema: {
       type: "object",
       properties: {
@@ -107,6 +119,7 @@ const ALIAS_TOOLS = [
   {
     name: "aliasmode_profile_delete",
     description: "Delete a closed AliasMode profile.",
+    annotations: toolAnnotations("Delete an AliasMode profile", { destructive: true }),
     inputSchema: {
       type: "object",
       properties: { profileId: PROFILE_ID },
@@ -117,6 +130,7 @@ const ALIAS_TOOLS = [
   {
     name: "aliasmode_browser_open",
     description: "Open an AliasMode browser and select it for Playwright actions.",
+    annotations: toolAnnotations("Open an AliasMode browser", { destructive: true, openWorld: true }),
     inputSchema: {
       type: "object",
       properties: {
@@ -135,6 +149,7 @@ const ALIAS_TOOLS = [
   {
     name: "aliasmode_browser_select",
     description: "Select an open AliasMode browser for subsequent Playwright actions.",
+    annotations: toolAnnotations("Select an AliasMode browser", { destructive: true }),
     inputSchema: {
       type: "object",
       properties: { profileId: PROFILE_ID },
@@ -145,6 +160,7 @@ const ALIAS_TOOLS = [
   {
     name: "aliasmode_browser_status",
     description: "Get the selected browser state, or the state of one profile.",
+    annotations: toolAnnotations("Get AliasMode browser status", { destructive: true }),
     inputSchema: {
       type: "object",
       properties: { profileId: PROFILE_ID },
@@ -154,6 +170,7 @@ const ALIAS_TOOLS = [
   {
     name: "aliasmode_browser_close",
     description: "Safely capture and close one AliasMode browser.",
+    annotations: toolAnnotations("Close an AliasMode browser", { destructive: true }),
     inputSchema: {
       type: "object",
       properties: { profileId: PROFILE_ID },
@@ -163,6 +180,7 @@ const ALIAS_TOOLS = [
   {
     name: "browser_close",
     description: "Safely capture and close the selected AliasMode browser.",
+    annotations: toolAnnotations("Close the selected AliasMode browser", { destructive: true }),
     inputSchema: EMPTY_SCHEMA,
   },
 ];
@@ -192,33 +210,24 @@ function profileInput(args) {
 }
 
 export async function createAliasModeMcp(options = {}) {
+  const playwright = options.playwright ?? new PlaywrightToolProxy(VERSION);
+  await playwright.initialize();
   const discovered = options.discovered ?? await discoverRuntime(options.runtime);
   const runtime = discovered.client;
-  const playwright = options.playwright ?? new PlaywrightToolProxy(VERSION);
   const server = new Server(
     { name: "aliasmode", version: VERSION },
-    { capabilities: { tools: { listChanged: true } } },
+    { capabilities: { tools: {} } },
   );
   let selectedProfileId;
   const ownedProfileIds = new Set();
   let closing;
 
-  const notifyToolsChanged = async () => {
-    await server.sendToolListChanged().catch(() => {});
-  };
-
   const selectBrowser = async (profileId, knownStatus) => {
     const status = knownStatus ?? await runtime.call("browser.status", { profileId });
     if (!status.running || !status.ws) throw new Error("open this AliasMode profile before selecting it");
     selectedProfileId = undefined;
-    try {
-      await playwright.attach(status.ws);
-    } catch (error) {
-      await notifyToolsChanged();
-      throw error;
-    }
+    await playwright.attach(status.ws);
     selectedProfileId = profileId;
-    await notifyToolsChanged();
     return {
       profileId,
       selected: true,
@@ -236,10 +245,7 @@ export async function createAliasModeMcp(options = {}) {
     try {
       const result = await runtime.call("browser.close", { profileId: target });
       ownedProfileIds.delete(target);
-      if (selected) {
-        selectedProfileId = undefined;
-        await notifyToolsChanged();
-      }
+      if (selected) selectedProfileId = undefined;
       return result;
     } catch (error) {
       if (selected) {
