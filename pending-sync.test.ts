@@ -210,6 +210,51 @@ test("concurrent pending retries report only durable accepted transitions", asyn
   state.queue.close();
 });
 
+test("pending sync cancellation never admits another close", async () => {
+  const state = queue();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 2,
+    payload: payload(),
+  });
+  await Bun.sleep(2);
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile2",
+    registrationId: "registration2",
+    expectedVersion: 3,
+    payload: { ...payload(), profile: { ...payload().profile, id: "profile2" } },
+  });
+  let markFirstStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+  let finishFirst!: () => void;
+  const firstPending = new Promise<void>((resolve) => { finishFirst = resolve; });
+  const seen: string[] = [];
+  let current = true;
+
+  const retrying = retryPendingSync(state.queue, {
+    async closeOpen(registrationId) {
+      seen.push(registrationId);
+      if (registrationId === "registration1") {
+        markFirstStarted();
+        await firstPending;
+      }
+      return { ok: true as const, status: "accepted" as const, version: 4 };
+    },
+  }, "account1", () => current);
+  await firstStarted;
+  current = false;
+  finishFirst();
+
+  expect(await retrying).toEqual({ accepted: 1, conflicts: 0, failed: 0 });
+  expect(seen).toEqual(["registration1"]);
+  expect(state.queue.list("account1")).toHaveLength(1);
+  expect(state.queue.list("account1")[0]?.profileId).toBe("profile2");
+  state.queue.close();
+});
+
 test("pending sync retry surfaces terminal API errors and continues with later closes", async () => {
   const state = queue();
   const terminalId = state.queue.enqueue({

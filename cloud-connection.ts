@@ -43,8 +43,9 @@ export class CloudConnectionRuntime {
     return this.deviceCredentialValue;
   }
 
-  async bootstrap(): Promise<BootstrapResponse> {
+  async bootstrap(accept: () => boolean = () => true): Promise<BootstrapResponse> {
     const response = await this.client.bootstrap({ device: this.installation });
+    if (!accept()) throw new Error("Cloud authentication was cancelled");
     this.accountIdValue = response.account.id;
     this.deviceIdValue = response.device.id;
     if (response.deviceCredential) this.deviceCredentialValue = response.deviceCredential;

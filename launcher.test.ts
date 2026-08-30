@@ -1095,7 +1095,13 @@ test("start reports a live-but-CDP-unresponsive browser as retryable failure wit
 
   // Memory pressure wedges the debug endpoint without ending Chromium.
   f.aliveByPort.set(first.port, false);
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  const retained = store.getLaunch("k1d0cd11")!;
+  const failure = await launcher.start("k1d0cd11").catch((error) => error);
+  expect(failure).toEqual(new BrowserLaunchError("preflight"));
+  expect(launcher.failedStartGeneration(failure)).toEqual({
+    debugPort: retained.debugPort,
+    startedAt: retained.startedAt,
+  });
 
   expect(args.length).toBe(1); // never opened a second persistent user-data dir
   expect(store.getLaunch("k1d0cd11")?.debugPort).toBe(first.port);
@@ -2069,6 +2075,91 @@ test("generation-fenced stop refuses a replacement before deferred teardown", as
   expect(await stopping).toBe(false);
   expect(killed).toEqual([]);
   expect(store.getLaunch("k1d0cd11")).toEqual(replacement);
+  store.close();
+});
+
+test("generation-fenced stop refuses a replacement found by the force scan", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const browserCloses: string[] = [];
+  const killedPids: number[] = [];
+  const killedGroups: number[] = [];
+  let armed = false;
+  let scans = 0;
+  let replacement!: NonNullable<ReturnType<ProfileStore["getLaunch"]>>;
+  const launcher = newLauncher(store, f, [], undefined, undefined, {
+    hostPlatform: "win32",
+    browserClose: async (ws) => {
+      browserCloses.push(ws);
+      return false;
+    },
+    findOwnedBrowserPids: async (input) => {
+      if (armed && ++scans === 2) {
+        f.pidByPort.set(replacement.debugPort, replacement.pid);
+        f.aliveByPid.set(replacement.pid, true);
+        store.recordLaunch(replacement);
+      }
+      return f.findOwnedBrowserPids(input);
+    },
+    killPid: async (pid) => {
+      killedPids.push(pid);
+      f.killPid(pid);
+    },
+    killProcessGroup: async (group) => { killedGroups.push(group); },
+  });
+  await launcher.start("k1d0cd11");
+  const original = store.getLaunch("k1d0cd11")!;
+  replacement = {
+    ...original,
+    pid: 7000,
+    ws: "ws://127.0.0.1:9333/devtools/browser/replacement",
+    startedAt: original.startedAt + 1,
+  };
+  armed = true;
+
+  expect(await launcher.stop("k1d0cd11", {
+    debugPort: original.debugPort,
+    startedAt: original.startedAt,
+  })).toBe(false);
+  expect(scans).toBe(2);
+  expect(browserCloses).toEqual([original.ws]);
+  expect(killedPids).toEqual([]);
+  expect(killedGroups).toEqual([]);
+  expect(store.getLaunch("k1d0cd11")).toEqual(replacement);
+  store.close();
+});
+
+test("stop never closes a recycled CDP websocket", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const browserCloses: string[] = [];
+  const killedPids: number[] = [];
+  const launcher = newLauncher(store, f, [], undefined, undefined, {
+    hostPlatform: "win32",
+    browserClose: async (ws) => {
+      browserCloses.push(ws);
+      return false;
+    },
+    killPid: async (pid) => {
+      killedPids.push(pid);
+      f.aliveByPid.set(pid, false);
+    },
+  });
+  await launcher.start("k1d0cd11");
+  const original = store.getLaunch("k1d0cd11")!;
+  const replacementWs = "ws://127.0.0.1:9333/devtools/browser/recycled";
+  f.setWs(original.debugPort, replacementWs);
+
+  expect(await launcher.stop("k1d0cd11", {
+    debugPort: original.debugPort,
+    startedAt: original.startedAt,
+  })).toBe(true);
+  expect(browserCloses).toEqual([]);
+  expect(killedPids).toEqual([original.pid]);
+  expect(f.aliveByPort.get(original.debugPort)).toBe(true);
+  expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });
 

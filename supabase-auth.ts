@@ -121,7 +121,7 @@ export class SupabaseAuthClient {
   }
 
   async signOut(accessToken: string): Promise<void> {
-    await this.call("/logout", {
+    await this.call("/logout?scope=local", {
       method: "POST",
       headers: { authorization: `Bearer ${accessToken}` },
     });

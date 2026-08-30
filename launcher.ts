@@ -633,6 +633,8 @@ export class Launcher {
    */
   private startsInFlight = new Map<string, Promise<LaunchStartResult>>();
   private startModesInFlight = new Map<string, boolean>();
+  /** Launch generations retained after a rejected start, keyed to that rejection. */
+  private failedStartGenerations = new WeakMap<object, LaunchGeneration>();
   /**
    * In-flight stop() per profile. start() waits for this promise before it
    * inspects or creates a launch, and overlapping stops share it. Together with
@@ -1054,16 +1056,38 @@ export class Launcher {
     }
   }
 
+  private rememberFailedStartGeneration<T>(error: T, launch: LaunchGeneration): T {
+    if (typeof error === "object" && error !== null) {
+      this.failedStartGenerations.set(error, {
+        debugPort: launch.debugPort,
+        startedAt: launch.startedAt,
+      });
+    }
+    return error;
+  }
+
   private async rejectUnsafeExistingLaunch(profileId: string, stage: string, error: unknown): Promise<never> {
     const detail = error instanceof Error ? error.message : String(error);
-    if (!this.store.getLaunch(profileId) && !this.procs.has(profileId)) throw error;
+    const existing = this.store.getLaunch(profileId);
+    if (!existing && !this.procs.has(profileId)) throw error;
     this.clearIdentityCertification(profileId);
-    const stopped = await this.doStop(profileId);
-    if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) throw error;
-    if (stopped) {
-      throw new Error(`${detail}; unsafe existing browser was stopped during ${stage} and process/CDP death was confirmed`);
+    const stopped = await this.doStop(profileId, existing ?? undefined);
+    let failure: unknown;
+    if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) {
+      failure = error;
+    } else if (stopped) {
+      failure = new Error(`${detail}; unsafe existing browser was stopped during ${stage} and process/CDP death was confirmed`);
+    } else {
+      failure = new Error(`${detail}; unsafe existing browser could not be confirmed stopped during ${stage}; launch ownership was retained`);
     }
-    throw new Error(`${detail}; unsafe existing browser could not be confirmed stopped during ${stage}; launch ownership was retained`);
+    if (!stopped && existing) this.rememberFailedStartGeneration(failure, existing);
+    throw failure;
+  }
+
+  failedStartGeneration(error: unknown): LaunchGeneration | undefined {
+    return typeof error === "object" && error !== null
+      ? this.failedStartGenerations.get(error)
+      : undefined;
   }
 
   /**
@@ -1105,7 +1129,10 @@ export class Launcher {
       })
       .catch((error) => {
         if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) throw error;
-        throw new BrowserLaunchError("preflight");
+        const normalized = new BrowserLaunchError("preflight");
+        const retained = this.failedStartGeneration(error);
+        if (retained) this.rememberFailedStartGeneration(normalized, retained);
+        throw normalized;
       })
       .finally(() => {
         if (this.startsInFlight.get(profileId) === promise) {
@@ -1168,25 +1195,32 @@ export class Launcher {
         return await this.rejectUnsafeExistingLaunch(profileId, "launch-time persona verification", error);
       }
       const trackedProc = this.procs.get(profileId);
-      const liveness = await this.inspectLaunchLiveness(profileId, existing, trackedProc, true);
+      const liveness = await this.inspectLaunchLiveness(profileId, existing, trackedProc, true)
+        .catch((error) => { throw this.rememberFailedStartGeneration(error, existing!); });
       if (liveness.cdpAlive) {
         // A responding port alone is never ownership proof, including for a
         // retained in-memory handle whose PID may have died and been recycled.
         if (liveness.process === "dead") {
           if (!await this.confirmPersistedLaunchStopped(profileId, existing)) {
             this.liveReserved.add(existing.debugPort);
-            throw new Error(`profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`);
+            throw this.rememberFailedStartGeneration(
+              new Error(`profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`),
+              existing,
+            );
           }
           this.log(`profile ${profileId} CDP port is occupied but no owned browser process matches; launching fresh`);
           if (!this.forgetLaunch(profileId, existing)) {
-            throw new Error(`profile ${profileId} launch changed while stale ownership was being cleared; retry`);
+            throw this.rememberFailedStartGeneration(
+              new Error(`profile ${profileId} launch changed while stale ownership was being cleared; retry`),
+              existing,
+            );
           }
           existing = null;
         } else if (liveness.process !== "alive") {
           this.liveReserved.add(existing.debugPort);
           const message = `profile ${profileId} CDP responds on port ${existing.debugPort} but browser ownership is inconclusive; stop and retry`;
           this.log(`${message} (kept the tracked launch)`);
-          throw new Error(message);
+          throw this.rememberFailedStartGeneration(new Error(message), existing);
         }
         if (!existing) {
           // Exact scan proved the recorded launch is gone; continue to a fresh
@@ -1197,8 +1231,11 @@ export class Launcher {
           && existing.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
         ) {
           this.log(`profile ${profileId} predates safe search setup; restarting it once before reattach`);
-          if (!await this.doStop(profileId)) {
-            throw new Error(`profile ${profileId} could not be safely restarted for search setup`);
+          if (!await this.doStop(profileId, existing)) {
+            throw this.rememberFailedStartGeneration(
+              new Error(`profile ${profileId} could not be safely restarted for search setup`),
+              existing,
+            );
           }
           existing = null;
         } else {
@@ -1260,18 +1297,24 @@ export class Launcher {
             : "browser process ownership scan is inconclusive";
         const message = `profile ${profileId} ${processDetail} but CDP is not responding on port ${existing.debugPort}; stop and retry`;
         this.log(`${message} (kept the tracked launch)`);
-        throw new Error(message);
+        throw this.rememberFailedStartGeneration(new Error(message), existing);
       }
       // CDP is unreachable and an exact executable/port/user-data-dir process
       // scan found no owner. Only this authoritative "none" permits reuse.
       if (existing) {
         if (!await this.confirmPersistedLaunchStopped(profileId, existing)) {
           this.liveReserved.add(existing.debugPort);
-          throw new Error(`profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`);
+          throw this.rememberFailedStartGeneration(
+            new Error(`profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`),
+            existing,
+          );
         }
         this.log(`profile ${profileId} has no owned browser process; launching fresh`);
         if (!this.forgetLaunch(profileId, existing)) {
-          throw new Error(`profile ${profileId} launch changed while stale ownership was being cleared; retry`);
+          throw this.rememberFailedStartGeneration(
+            new Error(`profile ${profileId} launch changed while stale ownership was being cleared; retry`),
+            existing,
+          );
         }
         existing = null;
       }
@@ -1667,6 +1710,7 @@ export class Launcher {
           // can safely re-scan. Forgetting an inconclusive partial launch would
           // permit this port and user-data dir to be reused beside a live Chrome.
           this.store.recordLaunch(pendingLaunch);
+          this.rememberFailedStartGeneration(err, pendingLaunch);
           this.liveReserved.add(port);
           this.log(`failed start ${profileId}: teardown unconfirmed; retained launch ownership for retry`);
         }
@@ -2093,6 +2137,7 @@ export class Launcher {
     profileId: string,
     launch: LaunchInfo,
     proof: LinuxTerminationProof,
+    expected?: LaunchGeneration,
   ): Promise<void> {
     if (!this.readProcessSnapshotFn) throw new Error("Linux process snapshot unavailable");
     if (proof.kind === "group") {
@@ -2105,6 +2150,9 @@ export class Launcher {
         || root?.startTime !== proof.rootStartTime
         || root.processGroupId !== proof.rootPid) {
         throw new Error("Linux browser process-group identity changed before signaling");
+      }
+      if (expected && !this.launchGenerationMatches(profileId, expected)) {
+        throw new Error("launch generation changed before Linux process-group signaling");
       }
       await this.killProcessGroupFn(proof.rootPid);
       return;
@@ -2129,8 +2177,14 @@ export class Launcher {
       }
       const target = members.find((member) => member.pid !== proof.rootPid);
       if (!target) {
+        if (expected && !this.launchGenerationMatches(profileId, expected)) {
+          throw new Error("launch generation changed before Linux root signaling");
+        }
         await this.killPidFn(proof.rootPid);
         return;
+      }
+      if (expected && !this.launchGenerationMatches(profileId, expected)) {
+        throw new Error("launch generation changed before Linux descendant signaling");
       }
       await this.killPidFn(target.pid);
       if (Date.now() >= deadline) throw new Error("Linux browser descendants did not stop within teardown deadline");
@@ -2250,6 +2304,7 @@ export class Launcher {
    * (including its final launch-row cleanup) before reusing the profile.
    */
   async stop(profileId: string, expected?: LaunchGeneration): Promise<boolean> {
+    if (expected && !this.launchGenerationMatches(profileId, expected)) return false;
     const existingStop = this.stopsInFlight.get(profileId);
     const starting = this.startsInFlight.get(profileId);
     const startQueuedAfterExistingStop = !!existingStop && !!starting &&
@@ -2279,12 +2334,14 @@ export class Launcher {
     return promise;
   }
 
+  private launchGenerationMatches(profileId: string, expected: LaunchGeneration): boolean {
+    const current = this.store.getLaunch(profileId);
+    return current?.debugPort === expected.debugPort && current.startedAt === expected.startedAt;
+  }
+
   private async doStop(profileId: string, expected?: LaunchGeneration): Promise<boolean> {
     let launch = this.store.getLaunch(profileId);
-    if (
-      expected &&
-      (!launch || launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt)
-    ) return false;
+    if (expected && !this.launchGenerationMatches(profileId, expected)) return false;
     if (launch && (!launch.binaryPath || !launch.userDataDir)) {
       const adopted = await this.adoptLegacyLaunchIdentity(profileId, launch);
       if (!adopted) {
@@ -2297,6 +2354,7 @@ export class Launcher {
       }
       launch = adopted;
     }
+    if (launch && !this.launchGenerationMatches(profileId, launch)) return false;
     const proc = this.procs.get(profileId);
     const initial = launch
       ? await this.inspectLaunchLiveness(profileId, launch, proc, true)
@@ -2321,11 +2379,13 @@ export class Launcher {
       // Browser.close is destructive too: only send it after the same exact
       // executable/port/user-data identity check required before an OS kill.
       // A recycled port can expose an unrelated but valid CDP endpoint.
-      const wasAlive = initial?.cdpAlive === true && initial.process === "alive";
+      const wasAlive = initial?.cdpAlive === true && initial.process === "alive" &&
+        initial.cdpWs === launch?.ws;
       const hasLinuxTreeProof = !requiresLinuxProof || !!linuxProof;
       if (wasAlive && hasLinuxTreeProof && launch?.ws) {
+        if (!this.launchGenerationMatches(profileId, launch)) return false;
         try {
-          if (await this.browserCloseFn(initial?.cdpWs ?? launch.ws, this.gracefulStopMs)) {
+          if (await this.browserCloseFn(launch.ws, this.gracefulStopMs)) {
             if (await this.confirmLaunchStopped(profileId, launch, linuxProof ?? undefined, true)) {
               if (this.forgetLaunch(profileId, launch)) return true;
               this.log(`stop ${profileId}: launch generation changed after graceful close; leaving the replacement owned`);
@@ -2349,11 +2409,14 @@ export class Launcher {
             if (!linuxProof) {
               this.log(`stop ${profileId}: Linux root/tree ownership could not be proven; refusing to signal`);
             } else {
-              await this.signalLinuxTermination(profileId, launch, linuxProof);
+              await this.signalLinuxTermination(profileId, launch, linuxProof, launch);
               teardownConfirmed = await this.confirmLaunchStopped(profileId, launch, linuxProof, true);
             }
           } else {
-            for (const pid of forceState.ownedPids) await this.killPidFn(pid);
+            for (const pid of forceState.ownedPids) {
+              if (!this.launchGenerationMatches(profileId, launch)) return false;
+              await this.killPidFn(pid);
+            }
             teardownConfirmed = await this.confirmLaunchStopped(profileId, launch, undefined, true);
           }
         } else if (forceState.process === "dead") {

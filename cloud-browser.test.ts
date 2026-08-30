@@ -99,6 +99,7 @@ function setup(options: {
   let verifyCalls = 0;
   let reconcileHook: (() => void | Promise<void>) | undefined;
   let abandonHook: (() => void | Promise<void>) | undefined;
+  let retainedStartFailure: unknown;
   const openedPayload = payload();
   openedPayload.profile.platform = options.platform ?? openedPayload.profile.platform;
   openedPayload.profile.proxy = options.proxy ?? null;
@@ -200,6 +201,11 @@ function setup(options: {
     },
   };
   const launcher = {
+    failedStartGeneration(error: unknown) {
+      return error === retainedStartFailure
+        ? { debugPort: 9222, startedAt: 1000 }
+        : undefined;
+    },
     async start(profileId: string, args: string[], startOptions: any) {
       startCalls++;
       events.push("start");
@@ -222,7 +228,8 @@ function setup(options: {
         sessionBaseVersion: startOptions.sessionBaseVersion,
       });
       if (options.startRetainedFailure && startCalls === 1) {
-        throw new Error("stale browser retained");
+        retainedStartFailure = new Error("stale browser retained");
+        throw retainedStartFailure;
       }
       return { ws: "ws://browser", port: 9222 };
     },
@@ -504,6 +511,64 @@ test("Cloud browser stops retained launch ownership and retries once", async () 
   expect(state.events).toEqual(["cloud-open", "start", "stop", "start", "restore"]);
   expect(state.abandonCalls()).toBe(0);
   expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud failed-open cleanup never stops a replacement", async () => {
+  const state = setup();
+  const launcher = (state.coordinator as any).options.launcher;
+  const failed = new Error("retained start failed");
+  let stoppedGeneration: number | undefined;
+  launcher.start = async (profileId: string) => {
+    state.store.recordLaunch({
+      profileId,
+      pid: 10,
+      debugPort: 9222,
+      ws: "ws://failed",
+      startedAt: 1000,
+    });
+    state.store.recordLaunch({
+      profileId,
+      pid: 11,
+      debugPort: 9333,
+      ws: "ws://replacement",
+      startedAt: 2000,
+    });
+    throw failed;
+  };
+  launcher.failedStartGeneration = (error: unknown) => error === failed
+    ? { debugPort: 9222, startedAt: 1000 }
+    : undefined;
+  launcher.stop = async (
+    profileId: string,
+    expected?: { debugPort: number; startedAt: number },
+  ) => {
+    const current = state.store.getLaunch(profileId)!;
+    if (
+      expected &&
+      (current.debugPort !== expected.debugPort || current.startedAt !== expected.startedAt)
+    ) return false;
+    stoppedGeneration = current.startedAt;
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+
+  expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toEqual({
+    ok: false,
+    error: "Cloud profile open failed at browser_launch/preflight (failed)",
+  });
+  expect(stoppedGeneration).toBeUndefined();
+  expect(state.store.getLaunch("profile1")).toMatchObject({
+    debugPort: 9333,
+    startedAt: 2000,
+  });
+  expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
+    phase: "restoring",
+    debugPort: 9222,
+    startedAt: 1000,
+    cleanupMode: "abandon",
+  });
   state.queue.close();
   state.store.close();
 });
@@ -1659,6 +1724,51 @@ test("Cloud releaseAll never stops a replacement during retained cleanup", async
   state.store.close();
 });
 
+test("Cloud close never stops a replacement after capture", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  let stoppedGeneration: number | undefined;
+  (state.coordinator as any).options.launcher.stop = async (
+    profileId: string,
+    expected?: { debugPort: number; startedAt: number },
+  ) => {
+    state.store.recordLaunch({
+      profileId,
+      pid: 11,
+      debugPort: 9333,
+      ws: "ws://replacement",
+      startedAt: 2000,
+    });
+    const current = state.store.getLaunch(profileId)!;
+    if (
+      expected &&
+      (current.debugPort !== expected.debugPort || current.startedAt !== expected.startedAt)
+    ) return false;
+    stoppedGeneration = current.startedAt;
+    state.store.clearLaunch(profileId);
+    return true;
+  };
+
+  expect(await state.coordinator.close("profile1")).toEqual({
+    closed: false,
+    reason: "teardown_unconfirmed",
+  });
+  expect(stoppedGeneration).toBeUndefined();
+  expect(state.store.getLaunch("profile1")).toMatchObject({
+    debugPort: 9333,
+    startedAt: 2000,
+  });
+  expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
+    registrationId: "registration1",
+    cleanupMode: "sync",
+  });
+  expect(state.queue.list("account1")).toMatchObject([{
+    readyToSubmit: false,
+  }]);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud browser reopens the latest Cloud state while preserving a stale CAS close", async () => {
   const state = setup({ closeConflict: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -2398,6 +2508,91 @@ test("Cloud releaseAll refuses to forget running browsers without restored accou
   expect(state.queue.listOpens("account1")).toHaveLength(1);
 
   accountId = "account1";
+  await state.coordinator.releaseAll(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("cancelled Cloud authentication resume admits no later pending close", async () => {
+  const state = setup();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 4,
+    payload: payload(),
+  });
+  await Bun.sleep(2);
+  const secondPayload = payload();
+  secondPayload.profile.id = "profile2";
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile2",
+    registrationId: "registration2",
+    expectedVersion: 4,
+    payload: secondPayload,
+  });
+  let markFirstStarted!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+  let finishFirst!: () => void;
+  const firstPending = new Promise<void>((resolve) => { finishFirst = resolve; });
+  const seen: string[] = [];
+  const internals = state.coordinator as any;
+  internals.options.cloud.closeOpen = async (registrationId: string) => {
+    seen.push(registrationId);
+    if (registrationId === "registration1") {
+      markFirstStarted();
+      await firstPending;
+    }
+    return { ok: true as const, status: "accepted" as const, version: 5 };
+  };
+  let current = true;
+
+  const resuming = state.coordinator.resumeAfterAuthentication(() => current);
+  await firstStarted;
+  current = false;
+  finishFirst();
+  await resuming;
+
+  expect(seen).toEqual(["registration1"]);
+  expect(state.queue.list("account1")).toHaveLength(1);
+  expect(state.queue.list("account1")[0]?.profileId).toBe("profile2");
+  expect(internals.draining).toBe(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("cancelled Cloud authentication resume keeps lifecycle admission closed", async () => {
+  const state = setup({ heartbeatMs: 60_000 });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const internals = state.coordinator as any;
+  internals.stopHeartbeat("profile1");
+
+  let markProbeStarted!: () => void;
+  const probeStarted = new Promise<void>((resolve) => { markProbeStarted = resolve; });
+  let finishProbe!: () => void;
+  const probePending = new Promise<void>((resolve) => { finishProbe = resolve; });
+  internals.options.launcher.active = async () => {
+    markProbeStarted();
+    await probePending;
+    return true;
+  };
+  let current = true;
+  const eventsBeforeResume = state.events.length;
+
+  const resuming = state.coordinator.resumeAfterAuthentication(() => current);
+  await probeStarted;
+  current = false;
+  finishProbe();
+  await resuming;
+
+  expect(internals.draining).toBe(true);
+  expect(internals.timers.has("profile1")).toBe(false);
+  expect(state.store.getLaunch("profile1")).not.toBeNull();
+  expect(state.queue.listOpens("account1")).toHaveLength(1);
+  expect(state.events.slice(eventsBeforeResume)).not.toContain("capture");
+  expect(state.events.slice(eventsBeforeResume)).not.toContain("stop");
+
   await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();

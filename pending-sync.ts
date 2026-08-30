@@ -738,9 +738,11 @@ export async function retryPendingSync(
   queue: PendingSyncQueue,
   cloud: PendingCloseSubmitter,
   accountId: string,
+  current: () => boolean = () => true,
 ): Promise<PendingSyncRetryResult> {
   const result: PendingSyncRetryResult = { accepted: 0, conflicts: 0, failed: 0 };
   for (const summary of queue.list(accountId)) {
+    if (!current()) break;
     if (summary.status === "conflict" || !summary.readyToSubmit) continue;
     const pending = queue.get(summary.id, accountId);
     if (!pending) continue;

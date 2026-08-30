@@ -104,6 +104,21 @@ test("Supabase auth refresh uses only the supplied refresh token", async () => {
   expect(body).toEqual({ refresh_token: "stored-refresh" });
 });
 
+test("Supabase auth signs out only the captured session", async () => {
+  let url = "";
+  let authorization = "";
+  const auth = client(async (nextUrl, init) => {
+    url = String(nextUrl);
+    authorization = new Headers(init?.headers).get("authorization") ?? "";
+    return new Response(null, { status: 204 });
+  });
+
+  await auth.signOut("old-access");
+
+  expect(url).toBe("https://auth.aliasmode.test/auth/v1/logout?scope=local");
+  expect(authorization).toBe("Bearer old-access");
+});
+
 test("Supabase auth preserves permanent refresh failure status", async () => {
   const auth = client(async () => Response.json({ message: "invalid refresh token" }, { status: 401 }));
   await expect(auth.refresh("stored-refresh")).rejects.toMatchObject({

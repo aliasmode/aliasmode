@@ -16,6 +16,11 @@ export interface CloudAuthResult extends CloudAuthState {
   refreshToken: string;
 }
 
+export interface CloudAuthTransition {
+  generation: number;
+  release(): void;
+}
+
 export class CloudAuthRuntime {
   private accessTokenValue: string | undefined;
   private refreshTokenValue: string | undefined;
@@ -23,7 +28,11 @@ export class CloudAuthRuntime {
   private userValue: SupabaseAuthUser | undefined;
   private refreshInFlight: Promise<string | undefined> | undefined;
   private credentialMutation = Promise.resolve();
+  private transitionTail = Promise.resolve();
+  private transitionGeneration = 0;
+  private exitsInProgress = 0;
   private signOutInFlight: Promise<void> | undefined;
+  private authenticationInFlight: number | undefined;
   private generation = 0;
 
   constructor(
@@ -39,6 +48,58 @@ export class CloudAuthRuntime {
       authenticated: true,
       expiresAt: this.expiresAtValue,
       user: this.userValue,
+    };
+  }
+
+  hasSession(): boolean {
+    return !!(this.accessTokenValue || this.refreshTokenValue);
+  }
+
+  canSignIn(): boolean {
+    return !this.hasSession() &&
+      this.authenticationInFlight === undefined &&
+      this.signOutInFlight === undefined &&
+      this.exitsInProgress === 0;
+  }
+
+  canRestore(refreshToken: string): boolean {
+    return this.authenticationInFlight === undefined &&
+      this.signOutInFlight === undefined &&
+      this.exitsInProgress === 0 &&
+      (!this.hasSession() || this.refreshTokenValue === refreshToken);
+  }
+
+  async acquireTransition(): Promise<CloudAuthTransition> {
+    const generation = this.transitionGeneration;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const previous = this.transitionTail;
+    this.transitionTail = previous.then(() => turn);
+    await previous;
+    let released = false;
+    return {
+      generation,
+      release() {
+        if (released) return;
+        released = true;
+        releaseTurn();
+      },
+    };
+  }
+
+  isTransitionCurrent(transition: CloudAuthTransition): boolean {
+    return transition.generation === this.transitionGeneration && this.exitsInProgress === 0;
+  }
+
+  beginExit(): () => void {
+    this.transitionGeneration++;
+    this.transitionTail = Promise.resolve();
+    this.exitsInProgress++;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      this.exitsInProgress--;
     };
   }
 
@@ -60,9 +121,9 @@ export class CloudAuthRuntime {
     const pending = (async () => {
       const session = await this.auth.refresh(refreshToken);
       if (generation !== this.generation) return undefined;
-      const result = this.accept(session);
-      await this.persistRefreshToken(result.refreshToken, generation);
+      await this.persistRefreshToken(session.refreshToken, generation);
       if (generation !== this.generation) return undefined;
+      this.accept(session);
       return this.accessToken();
     })().finally(() => {
       if (this.refreshInFlight === pending) this.refreshInFlight = undefined;
@@ -80,19 +141,36 @@ export class CloudAuthRuntime {
   }
 
   async signIn(email: string, password: string): Promise<CloudAuthResult> {
-    if (this.accessTokenValue || this.refreshTokenValue) {
+    if (this.hasSession()) {
       throw new Error("Sign out before signing in to another Cloud account");
     }
-    const generation = this.generation;
-    return this.acceptAndPersist(await this.auth.signIn(email, password), generation);
+    const generation = this.beginAuthentication();
+    try {
+      return await this.acceptAndPersist(await this.auth.signIn(email, password), generation);
+    } finally {
+      this.finishAuthentication(generation);
+    }
   }
 
   async restore(refreshToken: string): Promise<CloudAuthResult> {
-    if (this.accessTokenValue || this.refreshTokenValue) {
+    if (this.hasSession() && this.refreshTokenValue !== refreshToken) {
       throw new Error("Sign out before restoring another Cloud account");
     }
-    const generation = this.generation;
-    return this.acceptAndPersist(await this.auth.refresh(refreshToken), generation);
+    const generation = this.beginAuthentication();
+    try {
+      if (this.hasSession()) {
+        if (!this.accessToken() && !await this.accessTokenOrRefresh()) {
+          throw new Error("Cloud authentication was cancelled");
+        }
+        if (generation !== this.generation) {
+          throw new Error("Cloud authentication was cancelled");
+        }
+        return this.currentResult();
+      }
+      return await this.acceptAndPersist(await this.auth.refresh(refreshToken), generation);
+    } finally {
+      this.finishAuthentication(generation);
+    }
   }
 
   signOut(): Promise<void> {
@@ -130,18 +208,50 @@ export class CloudAuthRuntime {
 
   clear(): void {
     this.generation++;
+    this.authenticationInFlight = undefined;
+    this.refreshInFlight = undefined;
     this.accessTokenValue = undefined;
     this.refreshTokenValue = undefined;
     this.expiresAtValue = undefined;
     this.userValue = undefined;
   }
 
+  private beginAuthentication(): number {
+    if (
+      this.authenticationInFlight !== undefined ||
+      this.signOutInFlight !== undefined ||
+      this.exitsInProgress > 0
+    ) {
+      throw new Error("Cloud authentication is already in progress");
+    }
+    const generation = this.generation;
+    this.authenticationInFlight = generation;
+    return generation;
+  }
+
+  private finishAuthentication(generation: number): void {
+    if (this.authenticationInFlight === generation) {
+      this.authenticationInFlight = undefined;
+    }
+  }
+
+  private currentResult(): CloudAuthResult {
+    if (!this.refreshTokenValue || !this.expiresAtValue || !this.userValue) {
+      throw new Error("Cloud authentication was cancelled");
+    }
+    return {
+      authenticated: true,
+      refreshToken: this.refreshTokenValue,
+      expiresAt: this.expiresAtValue,
+      user: this.userValue,
+    };
+  }
+
   private async acceptAndPersist(session: SupabaseAuthSession, generation: number): Promise<CloudAuthResult> {
     if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
-    const result = this.accept(session);
-    await this.persistRefreshToken(result.refreshToken, generation);
+    await this.persistRefreshToken(session.refreshToken, generation);
     if (generation !== this.generation) throw new Error("Cloud authentication was cancelled");
-    return result;
+    return this.accept(session);
   }
 
   private persistRefreshToken(refreshToken: string, generation: number): Promise<void> {

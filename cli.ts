@@ -2040,6 +2040,7 @@ function createCloudCrossDeviceSyntheticRuntime(
   let sessionBundle = cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_INITIAL_SENTINEL);
   let generation = 0;
   const launcher: CloudBrowserOptions["launcher"] = {
+    failedStartGeneration() { return undefined; },
     async start(profileId, _launchArgs, options) {
       calls.start++;
       generation++;

@@ -1866,6 +1866,133 @@ test("Cloud auth API accepts verified sign-in without exposing extra user metada
   s.close();
 });
 
+test("Cloud auth routes cannot replace an active account session", async () => {
+  const s = store();
+  let remoteSignIns = 0;
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      remoteSignIns++;
+      return {
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account1", email_confirmed_at: "verified" },
+      };
+    },
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  await cloudAuth.signIn("first@example.com", "password");
+  const options = {
+    cloudAuth,
+    cloudConnection: {} as CloudConnectionRuntime,
+    pendingSync: {} as PendingSyncRuntime,
+  };
+
+  const signIn = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/signin", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "second@example.com", password: "password" }),
+  }), {} as any, s, null, options);
+  const restore = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "other-refresh-token",
+      deviceCredential: "other-device-credential",
+      queueKey: Buffer.alloc(32, 9).toString("base64"),
+    }),
+  }), {} as any, s, null, options);
+
+  expect(signIn!.status).toBe(409);
+  expect(restore!.status).toBe(409);
+  expect(remoteSignIns).toBe(1);
+  expect(cloudAuth.state()).toMatchObject({ authenticated: true, user: { id: "account1" } });
+  s.close();
+});
+
+test("Cloud sign-out cancels a stale bootstrap without delaying the next account", async () => {
+  const s = store();
+  const pendingSync = new PendingSyncRuntime(
+    join(mkdtempSync(join(tmpdir(), "aliasmode-ui-auth-transition-")), "pending.sqlite"),
+  );
+  const queueKey = Buffer.alloc(32, 7).toString("base64");
+  const legal = { terms: "1", privacy: "1", acceptableUse: "1" };
+  let account = 1;
+  const cloudAuth = new CloudAuthRuntime({
+    async signIn() {
+      const id = account++;
+      return {
+        accessToken: `access-${id}`,
+        refreshToken: `refresh-${id}`,
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: `account${id}`, email_confirmed_at: "verified" },
+      };
+    },
+    async signOut() {},
+  } as unknown as SupabaseAuthClient, () => 1_000);
+  let markFirstBootstrapStarted!: () => void;
+  const firstBootstrapStarted = new Promise<void>((resolve) => { markFirstBootstrapStarted = resolve; });
+  let finishFirstBootstrap!: () => void;
+  const firstBootstrap = new Promise<void>((resolve) => { finishFirstBootstrap = resolve; });
+  let bootstrapCalls = 0;
+  let accountId: string | undefined;
+  const cloudConnection = {
+    async bootstrap(accept: () => boolean = () => true) {
+      const call = ++bootstrapCalls;
+      if (call === 1) {
+        markFirstBootstrapStarted();
+        await firstBootstrap;
+      }
+      if (!accept()) throw new Error("Cloud authentication was cancelled");
+      accountId = `account${call}`;
+      return {
+        account: { id: accountId },
+        device: { id: `device${call}` },
+        deviceCredential: `device-credential-${call}`,
+        legal: { current: legal, accepted: legal },
+        workspace: { id: `workspace${call}` },
+      };
+    },
+    accountId() { return accountId; },
+    clearDevice() { accountId = undefined; },
+  } as unknown as CloudConnectionRuntime;
+  const cloudBrowser = {
+    async resumeAfterAuthentication() {},
+    async releaseAll() { return true; },
+  } as any;
+  const request = (email: string) => new Request("http://x/ui/api/cloud-auth/signin", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password: "password", queueKey }),
+  });
+  const options = { cloudAuth, cloudConnection, pendingSync, cloudBrowser };
+
+  const staleSignIn = handleUiRequest(request("first@example.com"), {} as any, s, null, options);
+  await firstBootstrapStarted;
+  const signingOut = handleUiRequest(new Request("http://x/ui/api/cloud-auth/signout", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  }), {} as any, s, null, options);
+  const signOut = await Promise.race([
+    signingOut,
+    Bun.sleep(200).then(() => null),
+  ]);
+  expect(signOut).not.toBeNull();
+  expect(signOut!.status).toBe(200);
+
+  const nextSignIn = await handleUiRequest(request("second@example.com"), {} as any, s, null, options);
+  expect(nextSignIn!.status).toBe(200);
+  finishFirstBootstrap();
+  expect((await staleSignIn)!.status).toBe(409);
+  expect(cloudAuth.state()).toMatchObject({ authenticated: true, user: { id: "account2" } });
+  expect(cloudConnection.accountId()).toBe("account2");
+  expect(pendingSync.queue()).toBeDefined();
+  pendingSync.close();
+  s.close();
+});
+
 test("Cloud auth API creates a pending-sync key only for a new queue", async () => {
   const s = store();
   const cloudAuth = new CloudAuthRuntime({
@@ -2090,12 +2217,25 @@ test("Cloud restore retains rotated auth, device, and queue state after a retrya
   } as unknown as SupabaseAuthClient, () => 1_000, (token) => { persisted.push(token); });
   let cleared = 0;
   let restoredCredential = "";
+  let statusCalls = 0;
+  const currentLegal = { terms: "1", privacy: "1", acceptableUse: "1" };
   const cloudConnection = {
     accountId() { return "account1"; },
+    restoreAccount() {},
+    restoreDevice() {},
     restoreCredential(value: string) { restoredCredential = value; },
     client: {
       async status() {
-        throw new CloudRequestError("offline", { kind: "transport", retryable: true });
+        statusCalls++;
+        if (statusCalls === 1) {
+          throw new CloudRequestError("offline", { kind: "transport", retryable: true });
+        }
+        return {
+          account: { id: "account1" },
+          device: { id: "device1" },
+          legal: { current: currentLegal, accepted: currentLegal },
+          workspace: { id: "workspace1" },
+        };
       },
     },
     clearDevice() { cleared++; },
@@ -2129,6 +2269,26 @@ test("Cloud restore retains rotated auth, device, and queue state after a retrya
   expect(JSON.stringify(body)).not.toContain("stored-refresh-token");
   expect(JSON.stringify(body)).not.toContain("stored-device-credential");
   expect(body.queueKey).toBeUndefined();
+
+  const recovered = await handleUiRequest(new Request("http://x/ui/api/cloud-auth/restore", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      refreshToken: "rotated-refresh-token",
+      deviceCredential: "stored-device-credential",
+      queueKey,
+    }),
+  }), {} as any, s, null, { cloudAuth, cloudConnection, pendingSync });
+
+  expect(recovered!.status).toBe(200);
+  expect(await recovered!.json()).toMatchObject({
+    ok: true,
+    authenticated: true,
+    refreshToken: "rotated-refresh-token",
+    deviceId: "device1",
+  });
+  expect(statusCalls).toBe(2);
+  expect(persisted).toEqual(["rotated-refresh-token"]);
   pendingSync.close();
   s.close();
 });
@@ -2252,6 +2412,9 @@ test("Cloud restore treats unverified email as permanent and clears credentials 
   let localClears = 0;
   let remoteSignOuts = 0;
   const cloudAuth = {
+    async acquireTransition() { return { generation: 0, release() {} }; },
+    isTransitionCurrent() { return true; },
+    canRestore() { return true; },
     async restore() { throw new EmailVerificationRequiredError(); },
     async clearStoredSession() { localClears++; },
     async signOut() { remoteSignOuts++; },
@@ -2380,6 +2543,7 @@ test("Cloud forget releases browsers and clears only stored session state", asyn
   const s = store();
   const calls: string[] = [];
   const cloudAuth = {
+    beginExit() { return () => {}; },
     async clearStoredSession() { calls.push("clearStoredSession"); },
     async signOut() { throw new Error("remote sign-out must not run"); },
   } as unknown as CloudAuthRuntime;
@@ -2402,6 +2566,7 @@ test("Cloud sign-out keeps auth and account state when browsers cannot release",
   const s = store();
   const calls: string[] = [];
   const cloudAuth = {
+    beginExit() { return () => {}; },
     state() { return { authenticated: true }; },
     async signOut() { calls.push("signOut"); },
   } as unknown as CloudAuthRuntime;
@@ -2430,6 +2595,7 @@ test("Cloud sign-out releases browsers before queue, device, and credentials", a
   const s = store();
   const calls: string[] = [];
   const cloudAuth = {
+    beginExit() { return () => {}; },
     async signOut() { calls.push("signOut"); },
   } as unknown as CloudAuthRuntime;
   const cloudConnection = {

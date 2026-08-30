@@ -499,7 +499,15 @@ export async function handleUiRequest(
     }
     const rejected = rejectUntrustedJsonMutation(req);
     if (rejected) return rejected;
+    const exitsAccount = pathname === "/ui/api/cloud-auth/signout" ||
+      pathname === "/ui/api/cloud-auth/forget";
+    const finishAccountExit = exitsAccount ? options.cloudAuth.beginExit() : undefined;
+    const authTransition = exitsAccount ? undefined : await options.cloudAuth.acquireTransition();
+    const transitionCurrent = () => !authTransition || options.cloudAuth!.isTransitionCurrent(authTransition);
     try {
+      if (!transitionCurrent()) {
+        return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+      }
       const body = await req.json() as {
         email?: unknown;
         password?: unknown;
@@ -535,6 +543,12 @@ export async function handleUiRequest(
         if (!options.cloudConnection || !options.pendingSync) {
           return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
         }
+        if (!options.cloudAuth.canSignIn()) {
+          return Response.json(
+            { ok: false, error: "Sign out before signing in to another Cloud account" },
+            { status: 409 },
+          );
+        }
         if (body.queueKey !== undefined && (typeof body.queueKey !== "string" || !body.queueKey)) {
           return Response.json({ ok: false, error: "stored queue encryption key is invalid" }, { status: 400 });
         }
@@ -546,12 +560,21 @@ export async function handleUiRequest(
             : undefined;
         try {
           const result = await options.cloudAuth.signIn(body.email, body.password);
-          const bootstrap = await options.cloudConnection.bootstrap();
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+          }
+          const bootstrap = await options.cloudConnection.bootstrap(transitionCurrent);
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+          }
           const initialized = pending ?? options.pendingSync.initialize();
           if (legalAcceptanceIsCurrent(bootstrap.legal)) {
-            await options.cloudBrowser?.resumeAfterAuthentication();
+            await options.cloudBrowser?.resumeAfterAuthentication(transitionCurrent);
           } else {
-            await options.cloudBrowser?.secureAfterAuthentication();
+            await options.cloudBrowser?.secureAfterAuthentication(transitionCurrent);
+          }
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
           }
           options.mcpTunnel?.refresh();
           return Response.json({
@@ -568,6 +591,9 @@ export async function handleUiRequest(
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+          }
           await options.mcpTunnel?.disconnect();
           options.pendingSync.close();
           options.cloudAuth.clear();
@@ -585,6 +611,12 @@ export async function handleUiRequest(
         if (!options.pendingSync || typeof body.queueKey !== "string" || !body.queueKey) {
           return Response.json({ ok: false, error: "stored queue encryption key is required" }, { status: 400 });
         }
+        if (!options.cloudAuth.canRestore(body.refreshToken)) {
+          return Response.json(
+            { ok: false, error: "Sign out before restoring another Cloud account" },
+            { status: 409 },
+          );
+        }
         if (body.resumeLifecycle !== undefined && typeof body.resumeLifecycle !== "boolean") {
           return Response.json({ ok: false, error: "resumeLifecycle must be boolean" }, { status: 400 });
         }
@@ -594,9 +626,15 @@ export async function handleUiRequest(
           if (!queueWasInitialized) options.pendingSync.initialize(body.queueKey);
           const priorAccountId = options.cloudConnection.accountId();
           const result = await options.cloudAuth.restore(body.refreshToken);
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+          }
           stage = "cloud_status";
           options.cloudConnection.restoreCredential(body.deviceCredential);
           const status = await options.cloudConnection.client.status();
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+          }
           options.cloudConnection.restoreAccount(status.account.id);
           options.cloudConnection.restoreDevice(status.device.id, body.deviceCredential);
           stage = "lifecycle_resume";
@@ -604,9 +642,12 @@ export async function handleUiRequest(
             legalAcceptanceIsCurrent(status.legal) &&
             (body.resumeLifecycle === true || !queueWasInitialized || (priorAccountId && priorAccountId !== status.account.id))
           ) {
-            await options.cloudBrowser?.resumeAfterAuthentication();
+            await options.cloudBrowser?.resumeAfterAuthentication(transitionCurrent);
           } else {
-            await options.cloudBrowser?.secureAfterAuthentication();
+            await options.cloudBrowser?.secureAfterAuthentication(transitionCurrent);
+          }
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
           }
           options.mcpTunnel?.refresh();
           return Response.json({
@@ -620,6 +661,9 @@ export async function handleUiRequest(
             user: { id: result.user?.id, email: result.user?.email },
           });
         } catch (error) {
+          if (!transitionCurrent()) {
+            return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+          }
           const failure = cloudRestoreFailure(error, stage);
           if (!failure.retryable) {
             await options.mcpTunnel?.disconnect();
@@ -641,8 +685,17 @@ export async function handleUiRequest(
           return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
         }
         const status = await options.cloudConnection.client.status();
+        if (!transitionCurrent()) {
+          return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+        }
         const accepted = await options.cloudConnection.client.acceptLegal({ versions: status.legal.current });
-        await options.cloudBrowser?.resumeAfterAuthentication();
+        if (!transitionCurrent()) {
+          return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+        }
+        await options.cloudBrowser?.resumeAfterAuthentication(transitionCurrent);
+        if (!transitionCurrent()) {
+          return Response.json({ ok: false, error: "Cloud authentication was cancelled" }, { status: 409 });
+        }
         options.mcpTunnel?.refresh();
         return Response.json({
           ok: true,
@@ -680,6 +733,9 @@ export async function handleUiRequest(
       return Response.json({ ok: false, error: "unknown Cloud auth action" }, { status: 404 });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    } finally {
+      authTransition?.release();
+      finishAccountExit?.();
     }
   }
 

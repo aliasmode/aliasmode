@@ -12,7 +12,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   };
   const tauriConfig = JSON.parse(readFileSync(join(root, "src-tauri", "tauri.conf.json"), "utf8")) as {
     version: string;
-    bundle: { createUpdaterArtifacts: boolean; windows: { webviewInstallMode: { type: string }; nsis: { installMode: string } } };
+    bundle: { createUpdaterArtifacts: boolean | string; windows: { webviewInstallMode: { type: string }; nsis: { installMode: string } } };
     plugins: { updater: { pubkey: string; windows: { installMode: string } } };
   };
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
@@ -29,7 +29,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(lockedVersion).toBe(ALIASMODE_VERSION);
   expect(tauriConfig.bundle.windows.webviewInstallMode.type).toBe("offlineInstaller");
   expect(tauriConfig.bundle.windows.nsis.installMode).toBe("currentUser");
-  expect(tauriConfig.bundle.createUpdaterArtifacts).toBe(true);
+  expect(tauriConfig.bundle.createUpdaterArtifacts).toBe("v1Compatible");
   expect(tauriConfig.plugins.updater.windows.installMode).toBe("passive");
   expect(tauriConfig.plugins.updater.pubkey.length).toBeGreaterThan(100);
   expect(cargoToml).toContain('tauri-plugin-updater = { version = "=2.10.1"');

@@ -64,11 +64,86 @@ test("Cloud auth refuses to replace an active account session", async () => {
   await expect(runtime.restore("replacement-refresh")).rejects.toThrow(
     "Sign out before restoring another Cloud account",
   );
+  await expect(runtime.restore("refresh-1")).resolves.toMatchObject({
+    authenticated: true,
+    user: { id: "account1" },
+  });
   expect(signInCalls).toBe(1);
   expect(runtime.state()).toMatchObject({
     authenticated: true,
     user: { id: "account1" },
   });
+});
+
+test("Cloud auth admits only one initial sign-in", async () => {
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let finishSignIn!: (session: any) => void;
+  const remote = new Promise<any>((resolve) => { finishSignIn = resolve; });
+  let signInCalls = 0;
+  const runtime = new CloudAuthRuntime(auth({
+    async signIn() {
+      signInCalls++;
+      markStarted();
+      return remote;
+    },
+  }), () => 1_000);
+
+  const first = runtime.signIn("first@example.com", "password");
+  await started;
+  await expect(runtime.signIn("second@example.com", "password")).rejects.toThrow(
+    "Cloud authentication is already in progress",
+  );
+  finishSignIn({
+    accessToken: "access",
+    refreshToken: "refresh",
+    expiresIn: 60,
+    expiresAt: 61_000,
+    user: { id: "account1", email_confirmed_at: "verified" },
+  });
+
+  await expect(first).resolves.toMatchObject({ authenticated: true, user: { id: "account1" } });
+  expect(signInCalls).toBe(1);
+  expect(runtime.state()).toMatchObject({ authenticated: true, user: { id: "account1" } });
+});
+
+test("Cloud sign-out cancels a pending sign-in without blocking the next account", async () => {
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  let finishFirst!: (session: any) => void;
+  const firstRemote = new Promise<any>((resolve) => { finishFirst = resolve; });
+  const runtime = new CloudAuthRuntime(auth({
+    async signIn(email) {
+      if (email === "first@example.com") {
+        markStarted();
+        return firstRemote;
+      }
+      return {
+        accessToken: "access-2",
+        refreshToken: "refresh-2",
+        expiresIn: 60,
+        expiresAt: 61_000,
+        user: { id: "account2", email_confirmed_at: "verified" },
+      };
+    },
+  }), () => 1_000);
+
+  const first = runtime.signIn("first@example.com", "password");
+  await started;
+  await runtime.signOut();
+  await expect(runtime.signIn("second@example.com", "password")).resolves.toMatchObject({
+    user: { id: "account2" },
+  });
+  finishFirst({
+    accessToken: "access-1",
+    refreshToken: "refresh-1",
+    expiresIn: 60,
+    expiresAt: 61_000,
+    user: { id: "account1", email_confirmed_at: "verified" },
+  });
+
+  await expect(first).rejects.toThrow("cancelled");
+  expect(runtime.state()).toMatchObject({ authenticated: true, user: { id: "account2" } });
 });
 
 test("Cloud auth rejects expired in-memory access tokens", async () => {
@@ -112,6 +187,92 @@ test("Cloud auth refreshes expired access tokens without a dashboard page", asyn
   expect(runtime.accessToken()).toBeUndefined();
   expect(await runtime.accessTokenOrRefresh()).toBe("restored-access");
   expect(rotated).toEqual(["refresh", "rotated-refresh"]);
+});
+
+test("Cloud sign-out detaches an old refresh from the next account", async () => {
+  let now = 1_000;
+  let markOldRefreshStarted!: () => void;
+  const oldRefreshStarted = new Promise<void>((resolve) => { markOldRefreshStarted = resolve; });
+  let finishOldRefresh!: (session: any) => void;
+  const oldRefresh = new Promise<any>((resolve) => { finishOldRefresh = resolve; });
+  let account = 1;
+  const runtime = new CloudAuthRuntime(auth({
+    async signIn() {
+      return {
+        accessToken: `access-${account}`,
+        refreshToken: `refresh-${account}`,
+        expiresIn: 60,
+        expiresAt: account === 1 ? 61_000 : 121_000,
+        user: { id: `account${account++}`, email_confirmed_at: "verified" },
+      };
+    },
+    async refresh(refreshToken) {
+      if (refreshToken === "refresh-1") {
+        markOldRefreshStarted();
+        return oldRefresh;
+      }
+      return {
+        accessToken: "access-2-refreshed",
+        refreshToken: "refresh-2-rotated",
+        expiresIn: 60,
+        expiresAt: 181_000,
+        user: { id: "account2", email_confirmed_at: "verified" },
+      };
+    },
+  }), () => now);
+
+  await runtime.signIn("first@example.com", "password");
+  now = 61_000;
+  const stale = runtime.accessTokenOrRefresh();
+  await oldRefreshStarted;
+  await runtime.signOut();
+  await runtime.signIn("second@example.com", "password");
+  now = 121_000;
+  const current = runtime.accessTokenOrRefresh();
+
+  await expect(current).resolves.toBe("access-2-refreshed");
+  finishOldRefresh({
+    accessToken: "stale-access",
+    refreshToken: "stale-refresh",
+    expiresIn: 60,
+    expiresAt: 181_000,
+    user: { id: "account1", email_confirmed_at: "verified" },
+  });
+  await expect(stale).resolves.toBeUndefined();
+  expect(runtime.state()).toMatchObject({ authenticated: true, user: { id: "account2" } });
+});
+
+test("Cloud restore can retry after a rotated credential write fails", async () => {
+  let refreshCalls = 0;
+  let rejectCredentialWrite = true;
+  const runtime = new CloudAuthRuntime(
+    auth({
+      async refresh() {
+        refreshCalls++;
+        return {
+          accessToken: `access-${refreshCalls}`,
+          refreshToken: `rotated-${refreshCalls}`,
+          expiresIn: 60,
+          expiresAt: 61_000,
+          user: { id: "account1", email_confirmed_at: "verified" },
+        };
+      },
+    }),
+    () => 1_000,
+    async () => {
+      if (rejectCredentialWrite) throw new Error("credential write failed");
+    },
+  );
+
+  await expect(runtime.restore("stored-refresh")).rejects.toThrow("credential write failed");
+  expect(runtime.canRestore("stored-refresh")).toBe(true);
+
+  rejectCredentialWrite = false;
+  await expect(runtime.restore("stored-refresh")).resolves.toMatchObject({
+    authenticated: true,
+    refreshToken: "rotated-2",
+  });
+  expect(refreshCalls).toBe(2);
 });
 
 test("Cloud restore persists its rotated refresh token before returning", async () => {
