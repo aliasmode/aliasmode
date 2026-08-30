@@ -1745,7 +1745,7 @@ test("Instagram checkpoint survives a failed Cloud close until retry", async () 
   state.store.close();
 });
 
-test("Cloud close starts pending retry after confirmed teardown", async () => {
+test("Cloud close starts pending retry and permits sign-out after confirmed teardown", async () => {
   let nextTimer = 0;
   const timers = new Map<number, () => void>();
   const state = setup({
@@ -1767,8 +1767,33 @@ test("Cloud close starts pending retry after confirmed teardown", async () => {
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.listOpens("account1")).toEqual([]);
   expect(timers.size).toBe(1);
+  expect(await state.coordinator.releaseAll()).toBe(true);
+  expect(state.queue.list("account1")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: true,
+    status: "retrying",
+  }]);
+  expect(timers.size).toBe(0);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll rejects an unready checkpoint without confirmed teardown", async () => {
+  const state = setup();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 4,
+    payload: payload(),
+    readyToSubmit: false,
+  });
+
   expect(await state.coordinator.releaseAll()).toBe(false);
-  await state.coordinator.releaseAll(true);
+  expect(state.queue.list("account1")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: false,
+  }]);
   state.queue.close();
   state.store.close();
 });
@@ -1822,15 +1847,19 @@ test("Cloud releaseAll succeeds when a close retry drains its early failure", as
   state.store.close();
 });
 
-test("Cloud releaseAll remains incomplete for a conflicted confirmed close", async () => {
+test("Cloud releaseAll permits sign-out after a conflicted confirmed close", async () => {
   const state = setup({ closeConflict: true });
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "conflict" });
 
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.listOpens("account1")).toEqual([]);
-  expect(await state.coordinator.releaseAll()).toBe(false);
-  await state.coordinator.releaseAll(true);
+  expect(await state.coordinator.releaseAll()).toBe(true);
+  expect(state.queue.list("account1")).toMatchObject([{
+    profileId: "profile1",
+    readyToSubmit: true,
+    status: "conflict",
+  }]);
   state.queue.close();
   state.store.close();
 });
@@ -2037,6 +2066,11 @@ test("Cloud browser retains durable cleanup when legacy concurrent-open abandon 
   });
   expect(state.events).toEqual(["cloud-open", "abandon"]);
   expect(state.startCalls()).toBe(0);
+  expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
+    registrationId: "registration2",
+    cleanupMode: "abandon",
+  });
+  expect(await state.coordinator.releaseAll()).toBe(false);
   expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
     registrationId: "registration2",
     cleanupMode: "abandon",
@@ -2261,6 +2295,36 @@ test("Cloud sign-out drain remains reusable after the next sign-in", async () =>
   expect(state.queue.listOpens("account1")).toEqual([]);
   await state.coordinator.resumeAfterAuthentication();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud pending close retries only after same-account reauthentication", async () => {
+  let accountId = "account1";
+  const state = setup({
+    accountId: () => accountId,
+    closeTransportFailure: true,
+  });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+  expect(await state.coordinator.releaseAll()).toBe(true);
+  expect(state.queue.list("account1")).toHaveLength(1);
+
+  let submissions = 0;
+  (state.coordinator as any).options.cloud.closeOpen = async () => {
+    submissions++;
+    return { ok: true, status: "accepted", version: 5 };
+  };
+  accountId = "account2";
+  await state.coordinator.resumeAfterAuthentication();
+  expect(submissions).toBe(0);
+  expect(state.queue.list("account1")).toHaveLength(1);
+
+  accountId = "account1";
+  await state.coordinator.resumeAfterAuthentication();
+  expect(submissions).toBe(1);
+  expect(state.queue.list("account1")).toEqual([]);
+  await state.coordinator.releaseAll(true);
   state.queue.close();
   state.store.close();
 });

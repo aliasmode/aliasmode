@@ -92,6 +92,8 @@ export interface CloudBrowserLifecycle {
   secureAfterAuthentication(): Promise<void>;
   resumeAfterAuthentication(): Promise<void>;
   retryPending(): Promise<void>;
+  /** Close every browser before releasing authentication. Ready encrypted close
+      records may remain for same-account synchronization after reauthentication. */
   releaseAll(permanent?: boolean): Promise<boolean>;
   diagnostics?(): readonly CloudDiagnosticEvent[];
 }
@@ -1718,7 +1720,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       await retryPendingSync(queue, this.options.cloud, accountId);
       released = teardownConfirmed &&
         queue.listOpens(accountId).length === 0 &&
-        queue.list(accountId).length === 0;
+        queue.list(accountId).every((close) => close.readyToSubmit);
       return released;
     } finally {
       if (permanent || this.shuttingDown || released) {
