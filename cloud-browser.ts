@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
-import type { ImportProfilesResponse } from "./contracts/cloud-v1.ts";
+import type { CloudProfileSummary, ImportProfilesResponse } from "./contracts/cloud-v1.ts";
 import {
   CloudDiagnostics,
   type CloudDiagnosticEvent,
@@ -20,6 +20,7 @@ import {
   retryPendingSync,
 } from "./pending-sync.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
+import { proxyHostPort } from "./proxy.ts";
 import {
   bundleHasRestorableLogin,
   bundleTabUrls,
@@ -48,7 +49,11 @@ export interface CloudBrowserProfile {
   group: string;
   platform: string;
   tags: string[];
-  proxy: null;
+  /** "host:port" from the locally cached decrypted profile — never user/pass.
+      Null until this device has opened the profile (the Cloud summary cannot
+      carry it: the proxy lives inside the end-to-end encrypted payload). */
+  proxy: string | null;
+  proxyError?: string;
   timezone: string;
   cookieCount: number;
   seeded: boolean;
@@ -64,6 +69,10 @@ export interface CloudBrowserProfile {
 
 export interface CloudBrowserLifecycle {
   listRoster(): Promise<{ profiles: CloudBrowserProfile[]; healthSources: [] }>;
+  /** A live edit changed the cached profile of an open session — make the next
+      checkpoint re-encode it and happen promptly. Optional so partial fakes in
+      tests need not provide it. */
+  noteProfileEdited?(profileId: string): void;
   create(profile: Profile): Promise<{ id: string }>;
   importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
@@ -77,7 +86,7 @@ export interface CloudBrowserLifecycle {
 
 type CloudBrowserClient = Pick<
   CloudClient,
-  "listProfiles" | "createProfile" | "importProfiles" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
+  "listProfiles" | "getProfile" | "createProfile" | "importProfiles" | "openProfile" | "heartbeat" | "closeOpen" | "abandon"
 >;
 
 type CloudBrowserLauncher = Pick<
@@ -109,6 +118,10 @@ export interface CloudBrowserOptions {
 }
 
 const PENDING_SESSION_BASE_VERSION = -1;
+/** Proxy-cache backfill: how many uncached profiles one roster poll fetches. */
+const PROXY_BACKFILL_BATCH = 8;
+/** How long a failed backfill fetch stays quiet before it is retried. */
+const PROXY_BACKFILL_RETRY_MS = 300_000;
 const DEFAULT_DIRTY_MONITOR_MS = 2_500;
 const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 1_200;
 const DEFAULT_CHECKPOINT_MIN_INTERVAL_MS = 3_000;
@@ -267,6 +280,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private readonly diagnosticEvents = new CloudDiagnostics();
   private shuttingDown = false;
   private draining = false;
+  /** Versions this run has decrypted into the local cache, per profile. */
+  private readonly proxyCacheVersions = new Map<string, number>();
+  /** Last backfill attempt per profile, so a failing fetch is not retried every poll. */
+  private readonly proxyCacheAttempts = new Map<string, number>();
+  private proxyBackfillTask: Promise<void> | null = null;
 
   constructor(private readonly options: CloudBrowserOptions) {
     this.heartbeatMs = Math.max(0, options.heartbeatMs ?? 60_000);
@@ -284,18 +302,21 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const { queue, accountId } = this.requireContext(false);
     await this.reconcileClosedBrowsers(queue, accountId);
     const response = await this.options.cloud.listProfiles();
+    this.backfillProxyCache(response.profiles);
     return {
       profiles: response.profiles
         .filter((profile) => profile.trashedAt === null)
         .map((profile) => {
           const launch = this.options.store.getLaunch(profile.id);
+          const cached = this.options.store.getProfile(profile.id);
           return {
             id: profile.id,
             name: profile.name,
             group: profile.group,
             platform: profile.platform,
             tags: [...profile.tags],
-            proxy: null,
+            proxy: cached?.proxy ? proxyHostPort(cached.proxy) : null,
+            ...(cached?.proxyError ? { proxyError: cached.proxyError } : {}),
             timezone: "",
             cookieCount: 0,
             seeded: false,
@@ -313,6 +334,49 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         }),
       healthSources: [],
     };
+  }
+
+  /**
+   * The Cloud summary cannot carry the proxy — it lives inside the end-to-end
+   * encrypted payload only this device can decrypt. A profile never opened here
+   * would therefore show no proxy forever, so fetch and cache a few uncached
+   * profiles per roster poll in the background; the column fills in over the
+   * next polls without blocking this one. A version change on a profile cached
+   * this run (a remote edit) triggers a refetch the same way.
+   */
+  private backfillProxyCache(profiles: readonly CloudProfileSummary[]): void {
+    if (this.proxyBackfillTask || this.shuttingDown) return;
+    const now = Date.now();
+    const candidates = profiles
+      .filter((profile) => {
+        if (profile.trashedAt !== null) return false;
+        const cachedVersion = this.proxyCacheVersions.get(profile.id);
+        if (cachedVersion === profile.version) return false;
+        // Cached by an earlier run at an unknown version: keep what we have
+        // rather than re-downloading the whole roster on every start.
+        if (cachedVersion === undefined && this.options.store.getProfile(profile.id)) return false;
+        const attempted = this.proxyCacheAttempts.get(profile.id);
+        return attempted === undefined || now - attempted > PROXY_BACKFILL_RETRY_MS;
+      })
+      .slice(0, PROXY_BACKFILL_BATCH);
+    if (candidates.length === 0) return;
+    this.proxyBackfillTask = (async () => {
+      for (const summary of candidates) {
+        if (this.shuttingDown) return;
+        this.proxyCacheAttempts.set(summary.id, now);
+        try {
+          const response = await this.options.cloud.getProfile(summary.id);
+          const { profile } = decodePortableProfile(response.payload);
+          if (profile.id !== summary.id) continue;
+          // A locally open profile's live state owns the cached row.
+          if (this.options.store.getLaunch(summary.id)) continue;
+          this.options.store.upsertProfile(profile);
+          this.proxyCacheVersions.set(summary.id, response.profile.version);
+        } catch {
+          // Transient Cloud errors: the attempt stamp keeps retries spaced out.
+        }
+      }
+    })().finally(() => { this.proxyBackfillTask = null; });
   }
 
   private async reconcileClosedBrowsers(queue: PendingSyncQueue, accountId: string): Promise<void> {
@@ -475,6 +539,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const { profile, sessionBundle } = decodePortableProfile(opened.payload);
       if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
       this.options.store.upsertProfile(profile);
+      this.proxyCacheVersions.set(profileId, opened.baseVersion);
 
       stage = "browser_launch";
       logStage("browser_launch");
@@ -1503,6 +1568,25 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     for (const watcher of monitor.watchers.splice(0)) {
       try { watcher.close(); } catch {}
     }
+  }
+
+  /**
+   * A live metadata edit rewrote the cached profile while its browser is open.
+   * The checkpoint signature hashes only the SESSION bundle, so an unchanged
+   * session would skip the next capture as "unchanged" and the edit would only
+   * sync by luck. Drop the signature — payloads are re-encoded from the store
+   * at capture time, so the next checkpoint or close carries the edit — and
+   * nudge the dirty monitor so that capture happens promptly (seconds), not at
+   * the next heartbeat.
+   */
+  noteProfileEdited(profileId: string): void {
+    // Blank only the signature: the entry's capture seed must survive, and a
+    // DELETED entry would be rebuilt by checkpointState from the queue's last
+    // payload — carrying the very signature this is trying to invalidate.
+    const state = this.checkpointSignatures.get(profileId);
+    if (state) state.signature = "";
+    const monitor = this.dirtyMonitors.get(profileId);
+    if (monitor) this.markCheckpointDirty(profileId, monitor);
   }
 
   private markCheckpointDirty(profileId: string, monitor: CloudDirtyMonitor): void {

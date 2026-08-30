@@ -1,5 +1,5 @@
 import type { CookieRecord, Profile } from "./types.ts";
-import { MAX_SCREEN_DIMENSION, MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH } from "./parse.ts";
+import { MAX_CUSTOM_NO_LENGTH, MAX_SCREEN_DIMENSION, MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH } from "./parse.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 
 const REQUIRED_STRING_FIELDS = [
@@ -70,6 +70,12 @@ export function assertValidProfile(value: unknown): asserts value is Profile {
   }
   if (profile.proxyError !== undefined && typeof profile.proxyError !== "string") {
     throw new Error("profile proxyError must be a string");
+  }
+  if (profile.customNo !== undefined) {
+    if (typeof profile.customNo !== "string") throw new Error("profile customNo must be a string");
+    if (profile.customNo && !new RegExp(`^\\d{1,${MAX_CUSTOM_NO_LENGTH}}$`).test(profile.customNo)) {
+      throw new Error(`profile customNo must be empty or 1-${MAX_CUSTOM_NO_LENGTH} digits`);
+    }
   }
   for (const field of ["extensions", "tags"] as const) {
     const list = profile[field];

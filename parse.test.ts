@@ -6,6 +6,8 @@ import {
   parseProxy,
   parseStrictProxy,
   parseStrictResolution,
+  parseStrictCustomNo,
+  rowsToUpdates,
   recordToProfile,
   parseExport,
   decodeText,
@@ -272,4 +274,28 @@ test("TXT and CSV exports preserve a bracketed IPv6 proxy", () => {
   const update = parseUpdateFile(serializeCsv([profile])).updates[0]!;
   expect(update.set.proxy).toBe("[2001:db8::1]:1080:user:p:ss");
   expect(parseStrictProxy(update.set.proxyType, update.set.proxy)).toEqual(profile.proxy);
+});
+
+test("parseStrictCustomNo accepts digits, clears on blank, rejects the rest", () => {
+  expect(parseStrictCustomNo("123456")).toBe("123456");
+  expect(parseStrictCustomNo("  4421  ")).toBe("4421"); // trimmed
+  expect(parseStrictCustomNo("")).toBe(""); // blank clears it -> falls back to the serial
+  expect(parseStrictCustomNo(undefined)).toBe("");
+  expect(() => parseStrictCustomNo("12a4")).toThrow("digits only");
+  expect(() => parseStrictCustomNo("#4421")).toThrow("digits only");
+  expect(() => parseStrictCustomNo("1234567890123")).toThrow("at most 12 digits");
+});
+
+test("an update file can renumber profiles in bulk through a custom_no column", () => {
+  const { updates, skipped } = rowsToUpdates([
+    { id: "k1d0cd11", custom_no: "907341" },
+    { id: "k1d0cd12", "custom no": "4421" },
+    { id: "k1d0cd13", no: "12" },
+  ]);
+  expect(skipped).toBe(0);
+  expect(updates.map((u) => u.set)).toEqual([
+    { customNo: "907341" },
+    { customNo: "4421" },
+    { customNo: "12" },
+  ]);
 });

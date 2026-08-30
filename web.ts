@@ -7,7 +7,7 @@
  */
 
 import index from "./web/index.html";
-import type { Launcher } from "./launcher.ts";
+import { profileDisplayNo, type Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
 import type { AppConfigStore } from "./app-config.ts";
@@ -86,9 +86,11 @@ function escapeHtml(s: unknown): string {
 function renderProfileCard(store: ProfileStore, id: string): Response {
   const p = store.getProfile(id);
   if (!p) return new Response("unknown profile", { status: 404, headers: { "content-type": "text/plain" } });
-  const serial = store.getSerial(id);
+  // Same number the browser window title and identity bookmark show: the
+  // operator's custom NO. first, the store serial as fallback.
+  const no = profileDisplayNo(p.customNo, store.getSerial(id)) ?? "?";
   const proxy = p.proxy ? `${p.proxy.type}://${p.proxy.host}:${p.proxy.port}` : "none";
-  const title = `${p.name || "profile"} · #${serial ?? "?"}`;
+  const title = `${p.name || "profile"} · #${no}`;
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
 <style>
   body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}
@@ -104,7 +106,7 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
   <div class="card">
     <h2>Account</h2>
     <div class="row"><span class="k">Name</span><span class="v">${escapeHtml(p.name)}</span></div>
-    <div class="row"><span class="k">Profile No / ID</span><span class="v">${escapeHtml(serial ?? "?")} / ${escapeHtml(id)}</span></div>
+    <div class="row"><span class="k">Profile No / ID</span><span class="v">${escapeHtml(no)} / ${escapeHtml(id)}</span></div>
     <div class="row"><span class="k">Group</span><span class="v">${escapeHtml(p.group) || "—"}</span></div>
     <div class="row"><span class="k">Platform</span><span class="v">${escapeHtml(p.platform) || "—"}</span></div>
     <div class="row"><span class="k">Proxy</span><span class="v">${escapeHtml(proxy)}</span></div>

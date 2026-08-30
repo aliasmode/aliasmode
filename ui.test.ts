@@ -839,7 +839,7 @@ test("extension deletion cannot mutate the persona of an open profile", async ()
   s.close();
 });
 
-test("local edits are rejected while the profile browser is open", async () => {
+test("local edits are stored while the profile browser is open and apply next launch", async () => {
   const s = store();
   s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
   const res = await handleUiRequest(
@@ -850,8 +850,10 @@ test("local edits are rejected while the profile browser is open", async () => {
     {} as any,
     s,
   );
-  expect(res!.status).toBe(409);
-  expect([s.getProfile("k1d0cd11")!.screenWidth, s.getProfile("k1d0cd11")!.screenHeight]).not.toEqual([1366, 768]);
+  expect(res!.status).toBe(200);
+  // The running browser is untouched; the stored fields drive the NEXT launch.
+  expect([s.getProfile("k1d0cd11")!.screenWidth, s.getProfile("k1d0cd11")!.screenHeight]).toEqual([1366, 768]);
+  expect(s.getLaunch("k1d0cd11")).not.toBeNull();
   s.close();
 });
 
@@ -2547,6 +2549,84 @@ test("Cloud profile editor routes return no session data and forward expectedVer
   s.close();
 });
 
+test("Cloud profile open on this device is edited live through the local cache", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-live-edit-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  // The running session's checkpoint/close sync owns the Cloud version, so the
+  // editor must never be consulted — the local cached copy is the truth.
+  const cloudConnection = {
+    client: new Proxy({}, {
+      get() { throw new Error("Cloud must not be called for a live edit"); },
+    }),
+  } as any;
+  const noted: string[] = [];
+  const cloudBrowser = { noteProfileEdited(id: string) { noted.push(id); } } as any;
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
+
+  const getResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser, cloudConnection },
+  );
+  expect(getResponse!.status).toBe(200);
+  const getBody = await getResponse!.json();
+  expect(getBody.profile.liveEdit).toBe(true);
+  expect(getBody.profile.expectedVersion).toBeUndefined();
+
+  // A transient Cloud connectivity outage must not block editing a profile
+  // that is open on this very device — the live path never uses the connection.
+  const offline = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(offline!.status).toBe(200);
+
+  const saveResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // customNo is ignored: the portable-profile contract cannot carry it, so
+      // honoring it would only last until the next open erased it.
+      body: JSON.stringify({ set: { name: "Live edited name", customNo: "999" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser, cloudConnection },
+  );
+  expect(saveResponse!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.name).toBe("Live edited name");
+  expect(s.getProfile("k1d0cd11")!.customNo ?? "").not.toBe("999");
+  // The edit was made durable immediately, not left to ride on the next
+  // session-content change.
+  expect(noted).toEqual(["k1d0cd11"]);
+
+  // Once the browser has closed, a stale live-edit dialog cannot silently fall
+  // through to the versioned editor without an expectedVersion.
+  s.clearLaunch("k1d0cd11");
+  const staleResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ set: { name: "Too late" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(staleResponse!.status).toBe(409);
+  expect((await staleResponse!.json()).error).toContain("reopen Edit");
+  s.close();
+});
+
 test("Cloud profile save rejects untrusted JSON before calling Cloud", async () => {
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-editor-trust-"));
@@ -2569,5 +2649,72 @@ test("Cloud profile save rejects untrusted JSON before calling Cloud", async () 
     { appConfig, cloudBrowser: {} as any, cloudConnection },
   );
   expect(response!.status).toBe(403);
+  s.close();
+});
+
+test("the roster carries each profile's serial and custom NO.", () => {
+  const s = store();
+  const [before] = listUiProfiles(s);
+  expect(before!.serial).toBe(s.getSerial("k1d0cd11")!);
+  expect(before!.customNo).toBe(""); // unset -> the UI falls back to the serial
+
+  s.upsertProfile({ ...s.getProfile("k1d0cd11")!, customNo: "907341" });
+  expect(listUiProfiles(s)[0]!.customNo).toBe("907341");
+  s.close();
+});
+
+test("editing a custom NO. validates digits and survives a reopen of the editor", async () => {
+  const s = store();
+  const save = (customNo: string) => handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { customNo } }),
+    }),
+    {} as any,
+    s,
+  );
+
+  expect((await save("4421"))!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.customNo).toBe("4421");
+
+  const view = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11"), {} as any, s);
+  expect((await view!.json()).profile.customNo).toBe("4421");
+
+  const rejected = await save("44-21");
+  expect(rejected!.status).toBe(500);
+  expect((await rejected!.json()).error).toContain("digits only");
+  expect(s.getProfile("k1d0cd11")!.customNo).toBe("4421"); // rejected edit changed nothing
+
+  expect((await save(""))!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.customNo).toBe("");
+  s.close();
+});
+
+test("creating a profile stores the credentials supplied with it", async () => {
+  const s = store();
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "fresh", group: "Warmup", platform: "x.com", customNo: "5150",
+        username: "fresh_user", password: "fresh-pass",
+        email: "fresh@example.com", emailPassword: "mailbox-pass",
+        twofa: "JBSWY3DPEHPK3PXP",
+      }),
+    }),
+    {} as any,
+    s,
+  );
+  const { ok, id } = await response!.json();
+  expect(ok).toBe(true);
+
+  // The create endpoint has always accepted these; this pins that the dialog is
+  // not the only thing that can set them and that none are silently dropped.
+  expect(s.getProfile(id)).toMatchObject({
+    name: "fresh", group: "Warmup", platform: "x.com", customNo: "5150",
+    username: "fresh_user", password: "fresh-pass",
+    email: "fresh@example.com", emailPassword: "mailbox-pass",
+    twofa: "JBSWY3DPEHPK3PXP",
+  });
   s.close();
 });

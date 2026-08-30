@@ -76,6 +76,7 @@ function setup(options: {
   const queue = new PendingSyncQueue(queuePath, new Uint8Array(32).fill(5));
   let closeCalls = 0;
   let abandonCalls = 0;
+  let getProfileCalls = 0;
   let startCalls = 0;
   let startedProxy: unknown;
   let verifyCalls = 0;
@@ -110,6 +111,30 @@ function setup(options: {
           activeOpens: [],
           permission: "edit" as const,
         }],
+      };
+    },
+    // Serves the roster's background proxy-cache backfill. Deliberately not
+    // recorded in `events`: the backfill is fire-and-forget, so its timing
+    // must not disturb the exact lifecycle-event assertions.
+    async getProfile(profileId: string) {
+      getProfileCalls++;
+      return {
+        ok: true as const,
+        profile: {
+          id: profileId,
+          name: "Profile",
+          group: "",
+          platform: "x.com",
+          tags: [],
+          version: 4,
+          trashedAt: null,
+          trashedBy: null,
+          updatedAt: 1,
+          activeOpens: [],
+          permission: "edit" as const,
+        },
+        payload: openedPayload,
+        payloadDigest: "digest",
       };
     },
     async createProfile(request: { payload: PortableProfileV1 }) {
@@ -259,6 +284,7 @@ function setup(options: {
     queue,
     closeCalls: () => closeCalls,
     abandonCalls: () => abandonCalls,
+    getProfileCalls: () => getProfileCalls,
     startCalls: () => startCalls,
     startedProxy: () => startedProxy,
     verifyCalls: () => verifyCalls,
@@ -633,6 +659,48 @@ test("Cloud roster polls cannot accelerate the heartbeat no-page confirmation", 
   await Bun.sleep(0);
   expect(state.store.getLaunch("profile1")).toBeNull();
   expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster backfills the proxy cache for profiles this device never opened", async () => {
+  const state = setup({ proxy: { type: "http", host: "203.0.113.9", port: "8080", user: "u", pass: "p" } });
+
+  // First poll: cache miss — the roster returns immediately and the decrypt
+  // runs in the background.
+  const first = await state.coordinator.listRoster();
+  expect(first.profiles[0]?.proxy).toBeNull();
+  await (state.coordinator as any).proxyBackfillTask;
+  expect(state.getProfileCalls()).toBe(1);
+
+  // Second poll: the cached decrypted profile now carries the proxy, redacted
+  // to host:port, and the matching version suppresses any refetch.
+  const second = await state.coordinator.listRoster();
+  expect(second.profiles[0]?.proxy).toBe("203.0.113.9:8080");
+  await (state.coordinator as any).proxyBackfillTask;
+  expect(state.getProfileCalls()).toBe(1);
+
+  state.queue.close();
+  state.store.close();
+});
+
+test("a live profile edit forces the next checkpoint to re-encode the payload", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const saved = () => state.coordinator.diagnostics().filter((event) => event.type === "checkpoint_saved").length;
+
+  await state.coordinator.heartbeatOnce("profile1");
+  const baseline = saved();
+  // Same session content again: the signature skips it as unchanged.
+  await state.coordinator.heartbeatOnce("profile1");
+  expect(saved()).toBe(baseline);
+
+  // A metadata edit changes no session bytes, so without the invalidation the
+  // capture above would keep skipping and the edit would only sync by luck.
+  state.coordinator.noteProfileEdited("profile1");
+  await state.coordinator.heartbeatOnce("profile1");
+  expect(saved()).toBe(baseline + 1);
+
   state.queue.close();
   state.store.close();
 });

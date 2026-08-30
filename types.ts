@@ -75,6 +75,13 @@ export interface Profile {
   extensions?: string[];
   /** Free-form custom tags/labels for this profile. Optional so older literals stay valid; treated as []. */
   tags?: string[];
+  /**
+   * Operator-chosen serial ("custom NO.") shown in the roster and prefixed onto
+   * the launched browser's window title / identity bookmark. Digits only, so it
+   * reads as a number wherever it is displayed. Empty/absent means the profile
+   * falls back to its store serial (the SQLite rowid).
+   */
+  customNo?: string;
   ua: string;
   /**
    * IANA timezone matching the proxy's geolocation (e.g. "America/New_York"),

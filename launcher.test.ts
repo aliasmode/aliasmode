@@ -8,6 +8,7 @@ import {
   BrowserLaunchError,
   Launcher as ProductionLauncher,
   buildWindowLabel,
+  profileDisplayNo,
   collectLinuxProcessTree,
   createInFlightSnapshotReader,
   createFailureBackoffReader,
@@ -3383,6 +3384,19 @@ test("start() does NOT reset volatile storage on an unclean exit when the launch
   expect(existsSync(join(defaultDir, "Local Storage"))).toBe(true); // kept — never wipe the only local copy of a login
   rmSync(dataRoot, { recursive: true, force: true });
   store.close();
+});
+
+test("profileDisplayNo prefers the operator's custom NO. over the store serial", () => {
+  expect(profileDisplayNo("907341", 1)).toBe("907341"); // custom wins
+  expect(profileDisplayNo("  4421 ", 3)).toBe("4421"); // trimmed
+  expect(profileDisplayNo("", 7)).toBe("7"); // blank -> serial
+  expect(profileDisplayNo(undefined, 7)).toBe("7"); // legacy row -> serial
+  expect(profileDisplayNo("", null)).toBe(null); // neither is known
+});
+
+test("buildWindowLabel carries a custom NO. into the window title", () => {
+  expect(buildWindowLabel("sophie", "907341")).toBe("sophie · #907341 — ");
+  expect(buildWindowLabel("sophie", "")).toBe("sophie — "); // empty is not a number
 });
 
 test("buildWindowLabel formats name + serial, with fallbacks", () => {

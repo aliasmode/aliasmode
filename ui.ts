@@ -32,7 +32,7 @@ import type { Profile } from "./types.ts";
 import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
-import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, decodeText } from "./parse.ts";
+import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictCustomNo, decodeText } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
 import { installExtension, removeExtensionFiles } from "./extensions.ts";
@@ -67,6 +67,14 @@ export interface UiProfile {
   mobilePersona?: boolean;
   /** Whether a 2FA secret is stored (drives the row's authenticator button). */
   has2fa: boolean;
+  /** Store serial (SQLite rowid) — the roster's default "No." for this profile. */
+  serial: number | null;
+  /** Creation time, ms. 0 for rows imported before the column existed. */
+  createdAt: number;
+  /** Most recent launch, ms. 0 when this profile has never been opened here. */
+  lastOpenAt: number;
+  /** Operator-chosen "custom NO.", or "" when the serial is used instead. */
+  customNo: string;
   running: boolean;
   debugPort?: number;
   startedAt?: number;
@@ -81,6 +89,7 @@ export interface UiProfile {
  */
 export function listUiProfiles(store: ProfileStore): UiProfile[] {
   const launches = new Map(store.listLaunches().map((l) => [l.profileId, l]));
+  const meta = store.listProfileMeta();
   return store.listProfiles().map((p) => {
     const l = launches.get(p.id);
     return {
@@ -96,6 +105,10 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
       seeded: p.seeded,
       screen: `${p.screenWidth}x${p.screenHeight}`,
       has2fa: !!(p.twofa && p.twofa.trim()),
+      serial: meta.get(p.id)?.serial ?? null,
+      createdAt: meta.get(p.id)?.createdAt ?? 0,
+      lastOpenAt: meta.get(p.id)?.lastOpenAt ?? 0,
+      customNo: p.customNo ?? "",
       mobilePersona: isMobileUserAgent(p.ua),
       running: !!l,
       debugPort: l?.debugPort,
@@ -268,6 +281,7 @@ function profileEditView(p: Profile) {
     resolution: `${p.screenWidth}*${p.screenHeight}`,
     extensions: p.extensions ?? [],
     tags: (p.tags ?? []).join(", "),
+    customNo: p.customNo ?? "",
     cookieCount: p.cookies.length, seeded: p.seeded,
     mobilePersona: !!conversion,
     ...(conversion ? {
@@ -321,6 +335,7 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
       ? set.tags.map(String)
       : String(set.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean);
   }
+  if ("customNo" in set) p.customNo = parseStrictCustomNo(set.customNo);
   return proxyChanged;
 }
 
@@ -739,12 +754,22 @@ export async function handleUiRequest(
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
+  // The extension registry is a purely local store of uploaded extension files;
+  // Cloud profiles carry assignments in their portable payload and load the
+  // matching local uploads at launch, so managing the registry works in Cloud
+  // mode too. Per-profile assignment stays Local-only (the Cloud editor never
+  // writes the extensions field).
+  const cloudExtensionRoute =
+    (pathname === "/ui/api/extensions" && req.method === "GET") ||
+    (pathname === "/ui/api/extensions/upload" && req.method === "POST") ||
+    (pathname === "/ui/api/extensions/delete" && req.method === "POST");
   if (
     options.appConfig?.read().mode === "cloud" &&
     options.cloudBrowser &&
     !remote &&
     !cloudLifecycleRoute &&
-    !cloudEditorRoute
+    !cloudEditorRoute &&
+    !cloudExtensionRoute
   ) {
     return Response.json(
       { ok: false, error: "This Cloud profile operation is not available yet" },
@@ -1184,6 +1209,16 @@ export async function handleUiRequest(
   if (single && req.method === "GET") {
     const id = decodeURIComponent(single[1]!);
     if (options.cloudBrowser) {
+      // A profile open on THIS device is edited live: its decrypted copy in the
+      // local cache is the session writer's source of truth, and the checkpoint
+      // and close syncs push the whole profile — edited fields included — back
+      // to Cloud. No expectedVersion handshake applies on this path, and no
+      // Cloud connection is needed — so this branch stays ahead of that guard.
+      if (store.getLaunch(id)) {
+        const live = store.getProfile(id);
+        if (!live) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+        return Response.json({ ok: true, profile: { ...profileEditView(live), liveEdit: true } });
+      }
       if (!options.cloudConnection) {
         return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
       }
@@ -1213,28 +1248,54 @@ export async function handleUiRequest(
       if (options.cloudBrowser) {
         const rejected = rejectUntrustedJsonMutation(req);
         if (rejected) return rejected;
-        if (!options.cloudConnection) {
-          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
-        }
         const body = (await req.json()) as { expectedVersion?: unknown; set?: unknown };
         const set = body.set && typeof body.set === "object" && !Array.isArray(body.set)
           ? body.set as Record<string, unknown>
           : {};
+        // Open on this device → live edit of the local cached copy; the running
+        // session's checkpoint/close sync carries the change to Cloud. Needs no
+        // Cloud connection, so it stays ahead of that guard.
+        if (store.getLaunch(id)) {
+          const live = store.getProfile(id);
+          if (!live) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+          // The portable-profile contract carries no custom NO., so accepting
+          // one here would only survive until the next open erased it. Ignore
+          // it, like the closed-profile Cloud editor does.
+          delete set.customNo;
+          const liveProxyChanged = applyEdits(live, set);
+          if (liveProxyChanged && live.proxy) {
+            await attachTimezones([live], options.timezoneFetch).catch(() => {});
+          }
+          store.upsertProfile(live);
+          // Make the edit durable NOW: the checkpoint signature hashes only
+          // session data, so without this a metadata-only edit could be
+          // skipped as "unchanged" and lost to an X-button close or crash.
+          options.cloudBrowser.noteProfileEdited?.(id);
+          return Response.json({ ok: true });
+        }
+        if (!options.cloudConnection) {
+          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+        }
+        if (body.expectedVersion === undefined) {
+          // The dialog was opened against a running profile that has since
+          // finished closing — its live-edit path is gone and there is no
+          // version to hand the Cloud editor.
+          return Response.json(
+            { ok: false, error: "the browser just closed; reopen Edit before saving" },
+            { status: 409 },
+          );
+        }
         const editor = new CloudProfileEditor(options.cloudConnection.client, store, options.timezoneFetch);
         await editor.save(id, body.expectedVersion as number, set);
         return Response.json({ ok: true });
       }
       const body = (await req.json()) as { set?: unknown };
       const set = body.set && typeof body.set === "object" ? (body.set as Record<string, unknown>) : {};
-      // Remote: fetch the live profile from the hub, apply the edits, save it back. Local: the store.
+      // Remote: fetch the live profile from the hub, apply the edits, save it
+      // back. Local: the store — a running profile may be edited too; the
+      // stored fields simply apply the next time its browser launches.
       const p = remote ? await remote.getProfile(id).catch(() => null) : store.getProfile(id);
       if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
-      if (!remote && store.getLaunch(id)) {
-        return Response.json(
-          { ok: false, error: "profile is currently open; close it before editing identity fields" },
-          { status: 409 },
-        );
-      }
       const proxyChanged = applyEdits(p, set);
       if (proxyChanged && p.proxy) {
         await attachTimezones([p], options.timezoneFetch).catch(() => {});

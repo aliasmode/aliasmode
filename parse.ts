@@ -166,6 +166,24 @@ export function parseStrictResolution(value: unknown): { width: number; height: 
   return { width, height };
 }
 
+/** Longest operator-chosen serial we accept. Wide enough for AdsPower-style ids. */
+export const MAX_CUSTOM_NO_LENGTH = 12;
+
+/**
+ * Parse an operator-chosen "custom NO." strictly. Digits only so it always reads
+ * as a number in the roster, the window title and the identity bookmark; blank
+ * clears it and the profile falls back to its store serial.
+ */
+export function parseStrictCustomNo(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (!/^\d+$/.test(raw)) throw new Error("invalid custom NO.: digits only");
+  if (raw.length > MAX_CUSTOM_NO_LENGTH) {
+    throw new Error(`invalid custom NO.: at most ${MAX_CUSTOM_NO_LENGTH} digits`);
+  }
+  return raw;
+}
+
 /** Parse a proxy edit/import strictly while retaining main's URL/IPv6/SOCKS5 support. */
 export function parseStrictProxy(type: unknown, value: unknown): ProxySpec | null {
   const raw = String(value ?? "").trim();
@@ -373,6 +391,12 @@ const UPDATE_KEYMAP: Record<string, string> = {
   "proxy type": "proxyType",
   resolution: "resolution",
   screen: "resolution",
+  // Operator-chosen serial. Exports do not emit this column (that would change a
+  // shape downstream tooling already parses), but an update file may add it.
+  custom_no: "customNo",
+  customno: "customNo",
+  "custom no": "customNo",
+  no: "customNo",
 };
 
 /**

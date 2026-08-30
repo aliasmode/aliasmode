@@ -25,6 +25,14 @@ export interface UiProfile {
   screen: string;
   mobilePersona?: boolean;
   has2fa: boolean;
+  /** Store serial (SQLite rowid). Absent in Cloud mode, where the roster is remote. */
+  serial?: number | null;
+  /** Creation time, ms. 0 or absent when unknown. */
+  createdAt?: number;
+  /** Most recent launch, ms. 0 or absent when never opened here. */
+  lastOpenAt?: number;
+  /** Operator-chosen "custom NO."; "" when the serial is used instead. */
+  customNo?: string;
   running: boolean;
   debugPort?: number;
   startedAt?: number;
@@ -422,6 +430,13 @@ export interface NewProfileInput {
   platform?: string;
   proxy?: { type: string; host: string; port: string; user: string; pass: string } | null;
   screen?: string;
+  /** Operator-chosen serial shown in the roster and the browser window title. */
+  customNo?: string;
+  username?: string;
+  password?: string;
+  email?: string;
+  emailPassword?: string;
+  twofa?: string;
 }
 
 export async function createProfile(input: NewProfileInput): Promise<any> {
@@ -460,6 +475,8 @@ export interface EditProfile {
   extensions: string[];
   /** Comma-separated custom tags. */
   tags: string;
+  /** Operator-chosen "custom NO."; "" falls back to the store serial. Local mode only. */
+  customNo?: string;
   cookieCount: number;
   seeded: boolean;
   mobilePersona: boolean;
@@ -470,6 +487,9 @@ export interface EditProfile {
   };
   /** Present only for Cloud profiles and required for optimistic saves. */
   expectedVersion?: number;
+  /** Cloud profile open on THIS device: edits apply to the local cached copy
+      and sync to Cloud with the running session (no expectedVersion needed). */
+  liveEdit?: boolean;
 }
 
 // ---- 2FA authenticator: current TOTP code (never the secret) ----------------

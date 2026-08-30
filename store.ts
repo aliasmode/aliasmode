@@ -153,6 +153,12 @@ export class ProfileStore {
     } catch {
       /* column already exists */
     }
+    // Migration for stores predating the operator-chosen "custom NO." serial.
+    try {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN custom_no TEXT NOT NULL DEFAULT ''`);
+    } catch {
+      /* column already exists */
+    }
     // Migrations for stores predating the AdsPower-parity bookkeeping columns
     // (created_at: profile creation; last_open_at: most recent launch). Both
     // surface through the AdsPower /api/v1/user/list facade.
@@ -184,9 +190,9 @@ export class ProfileStore {
     this.db
       .query(
         `INSERT INTO profiles
-           (id, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, ua, timezone,
+           (id, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone,
             screen_width, screen_height, fingerprint_seed, cookies_json, seeded, created_at)
-         VALUES ($id,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$ua,$tz,$w,$h,$seed,$cookies,$seeded,$created)
+         VALUES ($id,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$w,$h,$seed,$cookies,$seeded,$created)
          ON CONFLICT(id) DO UPDATE SET
            acc_id=$acc, name=$name, "group"=$group, platform=$platform, username=$user, password=$pass,
            email=$email, email_password=$emailPass, twofa=$twofa,
@@ -195,7 +201,7 @@ export class ProfileStore {
            -- explicit clear removes the quarantine and writes the new value.
            proxy_json = CASE WHEN $proxyError <> '' THEN proxy_json ELSE $proxy END,
            proxy_error = CASE WHEN $proxyError <> '' THEN $proxyError ELSE NULL END,
-           extensions_json=$ext, tags_json=$tags, ua=$ua,
+           extensions_json=$ext, tags_json=$tags, custom_no=$customNo, ua=$ua,
            -- Timezone on re-import:
            --   * new lookup resolved one ($tz<>'')       -> use it
            --   * else proxy UNCHANGED                     -> keep stored value
@@ -229,6 +235,7 @@ export class ProfileStore {
         $proxyError: proxyError || null,
         $ext: JSON.stringify(p.extensions ?? []),
         $tags: JSON.stringify(p.tags ?? []),
+        $customNo: p.customNo ?? "",
         $ua: p.ua,
         $tz: p.timezone ?? "",
         $w: p.screenWidth,
@@ -445,6 +452,22 @@ export class ProfileStore {
     return row ? row.s : null;
   }
 
+  /**
+   * Per-profile bookkeeping the roster shows but that does not live on Profile:
+   * the serial (rowid) plus creation/last-open timestamps. One query for a whole
+   * roster render rather than a lookup per row.
+   */
+  listProfileMeta(): Map<string, { serial: number; createdAt: number; lastOpenAt: number }> {
+    return new Map(
+      this.db
+        .query<{ id: string; s: number; c: number; l: number }, []>(
+          `SELECT id, rowid AS s, created_at AS c, last_open_at AS l FROM profiles`,
+        )
+        .all()
+        .map((row) => [row.id, { serial: row.s, createdAt: row.c ?? 0, lastOpenAt: row.l ?? 0 }] as const),
+    );
+  }
+
   recordLaunch(info: LaunchInfo): void {
     this.db
       .query(
@@ -529,6 +552,7 @@ function rowToProfile(row: any): Profile {
     ...(stored.error ? { proxyError: stored.error } : {}),
     extensions: safeParse<string[]>(row.extensions_json, []),
     tags: safeParse<string[]>(row.tags_json, []),
+    customNo: typeof row.custom_no === "string" ? row.custom_no : "",
     ua: row.ua ?? "",
     timezone: row.timezone ?? "",
     screenWidth: row.screen_width ?? 1920,
