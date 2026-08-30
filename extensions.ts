@@ -6,10 +6,46 @@
  */
 
 import { join, resolve } from "node:path";
-import { existsSync, readdirSync, statSync, readFileSync, rmSync } from "node:fs";
-import { extractZipTo } from "./unzip.ts";
+import { existsSync, readdirSync, statSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { extractZipTo, parseArchive } from "./unzip.ts";
 
 export const DEFAULT_EXTENSIONS_ROOT = "extensions";
+
+const EXTENSION_ID = /^[a-p]{32}$/;
+const WEB_STORE_DOWNLOAD_URL = "https://clients2.google.com/service/update2/crx";
+const WEB_STORE_PRODUCT_VERSION = "9999.0.0.0";
+
+export type ExtensionFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/** Extract an extension ID from a bare ID or an official Chrome Web Store detail URL. */
+export function parseWebStoreExtensionId(source: string): string {
+  const value = source.trim();
+  if (EXTENSION_ID.test(value)) return value;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") throw new Error();
+    const parts = url.pathname.split("/").filter(Boolean);
+    const current = url.hostname === "chromewebstore.google.com"
+      && parts[0] === "detail"
+      && (parts.length === 2 || parts.length === 3);
+    const legacy = url.hostname === "chrome.google.com"
+      && parts[0] === "webstore"
+      && parts[1] === "detail"
+      && (parts.length === 3 || parts.length === 4);
+    const id = parts.at(-1) ?? "";
+    if ((current || legacy) && EXTENSION_ID.test(id)) return id;
+  } catch {}
+  throw new Error("enter a Chrome Web Store extension URL or 32-character ID");
+}
+
+function webStoreDownloadUrl(id: string): string {
+  const url = new URL(WEB_STORE_DOWNLOAD_URL);
+  url.searchParams.set("response", "redirect");
+  url.searchParams.set("prodversion", WEB_STORE_PRODUCT_VERSION);
+  url.searchParams.set("acceptformat", "crx2,crx3");
+  url.searchParams.set("x", `id=${id}&uc`);
+  return url.toString();
+}
 
 /**
  * The directory to hand to --load-extension: the one containing manifest.json.
@@ -34,11 +70,18 @@ export function findManifestDir(root: string): string | null {
 /** Read the extension's display name from its manifest, falling back to `fallback`. */
 export function readManifestName(dir: string, fallback: string): string {
   try {
-    const m = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
-    const name = typeof m.name === "string" ? m.name.trim() : "";
-    // __MSG_*__ names are i18n placeholders resolved from _locales — not worth
-    // decoding here; fall back to the uploaded filename instead.
+    const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    const name = typeof manifest.name === "string" ? manifest.name.trim() : "";
     if (name && !name.startsWith("__MSG_")) return name;
+    const messageKey = /^__MSG_(.+)__$/.exec(name)?.[1];
+    const locale = typeof manifest.default_locale === "string" ? manifest.default_locale.trim() : "";
+    if (messageKey && /^[a-zA-Z0-9_-]+$/.test(locale)) {
+      const messages = JSON.parse(readFileSync(join(dir, "_locales", locale, "messages.json"), "utf8"));
+      const localized = typeof messages?.[messageKey]?.message === "string"
+        ? messages[messageKey].message.trim()
+        : "";
+      if (localized) return localized;
+    }
   } catch {}
   return fallback;
 }
@@ -47,6 +90,7 @@ export interface InstalledExtension {
   /** Directory passed to --load-extension (contains manifest.json). */
   loadDir: string;
   name: string;
+  extensionId?: string;
 }
 
 /**
@@ -60,14 +104,44 @@ export async function installExtension(
   root = DEFAULT_EXTENSIONS_ROOT,
 ): Promise<InstalledExtension> {
   const dest = resolve(root, id); // absolute, so --load-extension works from any cwd
+  const archive = parseArchive(bytes);
   rmSync(dest, { recursive: true, force: true }); // clean any partial prior attempt
-  await extractZipTo(bytes, dest);
-  const loadDir = findManifestDir(dest);
-  if (!loadDir) {
+  try {
+    await extractZipTo(archive.zip, dest);
+    const loadDir = findManifestDir(dest);
+    if (!loadDir) throw new Error("no manifest.json found in the uploaded extension");
+    if (archive.manifestKey) {
+      const manifestPath = join(loadDir, "manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.key = archive.manifestKey;
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+    }
+    return {
+      loadDir,
+      name: readManifestName(loadDir, fallbackName),
+      ...(archive.extensionId ? { extensionId: archive.extensionId } : {}),
+    };
+  } catch (error) {
     rmSync(dest, { recursive: true, force: true });
-    throw new Error("no manifest.json found in the uploaded extension");
+    throw error;
   }
-  return { loadDir, name: readManifestName(loadDir, fallbackName) };
+}
+
+/** Download and install a public Chrome Web Store extension as unpacked files. */
+export async function installWebStoreExtension(
+  source: string,
+  root = DEFAULT_EXTENSIONS_ROOT,
+  fetcher: ExtensionFetch = fetch,
+): Promise<InstalledExtension & { id: string }> {
+  const id = parseWebStoreExtensionId(source);
+  const response = await fetcher(webStoreDownloadUrl(id), { redirect: "follow" });
+  if (!response.ok) throw new Error(`Chrome Web Store download failed (${response.status})`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const archive = parseArchive(bytes);
+  if (!archive.extensionId) throw new Error("Chrome Web Store returned an unsigned extension archive");
+  if (archive.extensionId !== id) throw new Error("downloaded extension identity does not match the requested Chrome Web Store ID");
+  const installed = await installExtension(bytes, id, id, root);
+  return { id, ...installed };
 }
 
 /** Remove an installed extension's files. `id` must be the install id (a path segment). */

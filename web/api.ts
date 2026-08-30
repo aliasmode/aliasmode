@@ -367,6 +367,15 @@ export async function fetchExtensions(): Promise<Extension[]> {
   const b = await apiJson(r, path);
   return b.ok ? b.extensions : [];
 }
+export async function installWebStoreExtension(source: string): Promise<any> {
+  const path = "/ui/api/extensions/web-store";
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source }),
+  });
+  return apiJson(r, path);
+}
 export async function uploadExtensions(files: FileList | File[]): Promise<any> {
   const form = new FormData();
   for (const f of Array.from(files)) form.append("files", f);
