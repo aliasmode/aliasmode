@@ -133,29 +133,35 @@ test("dashboard and automation API share lifecycle admission", async () => {
   }
 });
 
-test("desktop automation API owns 127.0.0.1:50400 and fails on conflicts", async () => {
+test("desktop automation API owns 127.0.0.1:50400 and desktop startup survives conflicts", async () => {
   const store = new ProfileStore(":memory:");
-  const options = { launcher: {} as any, store, log: () => {} };
+  const logs: string[] = [];
+  const options = {
+    launcher: {} as any,
+    store,
+    log: (message: string) => logs.push(message),
+  };
   const server = serveDesktopAutomationApi(options);
-  const dashboard = serveDashboard({ ...options, port: 0 });
+  const dashboard = serveDashboard({ ...options, port: 0, log: () => {} });
   try {
-    expect(server.port).toBe(50_400);
     expect(dashboard.port).not.toBe(50_400);
-    const response = await fetch("http://127.0.0.1:50400/status");
-    expect(await response.json()).toMatchObject({ code: 0 });
-  } finally {
-    await Promise.all([server.stop(true), dashboard.stop(true)]);
-  }
+    if (server) {
+      expect(server.port).toBe(50_400);
+      const response = await fetch("http://127.0.0.1:50400/status");
+      expect(await response.json()).toMatchObject({ code: 0 });
+      expect(serveDesktopAutomationApi(options)).toBeUndefined();
+    }
 
-  const occupied = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 50_400,
-    fetch: () => new Response("occupied"),
-  });
-  try {
-    expect(() => serveDesktopAutomationApi(options)).toThrow("127.0.0.1:50400");
+    expect(logs.some((message) =>
+      message.includes("automation API could not bind to http://127.0.0.1:50400")
+    )).toBeTrue();
+    expect(logs.filter((message) => message.includes("automation API on")).length)
+      .toBe(server ? 1 : 0);
+
+    const health = await fetch(`http://127.0.0.1:${dashboard.port}/ui/api/health`);
+    expect(health.status).toBe(200);
   } finally {
-    await occupied.stop(true);
+    await Promise.all([server?.stop(true), dashboard.stop(true)]);
     store.close();
   }
 });

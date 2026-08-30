@@ -86,6 +86,12 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("setProfiles([]);");
   expect(app).toContain("setTeam(null);");
   expect(app).toContain("generation !== authGeneration.current");
+
+  const account = app.slice(
+    app.indexOf('<h2 className="sect-title">Account information</h2>'),
+    app.indexOf('className="settings-card remote-mcp-settings"'),
+  );
+  expect(account).toContain('{authErr && <p className="modal-err" role="alert">{authErr}</p>}');
 });
 
 test("dashboard accepts a server-persisted pending queue key", () => {
@@ -138,8 +144,18 @@ test("Account settings exposes fixed Cloud diagnostics without raw server messag
   expect(app).toContain("fetchCloudEvents");
   expect(app).toContain("Recent diagnostics");
   expect(app).toContain("CLOUD_DIAGNOSTIC_LABELS[event.type]");
+  expect(app).toContain("Cloud lease ended after a version conflict");
+  expect(app).toContain("Browser teardown could not be confirmed");
+  expect(app).toContain("Session synchronization has a terminal conflict");
   expect(app).toContain("They exclude profile data and credentials");
   expect(styles).toContain(".diagnostics-list");
+});
+
+test("dashboard shows close warnings without an open-only prefix", () => {
+  expect(app).toContain("else if (r && r.warning) setActionErr(r.warning);");
+  expect(app).not.toContain("Opened — ${r.warning}");
+  expect(app).toContain("if (r?.ok === false) issues.push");
+  expect(app).toContain("else if (r?.warning) issues.push");
 });
 
 test("dashboard lists the supported profile platforms", () => {

@@ -194,7 +194,7 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
       const report = await diagnoseOverCDP(opened.ws, profile, { collectLogin: false });
       expect(report.egress?.ip).toBe(expectedIp);
       expect(await launcher.active(profile.id)).toBe(true);
-      expect(await coordinator.close(profile.id)).toBe(true);
+      expect(await coordinator.close(profile.id)).toEqual({ closed: true, sync: "complete" });
       expect(await launcher.active(profile.id)).toBe(false);
       expect(store.getLaunch(profile.id)).toBeNull();
     }

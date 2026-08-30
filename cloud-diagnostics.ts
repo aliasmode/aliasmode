@@ -41,6 +41,13 @@ export const CLOUD_DIAGNOSTIC_TYPES = [
   "cloud_registration_released",
   "cleanup_retained",
   "heartbeat_failed",
+  "heartbeat_terminal_conflict",
+  "heartbeat_terminal_access_ended",
+  "no_page_observed",
+  "no_page_close_requested",
+  "browser_death_confirmed",
+  "browser_teardown_unconfirmed",
+  "session_sync_conflict",
   "access_ended",
 ] as const;
 

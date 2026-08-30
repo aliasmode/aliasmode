@@ -52,7 +52,11 @@ import {
 } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
-import { CloudBrowserCoordinator, type CloudBrowserOptions } from "./cloud-browser.ts";
+import {
+  CloudBrowserCoordinator,
+  type CloudBrowserCloseResult,
+  type CloudBrowserOptions,
+} from "./cloud-browser.ts";
 import { McpTunnelRuntime } from "./mcp-tunnel.ts";
 import { PendingSyncQueue, PendingSyncRuntime } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
@@ -1274,6 +1278,13 @@ export async function exerciseWindowsWindowAcceptance(
   if (cleanupFailure !== undefined) throw cleanupFailure;
 }
 
+function cloudCloseHasSync(
+  result: CloudBrowserCloseResult,
+  sync: "complete" | "pending" | "conflict",
+): boolean {
+  return result.closed && result.sync === sync;
+}
+
 export interface CloudLauncherSmokeRuntime {
   coordinator: Pick<CloudBrowserCoordinator, "open" | "close" | "releaseAll">;
   launcher: Pick<Launcher, "active" | "stop">;
@@ -1294,7 +1305,8 @@ export async function exerciseCloudLauncherSmoke(
     if (!runtime.store.getLaunch(profileId)) {
       throw new Error("Cloud launcher smoke lost durable launch ownership");
     }
-    if (!await runtime.coordinator.close(profileId)) {
+    const closed = await runtime.coordinator.close(profileId);
+    if (!cloudCloseHasSync(closed, "complete")) {
       throw new Error("Cloud launcher smoke could not close the profile safely");
     }
     if (await runtime.launcher.active(profileId)) {
@@ -2170,8 +2182,9 @@ export async function runCloudCrossDeviceAcceptance(
     );
 
     deviceA.setSession(cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_A_SENTINEL));
+    const closedA = await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID);
     requireCloudCrossDevice(
-      await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      cloudCloseHasSync(closedA, "complete"),
       "device A version 37 close was not accepted",
     );
     let state = await cloudCrossDeviceControl<CloudCrossDeviceFixtureState>(fixtureOrigin, "/control/state");
@@ -2184,8 +2197,9 @@ export async function runCloudCrossDeviceAcceptance(
         && cloudCrossDeviceSentinel(deviceB.appliedSessions.at(-1)!) === CLOUD_CROSS_DEVICE_A_SENTINEL,
       "device B did not restore device A's exact sentinel at version 38",
     );
+    const closedB = await deviceB.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID);
     requireCloudCrossDevice(
-      await deviceB.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      cloudCloseHasSync(closedB, "complete"),
       "device B version 38 close was not accepted",
     );
 
@@ -2193,8 +2207,9 @@ export async function runCloudCrossDeviceAcceptance(
     requireCloudCrossDevice(staleA.ok, staleA.error ?? "device A did not reopen before the conflict");
     deviceA.setSession(cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_CONFLICT_SENTINEL));
     await cloudCrossDeviceControl(fixtureOrigin, "/control/advance", "POST");
+    const conflictedA = await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID);
     requireCloudCrossDevice(
-      !await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      cloudCloseHasSync(conflictedA, "conflict"),
       "device A stale close did not remain a terminal conflict",
     );
     const conflictSummary = deviceA.queue.list(CLOUD_CROSS_DEVICE_ACCOUNT_ID)
@@ -2215,8 +2230,9 @@ export async function runCloudCrossDeviceAcceptance(
         && cloudCrossDeviceSentinel(deviceB.appliedSessions.at(-1)!) === CLOUD_CROSS_DEVICE_LATEST_SENTINEL,
       "device B did not restore the authoritative version beside device A's conflict",
     );
+    const closedLatestB = await deviceB.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID);
     requireCloudCrossDevice(
-      await deviceB.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      cloudCloseHasSync(closedLatestB, "complete"),
       "device B authoritative close was not accepted",
     );
 
@@ -2231,8 +2247,9 @@ export async function runCloudCrossDeviceAcceptance(
     );
     deviceA.setSession(cloudCrossDeviceSession(CLOUD_CROSS_DEVICE_AMBIGUOUS_SENTINEL));
     await cloudCrossDeviceControl(fixtureOrigin, "/control/drop-close-response", "POST");
+    const pendingA = await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID);
     requireCloudCrossDevice(
-      !await deviceA.coordinator.close(CLOUD_CROSS_DEVICE_PROFILE_ID),
+      cloudCloseHasSync(pendingA, "pending"),
       "device A dropped close response was not retained as ambiguous",
     );
     const ambiguousSummary = deviceA.queue.list(CLOUD_CROSS_DEVICE_ACCOUNT_ID)
@@ -2677,7 +2694,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
-            automationServer: automationServer!,
+            automationServer,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2766,7 +2783,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
-            automationServer: automationServer!,
+            automationServer,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2819,7 +2836,7 @@ async function main() {
         if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
         attachDesktopControl(new ManagedDesktopRuntime({
           server,
-          automationServer: automationServer!,
+          automationServer,
           admission: lifecycleAdmission!,
           store,
           launcher,
