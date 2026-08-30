@@ -57,6 +57,7 @@ test("Windows bundle preparation packages the official runtime and records its h
         const runtime = join(staging, "cloakbrowser");
         mkdirSync(join(runtime, "locales"), { recursive: true });
         writeFileSync(join(runtime, "chrome.exe"), browserBytes);
+        writeFileSync(join(runtime, "chromedriver.exe"), "driver");
         writeFileSync(join(runtime, "chrome.dll"), "dll");
         writeFileSync(join(runtime, "locales", "en-US.pak"), "locale");
         return { path: join(runtime, "chrome.exe"), sha256: sha256(browserBytes) };
@@ -69,6 +70,7 @@ test("Windows bundle preparation packages the official runtime and records its h
       wrapperVersion: "0.4.11",
     });
     expect(readFileSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chrome.dll"), "utf8")).toBe("dll");
+    expect(existsSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chromedriver.exe"))).toBe(false);
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node", "node.exe"), "utf8")).toBe("node");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "worker.mjs"), "utf8")).toBe("worker");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8")).version).toBe("1.58.2");

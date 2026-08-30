@@ -32,8 +32,9 @@ jobs:
             throw "update candidates must run from main"
           }
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:INSTALLER_RUN_ID" | ConvertFrom-Json
-          if ($run.name -ne "Client CI" -or $run.conclusion -ne "success") {
-            throw "installer run must be a successful Client CI run"
+          if ($run.name -ne "Client CI" -or $run.path -ne ".github/workflows/ci.yml" -or $run.conclusion -ne "success" -or
+              $run.event -ne "push" -or $run.head_branch -ne "main") {
+            throw "installer run must be a successful Client CI push from main"
           }
           $source = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$($run.head_sha)" | ConvertFrom-Json
           $current = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$env:GITHUB_SHA" | ConvertFrom-Json
@@ -54,6 +55,42 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.run_id }}
+      - name: Verify candidate installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $fullName = "AliasMode_$($version)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($version)_x64-setup.exe"
+          $requiredNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
+          $actualNames = @(Get-ChildItem ".\candidate" -File | ForEach-Object Name)
+          $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
+          $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
+          if ($missing.Count -ne 0 -or $unexpected.Count -ne 0) {
+            throw "candidate files did not match the required installer set"
+          }
+          $checksums = @{}
+          foreach ($line in @(Get-Content ".\candidate\SHA256SUMS.txt")) {
+            if ($line -notmatch '^([a-f0-9]{64})  (.+)$' -or $checksums.ContainsKey($Matches[2])) {
+              throw "candidate checksum manifest is malformed"
+            }
+            $checksums[$Matches[2]] = $Matches[1]
+          }
+          if ($checksums.Count -ne 2) { throw "candidate checksum manifest must contain both installers" }
+          foreach ($name in @($fullName, $slimName)) {
+            if (-not $checksums.ContainsKey($name)) { throw "candidate checksum manifest is missing $name" }
+            $installer = Resolve-Path (Join-Path ".\candidate" $name)
+            $actual = (Get-FileHash $installer.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $checksums[$name]) { throw "candidate installer SHA-256 mismatch: $name" }
+          }
+          $metadata = Get-Content ".\candidate\browser.json" | ConvertFrom-Json
+          if ($metadata.executable -ne "chrome.exe" -or $metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
+            throw "candidate browser metadata is invalid"
+          }
+          $fullInstaller = Resolve-Path (Join-Path ".\candidate" $fullName)
+          $slimInstaller = Resolve-Path (Join-Path ".\candidate" $slimName)
+          "ALIASMODE_CANDIDATE_FULL_INSTALLER=$($fullInstaller.Path)" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_CANDIDATE_SLIM_INSTALLER=$($slimInstaller.Path)" | Add-Content $env:GITHUB_ENV
       - name: Validate candidate version
         shell: pwsh
         env:
@@ -95,29 +132,26 @@ jobs:
             throw "protected Tauri updater signing secrets are unavailable"
           }
 
-          $installers = @(Get-ChildItem ".\candidate" -File -Filter "*.exe")
-          if ($installers.Count -ne 1) { throw "expected exactly one candidate installer" }
-          $expectedName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
-          if ($installers[0].Name -ne $expectedName) {
-            throw "candidate installer name did not match its version: $($installers[0].Name)"
-          }
-
+          $fullName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
           $artifact = ".\artifacts\windows-update-candidate"
           New-Item -ItemType Directory -Force $artifact | Out-Null
-          $installer = Join-Path $artifact $expectedName
-          Copy-Item $installers[0].FullName $installer
-          bunx tauri signer sign $installer
+          $fullInstaller = Join-Path $artifact $fullName
+          $slimInstaller = Join-Path $artifact $slimName
+          Copy-Item $env:ALIASMODE_CANDIDATE_FULL_INSTALLER $fullInstaller
+          Copy-Item $env:ALIASMODE_CANDIDATE_SLIM_INSTALLER $slimInstaller
+          bunx tauri signer sign $slimInstaller
           if ($LASTEXITCODE -ne 0) { throw "Tauri updater signing failed" }
-          $signaturePath = "$installer.sig"
+          $signaturePath = "$slimInstaller.sig"
           if (-not (Test-Path $signaturePath -PathType Leaf)) { throw "updater signature is missing" }
 
           $config = Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json
           $publicKey = $config.plugins.updater.pubkey
-          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $installer $signaturePath $publicKey
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $slimInstaller $signaturePath $publicKey
           if ($LASTEXITCODE -ne 0) { throw "updater signature verification failed" }
 
           $corrupt = Join-Path $env:RUNNER_TEMP "corrupt-update.exe"
-          Copy-Item $installer $corrupt
+          Copy-Item $slimInstaller $corrupt
           $bytes = [IO.File]::ReadAllBytes($corrupt)
           $bytes[[Math]::Floor($bytes.Length / 2)] = $bytes[[Math]::Floor($bytes.Length / 2)] -bxor 1
           [IO.File]::WriteAllBytes($corrupt, $bytes)
@@ -126,43 +160,55 @@ jobs:
           $global:LASTEXITCODE = 0
 
           $signature = (Get-Content $signaturePath -Raw).Trim()
-          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$($env:ALIASMODE_CANDIDATE_TAG)/$expectedName"
+          $releaseBase = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$($env:ALIASMODE_CANDIDATE_TAG)"
+          $slimDownloadUrl = "$releaseBase/$slimName"
           $manifest = [ordered]@{
             version = $env:ALIASMODE_CANDIDATE_VERSION
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{
-                url = $downloadUrl
+                url = $slimDownloadUrl
                 signature = $signature
               }
             }
           }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $artifact "latest.json") -Encoding utf8
-          $parsed = Get-Content (Join-Path $artifact "latest.json") | ConvertFrom-Json
+          $latestPath = Join-Path $artifact "latest.json"
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content $latestPath -Encoding utf8
+          $parsed = Get-Content $latestPath | ConvertFrom-Json
           if ($parsed.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
               @($parsed.platforms.PSObject.Properties).Count -ne 1 -or
-              $parsed.platforms."windows-x86_64".url -ne $downloadUrl -or
+              $parsed.platforms."windows-x86_64".url -ne $slimDownloadUrl -or
               $parsed.platforms."windows-x86_64".signature -ne $signature) {
             throw "generated updater manifest is inconsistent"
           }
 
           $bootstrapPath = Join-Path $artifact "aliasmode-agent-bootstrap.json"
-          $releaseBase = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$($env:ALIASMODE_CANDIDATE_TAG)"
-          bun scripts/write-agent-bootstrap-manifest.ts $installer $releaseBase $bootstrapPath
+          bun scripts/write-agent-bootstrap-manifest.ts $fullInstaller $releaseBase $bootstrapPath
           if ($LASTEXITCODE -ne 0) { throw "agent bootstrap manifest generation failed" }
           $bootstrap = Get-Content $bootstrapPath | ConvertFrom-Json
-          $installerHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $fullDownloadUrl = "$releaseBase/$fullName"
+          $fullHash = (Get-FileHash $fullInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($bootstrap.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
-              $bootstrap.installer.name -ne $expectedName -or
-              $bootstrap.installer.url -ne $downloadUrl -or
-              $bootstrap.installer.sha256 -ne $installerHash -or
-              $bootstrap.installer.size -ne (Get-Item $installer).Length) {
+              $bootstrap.installer.name -ne $fullName -or
+              $bootstrap.installer.url -ne $fullDownloadUrl -or
+              $bootstrap.installer.sha256 -ne $fullHash -or
+              $bootstrap.installer.size -ne (Get-Item $fullInstaller).Length) {
             throw "generated agent bootstrap manifest is inconsistent"
           }
 
-          $hashLines = Get-ChildItem $artifact -File |
-            Sort-Object Name |
-            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
-          $hashLines | Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+          $hashInputs = @($fullInstaller, $slimInstaller, $signaturePath, $latestPath, $bootstrapPath)
+          $hashInputs |
+            Sort-Object { Split-Path $_ -Leaf } |
+            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } |
+            Set-Content (Join-Path $artifact "SHA256SUMS.txt")
+          $requiredNames = @($fullName, $slimName, "$slimName.sig", "latest.json", "aliasmode-agent-bootstrap.json", "SHA256SUMS.txt")
+          $actualNames = @(Get-ChildItem $artifact -File | ForEach-Object Name)
+          $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
+          $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
+          if ($missing.Count -ne 0 -or $unexpected.Count -ne 0) {
+            throw "update candidate must contain exactly the six release assets"
+          }
+          $hashLines = @(Get-Content (Join-Path $artifact "SHA256SUMS.txt"))
+          if ($hashLines.Count -ne 5) { throw "release checksum manifest must hash exactly five files" }
       - name: Test previous-version upgrade and data preservation
         shell: pwsh
         env:
@@ -223,7 +269,17 @@ jobs:
             Sort-Object Version -Descending |
             Select-Object -First 1
           if (-not $previous) { throw "no previous public release is available for upgrade acceptance" }
-          $oldInstallerAsset = @($previous.Release.assets | Where-Object { $_.name -like "AliasMode_*_x64-setup.exe" })
+          $offlineInstallerName = "AliasMode_$($previous.Version)_x64-offline-setup.exe"
+          $legacyInstallerName = "AliasMode_$($previous.Version)_x64-setup.exe"
+          $oldInstallerAsset = @()
+          foreach ($installerName in @($offlineInstallerName, $legacyInstallerName)) {
+            $matches = @($previous.Release.assets | Where-Object { $_.name -eq $installerName })
+            if ($matches.Count -gt 1) { throw "previous release installer asset is ambiguous: $installerName" }
+            if ($matches.Count -eq 1) {
+              $oldInstallerAsset = $matches
+              break
+            }
+          }
           $oldChecksumAsset = @($previous.Release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" })
           if ($oldInstallerAsset.Count -ne 1 -or $oldChecksumAsset.Count -ne 1) {
             throw "previous release assets are incomplete"

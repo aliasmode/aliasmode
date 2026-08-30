@@ -207,6 +207,7 @@ export async function prepareWindowsBundle(
     throw new Error("official CloakBrowser installer did not provide Windows chrome.exe");
   }
   cpSync(runtimeRoot, resourceRoot, { recursive: true, errorOnExist: false });
+  rmSync(join(resourceRoot, "chromedriver.exe"), { force: true });
   const copiedExecutable = join(resourceRoot, executableRelative);
   const copiedHash = (await (options.hashFile ?? sha256File)(copiedExecutable)).toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(copiedHash) || copiedHash !== installed.sha256.toLowerCase()) {

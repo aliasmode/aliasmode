@@ -154,31 +154,44 @@ jobs:
           $env:ALIASMODE_LIVE_HEADFUL = "1"
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
-      - run: bunx tauri build --bundles nsis --config src-tauri/tauri.unsigned.conf.json
-      - name: Select NSIS installer
+      - run: bunx tauri build --bundles nsis --no-sign
+      - name: Select NSIS installers
         shell: pwsh
         run: |
-          $installers = @(Get-ChildItem ".\src-tauri\target" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" })
-          if ($installers.Count -ne 1) {
-            throw "expected exactly one NSIS installer, found $($installers.Count)"
-          }
-          "ALIASMODE_NSIS_INSTALLER=$($installers[0].FullName)" | Add-Content $env:GITHUB_ENV
+          $ErrorActionPreference = "Stop"
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $sourceName = "AliasMode_$($bundleVersion)_x64-setup.exe"
+          $fullInstaller = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $sourceName)
+          $slimInstaller = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis-updater" $sourceName)
+          if ($fullInstaller.Path -eq $slimInstaller.Path) { throw "full and updater NSIS installers must be distinct" }
+          "ALIASMODE_FULL_NSIS_INSTALLER=$($fullInstaller.Path)" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_SLIM_NSIS_INSTALLER=$($slimInstaller.Path)" | Add-Content $env:GITHUB_ENV
       - name: Stage Windows candidate
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $installerName = Split-Path $env:ALIASMODE_NSIS_INSTALLER -Leaf
-          if (-not $installerName.Contains("_$($bundleVersion)_")) {
-            throw "NSIS installer name does not contain bundle version ${bundleVersion}: $installerName"
-          }
+          $fullName = "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($bundleVersion)_x64-setup.exe"
           $candidate = ".\artifacts\windows-candidate"
           New-Item -ItemType Directory -Force $candidate | Out-Null
-          Copy-Item $env:ALIASMODE_NSIS_INSTALLER (Join-Path $candidate $installerName)
+          $fullInstaller = Join-Path $candidate $fullName
+          $slimInstaller = Join-Path $candidate $slimName
+          Copy-Item $env:ALIASMODE_FULL_NSIS_INSTALLER $fullInstaller
+          Copy-Item $env:ALIASMODE_SLIM_NSIS_INSTALLER $slimInstaller
           Copy-Item ".\src-tauri\generated\browser.json" (Join-Path $candidate "browser.json")
-          $sha256 = (Get-FileHash (Join-Path $candidate $installerName) -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $installerName" | Set-Content (Join-Path $candidate "SHA256SUMS.txt")
+          $fullSize = (Get-Item $fullInstaller).Length
+          $slimSize = (Get-Item $slimInstaller).Length
+          $sizeDelta = $fullSize - $slimSize
+          if ($sizeDelta -lt 100MB) { throw "full installer must exceed updater installer by at least 100 MiB" }
+          [ordered]@{
+            full = [ordered]@{ name = $fullName; bytes = $fullSize }
+            slim = [ordered]@{ name = $slimName; bytes = $slimSize }
+            deltaBytes = $sizeDelta
+          } | ConvertTo-Json | Set-Content (Join-Path $candidate "size-report.json") -Encoding utf8
+          @($fullInstaller, $slimInstaller) |
+            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } |
+            Set-Content (Join-Path $candidate "SHA256SUMS.txt")
       - uses: actions/upload-artifact@v4
         with:
           name: aliasmode-windows-candidate
@@ -200,22 +213,47 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $installers = @(Get-ChildItem ".\candidate" -File -Filter "*.exe")
-          if ($installers.Count -ne 1) {
-            throw "expected exactly one candidate NSIS installer, found $($installers.Count)"
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $fullName = "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($bundleVersion)_x64-setup.exe"
+          $requiredNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
+          $actualNames = @(Get-ChildItem ".\candidate" -File | ForEach-Object Name)
+          $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
+          $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
+          if ($missing.Count -ne 0 -or $unexpected.Count -ne 0) {
+            throw "candidate files did not match the required installer set"
           }
-          $checksum = (Get-Content ".\candidate\SHA256SUMS.txt" -Raw).Trim()
-          if ($checksum -notmatch '^([a-f0-9]{64})  (.+)$') {
-            throw "candidate checksum manifest is malformed"
+          $fullInstaller = Resolve-Path (Join-Path ".\candidate" $fullName)
+          $slimInstaller = Resolve-Path (Join-Path ".\candidate" $slimName)
+          $checksums = @{}
+          foreach ($line in @(Get-Content ".\candidate\SHA256SUMS.txt")) {
+            if ($line -notmatch '^([a-f0-9]{64})  (.+)$' -or $checksums.ContainsKey($Matches[2])) {
+              throw "candidate checksum manifest is malformed"
+            }
+            $checksums[$Matches[2]] = $Matches[1]
           }
-          if ($Matches[2] -ne $installers[0].Name) {
-            throw "candidate checksum manifest names a different installer"
+          if ($checksums.Count -ne 2) { throw "candidate checksum manifest must contain both installers" }
+          foreach ($installer in @($fullInstaller, $slimInstaller)) {
+            $name = Split-Path $installer.Path -Leaf
+            if (-not $checksums.ContainsKey($name)) { throw "candidate checksum manifest is missing $name" }
+            $actual = (Get-FileHash $installer.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $checksums[$name]) { throw "candidate installer SHA-256 mismatch: $name" }
           }
-          $actual = (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $Matches[1]) { throw "candidate installer SHA-256 mismatch" }
-          $metadata = Resolve-Path ".\candidate\browser.json"
-          "ALIASMODE_NSIS_INSTALLER=$($installers[0].FullName)" | Add-Content $env:GITHUB_ENV
-          "ALIASMODE_BROWSER_METADATA=$($metadata.Path)" | Add-Content $env:GITHUB_ENV
+          $sizeReport = Get-Content ".\candidate\size-report.json" | ConvertFrom-Json
+          $fullSize = (Get-Item $fullInstaller.Path).Length
+          $slimSize = (Get-Item $slimInstaller.Path).Length
+          if ($sizeReport.full.name -ne $fullName -or $sizeReport.slim.name -ne $slimName -or
+              $sizeReport.full.bytes -ne $fullSize -or $sizeReport.slim.bytes -ne $slimSize -or
+              $sizeReport.deltaBytes -ne ($fullSize - $slimSize) -or $sizeReport.deltaBytes -lt 100MB) {
+            throw "candidate installer size report is inconsistent"
+          }
+          $metadata = Get-Content ".\candidate\browser.json" | ConvertFrom-Json
+          if ($metadata.executable -ne "chrome.exe" -or $metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
+            throw "candidate browser metadata is invalid"
+          }
+          $metadataPath = Resolve-Path ".\candidate\browser.json"
+          "ALIASMODE_NSIS_INSTALLER=$($fullInstaller.Path)" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_BROWSER_METADATA=$($metadataPath.Path)" | Add-Content $env:GITHUB_ENV
       - name: Smoke-test installed desktop and headful Cloud proxies
         shell: pwsh
         env:
@@ -1431,10 +1469,26 @@ jobs:
               throw "installed headful Cloud proxy smoke exited with code $LASTEXITCODE"
             }
           }
+      - name: Stage unsigned compatibility installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $fullName = "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
+          $source = Resolve-Path (Join-Path ".\candidate" $fullName)
+          $compatibility = ".\artifacts\windows-unsigned"
+          New-Item -ItemType Directory -Force $compatibility | Out-Null
+          $installer = Join-Path $compatibility $fullName
+          Copy-Item $source.Path $installer
+          "$((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant())  $fullName" |
+            Set-Content (Join-Path $compatibility "SHA256SUMS.txt")
+          $files = @(Get-ChildItem $compatibility -File)
+          if ($files.Count -ne 2 -or @($files | Where-Object Name -eq $fullName).Count -ne 1 -or
+              @($files | Where-Object Name -eq "SHA256SUMS.txt").Count -ne 1) {
+            throw "unsigned compatibility artifact must contain exactly one installer and checksum"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: aliasmode-windows-unsigned
-          path: |
-            candidate/*.exe
-            candidate/SHA256SUMS.txt
+          path: artifacts/windows-unsigned
           if-no-files-found: error
