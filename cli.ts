@@ -26,7 +26,7 @@ import {
   runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
-import { serveDashboard } from "./web.ts";
+import { serveDashboard, serveDesktopAutomationApi } from "./web.ts";
 import { LifecycleAdmissionController, type LifecycleAdmissionOptions } from "./lifecycle-admission.ts";
 import { HubClient } from "./hub-client.ts";
 import { RemoteCoordinator } from "./remote.ts";
@@ -2647,6 +2647,15 @@ async function main() {
           ? Math.max(1_000, Math.floor(configuredShutdownTimeout))
           : DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS;
         console.log(`remote mode: hub ${hubUrl} (authenticated operator identity is token-derived)`);
+        const automationServer = desktopHealth
+          ? serveDesktopAutomationApi({
+              launcher,
+              store,
+              remote: coord,
+              lifecycleAdmission: lifecycleAdmission!,
+              appConfig,
+            })
+          : undefined;
         const server = serveDashboard({
           launcher,
           store,
@@ -2668,6 +2677,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
+            automationServer: automationServer!,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2726,6 +2736,14 @@ async function main() {
       if (configuredMode.mode === "cloud") {
         console.log("cloud mode: waiting for verified authentication before loading profiles");
         if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser, mcpTunnel);
+        const automationServer = desktopHealth
+          ? serveDesktopAutomationApi({
+              launcher,
+              store,
+              lifecycleAdmission: lifecycleAdmission!,
+              appConfig,
+            })
+          : undefined;
         const server = serveDashboard({
           launcher,
           store,
@@ -2748,6 +2766,7 @@ async function main() {
           if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
           attachDesktopControl(new ManagedDesktopRuntime({
             server,
+            automationServer: automationServer!,
             admission: lifecycleAdmission!,
             store,
             launcher,
@@ -2773,6 +2792,14 @@ async function main() {
       });
       if (r) console.log(`imported ${r.profiles} profile(s) from ${r.files} file(s); store holds ${store.count()}`);
       const stopInbox = watchInbox(store, paths.inbox);
+      const automationServer = desktopHealth
+        ? serveDesktopAutomationApi({
+            launcher,
+            store,
+            lifecycleAdmission: lifecycleAdmission!,
+            appConfig,
+          })
+        : undefined;
       const server = serveDashboard({
         launcher,
         store,
@@ -2792,6 +2819,7 @@ async function main() {
         if (!assignedPort) throw new Error("desktop sidecar did not receive a loopback port");
         attachDesktopControl(new ManagedDesktopRuntime({
           server,
+          automationServer: automationServer!,
           admission: lifecycleAdmission!,
           store,
           launcher,

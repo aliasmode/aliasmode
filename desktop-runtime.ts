@@ -47,6 +47,7 @@ interface ManagedLauncher {
 
 export interface ManagedDesktopRuntimeOptions {
   server: ManagedServer;
+  automationServer?: ManagedServer;
   admission: LifecycleAdmissionController;
   store: ManagedStore;
   launcher: ManagedLauncher;
@@ -196,6 +197,14 @@ async function beforeDeadline<T>(pending: Promise<T>, deadline: number): Promise
   }
 }
 
+async function stopServers(servers: ManagedServer[]): Promise<void> {
+  const results = await Promise.allSettled(
+    servers.map((server) => Promise.resolve().then(() => server.stop(false))),
+  );
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
+}
+
 export class ManagedDesktopRuntime {
   private shutdownInFlight: Promise<void> | null = null;
 
@@ -209,6 +218,7 @@ export class ManagedDesktopRuntime {
   private async runShutdown(): Promise<void> {
     const {
       server,
+      automationServer,
       admission,
       store,
       launcher,
@@ -221,7 +231,10 @@ export class ManagedDesktopRuntime {
     const deadline = Date.now() + shutdownTimeoutMs;
     let failure: unknown;
     try {
-      await beforeDeadline(Promise.resolve(server.stop(false)), deadline);
+      await beforeDeadline(stopServers([
+        server,
+        ...(automationServer ? [automationServer] : []),
+      ]), deadline);
       try {
         await beforeDeadline(Promise.resolve(stopInbox()), deadline);
       } catch (error) {

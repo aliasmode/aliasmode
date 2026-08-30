@@ -143,10 +143,11 @@ test("desktop credential bridge attempts both Cloud credential deletes after one
   expect(output.join("\n")).not.toContain("queue_encryption_key");
 });
 
-test("desktop shutdown coalesces and closes authoritative local launches", async () => {
+test("desktop shutdown coalesces and closes both listeners before authoritative local launches", async () => {
   const events: string[] = [];
   const runtime = new ManagedDesktopRuntime({
-    server: { stop: async () => { events.push("server"); } },
+    server: { stop: async () => { events.push("dashboard"); } },
+    automationServer: { stop: async () => { events.push("automation"); } },
     admission: admission(),
     store: {
       listLaunches: () => [{ profileId: "one" }, { profileId: "two" }],
@@ -160,7 +161,23 @@ test("desktop shutdown coalesces and closes authoritative local launches", async
   const second = runtime.shutdown();
   expect(first).toBe(second);
   await first;
-  expect(events).toEqual(["server", "inbox", "stop:one", "stop:two", "store"]);
+  expect(events.slice(0, 2).sort()).toEqual(["automation", "dashboard"]);
+  expect(events.slice(2)).toEqual(["inbox", "stop:one", "stop:two", "store"]);
+});
+
+test("desktop shutdown attempts both listener stops when one fails", async () => {
+  const events: string[] = [];
+  const runtime = new ManagedDesktopRuntime({
+    server: { stop: async () => { events.push("dashboard"); } },
+    automationServer: { stop: async () => { events.push("automation"); throw new Error("automation stop failed"); } },
+    admission: admission(),
+    store: { listLaunches: () => [], close: () => { events.push("store"); } },
+    launcher: { stop: async () => true },
+  });
+
+  await expect(runtime.shutdown()).rejects.toThrow("automation stop failed");
+  expect(events.slice(0, 2).sort()).toEqual(["automation", "dashboard"]);
+  expect(events.at(-1)).toBe("store");
 });
 
 test("desktop shutdown delegates remote capture and release to the coordinator drain", async () => {
