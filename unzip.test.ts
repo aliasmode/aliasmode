@@ -1,8 +1,9 @@
 import { test, expect } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractZipTo } from "./unzip.ts";
+import { extractZipTo, parseArchive } from "./unzip.ts";
 
 /** Build a minimal STORED (uncompressed) ZIP — enough to exercise the central-
  *  directory parser and path-safety without needing a deflate fixture. */
@@ -53,6 +54,104 @@ function storedZip(files: Record<string, string>): Uint8Array {
   for (const c of chunks) { out.set(c, o); o += c.length; }
   return out;
 }
+
+function concat(...chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+  return out;
+}
+
+function uint32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  new DataView(out.buffer).setUint32(0, value, true);
+  return out;
+}
+
+function extensionId(publicKey: Uint8Array): string {
+  const digest = createHash("sha256").update(publicKey).digest();
+  return [...digest.subarray(0, 16)]
+    .map((byte) => String.fromCharCode(97 + (byte >> 4), 97 + (byte & 15)))
+    .join("");
+}
+
+function crx2(zip: Uint8Array, publicKey: Uint8Array): Uint8Array {
+  const signature = new Uint8Array([1, 2, 3]);
+  return concat(
+    new TextEncoder().encode("Cr24"),
+    uint32(2),
+    uint32(publicKey.length),
+    uint32(signature.length),
+    publicKey,
+    signature,
+    zip,
+  );
+}
+
+function varint(value: number): Uint8Array {
+  const out: number[] = [];
+  do {
+    const byte = value % 128;
+    value = Math.floor(value / 128);
+    out.push(byte | (value > 0 ? 0x80 : 0));
+  } while (value > 0);
+  return new Uint8Array(out);
+}
+
+function field(number: number, bytes: Uint8Array): Uint8Array {
+  return concat(varint(number * 8 + 2), varint(bytes.length), bytes);
+}
+
+function proof(publicKey: Uint8Array): Uint8Array {
+  return concat(field(1, publicKey), field(2, new Uint8Array([9])));
+}
+
+function crx3(zip: Uint8Array, identityKey: Uint8Array, proofs: Array<{ field: 2 | 3; key: Uint8Array }>): Uint8Array {
+  const crxId = createHash("sha256").update(identityKey).digest().subarray(0, 16);
+  const signedData = field(1, crxId);
+  const header = concat(
+    ...proofs.map((item) => field(item.field, proof(item.key))),
+    field(10000, signedData),
+  );
+  return concat(new TextEncoder().encode("Cr24"), uint32(3), uint32(header.length), header, zip);
+}
+
+test("parses CRX2 public-key identity and ZIP payload", () => {
+  const zip = storedZip({ "manifest.json": '{"name":"X"}' });
+  const key = new Uint8Array([1, 3, 5, 7, 9]);
+  const parsed = parseArchive(crx2(zip, key));
+
+  expect(parsed.crxVersion).toBe(2);
+  expect(parsed.extensionId).toBe(extensionId(key));
+  expect(parsed.manifestKey).toBe(Buffer.from(key).toString("base64"));
+  expect(parsed.zip).toEqual(zip);
+});
+
+test("selects the CRX3 proof whose key matches the signed extension id", () => {
+  const zip = storedZip({ "manifest.json": '{"name":"X"}' });
+  const other = new Uint8Array([2, 4, 6]);
+  const key = new Uint8Array([8, 10, 12, 14]);
+  const parsed = parseArchive(crx3(zip, key, [
+    { field: 2, key: other },
+    { field: 3, key },
+  ]));
+
+  expect(parsed.crxVersion).toBe(3);
+  expect(parsed.extensionId).toBe(extensionId(key));
+  expect(parsed.manifestKey).toBe(Buffer.from(key).toString("base64"));
+  expect(parsed.zip).toEqual(zip);
+});
+
+test("rejects malformed CRX metadata and CRX3 without its identity proof", () => {
+  const fixed = concat(new TextEncoder().encode("Cr24"), uint32(3));
+  expect(() => parseArchive(concat(fixed, uint32(20), new Uint8Array([1])))).toThrow("truncated CRX3 header");
+  expect(() => parseArchive(concat(fixed, uint32(1), new Uint8Array([0x80])))).toThrow("protobuf varint");
+
+  const zip = storedZip({ "manifest.json": '{"name":"X"}' });
+  const identity = new Uint8Array([1]);
+  const other = new Uint8Array([2]);
+  expect(() => parseArchive(crx3(zip, identity, [{ field: 2, key: other }]))).toThrow("matching its signed extension id");
+});
 
 test("extracts files (incl. nested) from a zip", async () => {
   const dir = mkdtempSync(join(tmpdir(), "cp-unzip-"));

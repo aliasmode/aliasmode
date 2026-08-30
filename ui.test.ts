@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +49,39 @@ function timezoneFetch(timezones: Record<string, string>, calls?: string[][]) {
       },
     };
   };
+}
+
+const EXTENSION_ZIP = Buffer.from(
+  "UEsDBBQAAAAAAFtxHl1SmQ+hOwAAADsAAAANAAAAbWFuaWZlc3QuanNvbnsibWFuaWZlc3RfdmVyc2lvbiI6MywibmFtZSI6IlJvdXRlIEZpeHR1cmUiLCJ2ZXJzaW9uIjoiMSJ9UEsBAhQDFAAAAAAAW3EeXVKZD6E7AAAAOwAAAA0AAAAAAAAAAAAAAIABAAAAAG1hbmlmZXN0Lmpzb25QSwUGAAAAAAEAAQA7AAAAZgAAAAAA",
+  "base64",
+);
+
+function extensionId(publicKey: Uint8Array): string {
+  const digest = createHash("sha256").update(publicKey).digest();
+  return [...digest.subarray(0, 16)]
+    .map((byte) => String.fromCharCode(97 + (byte >> 4), 97 + (byte & 15)))
+    .join("");
+}
+
+function extensionCrx(publicKey: Uint8Array): Uint8Array {
+  const signature = new Uint8Array([1]);
+  const header = new Uint8Array(16);
+  header.set(new TextEncoder().encode("Cr24"));
+  const view = new DataView(header.buffer);
+  view.setUint32(4, 2, true);
+  view.setUint32(8, publicKey.length, true);
+  view.setUint32(12, signature.length, true);
+  const out = new Uint8Array(header.length + publicKey.length + signature.length + EXTENSION_ZIP.length);
+  out.set(header);
+  out.set(publicKey, header.length);
+  out.set(signature, header.length + publicKey.length);
+  out.set(EXTENSION_ZIP, header.length + publicKey.length + signature.length);
+  return out;
+}
+
+function extensionResponse(publicKey: Uint8Array): Response {
+  const bytes = extensionCrx(publicKey);
+  return new Response(bytes.buffer as ArrayBuffer);
 }
 
 test("listUiProfiles exposes metadata but redacts every secret", () => {
@@ -793,6 +827,78 @@ test("an IPv6 proxy round-trips through the edit view without losing its identit
   expect(calls).toEqual([]);
   expect(s.getProfile("k1d0cd11")!.proxy).toEqual(before.proxy);
   expect(s.getProfile("k1d0cd11")!.timezone).toBe("America/New_York");
+  s.close();
+});
+
+test("Chrome Web Store endpoint installs once and reuses the registered extension", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-web-store-"));
+  const publicKey = new Uint8Array([2, 7, 1, 8, 2, 8]);
+  const id = extensionId(publicKey);
+  let fetches = 0;
+  const request = () => new Request("http://x/ui/api/extensions/web-store", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source: `https://chromewebstore.google.com/detail/fixture/${id}` }),
+  });
+
+  const first = await handleUiRequest(request(), {} as any, s, null, {
+    paths: { extensions: root } as any,
+    extensionFetch: async () => { fetches++; return extensionResponse(publicKey); },
+  });
+  expect(first!.status).toBe(200);
+  expect(await first!.json()).toMatchObject({ ok: true, installed: { id, name: "Route Fixture" }, alreadyInstalled: false });
+  expect(s.getExtension(id)?.loadDir).toBe(join(root, id));
+  expect(existsSync(join(root, id, "manifest.json"))).toBe(true);
+
+  const second = await handleUiRequest(request(), {} as any, s, null, {
+    paths: { extensions: root } as any,
+    extensionFetch: async () => { fetches++; throw new Error("must not fetch again"); },
+  });
+  expect(second!.status).toBe(200);
+  expect(await second!.json()).toMatchObject({ ok: true, installed: { id, name: "Route Fixture" }, alreadyInstalled: true });
+  expect(fetches).toBe(1);
+  s.close();
+});
+
+test("Chrome Web Store endpoint leaves no registry or files after identity failure", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-web-store-"));
+  const requestedId = extensionId(new Uint8Array([1, 2, 3]));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/extensions/web-store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: requestedId }),
+    }),
+    {} as any,
+    s,
+    null,
+    {
+      paths: { extensions: root } as any,
+      extensionFetch: async () => extensionResponse(new Uint8Array([4, 5, 6])),
+    },
+  );
+
+  expect(response!.status).toBe(500);
+  expect(s.getExtension(requestedId)).toBeNull();
+  expect(existsSync(join(root, requestedId))).toBe(false);
+  s.close();
+});
+
+test("Chrome Web Store endpoint keeps the existing remote-mode restriction", async () => {
+  const s = store();
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/extensions/web-store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "aapbdbdomjkkjkaonfhkkikfgjllcleb" }),
+    }),
+    {} as any,
+    s,
+    {} as any,
+  );
+  expect(response!.status).toBe(400);
   s.close();
 });
 

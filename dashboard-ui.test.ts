@@ -569,12 +569,16 @@ test("editable Cloud selections expose every profile export format", () => {
   for (const format of ["csv", "txt", "xlsx"]) expect(toolbar).toContain(`exportSelected("${format}")`);
 });
 
-test("the extension manager explains the supported ZIP/CRX workflow", () => {
-  expect(app).toContain("Chrome Web Store installs are not supported");
-  expect(app).toContain("Switch to Chrome to install extensions and themes");
+test("the existing Extensions page installs from a Web Store URL and keeps archive upload", () => {
+  expect(app).toContain("Install from Chrome Web Store");
+  expect(app).toContain('aria-label="Chrome Web Store URL or extension ID"');
+  expect(app).toContain("installWebStoreExtension(source)");
+  expect(app).toContain("The in-browser Store button does not work in CloakBrowser");
   expect(app).toContain("Edit &gt; Extensions");
   expect(app).toContain("Upload ZIP/CRX");
   expect(app).toContain('accept=".zip,.crx,application/zip,application/x-chrome-extension"');
+  expect(app).not.toContain("Chrome Web Store installs are not supported in AliasMode");
+  expect(app.match(/setView\("extensions"\)/g)).toHaveLength(1);
 });
 
 test("Settings carries the Remote MCP connector card in Cloud mode", () => {

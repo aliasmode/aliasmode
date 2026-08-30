@@ -41,6 +41,7 @@ import {
   closeProfile,
   raiseProfile,
   fetchExtensions,
+  installWebStoreExtension,
   uploadExtensions,
   removeExtension,
   assignExtensionBulk,
@@ -1012,8 +1013,10 @@ function App() {
   const [editTotp, setEditTotp] = useState<{ code: string; secs: number } | null>(null);
   const [twoFaFlash, setTwoFaFlash] = useState<{ id: string; code: string } | null>(null);
   const [editExts, setEditExts] = useState<string[]>([]);
-  // Extensions registry + manager modal
+  // Local extension registry + Extensions page
   const [extensions, setExtensions] = useState<Extension[]>([]);
+  const [extSource, setExtSource] = useState("");
+  const [extInstallBusy, setExtInstallBusy] = useState(false);
   const [extBusy, setExtBusy] = useState(false);
   const [extErr, setExtErr] = useState<string | null>(null);
   const extFileRef = useRef<HTMLInputElement>(null);
@@ -2177,8 +2180,25 @@ function App() {
     }
   };
 
-  // ---- Extensions manager (upload / delete) ----
+  // ---- Extensions manager (Store URL / upload / delete) ----
   const reloadExtensions = async () => { try { setExtensions(await fetchExtensions()); } catch {} };
+  const doInstallWebStoreExtension = async () => {
+    const source = extSource.trim();
+    if (!source) { setExtErr("Paste a Chrome Web Store URL or extension ID"); return; }
+    setExtInstallBusy(true);
+    setExtErr(null);
+    try {
+      const r = await installWebStoreExtension(source);
+      if (!r.ok) { setExtErr(r.error || "installation failed"); return; }
+      setExtSource("");
+      await reloadExtensions();
+      flash(r.alreadyInstalled ? `${r.installed.name} is already installed` : `Installed ${r.installed.name}`);
+    } catch (e) {
+      setExtErr(String(e));
+    } finally {
+      setExtInstallBusy(false);
+    }
+  };
   const doUploadExtensions = async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (!list.length) return;
@@ -3129,16 +3149,31 @@ function App() {
       ) : view === "extensions" ? (
       <div className="workspace">
         <div className="settingspage">
-          <h2 className="sect-title">Uploaded extensions</h2>
+          <h2 className="sect-title">Extensions</h2>
           {extErr && <div className="modal-err"><Icon name="alert" className="sm" />{extErr}</div>}
-          <p className="formnote">
-            Chrome Web Store installs are not supported in AliasMode. Profiles use CloakBrowser rather than
-            Google Chrome, so “Switch to Chrome to install extensions and themes” is expected.
-          </p>
+          <section className="settings-card">
+            <header><Icon name="puzzle" className="sm" /><h2>Install from Chrome Web Store</h2></header>
+            <div className="card-body">
+              <p>Paste a Chrome Web Store extension link or its 32-character ID.</p>
+              <form className="fld-row" onSubmit={(event) => { event.preventDefault(); void doInstallWebStoreExtension(); }}>
+                <input
+                  className="input"
+                  style={{ flex: 1 }}
+                  aria-label="Chrome Web Store URL or extension ID"
+                  placeholder="https://chromewebstore.google.com/detail/…"
+                  value={extSource}
+                  onChange={(event) => setExtSource(event.target.value)}
+                />
+                <button className="btn primary" type="submit" disabled={extInstallBusy || extBusy}>
+                  <Icon name="plus" className="sm" />{extInstallBusy ? "Installing…" : "Install"}
+                </button>
+              </form>
+            </div>
+          </section>
+          <p className="formnote">The in-browser Store button does not work in CloakBrowser. Paste the Store link above, or upload a ZIP/CRX archive.</p>
           <ol className="steps">
-            <li>Obtain a trusted extension as a <code>.zip</code> or <code>.crx</code>.</li>
-            <li>Upload it here.</li>
-            <li>Close the target profile, then use <b>Edit &gt; Extensions</b> to assign it{!isCloudMode && ", or assign many at once from the roster toolbar"}.</li>
+            <li>Install the extension here.</li>
+            <li>Use <b>Edit &gt; Extensions</b> to assign it to a profile{!isCloudMode && ", or assign many at once from the roster toolbar"}.</li>
             <li>Reopen the profile. AliasMode loads the extension when the browser starts.</li>
           </ol>
           {extensions.length === 0 ? (
@@ -3146,7 +3181,7 @@ function App() {
               <span className="glyph"><Icon name="puzzle" /></span>
               <b>No extensions yet</b>
               <p>Uploaded extensions appear here, ready to assign to any profile.</p>
-              <button className="btn primary" disabled={extBusy} onClick={() => extFileRef.current?.click()}>
+              <button className="btn primary" disabled={extBusy || extInstallBusy} onClick={() => extFileRef.current?.click()}>
                 <Icon name="plus" className="sm" />{extBusy ? "Uploading…" : "Upload ZIP/CRX"}
               </button>
             </div>
@@ -3174,7 +3209,7 @@ function App() {
         <footer className="pagefoot">
           <span className="spacer" />
           {extensions.length > 0 && (
-            <button className="btn primary" type="button" disabled={extBusy} onClick={() => extFileRef.current?.click()}>
+            <button className="btn primary" type="button" disabled={extBusy || extInstallBusy} onClick={() => extFileRef.current?.click()}>
               <Icon name="plus" className="sm" />{extBusy ? "Uploading…" : "Upload ZIP/CRX"}
             </button>
           )}

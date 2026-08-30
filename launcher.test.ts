@@ -1247,6 +1247,20 @@ test("buildArgs accepts the fixed Automation runtime flag bundle", () => {
   store.close();
 });
 
+test("buildArgs loads the exact extension assigned through the registry", () => {
+  const store = seeded();
+  store.addExtension({ id: "aapbdbdomjkkjkaonfhkkikfgjllcleb", name: "Fixture", loadDir: "/data/extensions/store-fixture" });
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, extensions: ["aapbdbdomjkkjkaonfhkkikfgjllcleb"] });
+  const f = fleet();
+  const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn });
+
+  const args = launcher.buildArgs(store.getProfile("k1d0cd11")!, 9333, "/data", []);
+  expect(args).toContain("--load-extension=/data/extensions/store-fixture");
+  expect(args).toContain("--disable-extensions-except=/data/extensions/store-fixture");
+  store.close();
+});
+
 test("buildArgs rejects identity, proxy, storage, extension, mode, and WebRTC overrides", () => {
   const store = seeded();
   const f = fleet();
