@@ -6,11 +6,13 @@ test("Cloud diagnostics keep only fixed timestamp and type fields", () => {
   const diagnostics = new CloudDiagnostics(() => ++now);
   diagnostics.record("open_started");
   diagnostics.record("session_restore_context_timeout");
+  diagnostics.record("browser_teardown_unconfirmed");
 
   const snapshot = diagnostics.snapshot();
   expect(snapshot).toEqual([
     { timestamp: 101, type: "open_started" },
     { timestamp: 102, type: "session_restore_context_timeout" },
+    { timestamp: 103, type: "browser_teardown_unconfirmed" },
   ]);
 
   snapshot[0]!.timestamp = 999;

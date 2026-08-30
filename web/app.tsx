@@ -335,12 +335,22 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   cloud_registration_released: "Cloud session registration released",
   cleanup_retained: "Browser or recovery state was retained",
   heartbeat_failed: "Cloud heartbeat failed",
+  heartbeat_terminal_conflict: "Cloud lease ended after a version conflict",
+  heartbeat_terminal_access_ended: "Cloud lease ended after access was revoked",
+  no_page_observed: "Browser has no visible page",
+  no_page_close_requested: "Browser close requested after pages disappeared",
+  browser_death_confirmed: "Browser process exit confirmed",
+  browser_teardown_unconfirmed: "Browser teardown could not be confirmed",
+  session_sync_conflict: "Session synchronization has a terminal conflict",
   access_ended: "Cloud access ended",
 };
 
 function cloudDiagnosticFailed(type: CloudDiagnosticEvent["type"]): boolean {
   return type.includes("failed") || type.includes("timeout") || type === "checkpoint_invalid"
-    || type === "session_sync_pending" || type === "cleanup_retained" || type === "access_ended";
+    || type === "session_sync_pending" || type === "session_sync_conflict"
+    || type === "cleanup_retained" || type === "heartbeat_terminal_conflict"
+    || type === "heartbeat_terminal_access_ended" || type === "no_page_close_requested"
+    || type === "browser_teardown_unconfirmed" || type === "access_ended";
 }
 
 /**
@@ -1946,7 +1956,7 @@ function App() {
       const r = await fn(id);
       await load(); // refresh first; load() no longer clears action errors
       if (r && r.ok === false) setActionErr(r.error || "action failed");
-      else if (r && r.warning) setActionErr(`Opened — ${r.warning}`);
+      else if (r && r.warning) setActionErr(r.warning);
     } catch (e) {
       await load().catch(() => {});
       setActionErr(String(e));
@@ -2243,9 +2253,19 @@ function App() {
     if (!ids.length) return;
     setActionErr(null);
     setBusy((b) => { const n = { ...b }; ids.forEach((id) => (n[id] = true)); return n; });
-    await runPool(ids, 4, async (id) => { try { await op(id); } catch {} });
+    const issues: string[] = [];
+    await runPool(ids, 4, async (id) => {
+      try {
+        const r = await op(id);
+        if (r?.ok === false) issues.push(`${id}: ${r.error || "action failed"}`);
+        else if (r?.warning) issues.push(`${id}: ${r.warning}`);
+      } catch (error) {
+        issues.push(`${id}: ${String(error)}`);
+      }
+    });
     await load();
     setBusy((b) => { const n = { ...b }; ids.forEach((id) => delete n[id]); return n; });
+    if (issues.length > 0) setActionErr(issues.join("; "));
   };
   const openSelected = () => bulkRun(openProfile, (p) => !p.running && !p.mobilePersona);
   const closeSelected = () => bulkRun(closeProfile, (p) => p.running);

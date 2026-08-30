@@ -16,7 +16,10 @@ import type { RemoteCoordinator } from "./remote.ts";
 import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
-import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
+import type {
+  CloudBrowserCloseResult,
+  CloudBrowserLifecycle,
+} from "./cloud-browser.ts";
 import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
@@ -239,6 +242,30 @@ function rejectUntrustedJsonMutation(req: Request): Response | null {
     return Response.json({ ok: false, error: "cross-origin requests are forbidden" }, { status: 403 });
   }
   return null;
+}
+
+function cloudCloseResponse(result: CloudBrowserCloseResult): Response {
+  if (!result.closed) {
+    return Response.json(
+      { ok: false, error: "browser teardown unconfirmed" },
+      { status: 500 },
+    );
+  }
+  if (result.sync === "pending") {
+    return Response.json({
+      ok: true,
+      sync: result.sync,
+      warning: "Browser closed. Saving this profile to Cloud will retry automatically.",
+    });
+  }
+  if (result.sync === "conflict") {
+    return Response.json({
+      ok: true,
+      sync: result.sync,
+      warning: "Browser closed, but Cloud could not accept the saved session. The encrypted snapshot remains on this device.",
+    });
+  }
+  return Response.json({ ok: true, sync: result.sync });
 }
 
 function noStoreJson(body: unknown, status = 200): Response {
@@ -1360,9 +1387,7 @@ export async function handleUiRequest(
             : Response.json({ ok: false, error: result.error ?? "open failed" }, { status: 500 });
         }
         if (action[2] === "close") {
-          return await options.cloudBrowser.close(id)
-            ? Response.json({ ok: true })
-            : Response.json({ ok: false, error: "browser teardown unconfirmed" }, { status: 500 });
+          return cloudCloseResponse(await options.cloudBrowser.close(id));
         }
         return Response.json({ ok: true });
       } catch (error) {

@@ -2329,7 +2329,7 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
       calls.push(`open:${profileId}`);
       return { ok: true, port: 9222 };
     },
-    async close() { return true; },
+    async close() { return { closed: true, sync: "complete" }; },
     async resumeAfterAuthentication() {},
     async retryPending() {},
     async releaseAll() { return true; },
@@ -2372,6 +2372,45 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
   expect(createdBody).toMatchObject({ ok: true, id: expect.any(String) });
   expect(calls).toEqual(["list", "open:cloud1", "create:New Cloud profile"]);
   expect(s.getProfile(createdBody.id)).toBeNull();
+  s.close();
+});
+
+test("Cloud close route separates teardown from Cloud sync outcomes", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-close-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  let result: any = { closed: true, sync: "pending" };
+  const cloudBrowser = { async close() { return result; } } as any;
+  const request = () => handleUiRequest(
+    new Request("http://x/ui/api/profiles/cloud1/close", { method: "POST" }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+
+  let response = await request();
+  expect(response!.status).toBe(200);
+  expect(await response!.json()).toEqual({
+    ok: true,
+    sync: "pending",
+    warning: "Browser closed. Saving this profile to Cloud will retry automatically.",
+  });
+
+  result = { closed: true, sync: "conflict" };
+  response = await request();
+  expect(response!.status).toBe(200);
+  expect(await response!.json()).toEqual({
+    ok: true,
+    sync: "conflict",
+    warning: "Browser closed, but Cloud could not accept the saved session. The encrypted snapshot remains on this device.",
+  });
+
+  result = { closed: false, reason: "teardown_unconfirmed" };
+  response = await request();
+  expect(response!.status).toBe(500);
+  expect(await response!.json()).toEqual({ ok: false, error: "browser teardown unconfirmed" });
   s.close();
 });
 
