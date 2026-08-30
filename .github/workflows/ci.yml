@@ -1104,6 +1104,7 @@ jobs:
             const openMemberSettings = async () => {
               await page.getByRole("button", { name: "Open Account and Settings" }).click();
               await waitForText(["Fixture workspace"]);
+              await page.getByRole("tab", { name: "Team", exact: true }).click();
               const roleRow = page.locator(".settings-row").filter({ has: page.getByText("Role", { exact: true }) });
               await roleRow.waitFor({ state: "visible", timeout: 30_000 });
               if ((await roleRow.locator(":scope > strong").innerText()).trim() !== "member") {
