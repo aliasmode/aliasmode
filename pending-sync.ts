@@ -590,7 +590,7 @@ function decodeQueueKey(encodedKey: string): Buffer {
 }
 
 function syncFile(path: string): void {
-  const file = openSync(path, "r");
+  const file = openSync(path, "r+");
   try {
     fsyncSync(file);
   } finally {
