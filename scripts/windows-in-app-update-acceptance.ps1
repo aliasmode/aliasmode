@@ -197,6 +197,31 @@ function Get-InstalledBrowserProcesses([string]$InstallRoot) {
   return @($result)
 }
 
+function Get-CandidateUpdaterProcesses([string]$Version) {
+  $result = [Collections.Generic.List[Diagnostics.Process]]::new()
+  $expectedName = "AliasMode-$Version-installer.exe"
+  $expectedParentPrefix = "AliasMode-$Version-updater-"
+  $temporaryRoot = [IO.Path]::GetTempPath()
+  foreach ($record in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+    if (-not $record.ExecutablePath -or -not $record.CommandLine -or
+        -not (Test-PathWithin ([string]$record.ExecutablePath) $temporaryRoot) -or
+        -not [IO.Path]::GetFileName([string]$record.ExecutablePath).Equals(
+          $expectedName,
+          [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [IO.Path]::GetFileName([IO.Path]::GetDirectoryName([string]$record.ExecutablePath)).StartsWith(
+          $expectedParentPrefix,
+          [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not $record.CommandLine.Contains("/UPDATE", [StringComparison]::OrdinalIgnoreCase)) {
+      continue
+    }
+    $process = Get-Process -Id $record.ProcessId -ErrorAction SilentlyContinue
+    if ($process) { $result.Add($process) }
+  }
+  return @($result)
+}
+
 function Read-FixtureState([string]$StatePath) {
   try {
     if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) { return $null }
@@ -235,11 +260,15 @@ function Start-JavaScriptFixture([string]$RuntimePath, [string]$ScriptPath, [str
   return $process
 }
 
-function Invoke-VisibleUpdateNow(
+function Invoke-DesktopUiProbe(
   [string]$RuntimePath,
   [string]$ScriptPath,
   [int]$DebugPort,
-  [string]$ExpectedCandidateVersion
+  [string]$DashboardOrigin,
+  [string]$ExpectedCandidateVersion,
+  [string]$Action,
+  [string]$ExpectedResult,
+  [string]$ProfileName = ""
 ) {
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $RuntimePath
@@ -256,21 +285,25 @@ function Invoke-VisibleUpdateNow(
   try {
     $outputTask = $process.StandardOutput.ReadToEndAsync()
     $errorTask = $process.StandardError.ReadToEndAsync()
-    @{
+    $probeInput = [ordered]@{
       endpoint = "http://127.0.0.1:$DebugPort"
+      dashboardOrigin = $DashboardOrigin
       candidateVersion = $ExpectedCandidateVersion
-    } | ConvertTo-Json -Compress | ForEach-Object { $process.StandardInput.Write($_) }
+      action = $Action
+    }
+    if ($ProfileName) { $probeInput.profileName = $ProfileName }
+    $probeInput | ConvertTo-Json -Compress | ForEach-Object { $process.StandardInput.Write($_) }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit(120000)) {
       Stop-ProcessTree $process
-      throw "visible Update now probe timed out"
+      throw "desktop UI probe timed out"
     }
     $output = $outputTask.GetAwaiter().GetResult()
     [void]$errorTask.GetAwaiter().GetResult()
-    if ($process.ExitCode -ne 0) { throw "visible Update now probe failed" }
-    try { $result = $output | ConvertFrom-Json } catch { throw "visible Update now probe returned invalid output" }
-    if ($result.ok -ne $true -or $result.action -ne "visible-update-now") {
-      throw "visible Update now probe returned an unexpected result"
+    if ($process.ExitCode -ne 0) { throw "desktop UI probe failed" }
+    try { $result = $output | ConvertFrom-Json } catch { throw "desktop UI probe returned invalid output" }
+    if ($result.ok -ne $true -or $result.action -ne $ExpectedResult) {
+      throw "desktop UI probe returned an unexpected result"
     }
   } finally {
     if (-not (Test-ProcessExited $process)) { Stop-ProcessTree $process }
@@ -282,6 +315,7 @@ function Wait-CandidateRelaunch(
   [string]$AppPath,
   [string]$ExpectedCandidateVersion,
   [string]$ExpectedRoot,
+  [string]$WebViewRoot,
   $OldRecord,
   [Diagnostics.Process[]]$OldBrowserProcesses
 ) {
@@ -302,6 +336,8 @@ function Wait-CandidateRelaunch(
         if ($health.version -ne $ExpectedCandidateVersion) { continue }
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
+        $debugPort = Get-WebViewDebugPort $WebViewRoot
+        if ($debugPort -le 0) { continue }
         if (-not $oldDesktopExited -or -not $oldSidecarExited -or -not $oldBrowsersExited) { continue }
         if ($desktop.Id -eq $OldRecord.App.Id -or $sidecar.Id -eq $OldRecord.Sidecar.Id) {
           throw "candidate relaunch reused an old process ID"
@@ -320,6 +356,7 @@ function Wait-CandidateRelaunch(
           Sidecar = $sidecar
           Origin = $healthRecord.Origin
           Health = $health
+          DebugPort = $debugPort
         }
       }
     }
@@ -690,6 +727,7 @@ $observations = [ordered]@{
   oldSidecarExited = $false
   oldBrowserExited = $false
   candidateReady = $false
+  candidateDashboardReady = $false
   installPathPreserved = $false
   dataRootPreserved = $false
   configPreserved = $false
@@ -861,7 +899,14 @@ try {
   $sentinelHash = (Get-FileHash -LiteralPath $sentinelPath -Algorithm SHA256).Hash
 
   $stage = "clicking-visible-update"
-  Invoke-VisibleUpdateNow $runtime $probeScript $oldRecord.DebugPort $CandidateVersion
+  Invoke-DesktopUiProbe `
+    $runtime `
+    $probeScript `
+    $oldRecord.DebugPort `
+    $oldRecord.Origin `
+    $CandidateVersion `
+    "click-update" `
+    "visible-update-now"
   $observations.visibleUpdateClicked = $true
 
   $stage = "waiting-for-candidate-relaunch"
@@ -869,6 +914,7 @@ try {
     $appPath `
     $CandidateVersion `
     $appDataRoot `
+    $webViewRoot `
     $oldRecord `
     $oldBrowserProcesses
   $observations.oldDesktopExited = Test-ProcessExited $oldRecord.App
@@ -883,6 +929,18 @@ try {
     throw "installed browser process survived update handoff"
   }
   $observations.candidateReady = $true
+
+  $stage = "verifying-candidate-dashboard"
+  Invoke-DesktopUiProbe `
+    $runtime `
+    $probeScript `
+    $candidateRecord.DebugPort `
+    $candidateRecord.Origin `
+    $CandidateVersion `
+    "verify-candidate" `
+    "candidate-dashboard" `
+    $profileName
+  $observations.candidateDashboardReady = $true
 
   $stage = "verifying-candidate-state"
   $candidateAppPath = Get-ProcessPath $candidateRecord.App
@@ -936,6 +994,13 @@ try {
   foreach ($browserProcess in $oldBrowserProcesses) {
     try { Stop-ProcessTree $browserProcess } catch { $cleanupFailures.Add("browser process cleanup failed") }
   }
+  try {
+    foreach ($updaterProcess in @(Get-CandidateUpdaterProcesses $CandidateVersion)) {
+      Stop-ProcessTree $updaterProcess
+    }
+  } catch {
+    $cleanupFailures.Add("updater process cleanup failed")
+  }
   if ($fixtureProcess) {
     try { Stop-ProcessTree $fixtureProcess } catch { $cleanupFailures.Add("fixture process cleanup failed") }
   }
@@ -956,7 +1021,16 @@ try {
     $cleanupFailures.Add("isolated process sweep failed")
   }
 
-  if ($hostsChanged -and $hostsOriginalBytes) {
+  try {
+    foreach ($updaterRoot in @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory `
+      -Filter "AliasMode-$CandidateVersion-updater-*" -ErrorAction SilentlyContinue)) {
+      Remove-Item -LiteralPath $updaterRoot.FullName -Recurse -Force -ErrorAction Stop
+    }
+  } catch {
+    $cleanupFailures.Add("updater temporary state cleanup failed")
+  }
+
+  if ($hostsChanged -and $null -ne $hostsOriginalBytes) {
     try { [IO.File]::WriteAllBytes($hostsPath, $hostsOriginalBytes) } catch {
       $cleanupFailures.Add("hosts byte restoration failed")
     }
