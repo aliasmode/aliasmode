@@ -61,21 +61,30 @@
   --line-soft: #f0efeb;
   --line-strong: #d3cfc7;
 
-  /* AliasMode brand violet, taken from the site's own tokens (--violet family in
-     aliasmode-site/src/layouts/BaseLayout.astro). One accent drives every
+  /* AliasMode brand blue — the exact accent the live beta42 dashboard ships
+     (#3366e6 with its #eef3ff wash, #c5d6fb line and #284a9e ink), so the
+     redesign keeps the colour operators already know. One accent drives every
      primary action, link and selected state. */
-  --accent: #6d4aff;
-  --accent-hover: #5d38f5;
-  --accent-press: #4b2bd6;
-  --accent-soft: #f1ecff;
-  --accent-soft-hover: #e6dfff;
-  --accent-line: #ded4ff;
-  --accent-ink: #2e1b7a;
-  /* The lighter stop at the top of a filled button. */
-  --accent-lift: #8163ff;
+  --accent: #3366e6;
+  --accent-hover: #2a58cf;
+  --accent-press: #2349ad;
+  --accent-soft: #eef3ff;
+  --accent-soft-hover: #dfe9fd;
+  --accent-line: #c5d6fb;
+  --accent-ink: #284a9e;
+  /* Filled-control blue: the flat #3366e6 the live build paints, shared by
+     BOTH themes so the brand colour never shifts between light and dark. */
+  --accent-fill: #3366e6;
+  --accent-fill-hover: #2a58cf;
+  --accent-fill-press: #2349ad;
+  --on-fill: #ffffff;
+  /* Soft colored halo under filled accent controls — quiet at rest, a touch
+     stronger on hover. This is the only decorative shadow in the system. */
+  --glow: 0 4px 14px rgba(51, 102, 230, .22);
+  --glow-strong: 0 6px 18px rgba(51, 102, 230, .32);
 
-  /* The brand's companion to violet (--peach on the site). It is not decoration:
-     violet marks things you can DO (buttons, links, active tabs) and peach marks
+  /* The brand's companion accent (--peach on the site). It is not decoration:
+     blue marks things you can DO (buttons, links, active tabs) and peach marks
      IDENTITY — who this workspace belongs to and which numbers the operator
      chose. That split means a second colour adds meaning instead of noise. */
   --accent-2: #ff9e7a;
@@ -91,6 +100,9 @@
 
   --danger: #dc3b32;
   --danger-hover: #bd2a22;
+  /* Filled-control red, theme-stable for the same reason as --accent-fill. */
+  --danger-fill: #dc3b32;
+  --danger-fill-hover: #bd2a22;
   --danger-soft: #fdf3f2;
   --danger-line: #f7cbc7;
   --danger-ink: #b32620;
@@ -135,8 +147,6 @@
   --sh-md: 0 4px 14px rgba(var(--shadow-rgb), var(--shadow-a2)), 0 1px 3px rgba(var(--shadow-rgb), 0.05);
   --sh-pop: 0 14px 36px rgba(var(--shadow-rgb), var(--shadow-a3)), 0 2px 6px rgba(var(--shadow-rgb), 0.06);
   --sh-modal: 0 30px 74px rgba(var(--shadow-rgb), var(--shadow-a4)), 0 4px 12px rgba(var(--shadow-rgb), 0.10);
-  /* Inset top highlight that keeps filled buttons from looking flat. */
-  --sh-inset: inset 0 1px 0 rgba(255, 255, 255, 0.18);
   --sh-field: inset 0 1px 1.5px rgba(var(--shadow-rgb), 0.03);
   --scroll-thumb: #d3cfc7;
   --scroll-thumb-hover: #b3aea5;
@@ -145,7 +155,7 @@
      block swaps the whole image instead. */
   --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2376736d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
 
-  --ring: 0 0 0 3px rgba(109, 74, 255, 0.18);
+  --ring: 0 0 0 3px rgba(51, 102, 230, 0.18);
   --ring-danger: 0 0 0 3px rgba(220, 59, 50, 0.15);
   --ease: cubic-bezier(.2, .8, .3, 1);
 
@@ -240,29 +250,34 @@ button:disabled { cursor: default; }
 .btn .icon { color: var(--muted); transition: color .13s var(--ease); }
 .btn:hover:not(:disabled) .icon { color: currentColor; }
 
-/* Filled variants share one recipe: gradient body, darker rim, top highlight. */
+/* The filled primary is flat — the live build's exact blue, identical in both
+   themes; the glow is its only decoration. */
 .btn.primary {
-  color: var(--on-accent); background: linear-gradient(180deg, var(--accent-lift), var(--accent));
-  border-color: var(--accent-hover);
-  box-shadow: var(--sh-inset), 0 1px 2px rgba(109, 74, 255, .30);
+  color: var(--on-fill); background: var(--accent-fill);
+  border-color: var(--accent-fill);
+  box-shadow: var(--glow);
 }
 .btn.primary .icon, .btn.primary:hover:not(:disabled) .icon { color: currentColor; }
 .btn.primary:hover:not(:disabled) {
-  color: var(--on-accent); background: linear-gradient(180deg, var(--accent), var(--accent-hover));
-  border-color: var(--accent-press); box-shadow: var(--sh-inset), 0 2px 7px rgba(109, 74, 255, .34);
+  color: var(--on-fill); background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover); box-shadow: var(--glow-strong);
 }
-.btn.primary:active:not(:disabled) { background: var(--accent-press); box-shadow: inset 0 1px 2px rgba(15, 23, 42, .22); }
+.btn.primary:active:not(:disabled) { background: var(--accent-fill-press); box-shadow: none; }
 
+/* The filled danger matches the primary's recipe: flat, white label, the same
+   red in both themes (the dark theme's lifted --danger is for text, too pale
+   to hold white at this size). */
 .btn.solid-danger {
-  color: var(--on-accent); background: linear-gradient(180deg, var(--danger-lift), var(--danger));
-  border-color: var(--danger-hover); box-shadow: var(--sh-inset), 0 1px 2px rgba(220, 59, 50, .26);
+  color: var(--on-fill); background: var(--danger-fill);
+  border-color: var(--danger-fill);
+  box-shadow: 0 1px 2px rgba(220, 59, 50, .26);
 }
 .btn.solid-danger .icon, .btn.solid-danger:hover:not(:disabled) .icon { color: currentColor; }
 .btn.solid-danger:hover:not(:disabled) {
-  color: var(--on-accent); background: linear-gradient(180deg, var(--danger), var(--danger-hover));
-  border-color: var(--danger-hover); box-shadow: var(--sh-inset), 0 2px 7px rgba(220, 59, 50, .30);
+  color: var(--on-fill); background: var(--danger-fill-hover);
+  border-color: var(--danger-fill-hover); box-shadow: 0 2px 7px rgba(220, 59, 50, .30);
 }
-.btn.solid-danger:active:not(:disabled) { background: var(--danger-hover); box-shadow: inset 0 1px 2px rgba(15, 23, 42, .22); }
+.btn.solid-danger:active:not(:disabled) { background: var(--danger-fill-hover); box-shadow: none; }
 
 /* Tinted variants: soft fill, no gradient — they sit beside filled buttons. */
 .btn.accent { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); box-shadow: none; }
@@ -350,70 +365,8 @@ button:disabled { cursor: default; }
 .platform-pill .glyph.pm-reddit { background: #ff4500; }
 .platform-pill .glyph.pm-other { background: var(--faint); }
 
-.health-badge {
-  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px;
-  border-radius: var(--r-pill);
-  border: 1px solid var(--line); background: var(--surface-hover); color: var(--muted);
-  font-size: 11.5px; font-weight: 600; line-height: 1; white-space: nowrap;
-}
-.health-badge::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
-.health-badge.alive { border-color: var(--success-line); background: var(--success-soft); color: var(--success-ink); }
-.health-badge.alive::before { background: var(--success); }
-.health-badge.suspended { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger-ink); }
-.health-badge.suspended::before { background: var(--danger); }
-
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; }
 .dot.on { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
-
-/* Disc palettes, keyed by the hue index the roster assigns. Hand-picked rather
-   than generated: an even hue sweep produces olive and mustard bands that look
-   muddy. Light rows get a pale fill with dark digits; dark rows invert the pair,
-   because white-on-pastel and dark-on-deep both fail at 10.5px.
-   The full set lives here so a theme swap is a stylesheet change, not a JS one. */
-.no-avatar[data-hue="0"] { --avatar: #c7d2fe; --avatar-ink: #3730a3; }
-.no-avatar[data-hue="1"] { --avatar: #bfdbfe; --avatar-ink: #1e40af; }
-.no-avatar[data-hue="2"] { --avatar: #bae6fd; --avatar-ink: #075985; }
-.no-avatar[data-hue="3"] { --avatar: #a5f3fc; --avatar-ink: #155e75; }
-.no-avatar[data-hue="4"] { --avatar: #99f6e4; --avatar-ink: #115e59; }
-.no-avatar[data-hue="5"] { --avatar: #a7f3d0; --avatar-ink: #065f46; }
-.no-avatar[data-hue="6"] { --avatar: #bbf7d0; --avatar-ink: #166534; }
-.no-avatar[data-hue="7"] { --avatar: #fed7aa; --avatar-ink: #9a3412; }
-.no-avatar[data-hue="8"] { --avatar: #fecaca; --avatar-ink: #991b1b; }
-.no-avatar[data-hue="9"] { --avatar: #fecdd3; --avatar-ink: #9f1239; }
-.no-avatar[data-hue="10"] { --avatar: #fbcfe8; --avatar-ink: #9d174d; }
-.no-avatar[data-hue="11"] { --avatar: #f5d0fe; --avatar-ink: #86198f; }
-.no-avatar[data-hue="12"] { --avatar: #e9d5ff; --avatar-ink: #6b21a8; }
-.no-avatar[data-hue="13"] { --avatar: #ddd6fe; --avatar-ink: #5b21b6; }
-:root[data-theme="dark"] .no-avatar[data-hue="0"] { --avatar: #312e81; --avatar-ink: #c7d2fe; }
-:root[data-theme="dark"] .no-avatar[data-hue="1"] { --avatar: #1e3a8a; --avatar-ink: #bfdbfe; }
-:root[data-theme="dark"] .no-avatar[data-hue="2"] { --avatar: #0c4a6e; --avatar-ink: #bae6fd; }
-:root[data-theme="dark"] .no-avatar[data-hue="3"] { --avatar: #164e63; --avatar-ink: #a5f3fc; }
-:root[data-theme="dark"] .no-avatar[data-hue="4"] { --avatar: #134e4a; --avatar-ink: #99f6e4; }
-:root[data-theme="dark"] .no-avatar[data-hue="5"] { --avatar: #064e3b; --avatar-ink: #a7f3d0; }
-:root[data-theme="dark"] .no-avatar[data-hue="6"] { --avatar: #14532d; --avatar-ink: #bbf7d0; }
-:root[data-theme="dark"] .no-avatar[data-hue="7"] { --avatar: #7c2d12; --avatar-ink: #fed7aa; }
-:root[data-theme="dark"] .no-avatar[data-hue="8"] { --avatar: #7f1d1d; --avatar-ink: #fecaca; }
-:root[data-theme="dark"] .no-avatar[data-hue="9"] { --avatar: #881337; --avatar-ink: #fecdd3; }
-:root[data-theme="dark"] .no-avatar[data-hue="10"] { --avatar: #831843; --avatar-ink: #fbcfe8; }
-:root[data-theme="dark"] .no-avatar[data-hue="11"] { --avatar: #701a75; --avatar-ink: #f5d0fe; }
-:root[data-theme="dark"] .no-avatar[data-hue="12"] { --avatar: #581c87; --avatar-ink: #e9d5ff; }
-:root[data-theme="dark"] .no-avatar[data-hue="13"] { --avatar: #4c1d95; --avatar-ink: #ddd6fe; }
-
-/* The roster identity avatar: colored disc carrying the last 4 of the No. */
-.no-avatar {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; flex: 0 0 auto; border-radius: 50%;
-  color: var(--avatar-ink, #475569); font-size: 10.5px; font-weight: 700; letter-spacing: -.2px;
-  font-variant-numeric: tabular-nums;
-  /* Soft tint from the profile, digits in the matching darker ink. The ring is
-     the same ink at low alpha so the disc keeps an edge against white rows. */
-  background: var(--avatar, #e2e8f0);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--avatar-ink, #475569) 18%, transparent);
-}
-.no-avatar.running {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--avatar-ink, #475569) 18%, transparent),
-    0 0 0 2px var(--surface), 0 0 0 4px var(--success-line);
-}
 
 /* Tooltip on hover for icon-only controls. */
 .tip { position: relative; }
@@ -462,14 +415,6 @@ button:disabled { cursor: default; }
 .popover label.pop-item input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
 .popover .pop-sep { height: 1px; margin: 4px 0; background: var(--line); }
 
-/* With nothing selected the bulk actions must not shout: strip their fill so the
-   toolbar reads as inert until the operator picks a row. */
-.toolbar .btn.primary:disabled, .toolbar .btn.solid-danger:disabled {
-  color: var(--faint); background: var(--surface); border-color: var(--line);
-  box-shadow: none; filter: none;
-}
-.toolbar .btn.primary:disabled .icon, .toolbar .btn.solid-danger:disabled .icon { color: var(--faint); }
-
 /* Popover placement relative to its .menuwrap anchor. */
 .popover.below-right { top: calc(100% + 6px); right: 0; }
 .popover.below-left { top: calc(100% + 6px); left: 0; }
@@ -481,9 +426,17 @@ button:disabled { cursor: default; }
    App shell
    ========================================================================== */
 
+/* On a very wide monitor the whole shell — sidebar, header and content — caps
+   and centers as one frame, so nothing pins to a far screen edge while the
+   roster sits in the middle. 1704 = sidebar 232 + card 1440 + its margins. */
 .app {
   height: 100%; display: flex; background: var(--bg);
   position: relative; overflow: hidden;
+  max-width: 1704px; margin: 0 auto;
+}
+@media (min-width: 1705px) {
+  /* Once the cap engages, hairlines define the frame against the canvas. */
+  .app { border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 }
 
 /* Sidebar ------------------------------------------------------------------ */
@@ -547,7 +500,12 @@ button:disabled { cursor: default; }
   display: inline-flex; align-items: center; gap: 9px; min-width: 0;
   color: var(--ink); font-size: 16px; font-weight: 700; letter-spacing: -0.03em;
 }
-.brand img { width: 22px; height: 22px; flex: 0 0 auto; display: block; }
+/* Inline Alias Loop mark: the dark arm rides currentColor so it stays visible
+   on a dark surface; the loop arm follows the accent (the logo's own blue). */
+.alias-loop { flex: 0 0 auto; display: block; fill: none; color: var(--ink); }
+.alias-loop path { stroke-width: 64; stroke-linecap: round; stroke-linejoin: round; }
+.alias-loop .loop-accent { stroke: var(--accent); }
+.brand .alias-loop { width: 22px; height: 22px; }
 .appversion {
   margin-left: auto; padding: 2px 6px; border-radius: var(--r-xs);
   color: var(--faint); background: var(--surface-sunken);
@@ -568,12 +526,13 @@ button:disabled { cursor: default; }
   font-size: var(--t-base); font-weight: 500; text-align: left;
   transition: background .12s ease, color .12s ease;
 }
+a.navitem { box-sizing: border-box; text-decoration: none; cursor: pointer; }
 .navitem .icon { color: var(--muted); }
 .navitem:hover:not(:disabled) { background: var(--surface-hover); color: var(--ink); }
 .navitem:hover:not(:disabled) .icon { color: var(--ink-soft); }
 .navitem.active {
   background: var(--accent-soft); color: var(--accent-ink); font-weight: 650;
-  box-shadow: inset 0 0 0 1px rgba(109, 74, 255, .12);
+  box-shadow: inset 0 0 0 1px rgba(51, 102, 230, .12);
 }
 .navitem.active .icon { color: var(--accent); }
 .navitem:disabled { opacity: .5; }
@@ -606,7 +565,7 @@ button:disabled { cursor: default; }
 }
 .folder .icon { color: var(--faint); }
 .folder:hover { background: var(--surface-hover); color: var(--ink); }
-.folder.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 650; box-shadow: inset 0 0 0 1px rgba(109, 74, 255, .12); }
+.folder.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 650; box-shadow: inset 0 0 0 1px rgba(51, 102, 230, .12); }
 .folder.active .icon { color: var(--accent); }
 .folder .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder .cnt {
@@ -647,7 +606,7 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
 }
 .newgroup > button:not(.newgroup):hover { background: var(--surface-hover); color: var(--ink); }
 
-.sidefoot { display: flex; flex-direction: column; gap: 2px; padding: 10px 2px 0; margin-top: 10px; border-top: 1px solid var(--line); }
+.sidefoot { display: flex; flex-direction: column; gap: 2px; padding: 10px 2px 0; margin-top: 10px; border-top: 1px solid var(--line-soft); }
 
 /* Credit block: one quiet row of provenance, the two community links beside it,
    and the wordmark underneath — the site's footer order, scaled to the rail. */
@@ -677,13 +636,13 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
 .projectlink .brandmark { width: 13px; height: 13px; }
 .projectlink:hover { color: var(--accent-ink); background: var(--accent-soft); }
 
-/* The site's footer wordmark, scaled to the rail: violet clipped to the glyphs.
-   The gradient bottoms out well above zero — fading it to nothing made the word
-   look cut off by the window edge rather than deliberately faint. */
+/* The site's footer wordmark, scaled to the rail: brand blue clipped to the
+   glyphs. The gradient bottoms out well above zero — fading it to nothing made
+   the word look cut off by the window edge rather than deliberately faint. */
 .footer-mark {
   grid-column: 1 / -1;
   margin: 6px 0 0; padding: 0;
-  background-image: linear-gradient(180deg, rgba(109, 74, 255, .34), rgba(109, 74, 255, .12));
+  background-image: linear-gradient(180deg, rgba(51, 102, 230, .34), rgba(51, 102, 230, .12));
   -webkit-background-clip: text; background-clip: text; color: transparent;
   font-size: 23px; font-weight: 800; letter-spacing: -.045em; line-height: 1.15;
   text-align: center; white-space: nowrap; user-select: none;
@@ -720,7 +679,7 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; flex: 0 0 auto; border-radius: 50%;
   color: var(--on-accent); background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3), 0 1px 2px rgba(109, 74, 255, .28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3), 0 1px 2px rgba(51, 102, 230, .28);
 }
 .account-button .avatar .icon { width: 15px; height: 15px; }
 .account-button .who { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
@@ -728,9 +687,14 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
 .account-button .who span { color: var(--faint); font-size: 10.5px; }
 .account-button > .icon { color: var(--faint); }
 
-/* Filter row + selection toolbar live on one raised card with the table. */
+/* Filter row + selection toolbar live on one raised card with the table.
+   The card caps at a readable width and centers on a big monitor: a six-column
+   roster cannot fill 2500px gracefully — stretched that far, the last data
+   column and the action buttons drift apart. Symmetric canvas on both sides
+   reads deliberate; one giant gap inside the table reads broken. */
 .workspace {
-  flex: 1; min-height: 0; margin: 14px 16px 16px;
+  flex: 1; min-height: 0; margin: 14px auto 16px;
+  width: min(1440px, 100% - 32px);
   display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--r-xl); box-shadow: var(--sh-sm); overflow: hidden;
@@ -742,15 +706,15 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
   padding: 13px 14px; border-bottom: 1px solid var(--line-soft);
 }
 .filterbar .group-filter { width: 168px; flex: 0 0 auto; }
-.filterbar .health-filter { width: 132px; flex: 0 0 auto; }
 .filterbar .searchfield { max-width: 420px; }
 
 .toolbar {
   display: flex; align-items: center; gap: 6px; flex: 0 0 auto; flex-wrap: wrap;
-  padding: 9px 14px; border-bottom: 1px solid var(--line);
+  padding: 9px 14px; border-bottom: 1px solid var(--line-soft);
   background: var(--surface-sunken);
-  transition: background .15s ease;
+  animation: toolbar-in .15s var(--ease);
 }
+@keyframes toolbar-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .toolbar.active { background: var(--accent-soft); border-bottom-color: var(--accent-line); }
 .toolbar .selcount {
   display: inline-flex; align-items: center; gap: 6px; height: 30px; margin-right: 2px; padding: 0 10px;
@@ -772,7 +736,7 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
    offering actions, so they sit on the card's top edge like a page header. */
 .tabs {
   display: flex; align-items: stretch; gap: 2px; flex: 0 0 auto;
-  padding: 0 14px; border-bottom: 1px solid var(--line);
+  padding: 0 14px; border-bottom: 1px solid var(--line-soft);
 }
 .tab {
   position: relative; padding: 14px 12px 12px;
@@ -809,7 +773,7 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
   display: inline-flex; align-items: center; justify-content: center;
   width: 46px; height: 46px; flex: 0 0 auto; border-radius: 50%;
   color: var(--on-accent); background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3), 0 1px 3px rgba(109, 74, 255, .26);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .3), 0 1px 3px rgba(51, 102, 230, .26);
 }
 .identity-lines { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
 .identity-lines b { color: var(--ink); font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -817,67 +781,7 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
 
 .pagefoot {
   display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
-  padding: 12px 20px; border-top: 1px solid var(--line); background: var(--surface-sunken);
-}
-
-/* Profile form page --------------------------------------------------------- */
-
-/* One scrolling column of sections plus a sticky summary. The tabs above are a
-   scroll-spy over these sections, not separate panes — so an operator can either
-   jump or just scroll, and the strip always says where they are. */
-/* Form and summary travel together as one centred group: capping the fields
-   while letting their column fill just moves the dead space from one side of
-   the aside to the other. Centring makes the leftover symmetric and deliberate. */
-.formpage {
-  flex: 1; min-height: 0; display: flex; align-items: flex-start;
-  justify-content: center; overflow-y: auto;
-}
-/* The column grows to fill the card so the Overview stays pinned to the right
-   edge; the fields inside keep a readable measure instead of stretching. */
-.formmain {
-  flex: 0 1 660px; min-width: 0; display: flex; flex-direction: column; gap: 22px;
-  padding: 20px;
-}
-.formmain > * { flex: 0 0 auto; }
-
-.formsection { display: flex; flex-direction: column; gap: 14px; scroll-margin-top: 12px; }
-.formsection > h3 {
-  display: flex; align-items: center; gap: 8px; margin: 0;
-  padding-bottom: 10px; border-bottom: 1px solid var(--line-soft);
-  color: var(--ink); font-size: 14px; font-weight: 650; letter-spacing: -0.02em;
-}
-.formsection > h3 .muted { font-size: 11.5px; font-weight: 500; letter-spacing: 0; }
-.formsection > h3 .automatic-badge { margin-left: 0; }
-.formsection .fingerprint-grid { padding: 0; border-top: 0; }
-
-.formaside {
-  position: sticky; top: 20px; align-self: flex-start;
-  flex: 0 0 268px; width: 268px; max-height: calc(100% - 40px); overflow-y: auto;
-  display: flex; flex-direction: column; gap: 10px;
-  margin: 20px 20px 20px 0; padding: 14px;
-  background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-lg);
-}
-.formaside > h3 { margin: 0; color: var(--ink); font-size: 12.5px; font-weight: 650; }
-.aside-rows { display: flex; flex-direction: column; }
-.aside-rows > div {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
-  padding: 6px 0; border-top: 1px solid var(--line);
-}
-.aside-rows > div:first-child { border-top: 0; }
-.aside-rows span { flex: 0 0 auto; color: var(--muted); font-size: 11.5px; }
-.aside-rows b {
-  min-width: 0; color: var(--ink); font-size: 11.5px; font-weight: 600; text-align: right;
-  overflow-wrap: anywhere;
-}
-.aside-rows b.auto { color: var(--muted); font-weight: 500; }
-
-.pagehead .backbtn { margin-left: -6px; padding: 0 10px 0 6px; }
-.pagehead .chip.mono { font-family: var(--mono); font-size: 11.5px; }
-
-@media (max-width: 1180px) {
-  .formpage { flex-direction: column; align-items: stretch; justify-content: flex-start; }
-  .formaside { position: static; width: auto; flex: 0 0 auto; margin: 0 20px 20px; }
-  .formmain { flex: 0 0 auto; }
+  padding: 12px 20px; border-top: 1px solid var(--line-soft); background: var(--surface-sunken);
 }
 
 /* Table -------------------------------------------------------------------- */
@@ -905,13 +809,13 @@ button.newgroup:disabled { color: var(--faint); border-color: var(--line); backg
 .profile-table thead th.sorted .sortglyph { color: var(--accent); opacity: 1; }
 
 .profile-table tbody td {
-  padding: 0 12px; height: 52px;
+  padding: 0 12px; height: 46px;
   border-bottom: 1px solid var(--line-soft);
   vertical-align: middle; white-space: nowrap;
 }
 /* Only the text columns clip: applying this to every cell makes Chrome paint a
-   stray ellipsis next to the checkbox and inside the action cell. */
-td.col-no, td.col-name, td.col-group, td.col-tags, td.col-proxy, td.col-created, td.col-opened { overflow: hidden; text-overflow: ellipsis; }
+   stray ellipsis next to the checkbox cell. */
+td.col-no, td.col-name, td.col-group, td.col-tags, td.col-proxy { overflow: hidden; text-overflow: ellipsis; }
 .profile-table tbody tr { transition: background .1s ease; }
 .profile-table tbody tr:hover td { background: var(--surface-sunken); }
 .profile-table tbody tr.selected td { background: var(--accent-soft); }
@@ -923,26 +827,29 @@ td.col-no, td.col-name, td.col-group, td.col-tags, td.col-proxy, td.col-created,
 th.chk, td.chk { width: 44px; padding-left: 14px; padding-right: 0; }
 th.chk input, td.chk input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
 
-.no-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.no-cell .no-text {
+td.col-no .no-text {
   min-width: 0; overflow: hidden; text-overflow: ellipsis;
   color: var(--muted); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums;
 }
 /* A custom NO. is operator-set, so it takes the identity accent to separate it
    from the serial the store assigned. */
-.no-cell .no-text.custom { color: var(--accent-2-ink); }
+td.col-no .no-text.custom { color: var(--accent-2-ink); }
 
 .name-cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .name-cell .n { color: var(--ink); font-weight: 600; font-size: var(--t-base); letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; }
 .name-cell .sub { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11.5px; font-family: var(--mono); letter-spacing: -0.01em; }
 .name-cell .sub .live { display: inline-flex; align-items: center; gap: 4px; color: var(--success-ink); font-family: var(--font); font-weight: 600; }
+.name-cell .sub .lockedby {
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--warn-ink); font-family: var(--font); font-size: 11px; font-weight: 550; white-space: nowrap;
+}
 
-td.col-tags .chip + .chip { margin-left: 4px; }
-.proxy-cell { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
-.proxy-cell.bad { color: var(--danger-ink); font-family: var(--font); font-weight: 550; }
-/* Action pins to the right edge so Open stays reachable however far the roster
-   is scrolled sideways. A sticky cell has no row behind it, so each row state
-   has to repaint its own background here or the scrolled content shows through. */
+/* Every row action sits together at the row's end: quiet icon buttons for
+   2FA copy, Edit and Bring to front, then the filled Open/Close verb. Right-
+   aligned so Open/Close hugs the same edge on every row.
+   The cell pins to the right edge so Open stays reachable however far a small
+   window scrolls the roster sideways. A sticky cell has no row behind it, so
+   each row state repaints its own background or scrolled content shows through. */
 th.col-action, td.col-action {
   position: sticky; right: 0; z-index: 1; text-align: right;
   background: var(--surface);
@@ -956,17 +863,16 @@ th.col-action, td.col-action {
 .tablewrap.scrolled td.col-action::before {
   content: ""; position: absolute; top: 0; bottom: 0; left: -14px; width: 14px;
   pointer-events: none;
-  background: linear-gradient(to right, rgba(27, 26, 24, 0), rgba(27, 26, 24, .07));
+  background: linear-gradient(to right, rgba(var(--shadow-rgb), 0), rgba(var(--shadow-rgb), .09));
 }
-/* Timestamps line up when the digits do. */
-td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabular-nums; }
-
-.rowactions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.rowactions .lockedby {
-  display: inline-flex; align-items: center; gap: 5px;
-  color: var(--warn-ink); font-size: 11.5px; font-weight: 550; white-space: nowrap;
-}
+.rowactions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; }
+.rowactions .iconbtn { width: 28px; height: 28px; border-radius: var(--r-sm); }
+.rowactions .btn { min-width: 76px; justify-content: center; }
 .rowactions .twofa.flash { color: var(--success-ink); background: var(--success-soft); border-color: var(--success-line); }
+
+td.col-tags .chip + .chip { margin-left: 4px; }
+.proxy-cell { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.proxy-cell.bad { color: var(--danger-ink); font-family: var(--font); font-weight: 550; }
 
 .empty { height: 280px; text-align: center; vertical-align: middle; }
 .emptystate { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--muted); }
@@ -984,8 +890,8 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 /* Table footer / pagination ------------------------------------------------ */
 
 .statusbar {
-  display: flex; align-items: center; gap: 12px; flex: 0 0 auto;
-  padding: 9px 14px; border-top: 1px solid var(--line);
+  display: flex; align-items: center; gap: 12px; flex: 0 0 auto; flex-wrap: wrap;
+  padding: 9px 14px; border-top: 1px solid var(--line-soft);
   background: var(--surface-sunken); color: var(--muted); font-size: 12.5px;
 }
 .statusbar .stat { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -1016,7 +922,9 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 
 .error, .update-banner {
   display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
-  margin: 14px 16px -2px; padding: 11px 14px;
+  /* Tracks the workspace card's cap so banner and card edges line up. */
+  margin: 14px auto -2px; padding: 11px 14px;
+  width: min(1440px, 100% - 32px);
   border-radius: var(--r-lg); font-size: 12.5px;
 }
 .error { color: var(--danger-ink); background: var(--danger-soft); border: 1px solid var(--danger-line); }
@@ -1171,18 +1079,6 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 }
 .modal-err { color: var(--danger-ink); background: var(--danger-soft); border: 1px solid var(--danger-line); }
 .modal-ok { color: var(--success-ink); background: var(--success-soft); border: 1px solid var(--success-line); }
-
-/* Custom NO. editor -------------------------------------------------------- */
-
-.customno-preview {
-  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
-  background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-md);
-}
-.customno-preview .title {
-  min-width: 0; flex: 1; line-height: 1.55;
-  color: var(--ink-soft); font-size: 12.5px;
-}
-.customno-preview .title b { color: var(--ink); }
 
 /* Fingerprint disclosure --------------------------------------------------- */
 
@@ -1371,7 +1267,7 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
   border-radius: 20px; box-shadow: var(--sh-md);
 }
 .onboarding-brand { display: flex; align-items: center; gap: 9px; color: var(--ink); font-size: 15px; font-weight: 700; letter-spacing: -0.025em; }
-.onboarding-brand img { width: 24px; height: 24px; }
+.onboarding-brand .alias-loop { width: 24px; height: 24px; }
 .onboarding-brand span { color: var(--faint); font-size: 12px; font-weight: 500; letter-spacing: 0; }
 .onboarding-card h1 { margin: 26px 0 8px; font-size: 28px; line-height: 1.15; font-weight: 700; letter-spacing: -0.035em; }
 .onboarding-card > p { max-width: 460px; margin: 0 0 24px; color: var(--muted); font-size: 14px; line-height: 1.65; }
@@ -1392,19 +1288,21 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 }
 .mode-option strong { font-size: 15px; font-weight: 650; letter-spacing: -0.015em; }
 .mode-option span { color: var(--muted); font-size: 12.5px; line-height: 1.6; }
-.mode-option.primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
-.mode-option.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-.mode-option.primary span { color: var(--accent-line); }
-.mode-option.primary .badge { color: var(--on-accent); background: rgba(255, 255, 255, .18); }
+.mode-option.primary { color: var(--on-fill); background: var(--accent-fill); border-color: var(--accent-fill); }
+.mode-option.primary:hover:not(:disabled) { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
+/* Literal light blue: the tile's fill is the same in both themes, so its
+   secondary text must not follow the theme-dependent accent-line. */
+.mode-option.primary span { color: #c5d6fb; }
+.mode-option.primary .badge { color: var(--on-fill); background: rgba(255, 255, 255, .18); }
 .mode-option:disabled { opacity: .6; cursor: wait; }
 
 .mode-primary {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   height: 38px; padding: 0 18px;
-  color: var(--on-accent); background: var(--accent); border: 1px solid var(--accent); border-radius: var(--r-md);
-  font-size: 13px; font-weight: 600;
+  color: var(--on-fill); background: var(--accent-fill); border: 1px solid var(--accent-fill); border-radius: var(--r-md);
+  font-size: 13px; font-weight: 600; box-shadow: var(--glow);
 }
-.mode-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.mode-primary:hover:not(:disabled) { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); box-shadow: var(--glow-strong); }
 .mode-primary:disabled { opacity: .55; cursor: default; }
 .mode-secondary {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -1442,14 +1340,20 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
    Responsive
    ========================================================================== */
 
-/* No breakpoint hides a column any more: the roster scrolls sideways instead,
-   and the column chooser is the only thing that decides what is on screen. */
+/* No breakpoint hides a column any more: the roster scrolls sideways instead
+   (with Action pinned right), and the column chooser is the only thing that
+   decides what is on screen. Below 760px the app forces the sidebar into the
+   icon rail (RAIL_MEDIA in app.tsx) rather than hiding navigation. */
 @media (max-width: 920px) {
   :root { --sidebar-w: 200px; }
-  .workspace { margin: 10px; }
+  .workspace { margin: 10px auto; width: calc(100% - 20px); }
+}
+@media (max-width: 860px) {
+  /* The account chip keeps its avatar; the text is what crowds the header. */
+  .account-button .who, .account-button > .icon { display: none; }
+  .account-button { max-width: none; padding: 0 5px; }
 }
 @media (max-width: 760px) {
-  .sidebar { display: none; }
   .mode-options, .fingerprint-grid { grid-template-columns: 1fr; }
   .onboarding-card { padding: 26px 22px; }
 }
@@ -1483,34 +1387,44 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  /* Neutral charcoal, not a tinted navy. Pushing the brand violet into the
-     surfaces made every panel look faintly purple and muddied the accent it was
-     meant to echo — on a neutral ground the violet actually reads as violet. */
-  --bg: #0f0f12;
-  --surface: #17171b;
-  --surface-sunken: #1c1c21;
-  --surface-hover: #222229;
-  --surface-active: #2b2b33;
+  /* Neutral charcoal, not a tinted navy. Pushing the brand blue into the
+     surfaces would make every panel look faintly blue and muddy the accent it
+     is meant to echo — on a neutral ground the blue actually reads as blue.
+     The canvas sits two steps below the cards: dark mode needs the same
+     "cards floating on a canvas" hierarchy the light theme gets from stone
+     vs. white, or every region melts into one dark field. */
+  --bg: #0a0a0e;
+  --surface: #1a1a21;
+  --surface-sunken: #15151a;
+  --surface-hover: #24242c;
+  --surface-active: #2d2d37;
 
   --ink: #f1f1f4;
   --ink-soft: #c9c9d2;
   --muted: #90909d;
   --faint: #66666f;
 
-  --line: #2a2a32;
-  --line-soft: #232329;
-  --line-strong: #3c3c47;
+  --line: #2e2e38;
+  --line-soft: #26262e;
+  --line-strong: #41414e;
 
-  /* The accent lifts on dark: #6d4aff is too dense against a near-black ground
+  /* The accent lifts on dark: #3366e6 is too dense against a near-black ground
      to read as the same colour the light theme uses. */
-  --accent: #8b6dff;
-  --accent-hover: #9d84ff;
-  --accent-press: #7a58ff;
-  --accent-lift: #9d84ff;
-  --accent-soft: #1e1a2e;
-  --accent-soft-hover: #272040;
-  --accent-line: #3d3363;
-  --accent-ink: #c9b8ff;
+  --accent: #5e88f0;
+  --accent-hover: #7a9df4;
+  --accent-press: #4b74e8;
+  /* The fill itself stays the light theme's #3366e6 — only its hover flips
+     LIGHTER, because darker-on-hover sinks into a dark ground. */
+  --accent-fill-hover: #4573e9;
+  --accent-fill-press: #2a58cf;
+  --accent-soft: #151f38;
+  --accent-soft-hover: #1b2949;
+  --accent-line: #2b3f6e;
+  --accent-ink: #b3c6f8;
+  /* Dark glows can afford a little more presence — they replace the drop
+     shadows this theme barely renders. */
+  --glow: 0 4px 16px rgba(94, 136, 240, .30);
+  --glow-strong: 0 6px 20px rgba(94, 136, 240, .42);
 
   --accent-2: #ff9e7a;
   --accent-2-hover: #ffb497;
@@ -1535,30 +1449,31 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
   --warn-line: #543d1c;
   --warn-ink: #f3c07a;
 
-  /* Elevation without drop shadows: a raised control is simply lighter. */
-  --ctl: linear-gradient(180deg, #24242b, #1d1d22);
-  --ctl-hover: linear-gradient(180deg, #2b2b33, #24242b);
-  --ctl-border: #33333d;
-  --on-accent: #14121c;
-  --raised: #2b2b33;
+  /* Elevation without drop shadows: a raised control is simply lighter. The
+     gradient and border stay close in value — a high-contrast rim made every
+     dark button read as a harsh outlined box. */
+  --ctl: linear-gradient(180deg, #2a2a32, #232329);
+  --ctl-hover: linear-gradient(180deg, #31313b, #2a2a32);
+  --ctl-border: #32323c;
+  --on-accent: #0a1220;
+  --raised: #2f2f39;
 
   --shadow-rgb: 0, 0, 0;
   --shadow-a1: 0.22;
   --shadow-a2: 0.34;
   --shadow-a3: 0.52;
   --shadow-a4: 0.66;
-  --sh-inset: inset 0 1px 0 rgba(255, 255, 255, 0.09);
   --sh-field: inset 0 1px 2px rgba(0, 0, 0, 0.25);
 
   --scroll-thumb: #3a3a44;
   --scroll-thumb-hover: #4b4b58;
   --backdrop: rgba(6, 6, 8, .66);
-  --ring: 0 0 0 3px rgba(139, 109, 255, 0.32);
+  --ring: 0 0 0 3px rgba(94, 136, 240, 0.32);
   --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2390909d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
 }
 
 
-/* A filled button's label is dark-on-violet here, so its icon must follow. */
+/* A filled button's icon must track its label colour in this theme too. */
 :root[data-theme="dark"] .btn.primary .icon,
 :root[data-theme="dark"] .btn.solid-danger .icon { color: currentColor; }
 
@@ -1567,6 +1482,11 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 :root[data-theme="dark"] .platform-pill .glyph.pm-tiktok {
   background: #f4f4f5; color: #0b0b0b;
 }
+
+/* Chips drop their hairline on dark: a border-and-fill box per tag made every
+   row read as clutter. The tint alone carries the shape. */
+:root[data-theme="dark"] .chip { background: var(--surface-hover); border-color: transparent; }
+:root[data-theme="dark"] .filechip { border-color: transparent; }
 
 /* The tooltip is ink-on-surface; inverted it would be invisible. */
 :root[data-theme="dark"] .tip::after { background: var(--surface-active); color: var(--ink); }
@@ -1578,12 +1498,12 @@ td.stamp { color: var(--ink-soft); font-size: 12px; font-variant-numeric: tabula
 
 /* The wordmark reads as a faint glow rather than a faint shadow. */
 :root[data-theme="dark"] .footer-mark {
-  background-image: linear-gradient(180deg, rgba(139, 109, 255, .55), rgba(139, 109, 255, .16));
+  background-image: linear-gradient(180deg, rgba(94, 136, 240, .55), rgba(94, 136, 240, .16));
 }
 
 :root[data-theme="dark"] .onboarding {
   background: radial-gradient(120% 90% at 50% 0%, #1e1e25 0%, var(--bg) 62%);
 }
-:root[data-theme="dark"] .dropzone { background: rgba(139, 109, 255, .12); }
+:root[data-theme="dark"] .dropzone { background: rgba(94, 136, 240, .12); }
 :root[data-theme="dark"] .navitem:hover:not(:disabled),
 :root[data-theme="dark"] .folder:hover { background: var(--surface-hover); }

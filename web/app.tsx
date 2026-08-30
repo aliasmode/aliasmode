@@ -1,12 +1,10 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import aliasLoopUrl from "./alias-loop.svg";
 import { parsePastedProxy } from "./proxy-input.ts";
 import {
   type UiProfile,
   type HealthSource,
-  type HealthStatus,
   type DiagnoseReport,
   type EditProfile,
   type Extension,
@@ -187,12 +185,10 @@ const REFRESH_MS = 3000;
 const PROFILE_PAGE_SIZE = 50;
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const PAGE_TITLES: Record<"profiles" | "settings" | "extensions" | "create" | "edit", string> = {
+const PAGE_TITLES: Record<"profiles" | "settings" | "extensions", string> = {
   profiles: "Profiles",
   settings: "Settings",
   extensions: "Extensions",
-  create: "New profile",
-  edit: "Edit profile",
 };
 
 const SETTINGS_TABS = [
@@ -213,16 +209,14 @@ const MAX_CUSTOM_NO = 12;
  * Only the checkbox column is fixed; everything else can be hidden.
  */
 const COLUMNS = [
-  { key: "no", label: "No.", sort: true, width: 108 },
+  { key: "no", label: "No.", sort: true, width: 96 },
   { key: "name", label: "Name", sort: true, width: 220 },
   { key: "group", label: "Group", sort: true, width: 120 },
   { key: "platform", label: "Platform", sort: true, width: 128 },
   { key: "tags", label: "Tags", sort: false, width: 140 },
   { key: "proxy", label: "Proxy", sort: true, width: 160 },
-  { key: "health", label: "Health", sort: true, width: 100 },
-  { key: "created", label: "Created", sort: true, width: 116 },
-  { key: "opened", label: "Last opened", sort: true, width: 132 },
-  { key: "action", label: "Action", sort: false, width: 160 },
+  /* Every row action lives here, beside Open/Close — no hover reveal. */
+  { key: "action", label: "Action", sort: false, width: 190 },
 ] as const;
 
 /** Width of the always-present select-all checkbox column. */
@@ -230,29 +224,6 @@ const CHECKBOX_COLUMN_WIDTH = 44;
 
 type ColumnKey = (typeof COLUMNS)[number]["key"];
 type SortKey = ColumnKey | "status";
-
-/**
- * Roster timestamps. A profile imported before the store tracked these carries 0,
- * which is "unknown", not "1970" — so it renders as an em dash.
- */
-function formatStamp(ms: number | undefined, withTime: boolean): string {
-  if (!ms) return "—";
-  const date = new Date(ms);
-  if (!Number.isFinite(date.getTime())) return "—";
-  // "Aug 26, 26" reads as two competing numbers, so the year only appears when
-  // it is not the current one — which is the case that actually needs it.
-  const sameYear = date.getFullYear() === new Date().getFullYear();
-  const day = date.toLocaleDateString(
-    undefined,
-    sameYear ? { month: "short", day: "numeric" } : { year: "numeric", month: "short", day: "numeric" },
-  );
-  if (!withTime) return day;
-  return `${day} ${date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
-}
-
-function fullStamp(ms: number | undefined): string {
-  return ms ? new Date(ms).toLocaleString() : "Unknown";
-}
 
 const THEME_KEY = "aliasmode.shell.theme";
 
@@ -267,11 +238,24 @@ type ThemeChoice = (typeof THEMES)[number]["key"];
 function readTheme(): ThemeChoice {
   try {
     const stored = localStorage.getItem(THEME_KEY);
-    return stored === "light" || stored === "dark" ? stored : "system";
-  } catch { return "system"; }
+    // Light is the out-of-the-box look; Dark and follow-the-OS System are
+    // opt-in from Settings, and whatever is chosen there sticks.
+    return stored === "dark" || stored === "system" ? stored : "light";
+  } catch { return "light"; }
 }
 
 const SIDEBAR_KEY = "aliasmode.shell.sidebarCollapsed";
+
+/**
+ * Below this width the sidebar always renders as the icon rail. Hiding it
+ * entirely (the old breakpoint behavior) left a small window with no
+ * navigation at all — this is a desktop app and the user sizes it freely.
+ */
+const RAIL_MEDIA = "(max-width: 760px)";
+
+function readRailForced(): boolean {
+  try { return window.matchMedia(RAIL_MEDIA).matches; } catch { return false; }
+}
 const HIDDEN_COLUMNS_KEY = "aliasmode.roster.hiddenColumns";
 const PAGE_SIZE_KEY = "aliasmode.roster.pageSize";
 
@@ -406,6 +390,7 @@ const ICONS = {
   filter: <path d="M4 5h16l-6 7v6l-4 2v-8z" />,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
   moon: <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />,
+  help: <><circle cx="12" cy="12" r="9" /><path d="M9.4 9.1a2.7 2.7 0 015.3.7c0 1.8-2.7 2.2-2.7 3.7" /><path d="M12 16.8v.3" /></>,
 } as const;
 
 type IconName = keyof typeof ICONS;
@@ -461,17 +446,17 @@ function useDismiss<T extends HTMLElement>(open: boolean, close: () => void) {
 }
 
 /**
- * How many disc colours exist. The colours themselves live in styles.css keyed
- * by `data-hue`, not here: a light disc wants a pale fill with dark digits and a
- * dark disc wants the inverse, and that is a theming concern, not a data one.
+ * The Alias Loop mark, inlined so it can follow the theme: the dark arm is
+ * near-black in the packaged SVG and would vanish on a dark surface, so here it
+ * takes currentColor (the theme's ink) and the loop arm takes the accent.
  */
-const AVATAR_HUES = 14;
-
-/** Deterministic per-profile hue so a roster looks identical across reloads. */
-function avatarHue(seed: string): number {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
-  return hash % AVATAR_HUES;
+function AliasLoop({ className }: { className?: string }) {
+  return (
+    <svg className={className ? `alias-loop ${className}` : "alias-loop"} viewBox="0 0 512 512" aria-hidden="true">
+      <path d="M152 96H320C380 96 416 136 416 196V316C416 376 376 416 316 416H196C136 416 96 376 96 316V288" stroke="currentColor" />
+      <path className="loop-accent" d="M96 288C96 240 136 208 184 208H280" stroke="#2457D6" />
+    </svg>
+  );
 }
 
 /**
@@ -486,40 +471,8 @@ function displayNo(profile: UiProfile, fallbackIndex: number): { value: string; 
   return { value: String(fallbackIndex + 1), custom: false };
 }
 
-/**
- * Identity disc for a roster row — the same "last 4 digits of the NO." cue the
- * launched browser carries in its window title, so a row and its window are
- * recognizably the same profile.
- */
-function ProfileAvatar({ profile, no }: { profile: UiProfile; no: string }) {
-  const digits = no.replace(/\D/g, "");
-  const label = digits ? digits.slice(-4) : (profile.name.trim().slice(0, 2).toUpperCase() || "··");
-  return (
-    <span
-      className={`no-avatar${profile.running ? " running" : ""}`}
-      data-hue={avatarHue(profile.id)}
-      title={profile.running ? `#${no} · running` : `#${no}`}
-    >
-      {label}
-    </span>
-  );
-}
-
 function StatusDot({ running }: { running: boolean }) {
   return <span className={`dot ${running ? "on" : ""}`} title={running ? "running" : "stopped"} />;
-}
-
-function HealthBadge({ profile }: { profile: UiProfile }) {
-  const status = profile.healthStatus ?? "no_data";
-  const labels: Record<HealthStatus, string> = {
-    suspended: "Suspended",
-    alive: "Alive",
-    no_data: "No data",
-  };
-  const observed = profile.healthObservedAt
-    ? `Observed ${new Date(profile.healthObservedAt).toLocaleString()}`
-    : "No fresh automation observation";
-  return <span className={`health-badge ${status}`} title={observed}>{labels[status]}</span>;
 }
 
 function HealthSources({ sources }: { sources: HealthSource[] }) {
@@ -739,9 +692,6 @@ function CopyField({ label, value, onChange }: { label: string; value: string; o
   );
 }
 
-/** The subset of automatic values worth surfacing in the form's Overview aside. */
-const OVERVIEW_FINGERPRINT_FIELDS = ["User agent", "Timezone", "WebRTC", "Fingerprint seed"];
-
 const AUTOMATIC_FINGERPRINT_FIELDS = [
   ["User agent", "Automatic"],
   ["Browser version", "Automatic · latest installed"],
@@ -758,14 +708,16 @@ const AUTOMATIC_FINGERPRINT_FIELDS = [
 function FingerprintSettings({
   screen,
   onScreenChange,
-  flat = false,
 }: {
   screen: string;
   onScreenChange: (value: string) => void;
-  /** Rendered inside a section that already has a heading — drop the disclosure. */
-  flat?: boolean;
 }) {
-  const grid = (
+  return (
+    <details className="fingerprint-settings">
+      <summary>
+        <span>Fingerprint settings</span>
+        <span className="automatic-badge">Automatic</span>
+      </summary>
       <div className="fingerprint-grid">
         <label className="fld">
           <span>Screen</span>
@@ -779,15 +731,6 @@ function FingerprintSettings({
         ))}
         <div className="hint">CloakBrowser keeps the locked values coordinated. Screen is the only fingerprint setting you can override.</div>
       </div>
-  );
-  if (flat) return grid;
-  return (
-    <details className="fingerprint-settings">
-      <summary>
-        <span>Fingerprint settings</span>
-        <span className="automatic-badge">Automatic</span>
-      </summary>
-      {grid}
     </details>
   );
 }
@@ -861,8 +804,10 @@ function App() {
   const [modeErr, setModeErr] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
   // "profiles" is the roster; "settings" replaces it in the same content area
-  // rather than opening a dialog — Settings outgrew a modal.
-  const [view, setView] = useState<"profiles" | "settings" | "extensions" | "create" | "edit">("profiles");
+  // rather than opening a dialog — Settings outgrew a modal. New profile and
+  // Edit stay dialogs: short forms, and a page felt like too much ceremony.
+  const [view, setView] = useState<"profiles" | "settings" | "extensions">("profiles");
+  const [showCreate, setShowCreate] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
   const [cloudEvents, setCloudEvents] = useState<CloudDiagnosticEvent[]>([]);
   const [cloudEventsBusy, setCloudEventsBusy] = useState(false);
@@ -885,7 +830,6 @@ function App() {
   const [teamBusy, setTeamBusy] = useState(false);
   const [teamErr, setTeamErr] = useState<string | null>(null);
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
-  const [healthFilter, setHealthFilter] = useState<"all" | HealthStatus>("all");
   const [appVersion, setAppVersion] = useState("");
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus | null>(null);
   const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
@@ -907,6 +851,8 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+  const [railForced, setRailForced] = useState(readRailForced);
+  const [tableScrolled, setTableScrolled] = useState(false);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   // Two error slots so an auto-refresh can't silently wipe why an action failed:
@@ -920,7 +866,6 @@ function App() {
   const [newMode, setNewMode] = useState(false);
   const [newGroup, setNewGroup] = useState("");
   const [dragging, setDragging] = useState(false);
-  const [activeSection, setActiveSection] = useState("general");
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<string | null>(null);
   const [form, setForm] = useState(BLANK_FORM);
@@ -932,6 +877,11 @@ function App() {
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [editErr, setEditErr] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
+  const [editLoading, setEditLoading] = useState(false);
+  // Cloud profile open on this device: edits land in the local cache and sync
+  // to Cloud with the running session — no expectedVersion handshake.
+  const [editLive, setEditLive] = useState(false);
+  const editFetchId = useRef<string | null>(null);
   const [editMobile, setEditMobile] = useState<NonNullable<EditProfile["desktopConversion"]> | null>(null);
   const [editTotp, setEditTotp] = useState<{ code: string; secs: number } | null>(null);
   const [twoFaFlash, setTwoFaFlash] = useState<{ id: string; code: string } | null>(null);
@@ -994,6 +944,29 @@ function App() {
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, [theme]);
+
+  useEffect(() => {
+    const media = window.matchMedia(RAIL_MEDIA);
+    const apply = () => setRailForced(media.matches);
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, []);
+
+  // Escape closes whatever dialog is open, topmost first — standard desktop
+  // behavior the mouse-only close buttons don't cover.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (pendingMode) { if (!modeBusy) setPendingMode(null); return; }
+      if (logView || logErr) { setLogView(null); setLogErr(null); return; }
+      if (showUpdate) { setShowUpdate(false); return; }
+      if (showBulk) { closeBulk(); return; }
+      if (editId) { closeEdit(); return; }
+      if (showCreate) closeCreate();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
 
   const load = async () => {
     try {
@@ -1438,9 +1411,11 @@ function App() {
     if (!appMode || !workspaceReady || restartRequired) return;
     load();
     fetchHealth().then((health) => { setAppVersion(health.version); setLogDir(health.logDir); }).catch(() => {});
+    // The extension registry is local to this computer in both modes; Cloud
+    // profiles carry assignments and load the matching uploads at launch.
+    fetchExtensions().then(setExtensions).catch(() => {});
     if (appMode.mode === "local") {
       fetchDiagnose().then(setDiag).catch(() => {});
-      fetchExtensions().then(setExtensions).catch(() => {});
     }
   }, [appMode?.mode, restartRequired, workspaceReady]);
 
@@ -1492,7 +1467,6 @@ function App() {
     return map;
   }, [profiles]);
 
-  const HEALTH_ORDER: Record<string, number> = { suspended: 0, no_data: 1, alive: 2 };
   const sortField = (p: UiProfile, key: SortKey): string | number => {
     switch (key) {
       case "no": return Number(numbering.get(p.id)?.value ?? 0);
@@ -1500,9 +1474,6 @@ function App() {
       case "group": return p.group.toLowerCase();
       case "platform": return p.platform.toLowerCase();
       case "proxy": return (p.proxy ?? "").toLowerCase();
-      case "health": return HEALTH_ORDER[p.healthStatus ?? "no_data"] ?? 1;
-      case "created": return p.createdAt ?? 0;
-      case "opened": return p.lastOpenAt ?? 0;
       case "status": return p.running ? 0 : 1;
       default: return 0;
     }
@@ -1511,7 +1482,6 @@ function App() {
   const filtered = useMemo(() => {
     const matched = profiles.filter((p) => {
       if (group !== "all" && p.group !== group) return false;
-      if (healthFilter !== "all" && (p.healthStatus ?? "no_data") !== healthFilter) return false;
       if (q) {
         const needle = q.toLowerCase();
         const no = numbering.get(p.id)?.value ?? "";
@@ -1533,72 +1503,15 @@ function App() {
       if (left > right) return sort.dir;
       return a.id.localeCompare(b.id);
     });
-  }, [profiles, group, healthFilter, q, sort, numbering]);
+  }, [profiles, group, q, sort, numbering]);
 
   const profilePageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visibleProfilePage = Math.min(profilePage, profilePageCount - 1);
   const visibleProfiles = filtered.slice(visibleProfilePage * pageSize, (visibleProfilePage + 1) * pageSize);
-  useEffect(() => setProfilePage(0), [q, group, healthFilter, pageSize]);
-
-  const isCreateView = view === "create";
-  const isFormView = view === "create" || view === "edit";
-  const formSections = [
-    { key: "general", label: "General" },
-    { key: "proxy", label: "Proxy" },
-    { key: "credentials", label: "Credentials" },
-    { key: "fingerprint", label: "Fingerprint" },
-    ...(!isCreateView && !isCloudMode ? [{ key: "extensions", label: "Extensions" }] : []),
-  ];
-  const formBodyRef = useRef<HTMLDivElement>(null);
-  const tableWrapRef = useRef<HTMLDivElement>(null);
-  const [tableScrolled, setTableScrolled] = useState(false);
-  /**
-   * Drive the tab underline from the scroll position: the active tab is the last
-   * section whose top has passed just under the tab strip. Cheaper and far more
-   * predictable at section boundaries than an IntersectionObserver here.
-   */
-  const syncActiveSection = () => {
-    const root = formBodyRef.current;
-    if (!root) return;
-    const threshold = root.getBoundingClientRect().top + Math.min(180, root.clientHeight * 0.35);
-    let current = formSections[0]?.key ?? "general";
-    for (const section of formSections) {
-      const element = root.querySelector<HTMLElement>(`#form-${section.key}`);
-      if (element && element.getBoundingClientRect().top <= threshold) current = section.key;
-    }
-    setActiveSection(current);
-  };
-  const goToSection = (key: string) => {
-    setActiveSection(key);
-    formBodyRef.current?.querySelector<HTMLElement>(`#form-${key}`)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
+  useEffect(() => setProfilePage(0), [q, group, pageSize]);
 
   const editSerial = editId ? profiles.find((profile) => profile.id === editId)?.serial ?? null : null;
-  // What the launched browser will actually show: the typed custom NO. wins, the store serial backs it up.
-  const editNo = (editForm.customNo ?? "").trim() || (editSerial != null ? String(editSerial) : "");
-  const proxySummary = (type: string, host: string, port: string) =>
-    host.trim() ? `${type}://${host.trim()}${port.trim() ? `:${port.trim()}` : ""}` : "No proxy";
-  const formOverview = isCreateView
-    ? {
-      no: form.customNo.trim() || "auto",
-      name: form.name.trim() || "auto",
-      group: form.group.trim() || "Ungrouped",
-      platform: form.platform.trim() || "None",
-      proxy: proxySummary(form.proxyType, form.host, form.port),
-      screen: form.screen.trim() || "Automatic",
-    }
-    : {
-      no: editNo || "—",
-      name: (editForm.name ?? "").trim() || "—",
-      group: (editForm.group ?? "").trim() || "Ungrouped",
-      platform: (editForm.platform ?? "").trim() || "None",
-      proxy: (() => {
-        const [host = "", port = ""] = (editForm.proxy ?? "").split(":");
-        return proxySummary(editForm.proxyType ?? "http", host, port);
-      })(),
-      screen: (editForm.resolution ?? "").trim() || "Automatic",
-    };
+  const editRunning = editId ? profiles.find((profile) => profile.id === editId)?.running === true : false;
 
   const pastedRecordCount = bulkText.trim() ? countPastedRecords(bulkText) : null;
 
@@ -1790,11 +1703,10 @@ function App() {
     setProxyPaste("");
     setProxyPasteOk(null);
     setCreateErr(null);
-    setActiveSection("general");
-    setView("create");
+    setShowCreate(true);
   };
   const closeCreate = () => {
-    setView("profiles");
+    setShowCreate(false);
     setForm(BLANK_FORM);
     setProxyPaste("");
     setProxyPasteOk(null);
@@ -1851,37 +1763,59 @@ function App() {
 
   // ---- Edit one profile (full detail) ----
   const setEF = (k: string, v: string) => setEditForm((f) => ({ ...f, [k]: v }));
-  const openEdit = async (id: string) => {
+  // The dialog opens on the click; the detail fetch fills it in when it lands.
+  // The ref discards a stale response if the operator has moved on meanwhile.
+  const openEdit = (id: string) => {
     setActionErr(null);
-    try {
-      const p: EditProfile = await fetchProfileEdit(id);
-      setEditForm({
-        name: p.name, group: p.group, platform: p.platform,
-        proxyType: p.proxyType || "http", proxy: p.proxy,
-        proxyError: p.proxyError ?? "",
-        username: p.username, password: p.password,
-        email: p.email, emailPassword: p.emailPassword, twofa: p.twofa,
-        resolution: p.resolution, tags: p.tags,
-        customNo: p.customNo ?? "",
-      });
-      setEditExts(p.extensions ?? []);
-      setEditMobile(p.desktopConversion ?? null);
-      setEditExpectedVersion(p.expectedVersion ?? null);
-      setEditErr(null);
-      setEditId(id);
-      setActiveSection("general");
-      setView("edit");
-    } catch (e) {
-      setActionErr(String(e));
-    }
+    editFetchId.current = id;
+    setEditId(id);
+    setEditForm({});
+    setEditExts([]);
+    setEditMobile(null);
+    setEditExpectedVersion(null);
+    setEditLive(false);
+    setEditErr(null);
+    setEditLoading(true);
+    void (async () => {
+      try {
+        const p: EditProfile = await fetchProfileEdit(id);
+        if (editFetchId.current !== id) return;
+        setEditForm({
+          name: p.name, group: p.group, platform: p.platform,
+          proxyType: p.proxyType || "http", proxy: p.proxy,
+          proxyError: p.proxyError ?? "",
+          username: p.username, password: p.password,
+          email: p.email, emailPassword: p.emailPassword, twofa: p.twofa,
+          resolution: p.resolution, tags: p.tags,
+          customNo: p.customNo ?? "",
+        });
+        setEditExts(p.extensions ?? []);
+        setEditMobile(p.desktopConversion ?? null);
+        setEditExpectedVersion(p.expectedVersion ?? null);
+        setEditLive(p.liveEdit === true);
+      } catch (e) {
+        if (editFetchId.current === id) setEditErr(String(e));
+      } finally {
+        if (editFetchId.current === id) setEditLoading(false);
+      }
+    })();
   };
-  const closeEdit = () => { setView("profiles"); setEditId(null); setEditExpectedVersion(null); setEditForm({}); setEditErr(null); setEditMobile(null); };
+  const closeEdit = () => {
+    editFetchId.current = null;
+    setEditId(null);
+    setEditExpectedVersion(null);
+    setEditLive(false);
+    setEditLoading(false);
+    setEditForm({});
+    setEditErr(null);
+    setEditMobile(null);
+  };
   const saveEdit = async () => {
     if (!editId) return;
     setEditSaving(true);
     setEditErr(null);
     try {
-      if (isCloudMode && editExpectedVersion === null) throw new Error("Cloud profile version is missing; close and reopen Edit");
+      if (isCloudMode && !editLive && editExpectedVersion === null) throw new Error("Cloud profile version is missing; close and reopen Edit");
       const r = await updateProfile(editId, {
         name: editForm.name ?? "", group: editForm.group ?? "", platform: editForm.platform ?? "",
         proxy: editForm.proxy ?? "", proxyType: editForm.proxyType ?? "http",
@@ -1889,7 +1823,7 @@ function App() {
         email: editForm.email ?? "", emailPassword: editForm.emailPassword ?? "", twofa: editForm.twofa ?? "",
         resolution: editForm.resolution ?? "", tags: editForm.tags ?? "",
         ...(!isCloudMode ? { extensions: editExts, customNo: editForm.customNo ?? "" } : {}),
-      }, isCloudMode ? editExpectedVersion ?? undefined : undefined);
+      }, isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined);
       if (r.ok) { closeEdit(); await load(); }
       else if (r.status === 409) {
         const message = r.error || "Cloud profile changed; reopen Edit before saving";
@@ -2121,7 +2055,7 @@ function App() {
       <>
         <main className="onboarding">
         <section className="onboarding-card" aria-labelledby="onboarding-title">
-          <div className="onboarding-brand"><img src={aliasLoopUrl} alt="" />AliasMode <span>by Xreacher</span></div>
+          <div className="onboarding-brand"><AliasLoop />AliasMode <span>by Xreacher</span></div>
           {restartRequired ? (
             <>
               <h1 id="onboarding-title">Your mode is ready</h1>
@@ -2236,7 +2170,12 @@ function App() {
   // than letting the browser crush Name down to "mia.h…".
   const tableMinWidth = CHECKBOX_COLUMN_WIDTH + shownColumns.reduce((total, column) => total + column.width, 0);
   const columnHead = (column: (typeof COLUMNS)[number]) => {
-    const label = column.key === "group" && isCloudMode ? "Folder" : column.label;
+    // The Action column carries no header text: its buttons explain themselves,
+    // and a floating "ACTION" label over a right-aligned cluster read as an
+    // empty column. The column chooser still lists it by its registry label.
+    const label = column.key === "action" ? "" : column.key === "group" && isCloudMode ? "Folder" : column.label;
+    // Every column declares its width, so a wide window's extra space spreads
+    // proportionally across all of them — an even layout, no dead gap.
     const style = { width: column.width } as CSSProperties;
     if (!column.sort) return <th key={column.key} className={`col-${column.key}`} style={style}>{label}</th>;
     const key = column.key as SortKey;
@@ -2275,19 +2214,22 @@ function App() {
         </div>
       )}
 
-      <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
-        <button
-          type="button"
-          className="rail-toggle tip"
-          data-tip={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-expanded={!sidebarCollapsed}
-          onClick={toggleSidebar}
-        >
-          <Icon name={sidebarCollapsed ? "chevronRight" : "chevronLeft"} className="sm" />
-        </button>
+      <aside className={`sidebar${sidebarCollapsed || railForced ? " collapsed" : ""}`}>
+        {/* A too-narrow window forces the rail; the toggle would be a no-op. */}
+        {!railForced && (
+          <button
+            type="button"
+            className="rail-toggle tip"
+            data-tip={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!sidebarCollapsed}
+            onClick={toggleSidebar}
+          >
+            <Icon name={sidebarCollapsed ? "chevronRight" : "chevronLeft"} className="sm" />
+          </button>
+        )}
         <div className="brandrow">
-          <div className="brand"><img src={aliasLoopUrl} alt="" />AliasMode</div>
+          <div className="brand"><AliasLoop />AliasMode</div>
           {appVersion && <span className="appversion" title={appVersion}>{appVersion}</span>}
         </div>
         <div className="newrow">
@@ -2314,18 +2256,16 @@ function App() {
             <Icon name="profiles" /><span className="navlabel">All profiles</span>
             <span className="cnt">{profiles.length}</span>
           </button>
-          {!isCloudMode && (
-            <button
-              type="button"
-              className={`navitem${view === "extensions" ? " active" : ""}`}
-              data-tip="Extensions"
-              title="Extensions"
-              onClick={() => { setExtErr(null); setView("extensions"); }}
-            >
-              <Icon name="puzzle" /><span className="navlabel">Extensions</span>
-              {extensions.length > 0 && <span className="cnt">{extensions.length}</span>}
-            </button>
-          )}
+          <button
+            type="button"
+            className={`navitem${view === "extensions" ? " active" : ""}`}
+            data-tip="Manage extensions"
+            title="Manage extensions"
+            onClick={() => { setExtErr(null); setView("extensions"); }}
+          >
+            <Icon name="puzzle" /><span className="navlabel">Manage extensions</span>
+            {extensions.length > 0 && <span className="cnt">{extensions.length}</span>}
+          </button>
           <button
             type="button"
             className="navitem"
@@ -2412,6 +2352,16 @@ function App() {
         </div>
 
         <div className="sidefoot">
+          <a
+            className="navitem"
+            href="https://t.me/aliasmode"
+            target="_blank"
+            rel="noreferrer"
+            data-tip="Support"
+            title="Support — AliasMode Telegram group"
+          >
+            <Icon name="help" /><span className="navlabel">Support</span>
+          </a>
           <button type="button" className={`navitem${view === "settings" ? " active" : ""}`} data-tip="Settings" title="Settings" onClick={openAccountSettings}>
             <Icon name="settings" /><span className="navlabel">Settings</span>
           </button>
@@ -2446,13 +2396,7 @@ function App() {
 
       <div className="main">
       <header className="pagehead">
-        {isFormView && (
-          <button className="btn ghost backbtn" type="button" onClick={isCreateView ? closeCreate : closeEdit}>
-            <Icon name="chevronLeft" className="sm" />Back
-          </button>
-        )}
         <h1>{PAGE_TITLES[view]}</h1>
-        {view === "edit" && editId && <span className="chip mono">{editId}</span>}
         {view === "profiles" && (
           <span className="pagesub">
             {filtered.length === profiles.length ? `${profiles.length} total` : `${filtered.length} of ${profiles.length}`}
@@ -2575,23 +2519,15 @@ function App() {
             />
             {q && <button type="button" className="clear" aria-label="Clear search" onClick={() => setQ("")}><Icon name="close" className="sm" /></button>}
           </div>
-          <select
-            className="select health-filter"
-            aria-label="Health filter"
-            value={healthFilter}
-            onChange={(e) => setHealthFilter(e.target.value as "all" | HealthStatus)}
-          >
-            <option value="all">All health</option>
-            <option value="suspended">Suspended</option>
-            <option value="alive">Alive</option>
-            <option value="no_data">No data</option>
-          </select>
         </div>
 
-        <div className={`toolbar${selected.size ? " active" : ""}`}>
+        {/* Bulk actions only exist once there is a selection to act on — an
+            always-present strip of disabled buttons read as clutter. */}
+        {selected.size > 0 && (
+        <div className="toolbar active">
           <span className="selcount">
             <Icon name="check" className="sm" />
-            {selected.size ? `${selected.size} selected` : "No selection"}
+            {selected.size} selected
           </span>
           <button className="btn primary tip" data-tip="Open selected browsers" disabled={!selected.size} onClick={openSelected}>
             <Icon name="play" className="sm" />Open
@@ -2672,10 +2608,10 @@ function App() {
           )}
           </>}
         </div>
+        )}
 
         <div
           className={`tablewrap${tableScrolled ? " scrolled" : ""}`}
-          ref={tableWrapRef}
           onScroll={(event) => setTableScrolled(event.currentTarget.scrollLeft > 0)}
         >
           <table className="profile-table" style={{ minWidth: tableMinWidth }}>
@@ -2688,9 +2624,15 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {visibleProfiles.map((p, index) => {
-                const no = numbering.get(p.id) ?? displayNo(p, index);
-                const canEditRow = !isCloudMode || (p.permission === "edit" && !p.running && !p.lockedBy);
+              {visibleProfiles.map((p) => {
+                // The numbering memo covers every roster profile, so this
+                // lookup cannot miss; a silent fallback here would renumber
+                // rows wrongly if that invariant ever broke.
+                const no = numbering.get(p.id)!;
+                // Running rows are editable too: an open Cloud profile is edited
+                // live through the local cache. Only rows locked by ANOTHER
+                // session stay read-only — that writer owns the profile.
+                const canEditRow = !isCloudMode || (p.permission === "edit" && !p.lockedBy);
                 return (
                 <tr key={p.id} className={`${p.running ? "running" : ""}${selected.has(p.id) ? " selected" : ""}`}>
                   <td className="chk">
@@ -2698,10 +2640,7 @@ function App() {
                   </td>
                   {columnVisible("no") && (
                     <td className="col-no">
-                      <span className="no-cell">
-                        <ProfileAvatar profile={p} no={no.value} />
-                        <span className={`no-text${no.custom ? " custom" : ""}`} title={`${no.custom ? "Custom NO." : "Serial"} ${no.value}`}>{no.value}</span>
-                      </span>
+                      <span className={`no-text${no.custom ? " custom" : ""}`} title={`${no.custom ? "Custom NO." : "Serial"} ${no.value}`}>{no.value}</span>
                     </td>
                   )}
                   {columnVisible("name") && (
@@ -2711,6 +2650,11 @@ function App() {
                         <span className="sub">
                           {p.id}
                           {p.running && <span className="live"><StatusDot running />running</span>}
+                          {p.lockedBy && (
+                            <span className="lockedby" title={`in use by ${p.lockedBy}`}>
+                              <Icon name="lock" className="sm" />{p.lockedBy}
+                            </span>
+                          )}
                         </span>
                       </span>
                     </td>
@@ -2735,78 +2679,56 @@ function App() {
                           : <span className="muted">—</span>}
                     </td>
                   )}
-                  {columnVisible("health") && <td className="col-health"><HealthBadge profile={p} /></td>}
-                  {columnVisible("created") && (
-                    <td className="col-created stamp" title={fullStamp(p.createdAt)}>
-                      {p.createdAt ? formatStamp(p.createdAt, false) : <span className="muted">—</span>}
-                    </td>
-                  )}
-                  {columnVisible("opened") && (
-                    <td className="col-opened stamp" title={p.lastOpenAt ? fullStamp(p.lastOpenAt) : "Never opened on this machine"}>
-                      {p.lastOpenAt ? formatStamp(p.lastOpenAt, true) : <span className="muted">Never</span>}
-                    </td>
-                  )}
                   {columnVisible("action") && (
-                  <td className="col-action">
-                    <span className="rowactions">
-                      {!isCloudMode && p.has2fa && (
-                        <button
-                          className={`iconbtn twofa tip${twoFaFlash?.id === p.id ? " flash" : ""}`}
-                          data-tip={twoFaFlash?.id === p.id ? `Copied ${twoFaFlash.code}` : "Copy current 2FA code"}
-                          aria-label="Copy current 2FA code"
-                          title="Copy current 2FA code"
-                          onClick={() => copy2fa(p.id)}
-                        >
-                          <Icon name={twoFaFlash?.id === p.id ? "check" : "key"} className="sm" />
-                        </button>
-                      )}
-                      {canEditRow && (
-                        <button className="iconbtn tip" data-tip="Edit profile" aria-label={`Edit ${p.name}`} onClick={() => openEdit(p.id)}>
-                          <Icon name="edit" className="sm" />
-                        </button>
-                      )}
-                      {p.running ? (
-                        <>
+                    <td className="col-action">
+                      <span className="rowactions">
+                        {!isCloudMode && p.has2fa && (
                           <button
-                            className="iconbtn tip"
-                            data-tip="Bring to front"
-                            aria-label="Bring this browser window to the front"
-                            title="Bring this browser window to the front"
-                            disabled={busy[p.id]}
-                            onClick={() => act(p.id, raiseProfile)}
-                          ><Icon name="raise" className="sm" /></button>
-                          <button className="btn sm solid-danger" disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>
-                            <Icon name="power" className="sm" />Close
+                            className={`iconbtn twofa tip${twoFaFlash?.id === p.id ? " flash" : ""}`}
+                            data-tip={twoFaFlash?.id === p.id ? `Copied ${twoFaFlash.code}` : "Copy current 2FA code"}
+                            aria-label="Copy current 2FA code"
+                            onClick={() => copy2fa(p.id)}
+                          >
+                            <Icon name={twoFaFlash?.id === p.id ? "check" : "key"} className="sm" />
                           </button>
-                        </>
-                      ) : p.mobilePersona ? (
-                        p.lockedBy ? (
-                          <span className="lockedby" title={`in use by ${p.lockedBy}; close it there before conversion`}>
-                            <Icon name="lock" className="sm" />{p.lockedBy} · mobile persona
-                          </span>
+                        )}
+                        {canEditRow && (
+                          <button className="iconbtn tip" data-tip="Edit profile" aria-label={`Edit ${p.name}`} onClick={() => openEdit(p.id)}>
+                            <Icon name="edit" className="sm" />
+                          </button>
+                        )}
+                        {p.running ? (
+                          <>
+                            <button
+                              className="iconbtn tip"
+                              data-tip="Bring to front"
+                              aria-label="Bring this browser window to the front"
+                              disabled={busy[p.id]}
+                              onClick={() => act(p.id, raiseProfile)}
+                            ><Icon name="raise" className="sm" /></button>
+                            <button className="btn sm solid-danger" aria-label={`Close ${p.name}`} disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>
+                              <Icon name="power" className="sm" />Close
+                            </button>
+                          </>
+                        ) : p.mobilePersona ? (
+                          !p.lockedBy && (!isCloudMode || p.permission === "edit") ? (
+                            <button className="btn sm warn" disabled={busy[p.id]} title="Convert this mobile persona to a desktop device" onClick={() => openEdit(p.id)}>
+                              <Icon name="laptop" className="sm" />Convert
+                            </button>
+                          ) : null
                         ) : (
-                          (!isCloudMode || p.permission === "edit")
-                            ? <button className="btn sm warn" disabled={busy[p.id]} title="Convert this unsupported mobile persona to a coherent desktop device" onClick={() => openEdit(p.id)}>
-                                <Icon name="laptop" className="sm" />Convert device
-                              </button>
-                            : null
-                        )
-                      ) : p.lockedBy ? (
-                        <>
-                          <span className="lockedby" title={`session writer: ${p.lockedBy}; this browser will not save its session back`}>
-                            <Icon name="warning" className="sm" />{p.lockedBy}
-                          </span>
-                          <button className="btn sm primary" disabled={busy[p.id]} onClick={() => act(p.id, openProfile)}>
+                          <button
+                            className="btn sm primary"
+                            aria-label={`Open ${p.name}`}
+                            title={p.lockedBy ? `Open — session writer: ${p.lockedBy}; this browser will not save its session back` : undefined}
+                            disabled={busy[p.id]}
+                            onClick={() => act(p.id, openProfile)}
+                          >
                             <Icon name="play" className="sm" />Open
                           </button>
-                        </>
-                      ) : (
-                        <button className="btn sm primary" disabled={busy[p.id]} onClick={() => act(p.id, openProfile)}>
-                          <Icon name="play" className="sm" />Open
-                        </button>
-                      )}
-                    </span>
-                  </td>
+                        )}
+                      </span>
+                    </td>
                   )}
                 </tr>
                 );
@@ -2822,7 +2744,7 @@ function App() {
                           <p>
                             {isCloudMode
                               ? "No Cloud profiles yet — click New Profile to create one."
-                              : "No profiles yet — drop an AdsPower export in the inbox and click Import."}
+                              : "No profiles yet — click New Profile, or drop an AdsPower .txt / .csv export anywhere in this window to import it."}
                           </p>
                           <button className="btn primary" disabled={!canEditCloud} onClick={openCreate}><Icon name="plus" className="sm" />New Profile</button>
                         </>
@@ -2830,7 +2752,7 @@ function App() {
                         <>
                           <b>No matches</b>
                           <p>No profiles match the current filters.</p>
-                          <button className="btn" onClick={() => { setQ(""); setGroup("all"); setHealthFilter("all"); }}>Clear filters</button>
+                          <button className="btn" onClick={() => { setQ(""); setGroup("all"); }}>Clear filters</button>
                         </>
                       )}
                     </div>
@@ -2887,9 +2809,19 @@ function App() {
           <h2 className="sect-title">Uploaded extensions</h2>
           {extErr && <div className="modal-err"><Icon name="alert" className="sm" />{extErr}</div>}
           <p className="formnote">
-            Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Assign it per
-            profile from the <b>Extensions</b> tab when you edit that profile, or to many at once from
-            the <b>Extension</b> control in the roster toolbar — it loads when that browser opens.
+            {isCloudMode ? (
+              <>
+                Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Uploads stay on
+                this computer; a Cloud profile that carries an assignment for an uploaded extension loads it
+                when its browser opens here.
+              </>
+            ) : (
+              <>
+                Upload an unpacked extension as a <code>.zip</code> (or a <code>.crx</code>). Assign it per
+                profile from the <b>Extensions</b> tab when you edit that profile, or to many at once from
+                the <b>Extension</b> control in the roster toolbar — it loads when that browser opens.
+              </>
+            )}
           </p>
           {extensions.length === 0 ? (
             <div className="emptystate">
@@ -3019,12 +2951,6 @@ function App() {
                 <div className="settings-row"><span>Workspace</span><strong>{cloudAuth?.workspace?.name ?? "Cloud workspace"}</strong></div>
                 <div className="settings-row"><span>Role</span><strong>{cloudAuth?.workspace?.role ?? "member"}</strong></div>
                 {teamBusy && !team && <p className="hint" role="status">Loading team…</p>}
-                <h3 className="settings-subhead">Your folder access</h3>
-                {team?.folders.map((folder) => (
-                  <div className="settings-row" key={folder.name}>
-                    <span>{folder.name}</span><strong>{folder.permission}</strong>
-                  </div>
-                ))}
                 <h3 className="settings-subhead">Members</h3>
                 {team?.members.map((member) => (
                   <div className="team-member" key={member.accountId}>
@@ -3162,155 +3088,163 @@ function App() {
           <button className="btn primary" type="button" onClick={() => setView("profiles")}>Done</button>
         </footer>
       </div>
-      ) : (
-      <div className="workspace">
-        <div className="tabs" role="tablist" aria-label="Profile sections">
-          {formSections.map((section) => (
-            <button
-              key={section.key}
-              type="button"
-              role="tab"
-              aria-selected={activeSection === section.key}
-              className={`tab${activeSection === section.key ? " active" : ""}`}
-              onClick={() => goToSection(section.key)}
-            >
-              {section.label}
-            </button>
-          ))}
+      ) : null}
+      </div>
+
+      {(logView || logErr) && (
+        <div className="modal-backdrop" onClick={() => { setLogView(null); setLogErr(null); }}>
+          <div className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">Detailed logs<button type="button" className="modal-close" aria-label="Close" onClick={() => { setLogView(null); setLogErr(null); }}><Icon name="close" className="sm" /></button></div>
+            <div className="modal-body">
+              {logErr && <p className="hint">{logErr}</p>}
+              {logView && (
+                <pre className="logpre">
+                  {logView.file + "\n" + logView.content}
+                </pre>
+              )}
+            </div>
+            <div className="modal-foot"><button className="btn ghost" type="button" onClick={() => { setLogView(null); setLogErr(null); }}>Close</button></div>
+          </div>
         </div>
+      )}
 
-        <div className="formpage" ref={formBodyRef} onScroll={syncActiveSection}>
-          <div className="formmain">
-            {isCreateView ? (
-              <>
-                {createErr && <div className="modal-err"><Icon name="alert" className="sm" />{createErr}</div>}
-                <section id="form-general" className="formsection">
-                  <h3>General</h3>
-                  <div className="fld-row">
-                    <label className="fld grow">
-                      <span>Name</span>
-                      <input value={form.name} placeholder="e.g. sophia_skye" onChange={(e) => setF("name", e.target.value)} />
-                      <small>Named after the profile id if left blank.</small>
-                    </label>
-                    {!isCloudMode && (
-                      <label className="fld no">
-                        <span>Custom NO.</span>
-                        <input
-                          value={form.customNo}
-                          inputMode="numeric"
-                          maxLength={MAX_CUSTOM_NO}
-                          placeholder="auto"
-                          onChange={(e) => setF("customNo", e.target.value.replace(/\D/g, "").slice(0, MAX_CUSTOM_NO))}
-                        />
-                        <small>Digits only.</small>
-                      </label>
-                    )}
-                  </div>
-                  <div className="fld-row">
-                    <label className="fld grow">
-                      <span>Folder</span>
-                      <GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />
-                    </label>
-                    <label className="fld grow">
-                      <span>Platform</span>
-                      <PlatformPicker value={form.platform} onChange={(v) => setF("platform", v)} />
-                    </label>
-                  </div>
-                </section>
+      {pendingMode && (
+        <ModeSwitchConfirmation
+          mode={pendingMode}
+          busy={modeBusy}
+          error={modeErr}
+          onConfirm={() => void confirmModeSwitch()}
+          onCancel={() => { if (!modeBusy) setPendingMode(null); }}
+        />
+      )}
 
-                <section id="form-proxy" className="formsection">
-                  <h3>Proxy</h3>
-                  <div className="proxy-paste-row">
-                    <label className="fld grow">
-                      <span>Paste a proxy line</span>
-                      <input
-                        type="password"
-                        autoComplete="off"
-                        value={proxyPaste}
-                        placeholder="host:port:username:password"
-                        onChange={(e) => { setProxyPaste(e.target.value); setProxyPasteOk(null); }}
-                        onPaste={(e) => {
-                          const pasted = e.clipboardData.getData("text");
-                          if (pasted) { e.preventDefault(); applyProxyPaste(pasted); }
-                        }}
-                        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyProxyPaste(proxyPaste); } }}
-                      />
-                    </label>
-                    <button type="button" className="btn accent" disabled={!proxyPaste.trim()} onClick={() => applyProxyPaste(proxyPaste)}>Autofill</button>
-                  </div>
-                  <p className="formnote">Pick the type first, then paste — the pasted text stays hidden and fills the fields below.</p>
-                  {proxyPasteOk && <div className="proxy-paste-ok"><Icon name="check" className="sm" />{proxyPasteOk}</div>}
-                  <div className="fld-row">
-                    <label className="fld type">
-                      <span>Type</span>
-                      <select value={form.proxyType} onChange={(e) => setF("proxyType", e.target.value)}>
-                        <option value="http">http</option>
-                        <option value="socks5">socks5</option>
-                      </select>
-                    </label>
-                    <label className="fld grow">
-                      <span>Host</span>
-                      <input value={form.host} placeholder="e.g. 203.0.113.10" onChange={(e) => setF("host", e.target.value)} />
-                      <small>Leave blank to launch on a direct connection.</small>
-                    </label>
-                    <label className="fld port">
-                      <span>Port</span>
-                      <input value={form.port} inputMode="numeric" placeholder="8080" onChange={(e) => setF("port", e.target.value)} />
-                    </label>
-                  </div>
-                  <div className="fld-row">
-                    <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
-                    <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
-                  </div>
-                </section>
-
-                <section id="form-credentials" className="formsection">
-                  <h3>Credentials <span className="muted">optional</span></h3>
-                  <div className="fld-row">
-                    <label className="fld grow"><span>Username</span><input value={form.username} autoComplete="off" placeholder="e.g. sophia_skye" onChange={(e) => setF("username", e.target.value)} /></label>
-                    <label className="fld grow"><span>Password</span><input type="password" value={form.password} autoComplete="new-password" onChange={(e) => setF("password", e.target.value)} /></label>
-                  </div>
-                  <div className="fld-row">
-                    <label className="fld grow"><span>Email</span><input value={form.email} autoComplete="off" placeholder="name@example.com" onChange={(e) => setF("email", e.target.value)} /></label>
-                    <label className="fld grow"><span>Email password</span><input type="password" value={form.emailPassword} autoComplete="new-password" onChange={(e) => setF("emailPassword", e.target.value)} /></label>
-                  </div>
-                  <label className="fld">
-                    <span>2FA secret</span>
-                    <input value={form.twofa} autoComplete="off" placeholder="JBSWY3DPEHPK3PXP" onChange={(e) => setF("twofa", e.target.value)} />
-                    <small>The base32 seed shown when the platform sets up an authenticator app.</small>
+      {showCreate && (
+        /* Form dialog: a stray backdrop click must not discard typed input —
+           close via Cancel, the X, or Escape (the backdrop has no onClick). */
+        <div className="modal-backdrop">
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="create-profile-title" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head" id="create-profile-title">
+              <Icon name="plus" />New profile
+              <button type="button" className="modal-close" aria-label="Close" onClick={closeCreate}><Icon name="close" className="sm" /></button>
+            </div>
+            <div className="modal-body">
+              {createErr && <div className="modal-err"><Icon name="alert" className="sm" />{createErr}</div>}
+              <div className="fld-row">
+                <label className="fld grow">
+                  <span>Name</span>
+                  <input value={form.name} placeholder="auto if blank" onChange={(e) => setF("name", e.target.value)} />
+                </label>
+                {!isCloudMode && (
+                  <label className="fld no">
+                    <span>Custom NO.</span>
+                    <input
+                      value={form.customNo}
+                      inputMode="numeric"
+                      maxLength={MAX_CUSTOM_NO}
+                      placeholder="auto"
+                      onChange={(e) => setF("customNo", e.target.value.replace(/\D/g, "").slice(0, MAX_CUSTOM_NO))}
+                    />
                   </label>
-                  <p className="formnote">
-                    Stored for you to copy from the roster and for automation to use. AliasMode does not
-                    type them into login forms and does not add them to the browser's password manager.
-                  </p>
-                </section>
-
-                <section id="form-fingerprint" className="formsection">
-                  <h3>Fingerprint <span className="automatic-badge">Automatic</span></h3>
-                  <FingerprintSettings flat screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
-                </section>
-              </>
-            ) : (
-              <>
-                {editErr && <div className="modal-err"><Icon name="alert" className="sm" />{editErr}</div>}
-                {editForm.proxyError && <div className="modal-err"><Icon name="alert" className="sm" />Stored proxy quarantined: {editForm.proxyError}. Replace it below or clear the field.</div>}
-                {!isCloudMode && editMobile && (
-                  <div className="persona-warning">
-                    <strong><Icon name="warning" className="sm" />Imported mobile persona cannot open safely</strong>
-                    <span>
-                      Older AliasMode opened it as a desktop browser anyway: Android became Windows; iPhone/iPad became macOS. That looked usable, but it was not coherent mobile emulation.
-                    </span>
-                    <span>
-                      Convert it once to {editMobile.platform === "macos" ? "macOS" : "Windows"} desktop. Cookies, login/session, proxy, timezone, credentials and fingerprint seed stay intact
-                      {editMobile.screenChanged ? `; the mobile-sized screen becomes ${editMobile.resolution}` : "; the existing desktop-sized screen stays intact"}.
-                    </span>
-                    <button className="btn persona-convert" disabled={editSaving} onClick={convertEditedMobile}>
-                      {editSaving ? "Converting…" : `Convert to ${editMobile.platform === "macos" ? "macOS" : "Windows"} desktop`}
-                    </button>
-                  </div>
                 )}
-                <section id="form-general" className="formsection">
-                  <h3>General</h3>
+              </div>
+              <div className="fld-row">
+                <label className="fld grow">
+                  <span>Folder</span>
+                  <GroupPicker value={form.group} onChange={(v) => setF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />
+                </label>
+                <label className="fld grow">
+                  <span>Platform</span>
+                  <PlatformPicker value={form.platform} onChange={(v) => setF("platform", v)} />
+                </label>
+              </div>
+              <div className="proxy-paste-row">
+                <label className="fld grow">
+                  <span>Paste proxy to autofill <span className="muted">(select type first · host:port:username:password)</span></span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={proxyPaste}
+                    placeholder="Paste here — credentials stay hidden"
+                    onChange={(e) => { setProxyPaste(e.target.value); setProxyPasteOk(null); }}
+                    onPaste={(e) => {
+                      const pasted = e.clipboardData.getData("text");
+                      if (pasted) { e.preventDefault(); applyProxyPaste(pasted); }
+                    }}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); applyProxyPaste(proxyPaste); } }}
+                  />
+                </label>
+                <button type="button" className="btn accent" disabled={!proxyPaste.trim()} onClick={() => applyProxyPaste(proxyPaste)}>Autofill</button>
+              </div>
+              {proxyPasteOk && <div className="proxy-paste-ok"><Icon name="check" className="sm" />{proxyPasteOk}</div>}
+              <div className="fld-row">
+                <label className="fld type">
+                  <span>Proxy type</span>
+                  <select value={form.proxyType} onChange={(e) => setF("proxyType", e.target.value)}>
+                    <option value="http">http</option>
+                    <option value="socks5">socks5</option>
+                  </select>
+                </label>
+                <label className="fld grow">
+                  <span>Host</span>
+                  <input value={form.host} placeholder="blank = no proxy" onChange={(e) => setF("host", e.target.value)} />
+                </label>
+                <label className="fld port">
+                  <span>Port</span>
+                  <input value={form.port} inputMode="numeric" placeholder="8080" onChange={(e) => setF("port", e.target.value)} />
+                </label>
+              </div>
+              <div className="fld-row">
+                <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
+                <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
+              </div>
+              <FingerprintSettings screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={closeCreate}>Cancel</button>
+              <button className="btn primary" disabled={creating} onClick={submitCreate}>{creating ? "Creating…" : "Create profile"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editId && (
+        /* Form dialog: a stray backdrop click must not discard typed input —
+           close via Cancel, the X, or Escape (the backdrop has no onClick). */
+        <div className="modal-backdrop">
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="edit-profile-title" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head" id="edit-profile-title">
+              <Icon name="edit" />Edit profile<span className="mono muted">{editId}</span>
+              <button type="button" className="modal-close" aria-label="Close" onClick={closeEdit}><Icon name="close" className="sm" /></button>
+            </div>
+            <div className="modal-body">
+              {editErr && <div className="modal-err"><Icon name="alert" className="sm" />{editErr}</div>}
+              {editLoading ? (
+                <p className="hint" role="status">Loading profile…</p>
+              ) : (
+                <>
+                  {editForm.proxyError && <div className="modal-err"><Icon name="alert" className="sm" />Stored proxy quarantined: {editForm.proxyError}. Replace it below or clear the field.</div>}
+                  {(editLive || (!isCloudMode && editRunning)) && (
+                    <p className="hint" role="status">
+                      {editLive
+                        ? "This browser is open. Changes save to this device now and sync to Cloud when it closes."
+                        : "This browser is open. Changes save now and apply the next time it launches."}
+                    </p>
+                  )}
+                  {!isCloudMode && editMobile && (
+                    <div className="persona-warning">
+                      <strong><Icon name="warning" className="sm" />Imported mobile persona cannot open safely</strong>
+                      <span>
+                        Older AliasMode opened it as a desktop browser anyway: Android became Windows; iPhone/iPad became macOS. That looked usable, but it was not coherent mobile emulation.
+                      </span>
+                      <span>
+                        Convert it once to {editMobile.platform === "macos" ? "macOS" : "Windows"} desktop. Cookies, login/session, proxy, timezone, credentials and fingerprint seed stay intact
+                        {editMobile.screenChanged ? `; the mobile-sized screen becomes ${editMobile.resolution}` : "; the existing desktop-sized screen stays intact"}.
+                      </span>
+                      <button className="btn persona-convert" disabled={editSaving} onClick={convertEditedMobile}>
+                        {editSaving ? "Converting…" : `Convert to ${editMobile.platform === "macos" ? "macOS" : "Windows"} desktop`}
+                      </button>
+                    </div>
+                  )}
                   <div className="fld-row">
                     <label className="fld grow">
                       <span>Name</span>
@@ -3344,39 +3278,20 @@ function App() {
                     <span>Tags <span className="muted">(comma-separated)</span></span>
                     <input value={editForm.tags ?? ""} placeholder="warmup, us, priority" onChange={(e) => setEF("tags", e.target.value)} />
                   </label>
-                  {!isCloudMode && (
-                    <div className="customno-preview">
-                      <span className="no-avatar" data-hue={avatarHue(editId ?? "")}>
-                        {editNo ? editNo.slice(-4) : "··"}
-                      </span>
-                      <span className="title">
-                        Browser window and bookmark show <b>{(editForm.name || "profile").trim()} · #{editNo || "?"}</b>
-                        {" — the disc shows the last 4 digits."}
-                      </span>
-                    </div>
-                  )}
-                </section>
-
-                <section id="form-proxy" className="formsection">
-                  <h3>Proxy</h3>
                   <div className="fld-row">
                     <label className="fld type">
-                      <span>Type</span>
+                      <span>Proxy type</span>
                       <select value={editForm.proxyType ?? "http"} onChange={(e) => setEF("proxyType", e.target.value)}>
                         <option value="http">http</option>
                         <option value="socks5">socks5</option>
                       </select>
                     </label>
                     <label className="fld grow">
-                      <span>Address</span>
+                      <span>Proxy</span>
                       <input value={editForm.proxy ?? ""} placeholder="host:port:username:password" onChange={(e) => setEF("proxy", e.target.value)} />
                       <small>Leave blank to launch on a direct connection.</small>
                     </label>
                   </div>
-                </section>
-
-                <section id="form-credentials" className="formsection">
-                  <h3>Credentials</h3>
                   <div className="fld-row">
                     <CopyField label="Username" value={editForm.username ?? ""} onChange={(value) => setEF("username", value)} />
                     <CopyField label="Password" value={editForm.password ?? ""} onChange={(value) => setEF("password", value)} />
@@ -3396,19 +3311,10 @@ function App() {
                       </button>
                     </div>
                   )}
-                </section>
-
-                <section id="form-fingerprint" className="formsection">
-                  <h3>Fingerprint <span className="automatic-badge">Automatic</span></h3>
-                  <FingerprintSettings flat screen={editForm.resolution ?? ""} onScreenChange={(value) => setEF("resolution", value)} />
-                </section>
-
-                {!isCloudMode && (
-                  <section id="form-extensions" className="formsection">
-                    <h3>Extensions</h3>
-                    {extensions.length === 0 ? (
-                      <p className="cardnote">None uploaded yet — add some from Extensions in the sidebar.</p>
-                    ) : (
+                  <FingerprintSettings screen={editForm.resolution ?? ""} onScreenChange={(value) => setEF("resolution", value)} />
+                  {!isCloudMode && extensions.length > 0 && (
+                    <div className="fld">
+                      <span>Extensions</span>
                       <div className="extassign">
                         {extensions.map((x) => (
                           <label key={x.id} className="extchk">
@@ -3417,81 +3323,27 @@ function App() {
                           </label>
                         ))}
                       </div>
-                    )}
-                  </section>
-                )}
-                <p className="formnote">
-                  Cookies and locked fingerprint values are preserved. Only editable fields change.
-                  {!isCloudMode && " Extensions load when the browser opens."}
-                </p>
-              </>
-            )}
-          </div>
-
-          {/* Mirrors what the launch will actually use, so the operator can see the
-              consequences of an edit without opening the browser to check. */}
-          <aside className="formaside" aria-label="Overview">
-            <h3>Overview</h3>
-            <div className="aside-rows">
-              <div><span>No.</span><b>{formOverview.no}</b></div>
-              <div><span>Name</span><b>{formOverview.name}</b></div>
-              <div><span>Folder</span><b>{formOverview.group}</b></div>
-              <div><span>Platform</span><b>{formOverview.platform}</b></div>
-              <div><span>Proxy</span><b>{formOverview.proxy}</b></div>
-              <div><span>Screen</span><b>{formOverview.screen}</b></div>
-              <div><span>Browser</span><b>CloakBrowser</b></div>
-              {AUTOMATIC_FINGERPRINT_FIELDS
-                .filter(([label]) => OVERVIEW_FINGERPRINT_FIELDS.includes(label))
-                .map(([label, value]) => (
-                  <div key={label}><span>{label}</span><b className="auto">{value}</b></div>
-                ))}
-            </div>
-            <p className="cardnote">CloakBrowser derives a coherent fingerprint from this profile's seed at launch.</p>
-          </aside>
-        </div>
-
-        <footer className="pagefoot">
-          <span className="spacer" />
-          <button className="btn ghost" type="button" onClick={isCreateView ? closeCreate : closeEdit}>Cancel</button>
-          {isCreateView ? (
-            <button className="btn primary" type="button" disabled={creating} onClick={submitCreate}>{creating ? "Creating…" : "Create profile"}</button>
-          ) : (
-            <button className="btn primary" type="button" disabled={editSaving} onClick={saveEdit}>{editSaving ? "Saving…" : "Save changes"}</button>
-          )}
-        </footer>
-      </div>
-      )}
-      </div>
-
-      {(logView || logErr) && (
-        <div className="modal-backdrop" onClick={() => { setLogView(null); setLogErr(null); }}>
-          <div className="modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <div className="modal-head">Detailed logs<button type="button" className="modal-close" aria-label="Close" onClick={() => { setLogView(null); setLogErr(null); }}><Icon name="close" className="sm" /></button></div>
-            <div className="modal-body">
-              {logErr && <p className="hint">{logErr}</p>}
-              {logView && (
-                <pre className="logpre">
-                  {logView.file + "\n" + logView.content}
-                </pre>
+                    </div>
+                  )}
+                  <p className="formnote">
+                    Cookies and locked fingerprint values are preserved. Only editable fields change.
+                    {!isCloudMode && " Extensions load when the browser opens."}
+                  </p>
+                </>
               )}
             </div>
-            <div className="modal-foot"><button className="btn ghost" type="button" onClick={() => { setLogView(null); setLogErr(null); }}>Close</button></div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={closeEdit}>Cancel</button>
+              <button className="btn primary" disabled={editSaving || editLoading} onClick={saveEdit}>{editSaving ? "Saving…" : "Save changes"}</button>
+            </div>
           </div>
         </div>
-      )}
-
-      {pendingMode && (
-        <ModeSwitchConfirmation
-          mode={pendingMode}
-          busy={modeBusy}
-          error={modeErr}
-          onConfirm={() => void confirmModeSwitch()}
-          onCancel={() => { if (!modeBusy) setPendingMode(null); }}
-        />
       )}
 
       {showBulk && (
-        <div className="modal-backdrop" onClick={closeBulk}>
+        /* Form dialog: a stray backdrop click must not discard typed input —
+           close via Cancel, the X, or Escape (the backdrop has no onClick). */
+        <div className="modal-backdrop">
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">
               <Icon name="fileImport" />Import accounts
@@ -3610,7 +3462,9 @@ function App() {
       )}
 
       {showUpdate && (
-        <div className="modal-backdrop" onClick={() => setShowUpdate(false)}>
+        /* Form dialog: a stray backdrop click must not discard typed input —
+           close via Cancel, the X, or Escape (the backdrop has no onClick). */
+        <div className="modal-backdrop">
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">Update profiles from file<button type="button" className="modal-close" aria-label="Close" onClick={() => setShowUpdate(false)}><Icon name="close" className="sm" /></button></div>
             <div className="modal-body">

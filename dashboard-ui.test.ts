@@ -7,14 +7,24 @@ const styles = readFileSync(join(import.meta.dir, "web", "styles.css"), "utf8").
 const logo = readFileSync(join(import.meta.dir, "web", "alias-loop.svg"), "utf8").replaceAll("\r\n", "\n");
 const notice = readFileSync(join(import.meta.dir, "NOTICE"), "utf8");
 
-test("dashboard packages the approved Alias Loop logo", () => {
-  expect(app).toContain('import aliasLoopUrl from "./alias-loop.svg"');
-  expect(app).toContain('<img src={aliasLoopUrl} alt="" />AliasMode');
+test("dashboard renders the approved Alias Loop logo and it survives dark mode", () => {
+  // The mark is inlined so the dark arm can ride currentColor: the packaged
+  // SVG's #111827 stroke is invisible on a dark surface.
+  expect(app).toContain("function AliasLoop(");
+  expect(app).toContain('stroke="currentColor"');
+  expect(app).toContain('<div className="brand"><AliasLoop />AliasMode</div>');
+  expect(app).toContain('<div className="onboarding-brand"><AliasLoop />AliasMode');
+  expect(styles).toContain(".alias-loop .loop-accent { stroke: var(--accent); }");
   expect(styles).not.toContain(".brand::before");
-  expect(logo).toContain('stroke="#111827"');
-  expect(logo).toContain('stroke="#2457D6"');
-  expect(logo).toContain('d="M152 96H320C380 96 416 136 416 196V316C416 376 376 416 316 416H196C136 416 96 376 96 316V288"');
-  expect(logo).toContain('d="M96 288C96 240 136 208 184 208H280"');
+  // Both marks draw the same approved paths as the packaged asset.
+  const paths = [
+    'd="M152 96H320C380 96 416 136 416 196V316C416 376 376 416 316 416H196C136 416 96 376 96 316V288"',
+    'd="M96 288C96 240 136 208 184 208H280"',
+  ];
+  for (const path of paths) {
+    expect(app).toContain(path);
+    expect(logo).toContain(path);
+  }
 });
 
 test("dashboard exposes account settings and confirms mode switching", () => {
@@ -55,7 +65,7 @@ test("dashboard contains long roster labels inside the window", () => {
   expect(app).toContain('title={p.proxyError || p.proxy || "no proxy"}');
   // Fixed layout plus per-column clipping keeps a long value inside its cell.
   expect(styles).toContain("table-layout: fixed");
-  expect(styles).toContain("td.col-no, td.col-name, td.col-group, td.col-tags, td.col-proxy, td.col-created, td.col-opened { overflow: hidden; text-overflow: ellipsis; }");
+  expect(styles).toContain("td.col-no, td.col-name, td.col-group, td.col-tags, td.col-proxy { overflow: hidden; text-overflow: ellipsis; }");
 });
 
 test("Account settings offers fenced Cloud sign-out and clears account state", () => {
@@ -108,23 +118,24 @@ test("dashboard lists the supported profile platforms", () => {
 });
 
 test("running profile rows expose Bring to front in Local and Cloud mode", () => {
-  expect(app).toContain('p.running ? (');
   expect(app).toContain('data-tip="Bring to front"');
   expect(app).toContain('aria-label="Bring this browser window to the front"');
   expect(app).toContain('onClick={() => act(p.id, raiseProfile)}');
   // The running-row branch must stay mode-agnostic: raising a window is a local
   // action on a browser this machine already opened, in Cloud mode too.
-  const runningBranch = app.slice(app.indexOf("p.running ? ("), app.indexOf(") : p.mobilePersona ? ("));
+  const runningBranch = app.slice(app.indexOf("{p.running ? ("), app.indexOf(") : p.mobilePersona ? ("));
   expect(runningBranch).toContain("Bring to front");
   expect(runningBranch).not.toContain("isCloudMode");
 });
 
 test("Cloud rows expose Edit and Convert device only with effective Edit permission", () => {
-  expect(app).toContain('(p.permission === "edit" && !p.running && !p.lockedBy)');
+  // Running rows are editable (live edit through the local cache); only rows
+  // locked by ANOTHER session stay read-only.
+  expect(app).toContain('(p.permission === "edit" && !p.lockedBy)');
   expect(app).toContain('(!isCloudMode || p.permission === "edit")');
-  expect(app).toContain('<button className="btn sm warn"');
+  expect(app).toContain('title="Convert this mobile persona to a desktop device"');
   expect(app).toContain("setEditExpectedVersion(p.expectedVersion ?? null)");
-  expect(app).toContain("isCloudMode ? editExpectedVersion ?? undefined : undefined");
+  expect(app).toContain("isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined");
   expect(app).toContain("!isCloudMode && editTotp");
   expect(app).toContain("!isCloudMode && editMobile");
 });
@@ -166,7 +177,10 @@ test("sidebar creates persistent groups and gates Cloud deletion to workspace ma
 });
 
 test("Team settings guide invitations and explicit folder access", () => {
-  for (const heading of ["Your folder access", "Members", "Invitations", "Join another workspace"]) expect(app).toContain(`>${heading}</h3>`);
+  for (const heading of ["Members", "Invitations", "Join another workspace"]) expect(app).toContain(`>${heading}</h3>`);
+  // The "Your folder access" self-listing was removed on request: an owner or
+  // admin already sees every folder, so the list said nothing.
+  expect(app).not.toContain("Your folder access");
   expect(app).toContain("New members see no folders until you grant access here.");
   expect(app).toContain("It works only for the email you signed in with.");
   expect(app).toContain('invite.expiresAt <= Date.now() ? "Expired" : "Pending"');
@@ -200,12 +214,13 @@ test("the roster numbers every profile and prefers a custom NO. over the serial"
   expect(app).toContain("if (profile.serial != null) return { value: String(profile.serial), custom: false };");
   // Numbering is resolved against the unsorted roster, so sorting cannot renumber rows.
   expect(app).toContain("profiles.forEach((profile, index) => map.set(profile.id, displayNo(profile, index)));");
-  expect(app).toContain("<ProfileAvatar profile={p} no={no.value} />");
   expect(app).toContain('className={`no-text${no.custom ? " custom" : ""}`}');
-  expect(styles).toContain(".no-avatar");
+  // The number stands alone — the colored identity disc was removed on request.
+  expect(app).not.toContain("ProfileAvatar");
+  expect(styles).not.toContain(".no-avatar");
 });
 
-test("the custom NO. editor is Local-only, digits-only and previews the window title", () => {
+test("the custom NO. editor is Local-only and digits-only", () => {
   expect(app).toContain("const MAX_CUSTOM_NO = 12;"); // matches MAX_CUSTOM_NO_LENGTH in parse.ts
   expect(app).toContain("<span>Custom NO.</span>");
   expect(app).toContain("<small>Digits only · blank uses the serial</small>");
@@ -213,7 +228,6 @@ test("the custom NO. editor is Local-only, digits-only and previews the window t
   // field is never ambiguous about what the browser window will display.
   expect(app).toContain('placeholder={editSerial != null ? String(editSerial) : "auto"}');
   expect(app).toContain('setEF("customNo", e.target.value.replace(/\\D/g, "").slice(0, MAX_CUSTOM_NO))');
-  expect(app).toContain('Browser window and bookmark show');
   // Cloud profiles round-trip through the portable-profile contract, which has
   // no custom NO. field — so it is never offered or sent in Cloud mode.
   expect(app).toContain('...(!isCloudMode ? { extensions: editExts, customNo: editForm.customNo ?? "" } : {}),');
@@ -271,35 +285,30 @@ test("the dashboard typeface is bundled, never fetched at runtime", () => {
   expect(notice).toContain("Inter typeface");
 });
 
-test("New profile and Edit are pages, not dialogs", () => {
-  expect(app).toContain('useState<"profiles" | "settings" | "extensions" | "create" | "edit">("profiles")');
-  // Both entry points navigate; neither opens a modal any more.
-  expect(app).toContain('setView("create")');
-  expect(app).toContain('setView("edit")');
-  expect(app).not.toContain("setShowCreate");
-  expect(app).toContain("const isCreateView = view === \"create\";");
-  expect(app).toContain("const isFormView = view === \"create\" || view === \"edit\";");
-  // Cancel, Back and a completed save all return to the roster.
-  expect(app).toContain('const closeCreate = () => {\n    setView("profiles");');
-  expect(app).toContain('const closeEdit = () => { setView("profiles");');
+test("New profile and Edit are instant dialogs; only Settings and Extensions are pages", () => {
+  expect(app).toContain('useState<"profiles" | "settings" | "extensions">("profiles")');
+  expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
+  expect(app).toContain('aria-labelledby="create-profile-title"');
+  expect(app).toContain('aria-labelledby="edit-profile-title"');
+  expect(app).toContain('const closeCreate = () => {\n    setShowCreate(false);');
   expect(app).toContain("PAGE_TITLES[view]");
+  // Edit opens on the click — the detail fetch fills the dialog in when it
+  // lands, and a stale response for an abandoned dialog is discarded.
+  expect(app).toContain("editFetchId.current = id;");
+  expect(app).toContain("if (editFetchId.current !== id) return;");
+  expect(app).toContain('<p className="hint" role="status">Loading profile…</p>');
+  expect(app).toContain("disabled={editSaving || editLoading}");
 });
 
-test("the profile form tabs are a scroll-spy over one scrolling page", () => {
-  // Sections live in a single scroll container; the tabs mark position in it
-  // rather than swapping panes, so scrolling and clicking both work.
-  expect(app).toContain('<div className="formpage" ref={formBodyRef} onScroll={syncActiveSection}>');
-  expect(app).toContain("const syncActiveSection = () => {");
-  expect(app).toContain("if (element && element.getBoundingClientRect().top <= threshold) current = section.key;");
-  expect(app).toContain('?.scrollIntoView({ behavior: "smooth", block: "start" })');
-  expect(app).toContain('aria-selected={activeSection === section.key}');
-  for (const id of ["form-general", "form-proxy", "form-credentials", "form-fingerprint", "form-extensions"]) {
-    expect(app).toContain(`id="${id}"`);
-  }
-  // Credentials and Extensions only exist when editing / in Local mode, so the
-  // strip must be built from the same condition the sections are.
-  expect(app).toContain("...(!isCreateView && !isCloudMode ? [{ key: \"extensions\", label: \"Extensions\" }] : [])");
-  expect(styles).toContain("scroll-margin-top");
+test("running profiles are editable, live-synced in Cloud mode", () => {
+  // A Cloud profile open on THIS device is edited through the local cache; the
+  // running session's checkpoint/close sync carries the change to Cloud.
+  expect(app).toContain("const [editLive, setEditLive] = useState(false);");
+  expect(app).toContain("setEditLive(p.liveEdit === true);");
+  expect(app).toContain("isCloudMode && !editLive && editExpectedVersion === null");
+  expect(app).toContain("isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined");
+  expect(app).toContain("Changes save to this device now and sync to Cloud when it closes.");
+  expect(app).toContain("Changes save now and apply the next time it launches.");
 });
 
 test("the sidebar collapses to an icon rail and remembers it", () => {
@@ -325,23 +334,38 @@ test("roster columns declare their own width and never collapse", () => {
   expect(app).toContain("const CHECKBOX_COLUMN_WIDTH = 44;");
   expect(app).toContain("const tableMinWidth = CHECKBOX_COLUMN_WIDTH + shownColumns.reduce((total, column) => total + column.width, 0);");
   expect(app).toContain('style={{ minWidth: tableMinWidth }}');
+  // Every column declares a width, so a wide window's extra space spreads
+  // proportionally across all of them — no single column hoards it.
   expect(app).toContain("const style = { width: column.width } as CSSProperties;");
+  // The Action column shows no header text — its buttons explain themselves.
+  expect(app).toContain('const label = column.key === "action" ? ""');
   // Widths live in the registry only — a stray CSS width would silently win.
   expect(styles).not.toMatch(/th\.col-\w+, td\.col-\w+ \{ width:/);
   expect(styles).toContain("table-layout: fixed");
   expect(styles).toContain(".tablewrap { flex: 1; min-height: 0; overflow: auto; }");
 });
 
-test("the roster shows when a profile was created and last opened", () => {
-  expect(app).toContain('{ key: "created", label: "Created", sort: true, width: 116 }');
-  expect(app).toContain('{ key: "opened", label: "Last opened", sort: true, width: 132 }');
-  expect(app).toContain('case "created": return p.createdAt ?? 0;');
-  expect(app).toContain('case "opened": return p.lastOpenAt ?? 0;');
-  // 0 means "the store never recorded it", which is not 1970 and not "never
-  // opened" either — each renders its own way, with the exact time on hover.
-  expect(app).toContain('if (!ms) return "—";');
-  expect(app).toContain('title={p.lastOpenAt ? fullStamp(p.lastOpenAt) : "Never opened on this machine"}');
-  expect(app).toContain('<span className="muted">Never</span>');
+test("the roster keeps only the columns that matter and stays compact", () => {
+  // Health, Created and Last opened were removed on request; what is left is
+  // identity, grouping, connectivity — and the one button every row needs.
+  for (const key of ["health", "created", "opened"]) {
+    expect(app).not.toContain(`key: "${key}"`);
+  }
+  expect(app).toContain('{ key: "proxy", label: "Proxy", sort: true, width: 160 }');
+  expect(app).toContain('{ key: "action", label: "Action", sort: false, width: 190 }');
+  expect(app).not.toContain("healthFilter");
+});
+
+test("every row action sits beside Open in the Action cell — nothing hides on hover", () => {
+  expect(app).toContain('<span className="rowactions">');
+  expect(app).toContain('aria-label={`Open ${p.name}`}');
+  expect(app).toContain('aria-label={`Close ${p.name}`}');
+  expect(app).toContain('aria-label={`Edit ${p.name}`}');
+  expect(app).toContain('aria-label="Copy current 2FA code"');
+  // The hover-revealed overlay is gone: it overlapped the profile name.
+  expect(app).not.toContain("rowquick");
+  expect(styles).not.toContain(".rowquick");
+  expect(styles).toContain(".rowactions { display: inline-flex; align-items: center; justify-content: flex-end;");
 });
 
 test("the Action column stays reachable while the roster scrolls sideways", () => {
@@ -352,9 +376,23 @@ test("the Action column stays reachable while the roster scrolls sideways", () =
   // The edge shadow only appears once there is content underneath it.
   expect(app).toContain("onScroll={(event) => setTableScrolled(event.currentTarget.scrollLeft > 0)}");
   expect(styles).toContain(".tablewrap.scrolled td.col-action::before");
-  // Action is toggleable like any other column.
-  expect(app).toContain('{ key: "action", label: "Action", sort: false, width: 160 }');
-  expect(app).toContain('{columnVisible("action") && (');
+});
+
+test("small windows keep navigation and dialogs keep typed input", () => {
+  // Below the rail breakpoint the sidebar becomes the icon rail instead of
+  // disappearing — a resizable desktop app must never lose its navigation.
+  expect(app).toContain('const RAIL_MEDIA = "(max-width: 760px)";');
+  expect(app).toContain("sidebarCollapsed || railForced");
+  expect(styles).not.toContain(".sidebar { display: none; }");
+  // On a big monitor the WHOLE shell caps and centers as one frame — sidebar,
+  // header and roster together — a six-column app cannot fill 2500px gracefully.
+  expect(styles).toContain("max-width: 1704px; margin: 0 auto;");
+  expect(styles).toContain("width: min(1440px, 100% - 32px);");
+  // Escape closes the open dialog; a stray backdrop click never discards a form.
+  expect(app).toContain('if (event.key !== "Escape") return;');
+  expect(app).not.toContain('className="modal-backdrop" onClick={closeCreate}');
+  expect(app).not.toContain('className="modal-backdrop" onClick={closeEdit}');
+  expect(app).not.toContain('className="modal-backdrop" onClick={closeBulk}');
 });
 
 test("import offers one source at a time and counts what was pasted", () => {
@@ -383,14 +421,18 @@ test("no legacy arrow glyphs survive in place of icons", () => {
 });
 
 test("the second accent marks identity, and the credit matches the website", () => {
-  // Two accents only work if each means something: blue = actions, violet =
-  // identity. A violet button or a blue custom NO. would break that split.
-  // Both accents come from the site's own tokens, not invented values.
-  expect(styles).toContain("--accent: #6d4aff;");
+  // Two accents only work if each means something: the live build's brand blue
+  // (#3366e6) marks actions, peach marks identity. A peach button or a blue
+  // custom NO. would break that split.
+  expect(styles).toContain("--accent: #3366e6;");
   expect(styles).toContain("--accent-2: #ff9e7a;");
-  expect(styles).toContain(".no-cell .no-text.custom { color: var(--accent-2-ink); }");
+  expect(styles).toContain("td.col-no .no-text.custom { color: var(--accent-2-ink); }");
   expect(styles).toContain("linear-gradient(150deg, var(--accent), var(--accent-2))");
   expect(styles).not.toMatch(/\.btn\.primary \{[^}]*--accent-2/);
+  // The accent is the logo's blue, and no trace of the old violet survives.
+  expect(logo).toContain('stroke="#2457D6"');
+  expect(styles).not.toContain("#6d4aff");
+  expect(styles).not.toContain("#8b6dff");
 
   // aliasmode.com credits "Developed by Xreacher" — not "Powered by" — and the
   // name links to its owner, not back to the product it credits.
@@ -439,12 +481,23 @@ test("the dark theme is a token swap, and native controls follow it", () => {
   expect(rules).not.toMatch(/background: #fff/);
   // Two near-black brand tiles would vanish on a dark row.
   expect(styles).toContain(':root[data-theme="dark"] .platform-pill .glyph.pm-x');
-  // Disc colours live in CSS so they can inverse for dark rows.
-  expect(app).toContain("const AVATAR_HUES = 14;");
-  expect(app).toContain("data-hue={avatarHue(profile.id)}");
-  expect(styles).toContain(':root[data-theme="dark"] .no-avatar[data-hue="0"]');
+  // Light is the out-of-the-box default; Dark and follow-the-OS System are
+  // opt-in from Settings and persist once chosen.
+  expect(app).toContain('return stored === "dark" || stored === "system" ? stored : "light";');
   // The app resolves "system" itself rather than duplicating the palette.
   expect(app).toContain('window.matchMedia("(prefers-color-scheme: dark)")');
   expect(app).toContain("document.documentElement.dataset.theme =");
   expect(app).toContain('media.addEventListener("change", apply)');
+});
+
+test("the sidebar offers extension management in both modes and a support link", () => {
+  // The extension registry is local in both modes; Cloud profiles carry their
+  // assignments and load matching local uploads at launch.
+  expect(app).toContain('<Icon name="puzzle" /><span className="navlabel">Manage extensions</span>');
+  const nav = app.slice(app.indexOf('className="sidenav"'), app.indexOf("</nav>"));
+  expect(nav).not.toContain("isCloudMode");
+  // Small support entry that forwards to the Telegram group.
+  expect(app).toContain('href="https://t.me/aliasmode"');
+  expect(app).toContain('<Icon name="help" /><span className="navlabel">Support</span>');
+  expect(styles).toContain("a.navitem");
 });

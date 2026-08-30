@@ -839,7 +839,7 @@ test("extension deletion cannot mutate the persona of an open profile", async ()
   s.close();
 });
 
-test("local edits are rejected while the profile browser is open", async () => {
+test("local edits are stored while the profile browser is open and apply next launch", async () => {
   const s = store();
   s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
   const res = await handleUiRequest(
@@ -850,8 +850,10 @@ test("local edits are rejected while the profile browser is open", async () => {
     {} as any,
     s,
   );
-  expect(res!.status).toBe(409);
-  expect([s.getProfile("k1d0cd11")!.screenWidth, s.getProfile("k1d0cd11")!.screenHeight]).not.toEqual([1366, 768]);
+  expect(res!.status).toBe(200);
+  // The running browser is untouched; the stored fields drive the NEXT launch.
+  expect([s.getProfile("k1d0cd11")!.screenWidth, s.getProfile("k1d0cd11")!.screenHeight]).toEqual([1366, 768]);
+  expect(s.getLaunch("k1d0cd11")).not.toBeNull();
   s.close();
 });
 
@@ -2383,6 +2385,84 @@ test("Cloud profile editor routes return no session data and forward expectedVer
   expect(updateRequest.payload.profile.group).toBe("va2");
   expect(updateRequest.payload.session).toEqual(payload.session);
   expect(s.getProfile("k1d0cd11")!.name).toBe(localName);
+  s.close();
+});
+
+test("Cloud profile open on this device is edited live through the local cache", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-live-edit-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  // The running session's checkpoint/close sync owns the Cloud version, so the
+  // editor must never be consulted — the local cached copy is the truth.
+  const cloudConnection = {
+    client: new Proxy({}, {
+      get() { throw new Error("Cloud must not be called for a live edit"); },
+    }),
+  } as any;
+  const noted: string[] = [];
+  const cloudBrowser = { noteProfileEdited(id: string) { noted.push(id); } } as any;
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
+
+  const getResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser, cloudConnection },
+  );
+  expect(getResponse!.status).toBe(200);
+  const getBody = await getResponse!.json();
+  expect(getBody.profile.liveEdit).toBe(true);
+  expect(getBody.profile.expectedVersion).toBeUndefined();
+
+  // A transient Cloud connectivity outage must not block editing a profile
+  // that is open on this very device — the live path never uses the connection.
+  const offline = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11"),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+  expect(offline!.status).toBe(200);
+
+  const saveResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // customNo is ignored: the portable-profile contract cannot carry it, so
+      // honoring it would only last until the next open erased it.
+      body: JSON.stringify({ set: { name: "Live edited name", customNo: "999" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser, cloudConnection },
+  );
+  expect(saveResponse!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.name).toBe("Live edited name");
+  expect(s.getProfile("k1d0cd11")!.customNo ?? "").not.toBe("999");
+  // The edit was made durable immediately, not left to ride on the next
+  // session-content change.
+  expect(noted).toEqual(["k1d0cd11"]);
+
+  // Once the browser has closed, a stale live-edit dialog cannot silently fall
+  // through to the versioned editor without an expectedVersion.
+  s.clearLaunch("k1d0cd11");
+  const staleResponse = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ set: { name: "Too late" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(staleResponse!.status).toBe(409);
+  expect((await staleResponse!.json()).error).toContain("reopen Edit");
   s.close();
 });
 

@@ -457,6 +457,9 @@ export interface EditProfile {
   };
   /** Present only for Cloud profiles and required for optimistic saves. */
   expectedVersion?: number;
+  /** Cloud profile open on THIS device: edits apply to the local cached copy
+      and sync to Cloud with the running session (no expectedVersion needed). */
+  liveEdit?: boolean;
 }
 
 // ---- 2FA authenticator: current TOTP code (never the secret) ----------------
