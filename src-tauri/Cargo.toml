@@ -1,6 +1,6 @@
 [package]
 name = "aliasmode-desktop"
-version = "0.1.0-beta.44"
+version = "0.1.0-beta.45"
 description = "AliasMode Windows desktop shell"
 edition = "2021"
 rust-version = "1.89"
