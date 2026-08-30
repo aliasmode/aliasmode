@@ -17,6 +17,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   };
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
   const cargoLock = readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8");
+  const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
   const lockedVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "aliasmode-desktop"\r?\nversion = "([^"]+)"/)?.[1];
 
@@ -32,5 +33,8 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(tauriConfig.plugins.updater.windows.installMode).toBe("passive");
   expect(tauriConfig.plugins.updater.pubkey.length).toBeGreaterThan(100);
   expect(cargoToml).toContain('tauri-plugin-updater = { version = "=2.10.1"');
+  expect(cargoToml).toContain('tauri-plugin-updater = { path = "../vendor/tauri-plugin-updater" }');
+  expect(updaterSource).toContain("if result as isize <= 32");
+  expect(updaterSource).toContain("Error::Io(std::io::Error::last_os_error())");
   expect(existsSync(join(root, "src-tauri", "tauri.unsigned.conf.json"))).toBe(false);
 });

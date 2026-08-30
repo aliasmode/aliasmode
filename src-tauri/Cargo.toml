@@ -44,5 +44,8 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Threading",
 ] }
 
+[patch.crates-io]
+tauri-plugin-updater = { path = "../vendor/tauri-plugin-updater" }
+
 [dev-dependencies]
 tempfile = "3.23.0"
