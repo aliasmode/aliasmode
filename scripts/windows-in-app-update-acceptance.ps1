@@ -322,15 +322,25 @@ function Wait-CandidateRelaunch(
   [string]$ExpectedRoot,
   [string]$WebViewRoot,
   $OldRecord,
-  [Diagnostics.Process[]]$OldBrowserProcesses
+  [Diagnostics.Process[]]$OldBrowserProcesses,
+  [string]$FixtureStatePath,
+  $Observations
 ) {
-  for ($attempt = 0; $attempt -lt 2400; $attempt++) {
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  $deadline = [TimeSpan]::FromMinutes(10)
+  $nextReportSeconds = 0.0
+  while ($timer.Elapsed -lt $deadline) {
     $oldDesktopExited = Test-ProcessExited $OldRecord.App
     $oldSidecarExited = Test-ProcessExited $OldRecord.Sidecar
     $oldBrowsersExited = @($OldBrowserProcesses | Where-Object { -not (Test-ProcessExited $_) }).Count -eq 0
+    $Observations.oldDesktopExited = $oldDesktopExited
+    $Observations.oldSidecarExited = $oldSidecarExited
+    $Observations.oldBrowserExited = $oldBrowsersExited
 
     foreach ($desktop in @(Get-InstalledDesktopProcesses $AppPath)) {
+      if ($desktop.Id -ne $OldRecord.App.Id) { $Observations.candidateDesktopSeen = $true }
       foreach ($sidecar in @(Get-ChildSidecars $desktop.Id)) {
+        if ($sidecar.Id -ne $OldRecord.Sidecar.Id) { $Observations.candidateSidecarSeen = $true }
         $healthRecord = Get-SidecarHealth $sidecar.Id
         if (-not $healthRecord) { continue }
         $health = $healthRecord.Health
@@ -339,6 +349,7 @@ function Wait-CandidateRelaunch(
           throw "public $publicVersion health reappeared after update handoff"
         }
         if ($health.version -ne $ExpectedCandidateVersion) { continue }
+        $Observations.candidateHealthSeen = $true
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
         $debugPort = Get-WebViewDebugPort $WebViewRoot
@@ -374,6 +385,23 @@ function Wait-CandidateRelaunch(
       if ($oldOriginHealth -and $oldOriginHealth.version -eq $publicVersion) {
         throw "public $publicVersion health reappeared on its previous endpoint"
       }
+    }
+    if ($timer.Elapsed.TotalSeconds -ge $nextReportSeconds) {
+      $counts = Get-SafeRouteCounts $FixtureStatePath
+      Write-Host (
+        "AliasMode updater relaunch state: " +
+        "oldDesktopExited=$oldDesktopExited; " +
+        "oldSidecarExited=$oldSidecarExited; " +
+        "oldBrowserExited=$oldBrowsersExited; " +
+        "candidateDesktopSeen=$($Observations.candidateDesktopSeen); " +
+        "candidateSidecarSeen=$($Observations.candidateSidecarSeen); " +
+        "candidateHealthSeen=$($Observations.candidateHealthSeen); " +
+        "releaseRequests=$($counts.releaseList); " +
+        "manifestRequests=$($counts.manifest); " +
+        "installerRequests=$($counts.installer); " +
+        "rejectedRequests=$($counts.rejected)"
+      )
+      $nextReportSeconds = $timer.Elapsed.TotalSeconds + 30
     }
     Start-Sleep -Milliseconds 250
   }
@@ -737,10 +765,14 @@ $observations = [ordered]@{
   publicDesktopReady = $false
   profileCreated = $false
   activeBrowserStarted = $false
+  browserClosedBeforeUpdate = $false
   visibleUpdateClicked = $false
   oldDesktopExited = $false
   oldSidecarExited = $false
   oldBrowserExited = $false
+  candidateDesktopSeen = $false
+  candidateSidecarSeen = $false
+  candidateHealthSeen = $false
   candidateReady = $false
   candidateDashboardReady = $false
   installPathPreserved = $false
@@ -921,6 +953,31 @@ try {
   $configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
   $sentinelHash = (Get-FileHash -LiteralPath $sentinelPath -Algorithm SHA256).Hash
 
+  Set-AcceptanceStage "closing-active-profile"
+  $closed = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/close" `
+    -Method Post `
+    -TimeoutSec 120 `
+    -NoProxy
+  if ($closed.ok -ne $true) { throw "public $publicVersion could not close the preservation browser" }
+  $browserExited = $false
+  for ($attempt = 0; $attempt -lt 240; $attempt++) {
+    if (@($oldBrowserProcesses | Where-Object { -not (Test-ProcessExited $_) }).Count -eq 0) {
+      $browserExited = $true
+      break
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not $browserExited -or @(Get-InstalledBrowserProcesses $installRoot).Count -ne 0) {
+    throw "preservation browser survived its confirmed close"
+  }
+  $closedRoster = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" -TimeoutSec 30 -NoProxy
+  $closedProfile = @($closedRoster.profiles | Where-Object { $_.id -eq $profileId -and $_.name -eq $profileName })
+  if ($closedProfile.Count -ne 1 -or $closedProfile[0].running -ne $false) {
+    throw "preservation profile remained active after confirmed close"
+  }
+  $observations.browserClosedBeforeUpdate = $true
+  $observations.oldBrowserExited = $true
+
   Set-AcceptanceStage "clicking-visible-update"
   Invoke-DesktopUiProbe `
     $runtime `
@@ -939,7 +996,9 @@ try {
     $appDataRoot `
     $webViewRoot `
     $oldRecord `
-    $oldBrowserProcesses
+    $oldBrowserProcesses `
+    $fixtureStatePath `
+    $observations
   $observations.oldDesktopExited = Test-ProcessExited $oldRecord.App
   $observations.oldSidecarExited = Test-ProcessExited $oldRecord.Sidecar
   $observations.oldBrowserExited = @($oldBrowserProcesses | Where-Object { -not (Test-ProcessExited $_) }).Count -eq 0
