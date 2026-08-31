@@ -38,22 +38,37 @@ $ProgressPreference = "SilentlyContinue"
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 
-public static class AliasModeStandardUserProcess {
-  private const uint TokenAssignPrimary = 0x0001;
-  private const uint TokenDuplicate = 0x0002;
+public sealed class AliasModeAcceptanceUserSession : IDisposable {
+  private const int Logon32LogonInteractive = 2;
+  private const int Logon32ProviderDefault = 0;
+  private const int ProfileNoUi = 1;
+  private const uint CreateUnicodeEnvironment = 0x00000400;
+  private const uint ProcessQueryLimitedInformation = 0x1000;
   private const uint TokenQuery = 0x0008;
   private const int TokenTypeClass = 8;
   private const int TokenElevationTypeClass = 18;
-  private const int TokenLinkedTokenClass = 19;
   private const int TokenElevationClass = 20;
   private const int TokenPrimary = 1;
-  private const int SecurityImpersonation = 2;
-  private const int TokenElevationTypeFull = 2;
-  private const int TokenElevationTypeLimited = 3;
+  private const int TokenElevationTypeDefault = 1;
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct ProfileInfo {
+    public int size;
+    public int flags;
+    public string userName;
+    public string profilePath;
+    public string defaultPath;
+    public string serverName;
+    public string policyPath;
+    public IntPtr profile;
+  }
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   private struct StartupInfo {
@@ -85,34 +100,33 @@ public static class AliasModeStandardUserProcess {
     public int threadId;
   }
 
-  [StructLayout(LayoutKind.Sequential)]
-  private struct TokenElevation {
-    public int isElevated;
-  }
-
-  [StructLayout(LayoutKind.Sequential)]
-  private struct TokenLinkedToken {
-    public IntPtr linkedToken;
-  }
-
-  [DllImport("kernel32.dll")]
-  private static extern IntPtr GetCurrentProcess();
-
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool OpenProcessToken(
-    IntPtr process,
-    uint desiredAccess,
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool LogonUser(
+    string userName,
+    string domain,
+    string password,
+    int logonType,
+    int logonProvider,
     out IntPtr token
   );
 
-  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
-  private static extern bool GetTokenElevation(
-    IntPtr token,
-    int informationClass,
-    ref TokenElevation information,
-    int informationLength,
-    out int returnLength
+  [DllImport("advapi32.dll", EntryPoint = "CreateProcessWithLogonW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CreateProcessWithLogon(
+    string userName,
+    string domain,
+    string password,
+    uint logonFlags,
+    string applicationName,
+    StringBuilder commandLine,
+    uint creationFlags,
+    IntPtr environment,
+    string currentDirectory,
+    ref StartupInfo startupInfo,
+    out ProcessInformation processInformation
   );
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool OpenProcessToken(IntPtr process, uint desiredAccess, out IntPtr token);
 
   [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
   private static extern bool GetTokenInteger(
@@ -123,42 +137,66 @@ public static class AliasModeStandardUserProcess {
     out int returnLength
   );
 
-  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
-  private static extern bool GetLinkedToken(
-    IntPtr token,
-    int informationClass,
-    ref TokenLinkedToken information,
-    int informationLength,
-    out int returnLength
-  );
-
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool DuplicateTokenEx(
-    IntPtr existingToken,
-    uint desiredAccess,
-    IntPtr tokenAttributes,
-    int impersonationLevel,
-    int tokenType,
-    out IntPtr newToken
-  );
-
-  [DllImport("advapi32.dll", EntryPoint = "CreateProcessAsUserW", CharSet = CharSet.Unicode, SetLastError = true)]
-  private static extern bool CreateProcessAsUser(
-    IntPtr token,
-    string applicationName,
-    StringBuilder commandLine,
-    IntPtr processAttributes,
-    IntPtr threadAttributes,
-    bool inheritHandles,
-    uint creationFlags,
-    IntPtr environment,
-    string currentDirectory,
-    ref StartupInfo startupInfo,
-    out ProcessInformation processInformation
-  );
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
 
   [DllImport("kernel32.dll", SetLastError = true)]
   private static extern bool CloseHandle(IntPtr handle);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr LocalFree(IntPtr memory);
+
+  [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool LoadUserProfile(IntPtr token, ref ProfileInfo profileInfo);
+
+  [DllImport("userenv.dll", SetLastError = true)]
+  private static extern bool UnloadUserProfile(IntPtr token, IntPtr profile);
+
+  [DllImport("userenv.dll", SetLastError = true)]
+  private static extern bool CreateEnvironmentBlock(out IntPtr environment, IntPtr token, bool inherit);
+
+  [DllImport("userenv.dll", SetLastError = true)]
+  private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+  [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool GetUserProfileDirectory(
+    IntPtr token,
+    StringBuilder profileDirectory,
+    ref uint size
+  );
+
+  [DllImport("userenv.dll", EntryPoint = "DeleteProfileW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool DeleteProfile(string sid, string profilePath, string computerName);
+
+  private IntPtr token;
+  private IntPtr profile;
+  private IntPtr environment;
+  private readonly string userName;
+  private string password;
+  private readonly Dictionary<string, string> environmentValues;
+
+  private AliasModeAcceptanceUserSession(
+    IntPtr token,
+    IntPtr profile,
+    IntPtr environment,
+    string userName,
+    string password,
+    string sid,
+    string profileDirectory,
+    Dictionary<string, string> environmentValues
+  ) {
+    this.token = token;
+    this.profile = profile;
+    this.environment = environment;
+    this.userName = userName;
+    this.password = password;
+    UserSid = sid;
+    ProfileDirectory = profileDirectory;
+    this.environmentValues = environmentValues;
+  }
+
+  public string UserSid { get; private set; }
+  public string ProfileDirectory { get; private set; }
 
   private static int ReadTokenInteger(IntPtr token, int informationClass, string failure) {
     int value = 0;
@@ -169,83 +207,160 @@ public static class AliasModeStandardUserProcess {
     return value;
   }
 
-  private static int ReadTokenElevation(IntPtr token, string failure) {
-    TokenElevation elevation = new TokenElevation();
-    int returned;
-    if (!GetTokenElevation(
-      token,
-      TokenElevationClass,
-      ref elevation,
-      Marshal.SizeOf<TokenElevation>(),
-      out returned
-    )) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), failure);
+  private static Dictionary<string, string> ReadEnvironment(IntPtr block) {
+    Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    int offset = 0;
+    while (true) {
+      string entry = Marshal.PtrToStringUni(IntPtr.Add(block, offset * sizeof(char)));
+      if (string.IsNullOrEmpty(entry)) break;
+      offset += entry.Length + 1;
+      int separator = entry.IndexOf('=', 1);
+      if (separator > 0) values[entry.Substring(0, separator)] = entry.Substring(separator + 1);
     }
-    return elevation.isElevated;
+    return values;
   }
 
-  public static int Start(string fileName, string arguments, string currentDirectory) {
-    IntPtr currentToken = IntPtr.Zero;
-    IntPtr linkedToken = IntPtr.Zero;
+  private static string GetProfileDirectory(IntPtr token) {
+    uint size = 0;
+    GetUserProfileDirectory(token, null, ref size);
+    if (size == 0) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user profile path query failed");
+    }
+    StringBuilder path = new StringBuilder((int)size);
+    if (!GetUserProfileDirectory(token, path, ref size)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user profile path query failed");
+    }
+    return Path.GetFullPath(path.ToString());
+  }
+
+  public static AliasModeAcceptanceUserSession Open(
+    string userName,
+    string password,
+    string expectedSid
+  ) {
     IntPtr token = IntPtr.Zero;
-    ProcessInformation process = new ProcessInformation();
+    IntPtr environment = IntPtr.Zero;
+    ProfileInfo profileInfo = new ProfileInfo();
+    bool profileLoaded = false;
     try {
-      if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out currentToken)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "release runner token open failed");
-      }
-      if (ReadTokenElevation(currentToken, "release runner elevation query failed") == 0 ||
-          ReadTokenInteger(currentToken, TokenElevationTypeClass, "release runner elevation type query failed") != TokenElevationTypeFull) {
-        throw new InvalidOperationException("release runner must provide an elevated split token");
-      }
-
-      TokenLinkedToken linked = new TokenLinkedToken();
-      int returned;
-      if (!GetLinkedToken(
-        currentToken,
-        TokenLinkedTokenClass,
-        ref linked,
-        Marshal.SizeOf<TokenLinkedToken>(),
-        out returned
-      ) || linked.linkedToken == IntPtr.Zero) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user linked token query failed");
-      }
-      linkedToken = linked.linkedToken;
-      if (ReadTokenElevation(linkedToken, "standard-user linked token elevation query failed") != 0 ||
-          ReadTokenInteger(linkedToken, TokenElevationTypeClass, "standard-user linked token type query failed") != TokenElevationTypeLimited) {
-        throw new InvalidOperationException("linked token is not a limited standard-user token");
-      }
-
-      if (!DuplicateTokenEx(
-        linkedToken,
-        TokenAssignPrimary | TokenDuplicate | TokenQuery,
-        IntPtr.Zero,
-        SecurityImpersonation,
-        TokenPrimary,
+      if (!LogonUser(
+        userName,
+        Environment.MachineName,
+        password,
+        Logon32LogonInteractive,
+        Logon32ProviderDefault,
         out token
       )) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user primary token creation failed");
-      }
-      if (ReadTokenElevation(token, "standard-user token elevation query failed") != 0 ||
-          ReadTokenInteger(token, TokenElevationTypeClass, "standard-user token type query failed") != TokenElevationTypeLimited ||
-          ReadTokenInteger(token, TokenTypeClass, "standard-user primary token query failed") != TokenPrimary) {
-        throw new InvalidOperationException("standard-user token verification failed");
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user logon failed");
       }
 
+      string sid;
+      using (WindowsIdentity identity = new WindowsIdentity(token)) {
+        sid = identity.User.Value;
+        WindowsPrincipal principal = new WindowsPrincipal(identity);
+        if (principal.IsInRole(WindowsBuiltInRole.Administrator)) {
+          throw new InvalidOperationException("acceptance account is an administrator");
+        }
+      }
+      if (!sid.Equals(expectedSid, StringComparison.OrdinalIgnoreCase) ||
+          ReadTokenInteger(token, TokenElevationClass, "standard-user elevation query failed") != 0 ||
+          ReadTokenInteger(token, TokenElevationTypeClass, "standard-user elevation type query failed") != TokenElevationTypeDefault ||
+          ReadTokenInteger(token, TokenTypeClass, "standard-user token type query failed") != TokenPrimary) {
+        throw new InvalidOperationException("acceptance account token is not a standard-user primary token");
+      }
+
+      profileInfo.size = Marshal.SizeOf<ProfileInfo>();
+      profileInfo.flags = ProfileNoUi;
+      profileInfo.userName = userName;
+      if (!LoadUserProfile(token, ref profileInfo) || profileInfo.profile == IntPtr.Zero) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user profile load failed");
+      }
+      profileLoaded = true;
+      if (!CreateEnvironmentBlock(out environment, token, false) || environment == IntPtr.Zero) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user environment creation failed");
+      }
+      Dictionary<string, string> values = ReadEnvironment(environment);
+      foreach (string required in new[] { "LOCALAPPDATA", "APPDATA", "TEMP" }) {
+        if (!values.ContainsKey(required) || string.IsNullOrWhiteSpace(values[required])) {
+          throw new InvalidOperationException("standard-user environment is incomplete");
+        }
+      }
+      return new AliasModeAcceptanceUserSession(
+        token,
+        profileInfo.profile,
+        environment,
+        userName,
+        password,
+        sid,
+        GetProfileDirectory(token),
+        values
+      );
+    } catch {
+      if (environment != IntPtr.Zero) DestroyEnvironmentBlock(environment);
+      if (profileLoaded) UnloadUserProfile(token, profileInfo.profile);
+      if (token != IntPtr.Zero) CloseHandle(token);
+      throw;
+    }
+  }
+
+  public string GetEnvironmentVariable(string name) {
+    string value;
+    if (!environmentValues.TryGetValue(name, out value)) {
+      throw new InvalidOperationException("standard-user environment variable is missing");
+    }
+    return value;
+  }
+
+  private IntPtr BuildEnvironment(string[] overrides) {
+    Dictionary<string, string> values = new Dictionary<string, string>(environmentValues, StringComparer.OrdinalIgnoreCase);
+    if (overrides != null) {
+      foreach (string entry in overrides) {
+        int separator = entry == null ? -1 : entry.IndexOf('=');
+        if (separator <= 0) throw new ArgumentException("invalid standard-user environment override");
+        values[entry.Substring(0, separator)] = entry.Substring(separator + 1);
+      }
+    }
+    List<string> entries = new List<string>();
+    foreach (KeyValuePair<string, string> entry in values) {
+      entries.Add(entry.Key + "=" + entry.Value);
+    }
+    entries.Sort(StringComparer.OrdinalIgnoreCase);
+    byte[] bytes = Encoding.Unicode.GetBytes(string.Join("\0", entries) + "\0\0");
+    IntPtr block = Marshal.AllocHGlobal(bytes.Length);
+    Marshal.Copy(bytes, 0, block, bytes.Length);
+    return block;
+  }
+
+  public int Start(
+    string fileName,
+    string arguments,
+    string currentDirectory,
+    string desktop,
+    string[] environmentOverrides
+  ) {
+    if (token == IntPtr.Zero || profile == IntPtr.Zero || environment == IntPtr.Zero) {
+      throw new ObjectDisposedException("AliasModeAcceptanceUserSession");
+    }
+    ProcessInformation process = new ProcessInformation();
+    IntPtr processEnvironment = IntPtr.Zero;
+    try {
+      processEnvironment = BuildEnvironment(environmentOverrides);
       StartupInfo startup = new StartupInfo();
       startup.cb = Marshal.SizeOf<StartupInfo>();
-      string escapedFileName = "\"" + fileName.Replace("\"", "\"\"") + "\"";
+      startup.desktop = desktop;
+      string commandName = "\"" + fileName + "\"";
       StringBuilder command = new StringBuilder(
-        string.IsNullOrWhiteSpace(arguments) ? escapedFileName : escapedFileName + " " + arguments
+        string.IsNullOrWhiteSpace(arguments) ? commandName : commandName + " " + arguments
       );
-      if (!CreateProcessAsUser(
-        token,
+      if (!CreateProcessWithLogon(
+        userName,
+        Environment.MachineName,
+        password,
+        0,
         fileName,
         command,
-        IntPtr.Zero,
-        IntPtr.Zero,
-        false,
-        0,
-        IntPtr.Zero,
+        CreateUnicodeEnvironment,
+        processEnvironment,
         currentDirectory,
         ref startup,
         out process
@@ -256,21 +371,317 @@ public static class AliasModeStandardUserProcess {
     } finally {
       if (process.thread != IntPtr.Zero) CloseHandle(process.thread);
       if (process.process != IntPtr.Zero) CloseHandle(process.process);
-      if (token != IntPtr.Zero) CloseHandle(token);
-      if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
-      if (currentToken != IntPtr.Zero) CloseHandle(currentToken);
+      if (processEnvironment != IntPtr.Zero) Marshal.FreeHGlobal(processEnvironment);
     }
+  }
+
+  public static string GetProcessOwnerSid(int processId) {
+    IntPtr process = IntPtr.Zero;
+    IntPtr token = IntPtr.Zero;
+    try {
+      process = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+      if (process == IntPtr.Zero || !OpenProcessToken(process, TokenQuery, out token)) return null;
+      using (WindowsIdentity identity = new WindowsIdentity(token)) {
+        return identity.User == null ? null : identity.User.Value;
+      }
+    } catch {
+      return null;
+    } finally {
+      if (token != IntPtr.Zero) CloseHandle(token);
+      if (process != IntPtr.Zero) CloseHandle(process);
+    }
+  }
+
+  public static void DeleteProfileDirectory(string sid, string profilePath) {
+    if (!DeleteProfile(sid, profilePath, null)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user profile deletion failed");
+    }
+  }
+
+  public void Dispose() {
+    Win32Exception failure = null;
+    if (environment != IntPtr.Zero) {
+      if (!DestroyEnvironmentBlock(environment)) {
+        failure = new Win32Exception(Marshal.GetLastWin32Error(), "standard-user environment cleanup failed");
+      }
+      environment = IntPtr.Zero;
+    }
+    if (profile != IntPtr.Zero) {
+      if (!UnloadUserProfile(token, profile) && failure == null) {
+        failure = new Win32Exception(Marshal.GetLastWin32Error(), "standard-user profile unload failed");
+      }
+      profile = IntPtr.Zero;
+    }
+    if (token != IntPtr.Zero) {
+      CloseHandle(token);
+      token = IntPtr.Zero;
+    }
+    password = null;
+    if (failure != null) throw failure;
+  }
+}
+
+public sealed class AliasModeAcceptanceDesktopAccess : IDisposable {
+  private const int SeWindowObject = 7;
+  private const uint DaclSecurityInformation = 0x00000004;
+  private const uint WindowStationAllAccess = 0x000F037F;
+  private const uint DesktopAllAccess = 0x000F01FF;
+  private const int GrantAccess = 1;
+  private const int TrusteeIsSid = 0;
+  private const int TrusteeIsUser = 1;
+  private const int UoiName = 2;
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct Trustee {
+    public IntPtr multipleTrustee;
+    public int multipleTrusteeOperation;
+    public int trusteeForm;
+    public int trusteeType;
+    public IntPtr name;
+  }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct ExplicitAccess {
+    public uint accessPermissions;
+    public int accessMode;
+    public uint inheritance;
+    public Trustee trustee;
+  }
+
+  private sealed class SecurityRecord {
+    public IntPtr handle;
+    public IntPtr originalDacl;
+    public IntPtr securityDescriptor;
+  }
+
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern IntPtr GetProcessWindowStation();
+
+  [DllImport("kernel32.dll")]
+  private static extern uint GetCurrentThreadId();
+
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern IntPtr GetThreadDesktop(uint threadId);
+
+  [DllImport("user32.dll", EntryPoint = "GetUserObjectInformationW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool GetUserObjectInformation(
+    IntPtr handle,
+    int index,
+    StringBuilder information,
+    uint length,
+    out uint needed
+  );
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern uint GetSecurityInfo(
+    IntPtr handle,
+    int objectType,
+    uint securityInformation,
+    out IntPtr owner,
+    out IntPtr group,
+    out IntPtr dacl,
+    out IntPtr sacl,
+    out IntPtr securityDescriptor
+  );
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern uint SetSecurityInfo(
+    IntPtr handle,
+    int objectType,
+    uint securityInformation,
+    IntPtr owner,
+    IntPtr group,
+    IntPtr dacl,
+    IntPtr sacl
+  );
+
+  [DllImport("advapi32.dll", EntryPoint = "SetEntriesInAclW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern uint SetEntriesInAcl(
+    int count,
+    ref ExplicitAccess entries,
+    IntPtr oldAcl,
+    out IntPtr newAcl
+  );
+
+  [DllImport("advapi32.dll", EntryPoint = "ConvertStringSidToSidW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool ConvertStringSidToSid(string stringSid, out IntPtr sid);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr LocalFree(IntPtr memory);
+
+  private SecurityRecord windowStation;
+  private SecurityRecord desktop;
+
+  private AliasModeAcceptanceDesktopAccess(SecurityRecord windowStation, SecurityRecord desktop, string desktopPath) {
+    this.windowStation = windowStation;
+    this.desktop = desktop;
+    DesktopPath = desktopPath;
+  }
+
+  public string DesktopPath { get; private set; }
+
+  private static string GetObjectName(IntPtr handle) {
+    uint needed;
+    GetUserObjectInformation(handle, UoiName, null, 0, out needed);
+    if (needed == 0) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "interactive desktop name query failed");
+    }
+    StringBuilder name = new StringBuilder((int)(needed / sizeof(char)) + 1);
+    if (!GetUserObjectInformation(handle, UoiName, name, needed, out needed)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "interactive desktop name query failed");
+    }
+    return name.ToString();
+  }
+
+  private static SecurityRecord Grant(IntPtr handle, string sidText, uint access) {
+    IntPtr owner;
+    IntPtr group;
+    IntPtr originalDacl;
+    IntPtr sacl;
+    IntPtr descriptor;
+    uint result = GetSecurityInfo(
+      handle,
+      SeWindowObject,
+      DaclSecurityInformation,
+      out owner,
+      out group,
+      out originalDacl,
+      out sacl,
+      out descriptor
+    );
+    if (result != 0) throw new Win32Exception((int)result, "interactive desktop ACL query failed");
+
+    IntPtr sid = IntPtr.Zero;
+    IntPtr newAcl = IntPtr.Zero;
+    try {
+      if (!ConvertStringSidToSid(sidText, out sid)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "acceptance account SID conversion failed");
+      }
+      ExplicitAccess entry = new ExplicitAccess();
+      entry.accessPermissions = access;
+      entry.accessMode = GrantAccess;
+      entry.inheritance = 0;
+      entry.trustee.multipleTrustee = IntPtr.Zero;
+      entry.trustee.multipleTrusteeOperation = 0;
+      entry.trustee.trusteeForm = TrusteeIsSid;
+      entry.trustee.trusteeType = TrusteeIsUser;
+      entry.trustee.name = sid;
+      result = SetEntriesInAcl(1, ref entry, originalDacl, out newAcl);
+      if (result != 0) throw new Win32Exception((int)result, "interactive desktop ACL creation failed");
+      result = SetSecurityInfo(
+        handle,
+        SeWindowObject,
+        DaclSecurityInformation,
+        IntPtr.Zero,
+        IntPtr.Zero,
+        newAcl,
+        IntPtr.Zero
+      );
+      if (result != 0) throw new Win32Exception((int)result, "interactive desktop ACL grant failed");
+      return new SecurityRecord {
+        handle = handle,
+        originalDacl = originalDacl,
+        securityDescriptor = descriptor
+      };
+    } catch {
+      if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      throw;
+    } finally {
+      if (newAcl != IntPtr.Zero) LocalFree(newAcl);
+      if (sid != IntPtr.Zero) LocalFree(sid);
+    }
+  }
+
+  private static void Restore(SecurityRecord record) {
+    if (record == null) return;
+    try {
+      uint result = SetSecurityInfo(
+        record.handle,
+        SeWindowObject,
+        DaclSecurityInformation,
+        IntPtr.Zero,
+        IntPtr.Zero,
+        record.originalDacl,
+        IntPtr.Zero
+      );
+      if (result != 0) throw new Win32Exception((int)result, "interactive desktop ACL restoration failed");
+    } finally {
+      if (record.securityDescriptor != IntPtr.Zero) LocalFree(record.securityDescriptor);
+      record.securityDescriptor = IntPtr.Zero;
+    }
+  }
+
+  public static AliasModeAcceptanceDesktopAccess Open(string sid) {
+    IntPtr stationHandle = GetProcessWindowStation();
+    IntPtr desktopHandle = GetThreadDesktop(GetCurrentThreadId());
+    if (stationHandle == IntPtr.Zero || desktopHandle == IntPtr.Zero) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "interactive desktop lookup failed");
+    }
+    SecurityRecord station = null;
+    SecurityRecord desktop = null;
+    try {
+      station = Grant(stationHandle, sid, WindowStationAllAccess);
+      desktop = Grant(desktopHandle, sid, DesktopAllAccess);
+      return new AliasModeAcceptanceDesktopAccess(
+        station,
+        desktop,
+        GetObjectName(stationHandle) + "\\" + GetObjectName(desktopHandle)
+      );
+    } catch {
+      try {
+        if (desktop != null) Restore(desktop);
+      } finally {
+        if (station != null) Restore(station);
+      }
+      throw;
+    }
+  }
+
+  public void Dispose() {
+    Exception failure = null;
+    try {
+      Restore(desktop);
+    } catch (Exception error) {
+      failure = error;
+    } finally {
+      desktop = null;
+    }
+    try {
+      Restore(windowStation);
+    } catch (Exception error) {
+      if (failure == null) failure = error;
+    } finally {
+      windowStation = null;
+    }
+    if (failure != null) throw failure;
   }
 }
 '@
 
-function Start-StandardUserProcess([string]$FilePath, [string]$Arguments = "") {
-  $processId = [AliasModeStandardUserProcess]::Start(
+function Start-StandardUserProcess(
+  $UserSession,
+  $DesktopAccess,
+  [string]$FilePath,
+  [string]$Arguments = "",
+  [hashtable]$EnvironmentOverrides = @{}
+) {
+  [string[]]$overrides = @($EnvironmentOverrides.GetEnumerator() | ForEach-Object {
+    "$($_.Key)=$($_.Value)"
+  })
+  $processId = $UserSession.Start(
     $FilePath,
     $Arguments,
-    [IO.Path]::GetDirectoryName($FilePath)
+    [IO.Path]::GetDirectoryName($FilePath),
+    $DesktopAccess.DesktopPath,
+    $overrides
   )
-  return [Diagnostics.Process]::GetProcessById($processId)
+  $process = [Diagnostics.Process]::GetProcessById($processId)
+  $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid($processId)
+  if (-not $ownerSid -or -not $ownerSid.Equals($UserSession.UserSid, [StringComparison]::OrdinalIgnoreCase)) {
+    try { $process.Kill($true) } catch {}
+    throw "standard-user process owner verification failed"
+  }
+  return $process
 }
 
 $publicVersion = $SourceVersion
@@ -299,6 +710,24 @@ function Test-ProcessExited([Diagnostics.Process]$Process) {
   } catch {
     return $true
   }
+}
+
+function Assert-ProcessOwner([Diagnostics.Process]$Process, [string]$ExpectedSid) {
+  $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid($Process.Id)
+  if (-not $ownerSid -or -not $ownerSid.Equals($ExpectedSid, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "acceptance process used an unexpected Windows account"
+  }
+}
+
+function Get-ProcessesOwnedBySid([string]$Sid) {
+  $result = [Collections.Generic.List[Diagnostics.Process]]::new()
+  foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+    $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid($process.Id)
+    if ($ownerSid -and $ownerSid.Equals($Sid, [StringComparison]::OrdinalIgnoreCase)) {
+      $result.Add($process)
+    }
+  }
+  return @($result)
 }
 
 function Set-AcceptanceStage([string]$NextStage) {
@@ -394,14 +823,17 @@ function Wait-DesktopReady(
   [Diagnostics.Process]$DesktopProcess,
   [string]$ExpectedVersion,
   [string]$ExpectedRoot,
-  [string]$WebViewRoot
+  [string]$WebViewRoot,
+  [string]$ExpectedUserSid
 ) {
+  Assert-ProcessOwner $DesktopProcess $ExpectedUserSid
   for ($attempt = 0; $attempt -lt 240; $attempt++) {
     if (Test-ProcessExited $DesktopProcess) {
       throw "installed public desktop exited before readiness"
     }
     $sidecars = @(Get-ChildSidecars $DesktopProcess.Id)
     foreach ($sidecar in $sidecars) {
+      Assert-ProcessOwner $sidecar $ExpectedUserSid
       $healthRecord = Get-SidecarHealth $sidecar.Id
       if (-not $healthRecord) { continue }
       if ($healthRecord.Health.version -ne $ExpectedVersion) {
@@ -442,11 +874,10 @@ function Get-InstalledBrowserProcesses([string]$InstallRoot) {
   return @($result)
 }
 
-function Get-CandidateUpdaterProcesses([string]$Version) {
+function Get-CandidateUpdaterProcesses([string]$Version, [string]$TemporaryRoot) {
   $result = [Collections.Generic.List[Diagnostics.Process]]::new()
   $expectedName = "AliasMode-$Version-installer.exe"
   $expectedParentPrefix = "AliasMode-$Version-updater-"
-  $temporaryRoot = [IO.Path]::GetTempPath()
   foreach ($record in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
     if (-not $record.ExecutablePath -or -not $record.CommandLine -or
         -not (Test-PathWithin ([string]$record.ExecutablePath) $temporaryRoot) -or
@@ -569,6 +1000,7 @@ function Wait-CandidateRelaunch(
   [Diagnostics.Process[]]$OldBrowserProcesses,
   [string]$WebViewRoot,
   [string]$FixtureStatePath,
+  [string]$ExpectedUserSid,
   $Observations
 ) {
   $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -583,8 +1015,10 @@ function Wait-CandidateRelaunch(
     $Observations.oldBrowserExited = $oldBrowsersExited
 
     foreach ($desktop in @(Get-InstalledDesktopProcesses $AppPath)) {
+      Assert-ProcessOwner $desktop $ExpectedUserSid
       if ($desktop.Id -ne $OldRecord.App.Id) { $Observations.candidateDesktopSeen = $true }
       foreach ($sidecar in @(Get-ChildSidecars $desktop.Id)) {
+        Assert-ProcessOwner $sidecar $ExpectedUserSid
         if ($sidecar.Id -ne $OldRecord.Sidecar.Id) { $Observations.candidateSidecarSeen = $true }
         $healthRecord = Get-SidecarHealth $sidecar.Id
         if (-not $healthRecord) { continue }
@@ -980,8 +1414,6 @@ foreach ($requiredPath in @($fixtureScript, $probeScript, (Join-Path $repoRoot "
 
 $runId = [Guid]::NewGuid().ToString("N")
 $runRoot = Join-Path $env:RUNNER_TEMP "aliasmode-in-app-update-$runId"
-$installRoot = Join-Path $env:LOCALAPPDATA "AliasMode"
-$webViewRoot = Join-Path $runRoot "webview"
 $certificateRoot = Join-Path $runRoot "tls"
 $fixtureConfigPath = Join-Path $runRoot "fixture-config.json"
 $fixtureStatePath = Join-Path $runRoot "fixture-state.json"
@@ -991,14 +1423,24 @@ if ([string]::IsNullOrWhiteSpace($DiagnosticsPath)) {
   $DiagnosticsPath = [IO.Path]::GetFullPath($DiagnosticsPath)
 }
 $hostsPath = Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
-$appDataRoot = Join-Path (
-  [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
-) "com.aliasmode.desktop"
-$configPath = Join-Path $appDataRoot "config.json"
-$sentinelPath = Join-Path $appDataRoot "in-app-update-sentinel.txt"
-$appPath = Join-Path $installRoot "AliasMode.exe"
-$manufacturerKey = "Registry::HKEY_CURRENT_USER\Software\aliasmode\AliasMode"
-$uninstallKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\AliasMode"
+$acceptanceUserName = "amupd$($runId.Substring(0, 12))"
+$acceptancePassword = "Aa1!$runId"
+$acceptanceUserCreated = $false
+$acceptanceUserSession = $null
+$desktopAccess = $null
+$acceptanceUserSid = $null
+$acceptanceProfilePath = $null
+$userRunRoot = $null
+$userTempRoot = $null
+$installRoot = $null
+$webViewRoot = $null
+$appDataRoot = $null
+$configPath = $null
+$sentinelPath = $null
+$appPath = $null
+$manufacturerKey = $null
+$uninstallKey = $null
+$stagedSourceInstallerPath = $null
 $registrationBackup = $null
 $registrationChanged = $false
 $hostsOriginalBytes = $null
@@ -1014,8 +1456,6 @@ $cleanupFailures = [Collections.Generic.List[string]]::new()
 $routeCounts = [ordered]@{ releaseList = 0; manifest = 0; installer = 0; rejected = 0 }
 Set-AcceptanceStage "validating-inputs"
 $acceptanceSucceeded = $false
-$savedEnvironment = @{}
-$environmentNames = @("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "WEBVIEW2_USER_DATA_FOLDER")
 $observations = [ordered]@{
   publicInstallerVerified = $false
   standardUserTokenUsed = $false
@@ -1048,18 +1488,9 @@ $observations = [ordered]@{
 
 try {
   Set-AcceptanceStage "preparing-public-release"
-  New-Item -ItemType Directory -Force $runRoot, $webViewRoot, $certificateRoot | Out-Null
+  New-Item -ItemType Directory -Force $runRoot, $certificateRoot | Out-Null
   if (@(Get-Process -Name "AliasMode" -ErrorAction SilentlyContinue).Count -ne 0) {
     throw "runner has a pre-existing AliasMode process"
-  }
-  foreach ($path in @($appDataRoot, $installRoot)) {
-    if (Test-Path -LiteralPath $path) { throw "runner has pre-existing AliasMode state" }
-  }
-  foreach ($key in @(
-    "Registry::HKEY_CURRENT_USER\Software\aliasmode\AliasMode",
-    "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\AliasMode"
-  )) {
-    if (Test-Path -LiteralPath $key) { throw "runner has pre-existing AliasMode registration" }
   }
 
   $SourceInstallerPath = Resolve-InputFile $SourceInstallerPath "source $publicVersion installer"
@@ -1090,10 +1521,90 @@ try {
   if ($actualPublicChecksum -ne $expectedPublicChecksum) {
     throw "source installer SHA-256 mismatch"
   }
+
+  Set-AcceptanceStage "creating-standard-user"
+  $securePassword = ConvertTo-SecureString $acceptancePassword -AsPlainText -Force
+  try {
+    $acceptanceUser = New-LocalUser `
+      -Name $acceptanceUserName `
+      -Password $securePassword `
+      -AccountNeverExpires `
+      -PasswordNeverExpires `
+      -UserMayNotChangePassword `
+      -Description "AliasMode disposable updater acceptance"
+  } finally {
+    $securePassword.Dispose()
+  }
+  $acceptanceUserCreated = $true
+  $acceptanceUserSid = $acceptanceUser.SID.Value
+  $usersGroup = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]::new("S-1-5-32-545"))
+  $usersMembers = @(Get-LocalGroupMember -Group $usersGroup -ErrorAction SilentlyContinue)
+  if (@($usersMembers | Where-Object { $_.SID.Value -eq $acceptanceUserSid }).Count -eq 0) {
+    Add-LocalGroupMember -Group $usersGroup -Member $acceptanceUserName
+  }
+  $administratorsGroup = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]::new("S-1-5-32-544"))
+  if (@(Get-LocalGroupMember -Group $administratorsGroup | Where-Object {
+    $_.SID.Value -eq $acceptanceUserSid
+  }).Count -ne 0) {
+    throw "acceptance account unexpectedly belongs to Administrators"
+  }
+
+  $acceptanceUserSession = [AliasModeAcceptanceUserSession]::Open(
+    $acceptanceUserName,
+    $acceptancePassword,
+    $acceptanceUserSid
+  )
+  $desktopAccess = [AliasModeAcceptanceDesktopAccess]::Open($acceptanceUserSid)
+  $acceptanceProfilePath = $acceptanceUserSession.ProfileDirectory
+  $userLocalAppData = [IO.Path]::GetFullPath(
+    $acceptanceUserSession.GetEnvironmentVariable("LOCALAPPDATA")
+  )
+  $userAppData = [IO.Path]::GetFullPath(
+    $acceptanceUserSession.GetEnvironmentVariable("APPDATA")
+  )
+  $userTempRoot = [IO.Path]::GetFullPath(
+    $acceptanceUserSession.GetEnvironmentVariable("TEMP")
+  )
+  foreach ($path in @($userLocalAppData, $userAppData, $userTempRoot)) {
+    if (-not (Test-PathWithin $path $acceptanceProfilePath)) {
+      throw "standard-user environment escaped its disposable profile"
+    }
+  }
+
+  $userRunRoot = Join-Path $userTempRoot "aliasmode-in-app-update-$runId"
+  $installRoot = Join-Path $userLocalAppData "AliasMode"
+  $webViewRoot = Join-Path $userRunRoot "webview"
+  $appDataRoot = Join-Path $userAppData "com.aliasmode.desktop"
+  $configPath = Join-Path $appDataRoot "config.json"
+  $sentinelPath = Join-Path $appDataRoot "in-app-update-sentinel.txt"
+  $appPath = Join-Path $installRoot "AliasMode.exe"
+  $manufacturerKey = "Registry::HKEY_USERS\$acceptanceUserSid\Software\aliasmode\AliasMode"
+  $uninstallKey = "Registry::HKEY_USERS\$acceptanceUserSid\Software\Microsoft\Windows\CurrentVersion\Uninstall\AliasMode"
+  if (-not (Test-Path -LiteralPath "Registry::HKEY_USERS\$acceptanceUserSid")) {
+    throw "standard-user registry hive is not loaded"
+  }
+  foreach ($path in @($appDataRoot, $installRoot)) {
+    if (Test-Path -LiteralPath $path) { throw "standard user has pre-existing AliasMode state" }
+  }
+  foreach ($key in @($manufacturerKey, $uninstallKey)) {
+    if (Test-Path -LiteralPath $key) { throw "standard user has pre-existing AliasMode registration" }
+  }
+
+  New-Item -ItemType Directory -Force $userRunRoot, $webViewRoot | Out-Null
+  $stagedSourceInstallerPath = Join-Path $userRunRoot $publicInstallerName
+  Copy-Item -LiteralPath $SourceInstallerPath -Destination $stagedSourceInstallerPath
+  if ((Get-FileHash -LiteralPath $stagedSourceInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+      $actualPublicChecksum) {
+    throw "staged source installer SHA-256 mismatch"
+  }
   $observations.publicInstallerVerified = $true
 
   Set-AcceptanceStage "installing-source-release"
-  $install = Start-StandardUserProcess $SourceInstallerPath "/S"
+  $install = Start-StandardUserProcess `
+    $acceptanceUserSession `
+    $desktopAccess `
+    $stagedSourceInstallerPath `
+    "/S"
   if (-not $install.WaitForExit(300000)) {
     Stop-ProcessTree $install
     throw "public $publicVersion installer timed out"
@@ -1163,16 +1674,23 @@ try {
   Flush-DnsCache
   Assert-GithubResolvesToLoopback
 
-  foreach ($name in $environmentNames) {
-    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-  }
-  [Environment]::SetEnvironmentVariable("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "1", "Process")
-  [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webViewRoot, "Process")
-
   Set-AcceptanceStage "starting-public-release"
-  $publicDesktop = Start-StandardUserProcess $appPath
+  $publicDesktop = Start-StandardUserProcess `
+    $acceptanceUserSession `
+    $desktopAccess `
+    $appPath `
+    "" `
+    @{
+      ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
+      WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
+    }
   $observations.standardUserTokenUsed = $true
-  $oldRecord = Wait-DesktopReady $publicDesktop $publicVersion $appDataRoot $webViewRoot
+  $oldRecord = Wait-DesktopReady `
+    $publicDesktop `
+    $publicVersion `
+    $appDataRoot `
+    $webViewRoot `
+    $acceptanceUserSid
   $observations.publicDesktopReady = $true
 
   Set-AcceptanceStage "creating-active-profile"
@@ -1211,6 +1729,9 @@ try {
       @($oldBrowserProcesses | Where-Object { $_.Id -eq $browserOwner[0] }).Count -ne 1) {
     throw "installed preservation browser process tree was not found"
   }
+  foreach ($browserProcess in $oldBrowserProcesses) {
+    Assert-ProcessOwner $browserProcess $acceptanceUserSid
+  }
   $oldRoster = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" -TimeoutSec 30 -NoProxy
   $oldProfile = @($oldRoster.profiles | Where-Object { $_.id -eq $profileId -and $_.name -eq $profileName })
   if ($oldProfile.Count -ne 1 -or $oldProfile[0].running -ne $true) {
@@ -1238,7 +1759,7 @@ try {
     InstallLocation = (Get-ItemProperty -LiteralPath $uninstallKey -Name "InstallLocation").InstallLocation
     UninstallString = (Get-ItemProperty -LiteralPath $uninstallKey -Name "UninstallString").UninstallString
   }
-  $staleRoot = Join-Path $runRoot "stale-installation"
+  $staleRoot = Join-Path $userRunRoot "stale-installation"
   New-Item -ItemType Directory -Force $staleRoot | Out-Null
   Copy-Item -LiteralPath $appPath -Destination (Join-Path $staleRoot "AliasMode.exe")
   Copy-Item -LiteralPath (Join-Path $installRoot "uninstall.exe") -Destination (Join-Path $staleRoot "uninstall.exe")
@@ -1264,7 +1785,7 @@ try {
     throw "stale registration rejection changed the active process tree"
   }
   $observations.installerDidNotStartAfterRejection =
-    @(Get-CandidateUpdaterProcesses $CandidateVersion).Count -eq 0 -and
+    @(Get-CandidateUpdaterProcesses $CandidateVersion $userTempRoot).Count -eq 0 -and
     -not (Test-Path -LiteralPath (Join-Path $appDataRoot "update-attempt.json") -PathType Leaf)
   if (-not $observations.installerDidNotStartAfterRejection) {
     throw "stale registration rejection reached the installer handoff"
@@ -1297,6 +1818,7 @@ try {
     $oldBrowserProcesses `
     $webViewRoot `
     $fixtureStatePath `
+    $acceptanceUserSid `
     $observations
   $observations.oldDesktopExited = Test-ProcessExited $oldRecord.App
   $observations.oldSidecarExited = Test-ProcessExited $oldRecord.Sidecar
@@ -1408,54 +1930,61 @@ try {
   foreach ($browserProcess in $oldBrowserProcesses) {
     try { Stop-ProcessTree $browserProcess } catch { $cleanupFailures.Add("browser process cleanup failed") }
   }
-  try {
-    foreach ($updaterProcess in @(Get-CandidateUpdaterProcesses $CandidateVersion)) {
-      Stop-ProcessTree $updaterProcess
+  if ($userTempRoot) {
+    try {
+      foreach ($updaterProcess in @(Get-CandidateUpdaterProcesses $CandidateVersion $userTempRoot)) {
+        Stop-ProcessTree $updaterProcess
+      }
+    } catch {
+      $cleanupFailures.Add("updater process cleanup failed")
     }
-  } catch {
-    $cleanupFailures.Add("updater process cleanup failed")
   }
   if ($fixtureProcess) {
     try { Stop-ProcessTree $fixtureProcess } catch { $cleanupFailures.Add("fixture process cleanup failed") }
   }
 
-  try {
-    foreach ($processRecord in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
-      $belongsToAcceptance = $processRecord.ExecutablePath -and
-        (Test-PathWithin ([string]$processRecord.ExecutablePath) $installRoot)
-      if (-not $belongsToAcceptance -and $processRecord.CommandLine) {
-        $belongsToAcceptance = $processRecord.CommandLine.Contains($runRoot, [StringComparison]::OrdinalIgnoreCase)
-      }
-      if ($belongsToAcceptance) {
-        $process = Get-Process -Id $processRecord.ProcessId -ErrorAction SilentlyContinue
-        if ($process) { Stop-ProcessTree $process }
-      }
-    }
-  } catch {
-    $cleanupFailures.Add("isolated process sweep failed")
-  }
-
-  $uninstaller = Join-Path $installRoot "uninstall.exe"
-  if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+  if ($acceptanceUserSid) {
     try {
-      $uninstall = Start-Process -PassThru $uninstaller -ArgumentList "/S"
-      if (-not $uninstall.WaitForExit(120000)) {
-        Stop-ProcessTree $uninstall
-        throw "uninstaller timed out"
+      foreach ($process in @(Get-ProcessesOwnedBySid $acceptanceUserSid)) {
+        Stop-ProcessTree $process
       }
-      if ($uninstall.ExitCode -ne 0) { throw "uninstaller exited nonzero" }
     } catch {
-      $cleanupFailures.Add("installed app cleanup failed")
+      $cleanupFailures.Add("standard-user process sweep failed")
     }
   }
 
-  try {
-    foreach ($updaterRoot in @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory `
-      -Filter "AliasMode-$CandidateVersion-updater-*" -ErrorAction SilentlyContinue)) {
-      Remove-Item -LiteralPath $updaterRoot.FullName -Recurse -Force -ErrorAction Stop
+  if ($installRoot) {
+    $uninstaller = Join-Path $installRoot "uninstall.exe"
+    if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+      try {
+        if (-not $acceptanceUserSession -or -not $desktopAccess) {
+          throw "standard-user cleanup context is unavailable"
+        }
+        $uninstall = Start-StandardUserProcess `
+          $acceptanceUserSession `
+          $desktopAccess `
+          $uninstaller `
+          "/S"
+        if (-not $uninstall.WaitForExit(120000)) {
+          Stop-ProcessTree $uninstall
+          throw "uninstaller timed out"
+        }
+        if ($uninstall.ExitCode -ne 0) { throw "uninstaller exited nonzero" }
+      } catch {
+        $cleanupFailures.Add("installed app cleanup failed")
+      }
     }
-  } catch {
-    $cleanupFailures.Add("updater temporary state cleanup failed")
+  }
+
+  if ($userTempRoot) {
+    try {
+      foreach ($updaterRoot in @(Get-ChildItem $userTempRoot -Directory `
+        -Filter "AliasMode-$CandidateVersion-updater-*" -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $updaterRoot.FullName -Recurse -Force -ErrorAction Stop
+      }
+    } catch {
+      $cleanupFailures.Add("updater temporary state cleanup failed")
+    }
   }
 
   if ($hostsChanged -and $null -ne $hostsOriginalBytes) {
@@ -1473,19 +2002,15 @@ try {
   }
   if ($trustedCa) { $trustedCa.Dispose() }
 
-  foreach ($name in $environmentNames) {
-    if ($savedEnvironment.ContainsKey($name)) {
-      [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
-    }
-  }
-
   foreach ($key in @($manufacturerKey, $uninstallKey)) {
+    if ([string]::IsNullOrWhiteSpace([string]$key)) { continue }
     try { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue } catch {
       $cleanupFailures.Add("installer registration cleanup failed")
     }
   }
 
-  foreach ($path in @($appDataRoot, $installRoot, $runRoot)) {
+  foreach ($path in @($appDataRoot, $installRoot, $userRunRoot, $runRoot)) {
+    if ([string]::IsNullOrWhiteSpace([string]$path)) { continue }
     try {
       for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
@@ -1497,6 +2022,75 @@ try {
       $cleanupFailures.Add("isolated state cleanup failed")
     }
   }
+
+  if ($acceptanceUserCreated) {
+    try { Disable-LocalUser -Name $acceptanceUserName } catch {
+      $cleanupFailures.Add("standard-user disable failed")
+    }
+  }
+  if ($acceptanceUserSid) {
+    try {
+      foreach ($process in @(Get-ProcessesOwnedBySid $acceptanceUserSid)) {
+        Stop-ProcessTree $process
+      }
+      if (@(Get-ProcessesOwnedBySid $acceptanceUserSid).Count -ne 0) {
+        throw "standard-user process survived cleanup"
+      }
+    } catch {
+      $cleanupFailures.Add("final standard-user process cleanup failed")
+    }
+  }
+  if ($desktopAccess) {
+    try { $desktopAccess.Dispose() } catch {
+      $cleanupFailures.Add("interactive desktop ACL restoration failed")
+    }
+    $desktopAccess = $null
+  }
+  if ($acceptanceUserSession) {
+    try { $acceptanceUserSession.Dispose() } catch {
+      $cleanupFailures.Add("standard-user profile unload failed")
+    }
+    $acceptanceUserSession = $null
+  }
+
+  if ($acceptanceUserSid -and $acceptanceProfilePath) {
+    $profileLoaded = $false
+    try {
+      for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $profileRecord = @(Get-CimInstance Win32_UserProfile `
+          -Filter "SID = '$acceptanceUserSid'" `
+          -ErrorAction SilentlyContinue)
+        $profileLoaded = $profileRecord.Count -gt 0 -and $profileRecord[0].Loaded
+        if (-not $profileLoaded) { break }
+        Start-Sleep -Milliseconds 250
+      }
+      if ($profileLoaded) { throw "standard-user profile remained loaded" }
+      [AliasModeAcceptanceUserSession]::DeleteProfileDirectory(
+        $acceptanceUserSid,
+        $acceptanceProfilePath
+      )
+      if ((Test-Path -LiteralPath $acceptanceProfilePath) -or
+          @(Get-CimInstance Win32_UserProfile `
+            -Filter "SID = '$acceptanceUserSid'" `
+            -ErrorAction SilentlyContinue).Count -ne 0) {
+        throw "standard-user profile survived deletion"
+      }
+    } catch {
+      $cleanupFailures.Add("standard-user profile deletion failed")
+    }
+  }
+  if ($acceptanceUserCreated) {
+    try {
+      Remove-LocalUser -Name $acceptanceUserName
+      if (Get-LocalUser -Name $acceptanceUserName -ErrorAction SilentlyContinue) {
+        throw "standard user survived removal"
+      }
+      $acceptanceUserCreated = $false
+    } catch {
+      $cleanupFailures.Add("standard-user account removal failed")
+    }
+  }
+  $acceptancePassword = $null
   $stage = $stageBeforeCleanup
 }
 

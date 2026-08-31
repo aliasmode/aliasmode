@@ -52,9 +52,14 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).toContain("Build full offline installer");
   expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
   expect(ciWorkflow).not.toContain("nsis-updater");
-  expect(updaterAcceptance).toContain("TokenLinkedTokenClass = 19");
-  expect(updaterAcceptance).toContain("TokenElevationTypeLimited = 3");
-  expect(updaterAcceptance).toContain("DuplicateTokenEx(");
+  expect(updaterAcceptance).toContain("New-LocalUser");
+  expect(updaterAcceptance).toContain('EntryPoint = "CreateProcessWithLogonW"');
+  expect(updaterAcceptance).toContain("LoadUserProfile");
+  expect(updaterAcceptance).toContain('"Registry::HKEY_USERS\\$acceptanceUserSid');
+  expect(updaterAcceptance).toContain("AliasModeAcceptanceDesktopAccess");
+  expect(updaterAcceptance).not.toContain("TokenLinkedToken");
+  expect(updaterAcceptance).not.toContain("DuplicateTokenEx");
+  expect(updaterAcceptance).not.toContain("CreateProcessAsUser");
   expect(updaterAcceptance).not.toContain("SaferComputeTokenFromLevel");
   expect(releaseWorkflow).not.toContain('Join-Path $artifact "latest.json"');
   expect(releaseWorkflow).toContain("$updaterHeader[0] -ne 0x4d");
