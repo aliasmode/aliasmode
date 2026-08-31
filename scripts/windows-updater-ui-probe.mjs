@@ -44,6 +44,18 @@ async function writeResult(result) {
   }
 }
 
+async function connectToBrowser(endpoint) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      return await chromium.connectOverCDP(endpoint, { timeout: 1_000 });
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw new Error("installed AliasMode debug endpoint was not ready");
+}
+
 async function findDashboardPage(browser, dashboardOrigin) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
     const page = browser.contexts()
@@ -57,7 +69,7 @@ async function findDashboardPage(browser, dashboardOrigin) {
 
 async function main() {
   const input = await readInput();
-  const browser = await chromium.connectOverCDP(input.endpoint, { timeout: 30_000 });
+  const browser = await connectToBrowser(input.endpoint);
   try {
     const page = await findDashboardPage(browser, input.dashboardOrigin);
     if (input.action === "verify-update-result") {

@@ -806,28 +806,8 @@ function Get-SidecarHealth([int]$SidecarProcessId) {
   return $null
 }
 
-function Get-WebViewDebugPort(
-  [string]$WebViewRoot,
-  [int]$ExpectedPort = 0,
-  [string]$ExpectedUserSid = ""
-) {
-  if ($ExpectedPort -gt 0) {
-    try {
-      foreach ($listener in @(Get-NetTCPConnection `
-        -State Listen `
-        -LocalPort $ExpectedPort `
-        -ErrorAction Stop)) {
-        $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid(
-          [int]$listener.OwningProcess
-        )
-        if ([string]::IsNullOrWhiteSpace($ExpectedUserSid) -or
-            $ownerSid.Equals($ExpectedUserSid, [StringComparison]::OrdinalIgnoreCase)) {
-          return $ExpectedPort
-        }
-      }
-    } catch {}
-    return 0
-  }
+function Get-WebViewDebugPort([string]$WebViewRoot, [int]$ExpectedPort = 0) {
+  if ($ExpectedPort -gt 0) { return $ExpectedPort }
   $activePortPath = Join-Path $WebViewRoot "EBWebView\DevToolsActivePort"
   if (-not (Test-Path -LiteralPath $activePortPath -PathType Leaf)) { return 0 }
   try {
@@ -839,40 +819,6 @@ function Get-WebViewDebugPort(
     }
   } catch {}
   return 0
-}
-
-function Get-WebViewDebugEvidence([int]$ExpectedPort, [string]$ExpectedUserSid) {
-  $webViewSeen = $false
-  $expectedArgumentSeen = $false
-  $automaticArgumentSeen = $false
-  foreach ($record in @(Get-CimInstance Win32_Process `
-    -Filter "Name = 'msedgewebview2.exe'" `
-    -ErrorAction SilentlyContinue)) {
-    try {
-      $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid(
-        [int]$record.ProcessId
-      )
-      if (-not $ownerSid.Equals(
-        $ExpectedUserSid,
-        [StringComparison]::OrdinalIgnoreCase
-      )) { continue }
-      $webViewSeen = $true
-      $commandLine = [string]$record.CommandLine
-      if ($commandLine.Contains(
-        "--remote-debugging-port=$ExpectedPort",
-        [StringComparison]::OrdinalIgnoreCase
-      )) { $expectedArgumentSeen = $true }
-      if ($commandLine.Contains(
-        "--remote-debugging-port=0",
-        [StringComparison]::OrdinalIgnoreCase
-      )) { $automaticArgumentSeen = $true }
-    } catch {}
-  }
-  return [pscustomobject]@{
-    WebViewSeen = $webViewSeen
-    ExpectedArgumentSeen = $expectedArgumentSeen
-    AutomaticArgumentSeen = $automaticArgumentSeen
-  }
 }
 
 function Wait-DesktopReady(
@@ -898,8 +844,7 @@ function Wait-DesktopReady(
     if ($DesktopProcess.MainWindowHandle -ne 0) { $windowSeen = $true }
     $debugPort = Get-WebViewDebugPort `
       $WebViewRoot `
-      $ExpectedDebugPort `
-      $ExpectedUserSid
+      $ExpectedDebugPort
     if ($debugPort -gt 0) { $debugPortSeen = $true }
     $sidecars = @(Get-ChildSidecars $DesktopProcess.Id)
     if ($sidecars.Count -gt 0) { $sidecarSeen = $true }
@@ -930,16 +875,10 @@ function Wait-DesktopReady(
     }
     Start-Sleep -Milliseconds 250
   }
-  $debugEvidence = Get-WebViewDebugEvidence `
-    $ExpectedDebugPort `
-    $ExpectedUserSid
   throw (
     "installed public desktop did not become ready " +
     "(sidecarSeen=$sidecarSeen; healthSeen=$healthSeen; " +
-    "debugPortSeen=$debugPortSeen; windowSeen=$windowSeen; " +
-    "webViewSeen=$($debugEvidence.WebViewSeen); " +
-    "expectedDebugArgumentSeen=$($debugEvidence.ExpectedArgumentSeen); " +
-    "automaticDebugArgumentSeen=$($debugEvidence.AutomaticArgumentSeen))"
+    "debugPortSeen=$debugPortSeen; windowSeen=$windowSeen)"
   )
 }
 
@@ -1132,8 +1071,7 @@ function Wait-CandidateRelaunch(
         if ($desktop.MainWindowHandle -eq 0) { continue }
         $debugPort = Get-WebViewDebugPort `
           $WebViewRoot `
-          $ExpectedDebugPort `
-          $ExpectedUserSid
+          $ExpectedDebugPort
         if ($debugPort -eq 0) { continue }
         $Observations.candidateWindowSeen = $true
         $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
