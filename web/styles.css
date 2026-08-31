@@ -938,6 +938,22 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .update-banner { color: var(--accent-ink); background: var(--accent-soft); border: 1px solid var(--accent-line); }
 .update-banner span { min-width: 0; }
 .update-banner .btn { margin-left: auto; }
+.update-banner.update-result.success { color: var(--success-ink); background: var(--success-soft); border-color: var(--success-line); }
+.update-banner.update-result.warning { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
+.update-banner.update-result.error { color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-line); }
+.update-result-dismiss {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; flex: 0 0 auto; padding: 0;
+  color: currentColor; background: none; border: 0; border-radius: var(--r-xs);
+}
+.update-result-dismiss:hover { background: rgba(var(--shadow-rgb), .07); }
+.update-last-result {
+  display: flex; flex-direction: column; gap: 3px; padding: 10px 12px;
+  border: 1px solid; border-radius: var(--r-md); font-size: 12px; line-height: 1.55;
+}
+.update-last-result.success { color: var(--success-ink); background: var(--success-soft); border-color: var(--success-line); }
+.update-last-result.warning { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
+.update-last-result.error { color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-line); }
 
 /* Update banner details: the highlights disclosure and native install progress
    ported from main's old-dashboard implementation, restyled to tokens. */

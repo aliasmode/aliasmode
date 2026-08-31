@@ -65,6 +65,20 @@ test("dashboard shows curated desktop update notes and live progress", () => {
   expect(styles).toContain("accent-color: var(--accent)");
 });
 
+test("dashboard shows the durable result in its banner and Updates panel", () => {
+  expect(app).toContain('parseDesktopUpdateResult');
+  expect(app).toContain('invoke("last_update_result")');
+  expect(app).toContain('setDesktopUpdateResult(parseDesktopUpdateResult(value))');
+  expect(app).toContain('className={`update-banner update-result ${desktopUpdateResultSummary.tone}`}');
+  expect(app).toContain('aria-label="Dismiss last update result"');
+  expect(app).toContain('className={`update-last-result ${desktopUpdateResultSummary.tone}`}');
+  expect(app).toContain('{desktopUpdateResultSummary.title}');
+  expect(app).toContain('{desktopUpdateResultSummary.detail}');
+  expect(styles).toContain('.update-banner.update-result.success');
+  expect(styles).toContain('.update-last-result.warning');
+  expect(styles).toContain('.update-last-result.error');
+});
+
 test("dashboard contains long roster labels inside the window", () => {
   expect(app).toContain('className="profile-table"');
   expect(app).toContain('<span className="n">{p.name}</span>');

@@ -4,6 +4,11 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { parsePastedProxy } from "./proxy-input.ts";
 import {
+  describeDesktopUpdateResult,
+  parseDesktopUpdateResult,
+  type DesktopUpdateResult,
+} from "./desktop-update-result.ts";
+import {
   type UiProfile,
   type HealthSource,
   type DiagnoseReport,
@@ -975,6 +980,8 @@ function App() {
   const [healthSources, setHealthSources] = useState<HealthSource[]>([]);
   const [appVersion, setAppVersion] = useState("");
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdateStatus | null>(null);
+  const [desktopUpdateResult, setDesktopUpdateResult] = useState<DesktopUpdateResult | null>(null);
+  const [desktopUpdateResultDismissed, setDesktopUpdateResultDismissed] = useState(false);
   const [desktopUpdateChecking, setDesktopUpdateChecking] = useState(false);
   const [desktopUpdateInstalling, setDesktopUpdateInstalling] = useState(false);
   const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<DesktopUpdateProgress | null>(null);
@@ -1645,6 +1652,22 @@ function App() {
       setAuthBusy(false);
     }
   };
+
+  useEffect(() => {
+    const invoke = desktopInvoke();
+    if (!invoke) return;
+    let active = true;
+    void invoke("last_update_result")
+      .then((value) => {
+        if (!active) return;
+        setDesktopUpdateResult(parseDesktopUpdateResult(value));
+        setDesktopUpdateResultDismissed(false);
+      })
+      .catch((error) => {
+        if (active) setDesktopUpdateErr(error instanceof Error ? error.message : String(error));
+      });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     fetchAppMode().then((config) => {
@@ -2414,6 +2437,10 @@ function App() {
     }
   };
 
+  const desktopUpdateResultSummary = desktopUpdateResult
+    ? describeDesktopUpdateResult(desktopUpdateResult)
+    : null;
+
   if (!appMode || !workspaceReady || restartRequired) {
     return (
       <>
@@ -2848,6 +2875,26 @@ function App() {
       {notice && (
         <div className="notice" role="status" onClick={() => setNotice(null)}>
           <Icon name="check" className="sm" />{notice}
+        </div>
+      )}
+      {desktopUpdateResultSummary && !desktopUpdateResultDismissed && (
+        <div
+          className={`update-banner update-result ${desktopUpdateResultSummary.tone}`}
+          role={desktopUpdateResultSummary.tone === "success" ? "status" : "alert"}
+        >
+          <Icon name={desktopUpdateResultSummary.tone === "success" ? "check" : desktopUpdateResultSummary.tone === "warning" ? "warning" : "alert"} />
+          <div className="update-copy">
+            <strong>{desktopUpdateResultSummary.title}</strong>
+            <span>{desktopUpdateResultSummary.detail}</span>
+          </div>
+          <button
+            className="update-result-dismiss"
+            type="button"
+            aria-label="Dismiss last update result"
+            onClick={() => setDesktopUpdateResultDismissed(true)}
+          >
+            <Icon name="close" className="sm" />
+          </button>
         </div>
       )}
       {desktopUpdate?.state === "available" && (
@@ -3458,6 +3505,15 @@ function App() {
             <header><Icon name="import" className="sm" /><h2>Updates</h2></header>
             <div className="card-body">
             <div className="settings-row"><span>Installed version</span><strong className="mono">{appVersion || desktopUpdate?.currentVersion || "—"}</strong></div>
+            {desktopUpdateResultSummary && (
+              <div
+                className={`update-last-result ${desktopUpdateResultSummary.tone}`}
+                role={desktopUpdateResultSummary.tone === "success" ? "status" : "alert"}
+              >
+                <strong>{desktopUpdateResultSummary.title}</strong>
+                <span>{desktopUpdateResultSummary.detail}</span>
+              </div>
+            )}
             {desktopUpdate?.state === "upToDate" && <p role="status">AliasMode is up to date.</p>}
             {desktopUpdate?.state === "available" && (
               <>

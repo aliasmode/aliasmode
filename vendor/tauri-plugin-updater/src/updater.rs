@@ -285,6 +285,19 @@ impl UpdaterBuilder {
         self
     }
 
+    /// Replaces the arguments passed to the application after a Windows installer relaunch.
+    pub fn relaunch_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        self.current_exe_args.clear();
+        self.current_exe_args.push(OsString::new());
+        self.current_exe_args
+            .extend(args.into_iter().map(Into::into));
+        self
+    }
+
     /// Function to run before we run the installer and exit the app through `std::process::exit(0)` on Windows
     pub fn on_before_exit<F: Fn() + Send + Sync + 'static>(mut self, f: F) -> Self {
         self.on_before_exit.replace(Arc::new(f));
@@ -773,6 +786,32 @@ impl Config {
     }
 }
 
+#[cfg(windows)]
+fn nsis_installer_arguments(
+    install_mode: &crate::config::WindowsUpdateInstallMode,
+    current_args: &[&OsStr],
+    installer_args: &[&OsStr],
+) -> Vec<OsString> {
+    install_mode
+        .nsis_args()
+        .iter()
+        .map(OsString::from)
+        .chain([OsString::from("/UPDATE"), OsString::from("/ARGS")])
+        .chain(
+            current_args
+                .iter()
+                .skip(1)
+                .map(escape_nsis_current_exe_arg)
+                .map(OsString::from),
+        )
+        .chain(
+            installer_args
+                .iter()
+                .map(|argument| OsString::from(*argument)),
+        )
+        .collect()
+}
+
 /// Windows
 #[cfg(windows)]
 impl Update {
@@ -794,30 +833,24 @@ impl Update {
         let updater_type = self.extract(bytes)?;
 
         let install_mode = self.config.install_mode();
-        let current_args = &self.current_exe_args()[1..];
+        let current_args = self.current_exe_args();
+        let additional_installer_args = self.installer_args();
         let msi_args;
         let nsis_args;
 
         let installer_args: Vec<&OsStr> = match &updater_type {
             WindowsUpdaterType::Nsis { .. } => {
-                nsis_args = current_args
-                    .iter()
-                    .map(escape_nsis_current_exe_arg)
-                    .collect::<Vec<_>>();
-
-                install_mode
-                    .nsis_args()
-                    .iter()
-                    .map(OsStr::new)
-                    .chain(once(OsStr::new("/UPDATE")))
-                    .chain(once(OsStr::new("/ARGS")))
-                    .chain(nsis_args.iter().map(OsStr::new))
-                    .chain(self.installer_args())
-                    .collect()
+                nsis_args = nsis_installer_arguments(
+                    &install_mode,
+                    &current_args,
+                    &additional_installer_args,
+                );
+                nsis_args.iter().map(OsString::as_os_str).collect()
             }
             WindowsUpdaterType::Msi { path, .. } => {
                 let escaped_args = current_args
                     .iter()
+                    .skip(1)
                     .map(escape_msi_property_arg)
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -827,7 +860,7 @@ impl Update {
                     .into_iter()
                     .chain(install_mode.msiexec_args().iter().map(OsStr::new))
                     .chain(once(OsStr::new("/promptrestart")))
-                    .chain(self.installer_args())
+                    .chain(additional_installer_args.iter().copied())
                     .chain(once(OsStr::new("AUTOLAUNCHAPP=True")))
                     .chain(once(msi_args.as_os_str()))
                     .collect()
@@ -1573,6 +1606,53 @@ mod tests {
             PathBuf::from("C:\\Users\\Some User\\AppData\\tauri-example.exe").wrap_in_quotes(),
             PathBuf::from("\"C:\\Users\\Some User\\AppData\\tauri-example.exe\"")
         )
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn nsis_update_arguments_bind_one_relaunch_to_the_final_directory() {
+        use super::nsis_installer_arguments;
+        use crate::config::WindowsUpdateInstallMode;
+        use std::ffi::{OsStr, OsString};
+
+        let current_args = [
+            OsStr::new(r"C:\Program Files\AliasMode\AliasMode.exe"),
+            OsStr::new("--aliasmode-update-attempt=0123456789abcdef0123456789abcdef"),
+        ];
+        let installer_args = [
+            OsStr::new("/AMATTEMPT=0123456789abcdef0123456789abcdef"),
+            OsStr::new(r"/D=C:\Program Files\AliasMode"),
+        ];
+        let arguments = nsis_installer_arguments(
+            &WindowsUpdateInstallMode::Passive,
+            &current_args,
+            &installer_args,
+        );
+        let references = arguments
+            .iter()
+            .map(OsString::as_os_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            references.join(OsStr::new(" ")),
+            OsString::from(
+                r"/P /R /UPDATE /ARGS --aliasmode-update-attempt=0123456789abcdef0123456789abcdef /AMATTEMPT=0123456789abcdef0123456789abcdef /D=C:\Program Files\AliasMode"
+            )
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| argument
+                    .to_string_lossy()
+                    .starts_with("--aliasmode-update-attempt="))
+                .count(),
+            1
+        );
+        assert!(arguments
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("/D="));
     }
 
     #[test]

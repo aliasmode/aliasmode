@@ -4,6 +4,13 @@
 param(
   [Parameter(Mandatory)]
   [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$')]
+  [string]$SourceVersion,
+
+  [Parameter(Mandatory)]
+  [string]$SourceInstallerPath,
+
+  [Parameter(Mandatory)]
+  [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$')]
   [string]$CandidateVersion,
 
   [Parameter(Mandatory)]
@@ -15,12 +22,10 @@ param(
   [Parameter(Mandatory)]
   [string]$CandidateManifestPath,
 
-  [string]$PublicInstallerPath,
-
-  [string]$PublicChecksumsPath,
+  [string]$SourceChecksumsPath,
 
   [ValidatePattern('^[a-fA-F0-9]{64}$')]
-  [string]$ExpectedPublicInstallerSha256,
+  [string]$ExpectedSourceInstallerSha256,
 
   [string]$JavaScriptRuntimePath,
 
@@ -31,14 +36,170 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$publicVersion = "0.1.0-beta.45"
-$publicTag = "v$publicVersion"
-$publicInstallerName = "AliasMode_${publicVersion}_x64-setup.exe"
-$publicReleaseBase = "https://github.com/aliasmode/aliasmode/releases/download/$publicTag"
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class AliasModeStandardUserProcess {
+  private const uint SaferScopeUser = 2;
+  private const uint SaferLevelNormalUser = 0x00020000;
+  private const int TokenElevationClass = 20;
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  private struct StartupInfo {
+    public int cb;
+    public string reserved;
+    public string desktop;
+    public string title;
+    public int x;
+    public int y;
+    public int xSize;
+    public int ySize;
+    public int xCountChars;
+    public int yCountChars;
+    public int fillAttribute;
+    public int flags;
+    public short showWindow;
+    public short reserved2;
+    public IntPtr reserved2Pointer;
+    public IntPtr standardInput;
+    public IntPtr standardOutput;
+    public IntPtr standardError;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ProcessInformation {
+    public IntPtr process;
+    public IntPtr thread;
+    public int processId;
+    public int threadId;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct TokenElevation {
+    public int isElevated;
+  }
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool SaferCreateLevel(
+    uint scopeId,
+    uint levelId,
+    uint openFlags,
+    out IntPtr level,
+    IntPtr reserved
+  );
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool SaferComputeTokenFromLevel(
+    IntPtr level,
+    IntPtr inputToken,
+    out IntPtr outputToken,
+    uint flags,
+    IntPtr reserved
+  );
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool SaferCloseLevel(IntPtr level);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool GetTokenInformation(
+    IntPtr token,
+    int informationClass,
+    ref TokenElevation information,
+    int informationLength,
+    out int returnLength
+  );
+
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool CreateProcessAsUser(
+    IntPtr token,
+    string applicationName,
+    StringBuilder commandLine,
+    IntPtr processAttributes,
+    IntPtr threadAttributes,
+    bool inheritHandles,
+    uint creationFlags,
+    IntPtr environment,
+    string currentDirectory,
+    ref StartupInfo startupInfo,
+    out ProcessInformation processInformation
+  );
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool CloseHandle(IntPtr handle);
+
+  public static int Start(string fileName, string arguments, string currentDirectory) {
+    IntPtr level = IntPtr.Zero;
+    IntPtr token = IntPtr.Zero;
+    ProcessInformation process = new ProcessInformation();
+    try {
+      if (!SaferCreateLevel(SaferScopeUser, SaferLevelNormalUser, 1, out level, IntPtr.Zero)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user level creation failed");
+      }
+      if (!SaferComputeTokenFromLevel(level, IntPtr.Zero, out token, 0, IntPtr.Zero)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user token creation failed");
+      }
+      TokenElevation elevation = new TokenElevation();
+      int returned;
+      if (!GetTokenInformation(
+        token,
+        TokenElevationClass,
+        ref elevation,
+        Marshal.SizeOf<TokenElevation>(),
+        out returned
+      ) || elevation.isElevated != 0) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user token verification failed");
+      }
+
+      StartupInfo startup = new StartupInfo();
+      startup.cb = Marshal.SizeOf<StartupInfo>();
+      string escapedFileName = "\"" + fileName.Replace("\"", "\"\"") + "\"";
+      StringBuilder command = new StringBuilder(
+        string.IsNullOrWhiteSpace(arguments) ? escapedFileName : escapedFileName + " " + arguments
+      );
+      if (!CreateProcessAsUser(
+        token,
+        fileName,
+        command,
+        IntPtr.Zero,
+        IntPtr.Zero,
+        false,
+        0,
+        IntPtr.Zero,
+        currentDirectory,
+        ref startup,
+        out process
+      )) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user process launch failed");
+      }
+      return process.processId;
+    } finally {
+      if (process.thread != IntPtr.Zero) CloseHandle(process.thread);
+      if (process.process != IntPtr.Zero) CloseHandle(process.process);
+      if (token != IntPtr.Zero) CloseHandle(token);
+      if (level != IntPtr.Zero) SaferCloseLevel(level);
+    }
+  }
+}
+'@
+
+function Start-StandardUserProcess([string]$FilePath, [string]$Arguments = "") {
+  $processId = [AliasModeStandardUserProcess]::Start(
+    $FilePath,
+    $Arguments,
+    [IO.Path]::GetDirectoryName($FilePath)
+  )
+  return [Diagnostics.Process]::GetProcessById($processId)
+}
+
+$publicVersion = $SourceVersion
+$publicInstallerName = "AliasMode_${publicVersion}_x64-offline-setup.exe"
 $candidateTag = "v$CandidateVersion"
 $candidateInstallerName = "AliasMode_${CandidateVersion}_x64-setup.exe"
 $candidateReleaseBase = "https://github.com/aliasmode/aliasmode/releases/download/$candidateTag"
-$candidateManifestUrl = "$candidateReleaseBase/latest.json"
+$candidateManifestUrl = "$candidateReleaseBase/latest-v2.json"
 $candidateInstallerUrl = "$candidateReleaseBase/$candidateInstallerName"
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $fixtureScript = Join-Path $PSScriptRoot "windows-updater-https-fixture.mjs"
@@ -270,7 +431,10 @@ function Invoke-DesktopUiProbe(
   [string]$ScriptPath,
   [int]$DebugPort,
   [string]$DashboardOrigin,
-  [string]$ExpectedCandidateVersion
+  [string]$ExpectedCandidateVersion,
+  [ValidateSet("click-update", "click-update-and-wait-error", "verify-update-result")]
+  [string]$Action = "click-update",
+  [string]$ExpectedSourceVersion = ""
 ) {
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $RuntimePath
@@ -291,7 +455,8 @@ function Invoke-DesktopUiProbe(
       endpoint = "http://127.0.0.1:$DebugPort"
       dashboardOrigin = $DashboardOrigin
       candidateVersion = $ExpectedCandidateVersion
-      action = "click-update"
+      sourceVersion = $ExpectedSourceVersion
+      action = $Action
     }
     $probeInput | ConvertTo-Json -Compress | ForEach-Object { $process.StandardInput.Write($_) }
     $process.StandardInput.Close()
@@ -303,7 +468,12 @@ function Invoke-DesktopUiProbe(
     [void]$errorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) { throw "desktop UI probe failed" }
     try { $result = $output | ConvertFrom-Json } catch { throw "desktop UI probe returned invalid output" }
-    if ($result.ok -ne $true -or $result.action -ne "visible-update-now") {
+    $expectedResult = switch ($Action) {
+      "click-update" { "visible-update-now" }
+      "click-update-and-wait-error" { "visible-update-rejected" }
+      "verify-update-result" { "verified-durable-success" }
+    }
+    if ($result.ok -ne $true -or $result.action -ne $expectedResult) {
       throw "desktop UI probe returned an unexpected result"
     }
   } finally {
@@ -318,6 +488,7 @@ function Wait-CandidateRelaunch(
   [string]$ExpectedRoot,
   $OldRecord,
   [Diagnostics.Process[]]$OldBrowserProcesses,
+  [string]$WebViewRoot,
   [string]$FixtureStatePath,
   $Observations
 ) {
@@ -360,15 +531,18 @@ function Wait-CandidateRelaunch(
         }
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
+        $debugPort = Get-WebViewDebugPort $WebViewRoot
+        if ($debugPort -eq 0) { continue }
         $Observations.candidateWindowSeen = $true
         $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
-        if ($candidateRoutes.releaseList -lt 3) { continue }
+        if ($candidateRoutes.releaseList -lt 4) { continue }
         $Observations.candidateFrontendSeen = $true
         return [pscustomobject]@{
           App = $desktop
           Sidecar = $sidecar
           Origin = $healthRecord.Origin
           Health = $health
+          DebugPort = $debugPort
         }
       }
     }
@@ -672,8 +846,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $candidateSemanticVersion = [Management.Automation.SemanticVersion]::Parse($CandidateVersion)
 $publicSemanticVersion = [Management.Automation.SemanticVersion]::Parse($publicVersion)
 if ($candidateSemanticVersion -le $publicSemanticVersion -or
-    $candidateSemanticVersion.ToString() -ne $CandidateVersion) {
-  throw "candidate version must be canonical and newer than public $publicVersion"
+    $candidateSemanticVersion.ToString() -ne $CandidateVersion -or
+    $publicSemanticVersion.ToString() -ne $publicVersion) {
+  throw "candidate version must be canonical and newer than source $publicVersion"
 }
 
 $candidateInstallerPath = Resolve-InputFile $CandidateInstallerPath "signed candidate slim installer"
@@ -685,8 +860,8 @@ if ((Split-Path $candidateInstallerPath -Leaf) -ne $candidateInstallerName) {
 if ((Split-Path $candidateSignaturePath -Leaf) -ne "$candidateInstallerName.sig") {
   throw "candidate detached signature name does not match candidate installer"
 }
-if ((Split-Path $candidateManifestPath -Leaf) -ne "latest.json") {
-  throw "candidate updater manifest must be named latest.json"
+if ((Split-Path $candidateManifestPath -Leaf) -ne "latest-v2.json") {
+  throw "candidate updater manifest must be named latest-v2.json"
 }
 $signature = [IO.File]::ReadAllText($candidateSignaturePath).Trim()
 if ([string]::IsNullOrWhiteSpace($signature)) { throw "candidate detached signature is empty" }
@@ -726,7 +901,7 @@ foreach ($requiredPath in @($fixtureScript, $probeScript, (Join-Path $repoRoot "
 
 $runId = [Guid]::NewGuid().ToString("N")
 $runRoot = Join-Path $env:RUNNER_TEMP "aliasmode-in-app-update-$runId"
-$installRoot = Join-Path $runRoot "installed"
+$installRoot = Join-Path $env:LOCALAPPDATA "AliasMode"
 $webViewRoot = Join-Path $runRoot "webview"
 $certificateRoot = Join-Path $runRoot "tls"
 $fixtureConfigPath = Join-Path $runRoot "fixture-config.json"
@@ -743,6 +918,10 @@ $appDataRoot = Join-Path (
 $configPath = Join-Path $appDataRoot "config.json"
 $sentinelPath = Join-Path $appDataRoot "in-app-update-sentinel.txt"
 $appPath = Join-Path $installRoot "AliasMode.exe"
+$manufacturerKey = "Registry::HKEY_CURRENT_USER\Software\aliasmode\AliasMode"
+$uninstallKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\AliasMode"
+$registrationBackup = $null
+$registrationChanged = $false
 $hostsOriginalBytes = $null
 $hostsChanged = $false
 $trustedCa = $null
@@ -760,10 +939,13 @@ $savedEnvironment = @{}
 $environmentNames = @("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "WEBVIEW2_USER_DATA_FOLDER")
 $observations = [ordered]@{
   publicInstallerVerified = $false
+  standardUserTokenUsed = $false
   publicDesktopReady = $false
   profileCreated = $false
   activeBrowserStarted = $false
-  browserClosedBeforeUpdate = $false
+  rootMismatchRejected = $false
+  browserStayedActiveAfterRejection = $false
+  installerDidNotStartAfterRejection = $false
   visibleUpdateClicked = $false
   oldDesktopExited = $false
   oldSidecarExited = $false
@@ -775,10 +957,12 @@ $observations = [ordered]@{
   candidateFrontendSeen = $false
   candidateReady = $false
   candidateWindowReady = $false
+  durableSuccessVisible = $false
   installPathPreserved = $false
   dataRootPreserved = $false
   configPreserved = $false
   sentinelPreserved = $false
+  encryptedStatePreserved = $false
   profilePreserved = $false
   publicHealthDidNotReappear = $false
 }
@@ -789,45 +973,48 @@ try {
   if (@(Get-Process -Name "AliasMode" -ErrorAction SilentlyContinue).Count -ne 0) {
     throw "runner has a pre-existing AliasMode process"
   }
-  Remove-Item -LiteralPath $appDataRoot -Recurse -Force -ErrorAction SilentlyContinue
-  if (Test-Path -LiteralPath $appDataRoot) { throw "public app-data root was not isolated" }
-
-  if ([string]::IsNullOrWhiteSpace($PublicInstallerPath)) {
-    $PublicInstallerPath = Join-Path $runRoot $publicInstallerName
-    Invoke-WebRequest "$publicReleaseBase/$publicInstallerName" -OutFile $PublicInstallerPath -TimeoutSec 300
+  foreach ($path in @($appDataRoot, $installRoot)) {
+    if (Test-Path -LiteralPath $path) { throw "runner has pre-existing AliasMode state" }
   }
-  $PublicInstallerPath = Resolve-InputFile $PublicInstallerPath "public $publicVersion installer"
-  if ([string]::IsNullOrWhiteSpace($ExpectedPublicInstallerSha256) -and
-      [string]::IsNullOrWhiteSpace($PublicChecksumsPath)) {
-    $PublicChecksumsPath = Join-Path $runRoot "public-SHA256SUMS.txt"
-    Invoke-WebRequest "$publicReleaseBase/SHA256SUMS.txt" -OutFile $PublicChecksumsPath -TimeoutSec 30
+  foreach ($key in @(
+    "Registry::HKEY_CURRENT_USER\Software\aliasmode\AliasMode",
+    "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\AliasMode"
+  )) {
+    if (Test-Path -LiteralPath $key) { throw "runner has pre-existing AliasMode registration" }
   }
 
+  $SourceInstallerPath = Resolve-InputFile $SourceInstallerPath "source $publicVersion installer"
+  if ((Split-Path $SourceInstallerPath -Leaf) -ne $publicInstallerName) {
+    throw "source installer name does not match source version"
+  }
   $checksumFromManifest = $null
-  if (-not [string]::IsNullOrWhiteSpace($PublicChecksumsPath)) {
-    $PublicChecksumsPath = Resolve-InputFile $PublicChecksumsPath "public $publicVersion checksum manifest"
+  if (-not [string]::IsNullOrWhiteSpace($SourceChecksumsPath)) {
+    $SourceChecksumsPath = Resolve-InputFile $SourceChecksumsPath "source checksum manifest"
     $pattern = '^([a-fA-F0-9]{64})  ' + [Text.RegularExpressions.Regex]::Escape($publicInstallerName) + '$'
-    $checksumLines = @([IO.File]::ReadAllLines($PublicChecksumsPath) | Where-Object { $_ -match $pattern })
-    if ($checksumLines.Count -ne 1) { throw "public $publicVersion checksum entry is missing or ambiguous" }
+    $checksumLines = @([IO.File]::ReadAllLines($SourceChecksumsPath) | Where-Object { $_ -match $pattern })
+    if ($checksumLines.Count -ne 1) { throw "source installer checksum entry is missing or ambiguous" }
     $match = [Text.RegularExpressions.Regex]::Match($checksumLines[0], $pattern)
     $checksumFromManifest = $match.Groups[1].Value.ToLowerInvariant()
   }
-  $expectedPublicChecksum = if ($ExpectedPublicInstallerSha256) {
-    $ExpectedPublicInstallerSha256.ToLowerInvariant()
+  $expectedPublicChecksum = if ($ExpectedSourceInstallerSha256) {
+    $ExpectedSourceInstallerSha256.ToLowerInvariant()
   } else {
     $checksumFromManifest
   }
-  if ($checksumFromManifest -and $expectedPublicChecksum -ne $checksumFromManifest) {
-    throw "provided public $publicVersion checksum disagrees with its checksum manifest"
+  if ([string]::IsNullOrWhiteSpace($expectedPublicChecksum)) {
+    throw "source installer SHA-256 is required"
   }
-  $actualPublicChecksum = (Get-FileHash -LiteralPath $PublicInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($checksumFromManifest -and $expectedPublicChecksum -ne $checksumFromManifest) {
+    throw "provided source installer checksum disagrees with its checksum manifest"
+  }
+  $actualPublicChecksum = (Get-FileHash -LiteralPath $SourceInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actualPublicChecksum -ne $expectedPublicChecksum) {
-    throw "public $publicVersion installer SHA-256 mismatch"
+    throw "source installer SHA-256 mismatch"
   }
   $observations.publicInstallerVerified = $true
 
-  Set-AcceptanceStage "installing-public-release"
-  $install = Start-Process -PassThru $PublicInstallerPath -ArgumentList @("/S", "/D=$installRoot")
+  Set-AcceptanceStage "installing-source-release"
+  $install = Start-StandardUserProcess $SourceInstallerPath "/S"
   if (-not $install.WaitForExit(300000)) {
     Stop-ProcessTree $install
     throw "public $publicVersion installer timed out"
@@ -904,7 +1091,8 @@ try {
   [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webViewRoot, "Process")
 
   Set-AcceptanceStage "starting-public-release"
-  $publicDesktop = Start-Process -PassThru $appPath
+  $publicDesktop = Start-StandardUserProcess $appPath
+  $observations.standardUserTokenUsed = $true
   $oldRecord = Wait-DesktopReady $publicDesktop $publicVersion $appDataRoot $webViewRoot
   $observations.publicDesktopReady = $true
 
@@ -952,31 +1140,65 @@ try {
   $observations.activeBrowserStarted = $true
   $configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
   $sentinelHash = (Get-FileHash -LiteralPath $sentinelPath -Algorithm SHA256).Hash
+  $localStatePath = Join-Path (Join-Path (Join-Path $appDataRoot "profiles") $profileId) "Local State"
+  if (-not (Test-Path -LiteralPath $localStatePath -PathType Leaf)) {
+    throw "active profile encryption state is missing"
+  }
+  $localState = [IO.File]::ReadAllText($localStatePath) | ConvertFrom-Json
+  $encryptedKey = [string]$localState.os_crypt.encrypted_key
+  if ([string]::IsNullOrWhiteSpace($encryptedKey)) {
+    throw "active profile encryption key is missing"
+  }
+  $encryptedKeyHash = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($encryptedKey))
+  )
 
-  Set-AcceptanceStage "closing-active-profile"
-  $closed = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/close" `
-    -Method Post `
-    -TimeoutSec 120 `
-    -NoProxy
-  if ($closed.ok -ne $true) { throw "public $publicVersion could not close the preservation browser" }
-  $browserExited = $false
-  for ($attempt = 0; $attempt -lt 240; $attempt++) {
-    if (@($oldBrowserProcesses | Where-Object { -not (Test-ProcessExited $_) }).Count -eq 0) {
-      $browserExited = $true
-      break
-    }
-    Start-Sleep -Milliseconds 250
+  Set-AcceptanceStage "rejecting-stale-registration"
+  $registrationBackup = [ordered]@{
+    ManufacturerRoot = (Get-Item -LiteralPath $manufacturerKey).GetValue("")
+    InstallLocation = (Get-ItemProperty -LiteralPath $uninstallKey -Name "InstallLocation").InstallLocation
+    UninstallString = (Get-ItemProperty -LiteralPath $uninstallKey -Name "UninstallString").UninstallString
   }
-  if (-not $browserExited -or @(Get-InstalledBrowserProcesses $installRoot).Count -ne 0) {
-    throw "preservation browser survived its confirmed close"
+  $staleRoot = Join-Path $runRoot "stale-installation"
+  New-Item -ItemType Directory -Force $staleRoot | Out-Null
+  Copy-Item -LiteralPath $appPath -Destination (Join-Path $staleRoot "AliasMode.exe")
+  Copy-Item -LiteralPath (Join-Path $installRoot "uninstall.exe") -Destination (Join-Path $staleRoot "uninstall.exe")
+  Set-Item -LiteralPath $manufacturerKey -Value $staleRoot
+  Set-ItemProperty -LiteralPath $uninstallKey -Name "InstallLocation" -Value $staleRoot
+  Set-ItemProperty -LiteralPath $uninstallKey -Name "UninstallString" -Value (Join-Path $staleRoot "uninstall.exe")
+  $registrationChanged = $true
+  $routesBeforeRejection = Get-SafeRouteCounts $fixtureStatePath
+  Invoke-DesktopUiProbe `
+    $runtime `
+    $probeScript `
+    $oldRecord.DebugPort `
+    $oldRecord.Origin `
+    $CandidateVersion `
+    "click-update-and-wait-error"
+  $observations.rootMismatchRejected = $true
+  $observations.browserStayedActiveAfterRejection = @(
+    $oldBrowserProcesses | Where-Object { -not (Test-ProcessExited $_) }
+  ).Count -eq $oldBrowserProcesses.Count
+  if ((Test-ProcessExited $oldRecord.App) -or
+      (Test-ProcessExited $oldRecord.Sidecar) -or
+      -not $observations.browserStayedActiveAfterRejection) {
+    throw "stale registration rejection changed the active process tree"
   }
-  $closedRoster = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" -TimeoutSec 30 -NoProxy
-  $closedProfile = @($closedRoster.profiles | Where-Object { $_.id -eq $profileId -and $_.name -eq $profileName })
-  if ($closedProfile.Count -ne 1 -or $closedProfile[0].running -ne $false) {
-    throw "preservation profile remained active after confirmed close"
+  $observations.installerDidNotStartAfterRejection =
+    @(Get-CandidateUpdaterProcesses $CandidateVersion).Count -eq 0 -and
+    -not (Test-Path -LiteralPath (Join-Path $appDataRoot "update-attempt.json") -PathType Leaf)
+  if (-not $observations.installerDidNotStartAfterRejection) {
+    throw "stale registration rejection reached the installer handoff"
   }
-  $observations.browserClosedBeforeUpdate = $true
-  $observations.oldBrowserExited = $true
+  $routesAfterRejection = Get-SafeRouteCounts $fixtureStatePath
+  if ($routesAfterRejection.installer -le $routesBeforeRejection.installer) {
+    throw "stale registration check ran before detached-signature verification"
+  }
+
+  Set-Item -LiteralPath $manufacturerKey -Value $registrationBackup.ManufacturerRoot
+  Set-ItemProperty -LiteralPath $uninstallKey -Name "InstallLocation" -Value $registrationBackup.InstallLocation
+  Set-ItemProperty -LiteralPath $uninstallKey -Name "UninstallString" -Value $registrationBackup.UninstallString
+  $registrationChanged = $false
 
   Set-AcceptanceStage "clicking-visible-update"
   Invoke-DesktopUiProbe `
@@ -994,6 +1216,7 @@ try {
     $appDataRoot `
     $oldRecord `
     $oldBrowserProcesses `
+    $webViewRoot `
     $fixtureStatePath `
     $observations
   $observations.oldDesktopExited = Test-ProcessExited $oldRecord.App
@@ -1016,6 +1239,17 @@ try {
   }
   $observations.candidateWindowReady = $true
 
+  Set-AcceptanceStage "verifying-durable-update-result"
+  Invoke-DesktopUiProbe `
+    $runtime `
+    $probeScript `
+    $candidateRecord.DebugPort `
+    $candidateRecord.Origin `
+    $CandidateVersion `
+    "verify-update-result" `
+    $publicVersion
+  $observations.durableSuccessVisible = $true
+
   Set-AcceptanceStage "verifying-candidate-state"
   $candidateAppPath = Get-ProcessPath $candidateRecord.App
   $observations.installPathPreserved = $candidateAppPath -and
@@ -1031,6 +1265,21 @@ try {
     (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -eq $configHash
   $observations.sentinelPreserved = (Test-Path -LiteralPath $sentinelPath -PathType Leaf) -and
     (Get-FileHash -LiteralPath $sentinelPath -Algorithm SHA256).Hash -eq $sentinelHash
+  $newEncryptedKey = ""
+  if (Test-Path -LiteralPath $localStatePath -PathType Leaf) {
+    try {
+      $newLocalState = [IO.File]::ReadAllText($localStatePath) | ConvertFrom-Json
+      $newEncryptedKey = [string]$newLocalState.os_crypt.encrypted_key
+    } catch {}
+  }
+  $newEncryptedKeyHash = if ([string]::IsNullOrWhiteSpace($newEncryptedKey)) {
+    ""
+  } else {
+    [Convert]::ToHexString(
+      [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($newEncryptedKey))
+    )
+  }
+  $observations.encryptedStatePreserved = $newEncryptedKeyHash -eq $encryptedKeyHash
   $newRoster = Invoke-RestMethod "$($candidateRecord.Origin)/ui/api/profiles" -TimeoutSec 30 -NoProxy
   $newProfile = @($newRoster.profiles | Where-Object { $_.id -eq $profileId -and $_.name -eq $profileName })
   $observations.profilePreserved = $newProfile.Count -eq 1 -and $newProfile[0].running -ne $true
@@ -1038,14 +1287,15 @@ try {
       -not $observations.dataRootPreserved -or
       -not $observations.configPreserved -or
       -not $observations.sentinelPreserved -or
+      -not $observations.encryptedStatePreserved -or
       -not $observations.profilePreserved) {
     throw "signed candidate did not preserve installed state"
   }
 
   $routeCounts = Get-SafeRouteCounts $fixtureStatePath
-  if ($routeCounts.releaseList -lt 3 -or
-      $routeCounts.manifest -lt 2 -or
-      $routeCounts.installer -lt 1 -or
+  if ($routeCounts.releaseList -lt 4 -or
+      $routeCounts.manifest -lt 3 -or
+      $routeCounts.installer -lt 2 -or
       $routeCounts.rejected -ne 0) {
     throw "HTTPS fixture did not observe only the required production requests"
   }
@@ -1059,6 +1309,17 @@ try {
   $stageBeforeCleanup = $stage
   Set-AcceptanceStage "cleanup"
   $routeCounts = Get-SafeRouteCounts $fixtureStatePath
+
+  if ($registrationChanged -and $registrationBackup) {
+    try {
+      Set-Item -LiteralPath $manufacturerKey -Value $registrationBackup.ManufacturerRoot
+      Set-ItemProperty -LiteralPath $uninstallKey -Name "InstallLocation" -Value $registrationBackup.InstallLocation
+      Set-ItemProperty -LiteralPath $uninstallKey -Name "UninstallString" -Value $registrationBackup.UninstallString
+      $registrationChanged = $false
+    } catch {
+      $cleanupFailures.Add("registration restoration failed")
+    }
+  }
 
   foreach ($record in @($candidateRecord, $oldRecord)) {
     if ($record -and $record.App) {
@@ -1095,6 +1356,20 @@ try {
     $cleanupFailures.Add("isolated process sweep failed")
   }
 
+  $uninstaller = Join-Path $installRoot "uninstall.exe"
+  if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+    try {
+      $uninstall = Start-Process -PassThru $uninstaller -ArgumentList "/S"
+      if (-not $uninstall.WaitForExit(120000)) {
+        Stop-ProcessTree $uninstall
+        throw "uninstaller timed out"
+      }
+      if ($uninstall.ExitCode -ne 0) { throw "uninstaller exited nonzero" }
+    } catch {
+      $cleanupFailures.Add("installed app cleanup failed")
+    }
+  }
+
   try {
     foreach ($updaterRoot in @(Get-ChildItem ([IO.Path]::GetTempPath()) -Directory `
       -Filter "AliasMode-$CandidateVersion-updater-*" -ErrorAction SilentlyContinue)) {
@@ -1125,7 +1400,13 @@ try {
     }
   }
 
-  foreach ($path in @($appDataRoot, $runRoot)) {
+  foreach ($key in @($manufacturerKey, $uninstallKey)) {
+    try { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue } catch {
+      $cleanupFailures.Add("installer registration cleanup failed")
+    }
+  }
+
+  foreach ($path in @($appDataRoot, $installRoot, $runRoot)) {
     try {
       for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue

@@ -1,21 +1,27 @@
-use crate::{shutdown, sidecar::SidecarSupervisor};
+use crate::{
+    shutdown,
+    sidecar::SidecarSupervisor,
+    update_attempt::{self, InstallerHandoff, LastUpdateResult, UpdateFailureReason},
+};
 use reqwest::{header::ACCEPT, redirect::Policy, Client};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
-use tauri::{ipc::Channel, AppHandle, WebviewWindow};
+use tauri::{ipc::Channel, AppHandle, Manager, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::Mutex;
 use url::Url;
 
 const RELEASES_API: &str = "https://api.github.com/repos/aliasmode/aliasmode/releases?per_page=10";
+const UPDATE_MANIFEST: &str = "latest-v2.json";
 const UPDATE_TARGET: &str = "windows-x86_64";
 const MAX_RELEASE_HIGHLIGHTS: usize = 3;
 const UPDATE_BUSY: &str = "An update operation is already running.";
 const CHECK_FAILED: &str = "AliasMode could not check for updates. Try again.";
 const DOWNLOAD_FAILED: &str = "AliasMode could not download and verify the update. Try again.";
+const INSTALLATION_UNSAFE: &str = "AliasMode cannot safely update this installation. Close AliasMode and run the full offline installer from the release page. Do not uninstall.";
 const CLEANUP_FAILED: &str =
     "The update was not installed because AliasMode could not safely close browser services. The current version remains installed.";
 const INSTALL_FAILED: &str =
@@ -127,13 +133,13 @@ fn release_manifest_url(release: &GithubRelease) -> Option<Url> {
     let manifests: Vec<&GithubAsset> = release
         .assets
         .iter()
-        .filter(|asset| asset.name == "latest.json")
+        .filter(|asset| asset.name == UPDATE_MANIFEST)
         .collect();
     if manifests.len() != 1 {
         return None;
     }
     let url = Url::parse(&manifests[0].browser_download_url).ok()?;
-    is_release_asset_url(&url, &release.tag_name, "latest.json").then_some(url)
+    is_release_asset_url(&url, &release.tag_name, UPDATE_MANIFEST).then_some(url)
 }
 
 fn newest_release(current: &Version, releases: &[GithubRelease]) -> Option<ReleaseCandidate> {
@@ -237,7 +243,10 @@ fn validate_manifest_result(
     Ok(())
 }
 
-async fn discover_update(app: &AppHandle) -> Result<Option<DiscoveredUpdate>, String> {
+async fn discover_update(
+    app: &AppHandle,
+    handoff: Option<&InstallerHandoff>,
+) -> Result<Option<DiscoveredUpdate>, String> {
     let current = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
     let releases = fetch_releases().await?;
     let Some(candidate) = newest_release(&current, &releases) else {
@@ -254,6 +263,14 @@ async fn discover_update(app: &AppHandle) -> Result<Option<DiscoveredUpdate>, St
                 .read_timeout(Duration::from_secs(30))
         })
         .version_comparator(|_, _| true);
+    let builder = if let Some(handoff) = handoff {
+        builder
+            .relaunch_args([handoff.relaunch_argument()])
+            .clear_installer_args()
+            .installer_args(handoff.installer_arguments())
+    } else {
+        builder
+    };
     let updater = builder
         .endpoints(vec![candidate.manifest_url.clone()])
         .map_err(|error| error.to_string())?
@@ -288,7 +305,7 @@ pub async fn check_for_updates(
         .try_lock()
         .map_err(|_| UPDATE_BUSY.to_owned())?;
     let current_version = env!("CARGO_PKG_VERSION").to_owned();
-    match discover_update(&app).await {
+    match discover_update(&app, None).await {
         Ok(Some(discovered)) => Ok(UpdateStatus::Available {
             current_version,
             version: discovered.update.version,
@@ -302,6 +319,16 @@ pub async fn check_for_updates(
     }
 }
 
+#[tauri::command]
+pub fn last_update_result(app: AppHandle) -> Result<Option<LastUpdateResult>, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "AliasMode could not read the last update result.".to_owned())?;
+    update_attempt::last_update_result(&data_dir)
+        .map_err(|_| "AliasMode could not read the last update result.".to_owned())
+}
+
 fn restart_after_install_failure(app: AppHandle, error: impl std::fmt::Display) {
     eprintln!("AliasMode update installation failed: {error}");
     app.dialog()
@@ -312,24 +339,38 @@ fn restart_after_install_failure(app: AppHandle, error: impl std::fmt::Display) 
         .show(move |_| app.request_restart());
 }
 
+fn record_update_failure(
+    data_dir: &std::path::Path,
+    attempt_id: &str,
+    reason: UpdateFailureReason,
+) {
+    if update_attempt::record_failure(data_dir, attempt_id, reason).is_err() {
+        eprintln!("AliasMode could not store the failed update result");
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum UpdatePreparationError {
     Download(String),
+    Prepare(String),
     Cleanup(String),
     Install(String),
 }
 
-async fn run_verified_update<Download, Cleanup, Install>(
+async fn run_verified_update<Download, Prepare, Cleanup, Install>(
     download: Download,
+    prepare: Prepare,
     cleanup: Cleanup,
     install: Install,
 ) -> Result<(), UpdatePreparationError>
 where
     Download: std::future::Future<Output = Result<Vec<u8>, String>>,
+    Prepare: std::future::Future<Output = Result<(), String>>,
     Cleanup: std::future::Future<Output = Result<(), String>>,
     Install: FnOnce(&[u8]) -> Result<(), String>,
 {
     let bytes = download.await.map_err(UpdatePreparationError::Download)?;
+    prepare.await.map_err(UpdatePreparationError::Prepare)?;
     cleanup.await.map_err(UpdatePreparationError::Cleanup)?;
     install(&bytes).map_err(UpdatePreparationError::Install)
 }
@@ -350,7 +391,15 @@ pub async fn update_now(
         .try_lock()
         .map_err(|_| UPDATE_BUSY.to_owned())?;
     let _ = on_progress.send(UpdateProgress::Preparing);
-    let discovered = match discover_update(&app).await {
+    let handoff = InstallerHandoff::prepare().map_err(|error| {
+        eprintln!("AliasMode update install-root preparation failed: {error}");
+        INSTALLATION_UNSAFE.to_owned()
+    })?;
+    let data_dir = app.path().app_data_dir().map_err(|_| {
+        eprintln!("AliasMode update app-data path was unavailable");
+        INSTALLATION_UNSAFE.to_owned()
+    })?;
+    let discovered = match discover_update(&app, Some(&handoff)).await {
         Ok(Some(discovered)) => discovered,
         Ok(None) => return Err("AliasMode is already up to date.".to_owned()),
         Err(error) => {
@@ -363,12 +412,16 @@ pub async fn update_now(
         highlights: discovered.highlights,
     });
     let update = discovered.update;
+    let expected_version = update.version.clone();
     let sidecar = sidecar.inner().clone();
     let download_progress = on_progress.clone();
     let verifying_progress = on_progress.clone();
     let cleanup_progress = on_progress.clone();
     let install_progress = on_progress.clone();
     let install_window = window.clone();
+    let preparation_handoff = handoff.clone();
+    let preparation_data_dir = data_dir.clone();
+    let preparation_version = expected_version.clone();
     match run_verified_update(
         async {
             let mut downloaded = 0_u64;
@@ -390,6 +443,20 @@ pub async fn update_now(
                 .await
                 .map_err(|error| error.to_string())
         },
+        async move {
+            update_attempt::validate_registered_install(
+                &preparation_handoff,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .map_err(|error| error.to_string())?;
+            update_attempt::begin_attempt(
+                &preparation_data_dir,
+                &preparation_handoff,
+                env!("CARGO_PKG_VERSION"),
+                &preparation_version,
+            )
+            .map_err(|error| error.to_string())
+        },
         async {
             let _ = cleanup_progress.send(UpdateProgress::ClosingBrowsers);
             shutdown::graceful_sidecar_cleanup(&sidecar).await
@@ -397,22 +464,35 @@ pub async fn update_now(
         |bytes| {
             let _ = install_progress.send(UpdateProgress::Installing);
             let _ = install_window.hide();
-            update.install(bytes).map_err(|error| error.to_string())
+            update.install(bytes).map_err(|error| error.to_string())?;
+            Err("the verified installer returned without transferring control".to_owned())
         },
     )
     .await
     {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            record_update_failure(&data_dir, &handoff.id, UpdateFailureReason::InstallerLaunch);
+            let _ = window.show();
+            let _ = window.set_focus();
+            restart_after_install_failure(app, "the installer returned unexpectedly");
+            Err(INSTALL_FAILED.to_owned())
+        }
         Err(UpdatePreparationError::Download(error)) => {
             eprintln!("AliasMode update download or signature verification failed: {error}");
             Err(DOWNLOAD_FAILED.to_owned())
         }
+        Err(UpdatePreparationError::Prepare(error)) => {
+            eprintln!("AliasMode update install-root validation failed: {error}");
+            Err(INSTALLATION_UNSAFE.to_owned())
+        }
         Err(UpdatePreparationError::Cleanup(error)) => {
             eprintln!("AliasMode update browser cleanup failed: {error}");
+            record_update_failure(&data_dir, &handoff.id, UpdateFailureReason::BrowserCleanup);
             shutdown::exit_after_update_cleanup_failure(app, &sidecar, error);
             Err(CLEANUP_FAILED.to_owned())
         }
         Err(UpdatePreparationError::Install(error)) => {
+            record_update_failure(&data_dir, &handoff.id, UpdateFailureReason::InstallerLaunch);
             let _ = window.show();
             let _ = window.set_focus();
             restart_after_install_failure(app, error);
@@ -427,7 +507,7 @@ mod tests {
         download_percent, is_release_asset_url, newest_release, release_highlights,
         run_verified_update, validate_manifest_result, GithubAsset, GithubRelease,
         ReleaseCandidate, UpdateCoordinator, UpdatePreparationError, UpdateProgress, UpdateStatus,
-        UPDATE_TARGET,
+        UPDATE_MANIFEST, UPDATE_TARGET,
     };
     use semver::Version;
     use serde_json::json;
@@ -435,7 +515,7 @@ mod tests {
     use url::Url;
 
     fn manifest_url(tag: &str) -> String {
-        format!("https://github.com/aliasmode/aliasmode/releases/download/{tag}/latest.json")
+        format!("https://github.com/aliasmode/aliasmode/releases/download/{tag}/{UPDATE_MANIFEST}")
     }
 
     fn release(tag: &str, draft: bool, prerelease: bool, manifest_count: usize) -> GithubRelease {
@@ -446,7 +526,7 @@ mod tests {
             body: None,
             assets: (0..manifest_count)
                 .map(|_| GithubAsset {
-                    name: "latest.json".to_owned(),
+                    name: UPDATE_MANIFEST.to_owned(),
                     browser_download_url: manifest_url(tag),
                 })
                 .collect(),
@@ -569,15 +649,39 @@ mod tests {
     fn accepts_only_exact_aliasmode_release_asset_urls() {
         let tag = "v0.1.0-beta.36";
         let valid = Url::parse(&manifest_url(tag)).unwrap();
-        assert!(is_release_asset_url(&valid, tag, "latest.json"));
+        assert!(is_release_asset_url(&valid, tag, UPDATE_MANIFEST));
         for invalid in [
-            "http://github.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.36/latest.json",
-            "https://example.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.36/latest.json",
-            "https://github.com/other/aliasmode/releases/download/v0.1.0-beta.36/latest.json",
-            "https://github.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.36/latest.json?raw=1",
+            "http://github.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.36/latest-v2.json",
+            "https://example.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.36/latest-v2.json",
+            "https://github.com/other/aliasmode/releases/download/v0.1.0-beta.36/latest-v2.json",
+            "https://github.com/aliasmode/aliasmode/releases/download/v0.1.0-beta.36/latest-v2.json?raw=1",
         ] {
-            assert!(!is_release_asset_url(&Url::parse(invalid).unwrap(), tag, "latest.json"));
+            assert!(!is_release_asset_url(
+                &Url::parse(invalid).unwrap(),
+                tag,
+                UPDATE_MANIFEST
+            ));
         }
+    }
+
+    #[test]
+    fn ignores_the_legacy_manifest_seen_by_beta46() {
+        let current = Version::parse("0.1.0-beta.47").unwrap();
+        let tag = "v0.1.0-beta.48";
+        let legacy = GithubRelease {
+            tag_name: tag.to_owned(),
+            draft: false,
+            prerelease: true,
+            body: None,
+            assets: vec![GithubAsset {
+                name: "latest.json".to_owned(),
+                browser_download_url: format!(
+                    "https://github.com/aliasmode/aliasmode/releases/download/{tag}/latest.json"
+                ),
+            }],
+        };
+
+        assert!(newest_release(&current, &[legacy]).is_none());
     }
 
     #[test]
@@ -609,11 +713,16 @@ mod tests {
     }
 
     #[test]
-    fn failed_verified_download_cannot_start_cleanup_or_install() {
+    fn failed_verified_download_cannot_start_preparation_cleanup_or_install() {
+        let preparation_started = Cell::new(false);
         let cleanup_started = Cell::new(false);
         let install_started = Cell::new(false);
         let result = tauri::async_runtime::block_on(run_verified_update(
             async { Err::<Vec<u8>, String>("bad signature".to_owned()) },
+            async {
+                preparation_started.set(true);
+                Ok(())
+            },
             async {
                 cleanup_started.set(true);
                 Ok(())
@@ -627,12 +736,13 @@ mod tests {
             result,
             Err(UpdatePreparationError::Download("bad signature".to_owned()))
         );
+        assert!(!preparation_started.get());
         assert!(!cleanup_started.get());
         assert!(!install_started.get());
     }
 
     #[test]
-    fn cleanup_and_install_run_only_after_verified_download() {
+    fn every_update_stage_runs_in_order_after_verified_download() {
         let stage = Cell::new(0);
         let result = tauri::async_runtime::block_on(run_verified_update(
             async {
@@ -644,15 +754,46 @@ mod tests {
                 stage.set(2);
                 Ok(())
             },
-            |bytes| {
+            async {
                 assert_eq!(stage.get(), 2);
-                assert_eq!(bytes, [1, 2, 3]);
                 stage.set(3);
+                Ok(())
+            },
+            |bytes| {
+                assert_eq!(stage.get(), 3);
+                assert_eq!(bytes, [1, 2, 3]);
+                stage.set(4);
                 Ok(())
             },
         ));
         assert_eq!(result, Ok(()));
-        assert_eq!(stage.get(), 3);
+        assert_eq!(stage.get(), 4);
+    }
+
+    #[test]
+    fn preparation_failure_cannot_start_cleanup_or_install() {
+        let cleanup_started = Cell::new(false);
+        let install_started = Cell::new(false);
+        let result = tauri::async_runtime::block_on(run_verified_update(
+            async { Ok(vec![1, 2, 3]) },
+            async { Err("install root mismatch".to_owned()) },
+            async {
+                cleanup_started.set(true);
+                Ok(())
+            },
+            |_| {
+                install_started.set(true);
+                Ok(())
+            },
+        ));
+        assert_eq!(
+            result,
+            Err(UpdatePreparationError::Prepare(
+                "install root mismatch".to_owned(),
+            ))
+        );
+        assert!(!cleanup_started.get());
+        assert!(!install_started.get());
     }
 
     #[test]
@@ -660,6 +801,7 @@ mod tests {
         let install_started = Cell::new(false);
         let result = tauri::async_runtime::block_on(run_verified_update(
             async { Ok(vec![1, 2, 3]) },
+            async { Ok(()) },
             async { Err("browser cleanup unconfirmed".to_owned()) },
             |_| {
                 install_started.set(true);
@@ -679,6 +821,7 @@ mod tests {
     fn install_failure_is_not_reported_as_success() {
         let result = tauri::async_runtime::block_on(run_verified_update(
             async { Ok(vec![1, 2, 3]) },
+            async { Ok(()) },
             async { Ok(()) },
             |_| Err("installer could not start".to_owned()),
         ));

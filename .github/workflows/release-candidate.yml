@@ -140,6 +140,10 @@ jobs:
           $slimInstaller = Join-Path $artifact $slimName
           Copy-Item $env:ALIASMODE_CANDIDATE_FULL_INSTALLER $fullInstaller
           Copy-Item $env:ALIASMODE_CANDIDATE_SLIM_INSTALLER $slimInstaller
+          $updaterHeader = [IO.File]::ReadAllBytes($slimInstaller)[0..1]
+          if ($updaterHeader[0] -ne 0x4d -or $updaterHeader[1] -ne 0x5a) {
+            throw "updater artifact must be a raw Windows PE"
+          }
           bunx tauri signer sign $slimInstaller
           if ($LASTEXITCODE -ne 0) { throw "Tauri updater signing failed" }
           $signaturePath = "$slimInstaller.sig"
@@ -171,7 +175,7 @@ jobs:
               }
             }
           }
-          $latestPath = Join-Path $artifact "latest.json"
+          $latestPath = Join-Path $artifact "latest-v2.json"
           $manifest | ConvertTo-Json -Depth 5 | Set-Content $latestPath -Encoding utf8
           $parsed = Get-Content $latestPath | ConvertFrom-Json
           if ($parsed.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
@@ -200,7 +204,7 @@ jobs:
             Sort-Object { Split-Path $_ -Leaf } |
             ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } |
             Set-Content (Join-Path $artifact "SHA256SUMS.txt")
-          $requiredNames = @($fullName, $slimName, "$slimName.sig", "latest.json", "aliasmode-agent-bootstrap.json", "SHA256SUMS.txt")
+          $requiredNames = @($fullName, $slimName, "$slimName.sig", "latest-v2.json", "aliasmode-agent-bootstrap.json", "SHA256SUMS.txt")
           $actualNames = @(Get-ChildItem $artifact -File | ForEach-Object Name)
           $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
           $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
@@ -209,42 +213,105 @@ jobs:
           }
           $hashLines = @(Get-Content (Join-Path $artifact "SHA256SUMS.txt"))
           if ($hashLines.Count -ne 5) { throw "release checksum manifest must hash exactly five files" }
-      - name: Test public beta.45 through the real in-app updater
-        timeout-minutes: 25
+      - name: Build protected synthetic successor
+        timeout-minutes: 35
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sourceVersion = $env:ALIASMODE_CANDIDATE_VERSION
+          $sourceSemantic = [System.Management.Automation.SemanticVersion]::Parse($sourceVersion)
+          $successorVersion = if ($sourceVersion.Contains("-")) {
+            "$sourceVersion.acceptance.1"
+          } else {
+            "$($sourceSemantic.Major).$($sourceSemantic.Minor).$($sourceSemantic.Patch + 1)-acceptance.1"
+          }
+          $successorSemantic = [System.Management.Automation.SemanticVersion]::Parse($successorVersion)
+          if ($successorSemantic -le $sourceSemantic -or $successorSemantic.ToString() -ne $successorVersion) {
+            throw "synthetic successor version is not canonical and newer"
+          }
+
+          $versionFiles = @(
+            ".\package.json",
+            ".\version.ts",
+            ".\src-tauri\tauri.conf.json",
+            ".\src-tauri\Cargo.toml",
+            ".\src-tauri\Cargo.lock"
+          )
+          foreach ($path in $versionFiles) {
+            $text = [IO.File]::ReadAllText($path)
+            if ([regex]::Matches($text, [regex]::Escape($sourceVersion)).Count -ne 1) {
+              throw "synthetic successor version replacement is ambiguous: $path"
+            }
+            [IO.File]::WriteAllText(
+              $path,
+              $text.Replace($sourceVersion, $successorVersion),
+              [Text.UTF8Encoding]::new($false)
+            )
+          }
+
+          try {
+            bun run desktop:prepare
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor bundle preparation failed" }
+            bunx tauri build --bundles nsis --no-sign
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor build failed" }
+
+            $name = "AliasMode_$($successorVersion)_x64-setup.exe"
+            $source = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis-updater" $name)
+            $root = Join-Path $env:RUNNER_TEMP "aliasmode-protected-successor"
+            New-Item -ItemType Directory -Force $root | Out-Null
+            $installer = Join-Path $root $name
+            Copy-Item $source.Path $installer
+            $header = [IO.File]::ReadAllBytes($installer)[0..1]
+            if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
+              throw "synthetic updater must be a raw Windows PE"
+            }
+            bunx tauri signer sign $installer
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor signing failed" }
+            $signaturePath = "$installer.sig"
+            $publicKey = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).plugins.updater.pubkey
+            cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $installer $signaturePath $publicKey
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor signature verification failed" }
+
+            $tag = "v$successorVersion"
+            $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$name"
+            $manifest = [ordered]@{
+              version = $successorVersion
+              platforms = [ordered]@{
+                "windows-x86_64" = [ordered]@{
+                  url = $url
+                  signature = ([IO.File]::ReadAllText($signaturePath).Trim())
+                }
+              }
+            }
+            $manifestPath = Join-Path $root "latest-v2.json"
+            $manifest | ConvertTo-Json -Depth 5 | Set-Content $manifestPath -Encoding utf8
+            "ALIASMODE_SUCCESSOR_VERSION=$successorVersion" | Add-Content $env:GITHUB_ENV
+            "ALIASMODE_SUCCESSOR_INSTALLER=$installer" | Add-Content $env:GITHUB_ENV
+            "ALIASMODE_SUCCESSOR_SIGNATURE=$signaturePath" | Add-Content $env:GITHUB_ENV
+            "ALIASMODE_SUCCESSOR_MANIFEST=$manifestPath" | Add-Content $env:GITHUB_ENV
+          } finally {
+            git checkout -- @versionFiles
+          }
+      - name: Test candidate through the exact updater protocol
+        timeout-minutes: 25
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $artifact = Resolve-Path ".\artifacts\windows-update-candidate"
-          $installer = Join-Path $artifact.Path "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
-          $signature = "$installer.sig"
-          $manifest = Join-Path $artifact.Path "latest.json"
+          $sourceInstaller = Join-Path $artifact.Path "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-offline-setup.exe"
+          $sourceChecksums = Join-Path $artifact.Path "SHA256SUMS.txt"
           $diagnostics = Join-Path $env:RUNNER_TEMP "aliasmode-windows-updater-acceptance.json"
-          $publicDir = Join-Path $env:RUNNER_TEMP "aliasmode-public-beta45"
-          New-Item -ItemType Directory -Force $publicDir | Out-Null
-          Write-Host "AliasMode updater acceptance stage: downloading-public-release"
-          $download = Start-Process -PassThru -NoNewWindow -FilePath "gh" -ArgumentList @(
-            "release", "download", "v0.1.0-beta.45",
-            "--repo", $env:GITHUB_REPOSITORY,
-            "--pattern", "AliasMode_0.1.0-beta.45_x64-setup.exe",
-            "--pattern", "SHA256SUMS.txt",
-            "--dir", $publicDir,
-            "--clobber"
-          )
-          if (-not $download.WaitForExit(300000)) {
-            try { $download.Kill($true) } catch {}
-            throw "public beta.45 asset download timed out"
-          }
-          if ($download.ExitCode -ne 0) { throw "public beta.45 assets could not be downloaded" }
-          Remove-Item Env:GH_TOKEN
           & ".\scripts\windows-in-app-update-acceptance.ps1" `
-            -CandidateVersion $env:ALIASMODE_CANDIDATE_VERSION `
-            -CandidateInstallerPath $installer `
-            -CandidateSignaturePath $signature `
-            -CandidateManifestPath $manifest `
-            -PublicInstallerPath (Join-Path $publicDir "AliasMode_0.1.0-beta.45_x64-setup.exe") `
-            -PublicChecksumsPath (Join-Path $publicDir "SHA256SUMS.txt") `
+            -SourceVersion $env:ALIASMODE_CANDIDATE_VERSION `
+            -SourceInstallerPath $sourceInstaller `
+            -SourceChecksumsPath $sourceChecksums `
+            -CandidateVersion $env:ALIASMODE_SUCCESSOR_VERSION `
+            -CandidateInstallerPath $env:ALIASMODE_SUCCESSOR_INSTALLER `
+            -CandidateSignaturePath $env:ALIASMODE_SUCCESSOR_SIGNATURE `
+            -CandidateManifestPath $env:ALIASMODE_SUCCESSOR_MANIFEST `
             -DiagnosticsPath $diagnostics
       - uses: actions/upload-artifact@v4
         if: always()

@@ -13,9 +13,9 @@ const installerName = `AliasMode_${version}_x64-setup.exe`;
 const releaseBase = `/aliasmode/aliasmode/releases/download/${tag}`;
 const config = normalizeFixtureConfig({
   candidateVersion: version,
-  manifestUrl: `https://github.com${releaseBase}/latest.json`,
+  manifestUrl: `https://github.com${releaseBase}/latest-v2.json`,
   installerUrl: `https://github.com${releaseBase}/${installerName}`,
-  manifestPath: "latest.json",
+  manifestPath: "latest-v2.json",
   installerPath: installerName,
   certificatePath: "server.pem",
   privateKeyPath: "server.key",
@@ -31,8 +31,8 @@ describe("Windows updater HTTPS fixture", () => {
       body: "## Highlights\n- Signed Windows update acceptance candidate",
       assets: [
         {
-          name: "latest.json",
-          browser_download_url: `https://github.com${releaseBase}/latest.json`,
+          name: "latest-v2.json",
+          browser_download_url: `https://github.com${releaseBase}/latest-v2.json`,
         },
         {
           name: installerName,
@@ -85,9 +85,9 @@ describe("Windows updater HTTPS fixture", () => {
   test("rejects noncanonical manifest and installer URLs", () => {
     expect(() => normalizeFixtureConfig({
       candidateVersion: version,
-      manifestUrl: `https://example.com${releaseBase}/latest.json`,
+      manifestUrl: `https://example.com${releaseBase}/latest-v2.json`,
       installerUrl: `https://github.com${releaseBase}/${installerName}`,
-      manifestPath: "latest.json",
+      manifestPath: "latest-v2.json",
       installerPath: installerName,
       certificatePath: "server.pem",
       privateKeyPath: "server.key",

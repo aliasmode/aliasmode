@@ -179,6 +179,10 @@ jobs:
           $slimInstaller = Join-Path $candidate $slimName
           Copy-Item $env:ALIASMODE_FULL_NSIS_INSTALLER $fullInstaller
           Copy-Item $env:ALIASMODE_SLIM_NSIS_INSTALLER $slimInstaller
+          $updaterHeader = [IO.File]::ReadAllBytes($slimInstaller)[0..1]
+          if ($updaterHeader[0] -ne 0x4d -or $updaterHeader[1] -ne 0x5a) {
+            throw "updater artifact must be a raw Windows PE"
+          }
           Copy-Item ".\src-tauri\generated\browser.json" (Join-Path $candidate "browser.json")
           $fullSize = (Get-Item $fullInstaller).Length
           $slimSize = (Get-Item $slimInstaller).Length

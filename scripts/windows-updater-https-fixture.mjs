@@ -17,7 +17,7 @@ export function normalizeFixtureConfig(input) {
   const candidateTag = `v${candidateVersion}`;
   const installerName = `AliasMode_${candidateVersion}_x64-setup.exe`;
   const releaseBase = `/aliasmode/aliasmode/releases/download/${candidateTag}`;
-  const manifestRoute = `${releaseBase}/latest.json`;
+  const manifestRoute = `${releaseBase}/latest-v2.json`;
   const installerRoute = `${releaseBase}/${installerName}`;
   const manifestUrl = `https://github.com${manifestRoute}`;
   const installerUrl = `https://github.com${installerRoute}`;
@@ -51,7 +51,7 @@ export function releaseList(config) {
     body: "## Highlights\n- Signed Windows update acceptance candidate",
     assets: [
       {
-        name: "latest.json",
+        name: "latest-v2.json",
         browser_download_url: config.manifestUrl,
       },
       {

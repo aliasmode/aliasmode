@@ -4,6 +4,7 @@ mod releases;
 mod runtime_descriptor;
 mod shutdown;
 mod sidecar;
+mod update_attempt;
 
 use credentials::{credential_delete, credential_get, credential_set, CredentialOrigin};
 use rand::random;
@@ -297,6 +298,7 @@ mod tests {
 
 pub fn run() {
     let background = background_requested(std::env::args_os());
+    let update_relaunch = update_attempt::parse_relaunch_argument(std::env::args_os().skip(1));
     let import_request = parse_cloakpit_import_args(std::env::args_os().skip(1));
     let app = tauri::Builder::default()
         .manage(RevealRequested::default())
@@ -324,6 +326,7 @@ pub fn run() {
             runtime_descriptor::agent_runtime_ready,
             shutdown::restart_after_mode_change,
             releases::check_for_updates,
+            releases::last_update_result,
             releases::update_now,
         ])
         .setup(move |app| {
@@ -533,6 +536,10 @@ pub fn run() {
                 let _ = window.set_focus();
             } else if background {
                 window.hide()?;
+            }
+            if let Err(error) = update_attempt::reconcile_after_startup(&data_dir, &update_relaunch)
+            {
+                eprintln!("AliasMode could not reconcile the previous update result: {error}");
             }
             Ok(())
         })
