@@ -61,6 +61,11 @@ function Test-ProcessExited([Diagnostics.Process]$Process) {
   }
 }
 
+function Set-AcceptanceStage([string]$NextStage) {
+  $script:stage = $NextStage
+  Write-Host "AliasMode updater acceptance stage: $NextStage"
+}
+
 function Stop-ProcessTree([Diagnostics.Process]$Process) {
   if (-not $Process -or (Test-ProcessExited $Process)) { return }
   $Process.Kill($true)
@@ -713,7 +718,7 @@ $oldBrowserProcesses = @()
 $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
 $routeCounts = [ordered]@{ releaseList = 0; manifest = 0; installer = 0; rejected = 0 }
-$stage = "validating-inputs"
+Set-AcceptanceStage "validating-inputs"
 $acceptanceSucceeded = $false
 $savedEnvironment = @{}
 $environmentNames = @("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "WEBVIEW2_USER_DATA_FOLDER")
@@ -737,7 +742,7 @@ $observations = [ordered]@{
 }
 
 try {
-  $stage = "preparing-public-release"
+  Set-AcceptanceStage "preparing-public-release"
   New-Item -ItemType Directory -Force $runRoot, $webViewRoot, $certificateRoot | Out-Null
   if (@(Get-Process -Name "AliasMode" -ErrorAction SilentlyContinue).Count -ne 0) {
     throw "runner has a pre-existing AliasMode process"
@@ -747,13 +752,13 @@ try {
 
   if ([string]::IsNullOrWhiteSpace($PublicInstallerPath)) {
     $PublicInstallerPath = Join-Path $runRoot $publicInstallerName
-    Invoke-WebRequest "$publicReleaseBase/$publicInstallerName" -OutFile $PublicInstallerPath
+    Invoke-WebRequest "$publicReleaseBase/$publicInstallerName" -OutFile $PublicInstallerPath -TimeoutSec 300
   }
   $PublicInstallerPath = Resolve-InputFile $PublicInstallerPath "public $publicVersion installer"
   if ([string]::IsNullOrWhiteSpace($ExpectedPublicInstallerSha256) -and
       [string]::IsNullOrWhiteSpace($PublicChecksumsPath)) {
     $PublicChecksumsPath = Join-Path $runRoot "public-SHA256SUMS.txt"
-    Invoke-WebRequest "$publicReleaseBase/SHA256SUMS.txt" -OutFile $PublicChecksumsPath
+    Invoke-WebRequest "$publicReleaseBase/SHA256SUMS.txt" -OutFile $PublicChecksumsPath -TimeoutSec 30
   }
 
   $checksumFromManifest = $null
@@ -779,8 +784,12 @@ try {
   }
   $observations.publicInstallerVerified = $true
 
-  $stage = "installing-public-release"
-  $install = Start-Process -Wait -PassThru $PublicInstallerPath -ArgumentList @("/S", "/D=$installRoot")
+  Set-AcceptanceStage "installing-public-release"
+  $install = Start-Process -PassThru $PublicInstallerPath -ArgumentList @("/S", "/D=$installRoot")
+  if (-not $install.WaitForExit(300000)) {
+    Stop-ProcessTree $install
+    throw "public $publicVersion installer timed out"
+  }
   if ($install.ExitCode -ne 0) { throw "public $publicVersion installer exited nonzero" }
   if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
     throw "public $publicVersion desktop executable is missing after install"
@@ -794,7 +803,7 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
 
-  $stage = "intercepting-github"
+  Set-AcceptanceStage "intercepting-github"
   $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 443)
   try {
     $portProbe.Server.ExclusiveAddressUse = $true
@@ -848,12 +857,12 @@ try {
   [Environment]::SetEnvironmentVariable("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "1", "Process")
   [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webViewRoot, "Process")
 
-  $stage = "starting-public-release"
+  Set-AcceptanceStage "starting-public-release"
   $publicDesktop = Start-Process -PassThru $appPath
   $oldRecord = Wait-DesktopReady $publicDesktop $publicVersion $appDataRoot $webViewRoot
   $observations.publicDesktopReady = $true
 
-  $stage = "creating-active-profile"
+  Set-AcceptanceStage "creating-active-profile"
   $profile = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" `
     -Method Post `
     -ContentType "application/json" `
@@ -898,7 +907,7 @@ try {
   $configHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
   $sentinelHash = (Get-FileHash -LiteralPath $sentinelPath -Algorithm SHA256).Hash
 
-  $stage = "clicking-visible-update"
+  Set-AcceptanceStage "clicking-visible-update"
   Invoke-DesktopUiProbe `
     $runtime `
     $probeScript `
@@ -909,7 +918,7 @@ try {
     "visible-update-now"
   $observations.visibleUpdateClicked = $true
 
-  $stage = "waiting-for-candidate-relaunch"
+  Set-AcceptanceStage "waiting-for-candidate-relaunch"
   $candidateRecord = Wait-CandidateRelaunch `
     $appPath `
     $CandidateVersion `
@@ -930,7 +939,7 @@ try {
   }
   $observations.candidateReady = $true
 
-  $stage = "verifying-candidate-dashboard"
+  Set-AcceptanceStage "verifying-candidate-dashboard"
   Invoke-DesktopUiProbe `
     $runtime `
     $probeScript `
@@ -942,7 +951,7 @@ try {
     $profileName
   $observations.candidateDashboardReady = $true
 
-  $stage = "verifying-candidate-state"
+  Set-AcceptanceStage "verifying-candidate-state"
   $candidateAppPath = Get-ProcessPath $candidateRecord.App
   $observations.installPathPreserved = $candidateAppPath -and
     [IO.Path]::GetFullPath($candidateAppPath).Equals(
@@ -977,13 +986,13 @@ try {
   }
   Assert-NoPublicHealthReappears $appPath $oldRecord $candidateRecord
   $observations.publicHealthDidNotReappear = $true
-  $stage = "verified"
+  Set-AcceptanceStage "verified"
   $acceptanceSucceeded = $true
 } catch {
   $primaryFailure = $_
 } finally {
   $stageBeforeCleanup = $stage
-  $stage = "cleanup"
+  Set-AcceptanceStage "cleanup"
   $routeCounts = Get-SafeRouteCounts $fixtureStatePath
 
   foreach ($record in @($candidateRecord, $oldRecord)) {
