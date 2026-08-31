@@ -270,10 +270,7 @@ function Invoke-DesktopUiProbe(
   [string]$ScriptPath,
   [int]$DebugPort,
   [string]$DashboardOrigin,
-  [string]$ExpectedCandidateVersion,
-  [string]$Action,
-  [string]$ExpectedResult,
-  [string]$ProfileName = ""
+  [string]$ExpectedCandidateVersion
 ) {
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $RuntimePath
@@ -294,9 +291,8 @@ function Invoke-DesktopUiProbe(
       endpoint = "http://127.0.0.1:$DebugPort"
       dashboardOrigin = $DashboardOrigin
       candidateVersion = $ExpectedCandidateVersion
-      action = $Action
+      action = "click-update"
     }
-    if ($ProfileName) { $probeInput.profileName = $ProfileName }
     $probeInput | ConvertTo-Json -Compress | ForEach-Object { $process.StandardInput.Write($_) }
     $process.StandardInput.Close()
     if (-not $process.WaitForExit(120000)) {
@@ -307,7 +303,7 @@ function Invoke-DesktopUiProbe(
     [void]$errorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) { throw "desktop UI probe failed" }
     try { $result = $output | ConvertFrom-Json } catch { throw "desktop UI probe returned invalid output" }
-    if ($result.ok -ne $true -or $result.action -ne $ExpectedResult) {
+    if ($result.ok -ne $true -or $result.action -ne "visible-update-now") {
       throw "desktop UI probe returned an unexpected result"
     }
   } finally {
@@ -320,7 +316,6 @@ function Wait-CandidateRelaunch(
   [string]$AppPath,
   [string]$ExpectedCandidateVersion,
   [string]$ExpectedRoot,
-  [string]$WebViewRoot,
   $OldRecord,
   [Diagnostics.Process[]]$OldBrowserProcesses,
   [string]$FixtureStatePath,
@@ -350,10 +345,6 @@ function Wait-CandidateRelaunch(
         }
         if ($health.version -ne $ExpectedCandidateVersion) { continue }
         $Observations.candidateHealthSeen = $true
-        $desktop.Refresh()
-        if ($desktop.MainWindowHandle -eq 0) { continue }
-        $debugPort = Get-WebViewDebugPort $WebViewRoot
-        if ($debugPort -le 0) { continue }
         if (-not $oldDesktopExited -or -not $oldSidecarExited -or -not $oldBrowsersExited) { continue }
         if ($desktop.Id -eq $OldRecord.App.Id -or $sidecar.Id -eq $OldRecord.Sidecar.Id) {
           throw "candidate relaunch reused an old process ID"
@@ -367,12 +358,17 @@ function Wait-CandidateRelaunch(
         )) {
           throw "candidate relaunch changed the app-data root"
         }
+        $desktop.Refresh()
+        if ($desktop.MainWindowHandle -eq 0) { continue }
+        $Observations.candidateWindowSeen = $true
+        $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
+        if ($candidateRoutes.releaseList -lt 3) { continue }
+        $Observations.candidateFrontendSeen = $true
         return [pscustomobject]@{
           App = $desktop
           Sidecar = $sidecar
           Origin = $healthRecord.Origin
           Health = $health
-          DebugPort = $debugPort
         }
       }
     }
@@ -396,6 +392,8 @@ function Wait-CandidateRelaunch(
         "candidateDesktopSeen=$($Observations.candidateDesktopSeen); " +
         "candidateSidecarSeen=$($Observations.candidateSidecarSeen); " +
         "candidateHealthSeen=$($Observations.candidateHealthSeen); " +
+        "candidateWindowSeen=$($Observations.candidateWindowSeen); " +
+        "candidateFrontendSeen=$($Observations.candidateFrontendSeen); " +
         "releaseRequests=$($counts.releaseList); " +
         "manifestRequests=$($counts.manifest); " +
         "installerRequests=$($counts.installer); " +
@@ -773,8 +771,10 @@ $observations = [ordered]@{
   candidateDesktopSeen = $false
   candidateSidecarSeen = $false
   candidateHealthSeen = $false
+  candidateWindowSeen = $false
+  candidateFrontendSeen = $false
   candidateReady = $false
-  candidateDashboardReady = $false
+  candidateWindowReady = $false
   installPathPreserved = $false
   dataRootPreserved = $false
   configPreserved = $false
@@ -984,9 +984,7 @@ try {
     $probeScript `
     $oldRecord.DebugPort `
     $oldRecord.Origin `
-    $CandidateVersion `
-    "click-update" `
-    "visible-update-now"
+    $CandidateVersion
   $observations.visibleUpdateClicked = $true
 
   Set-AcceptanceStage "waiting-for-candidate-relaunch"
@@ -994,7 +992,6 @@ try {
     $appPath `
     $CandidateVersion `
     $appDataRoot `
-    $webViewRoot `
     $oldRecord `
     $oldBrowserProcesses `
     $fixtureStatePath `
@@ -1012,17 +1009,12 @@ try {
   }
   $observations.candidateReady = $true
 
-  Set-AcceptanceStage "verifying-candidate-dashboard"
-  Invoke-DesktopUiProbe `
-    $runtime `
-    $probeScript `
-    $candidateRecord.DebugPort `
-    $candidateRecord.Origin `
-    $CandidateVersion `
-    "verify-candidate" `
-    "candidate-dashboard" `
-    $profileName
-  $observations.candidateDashboardReady = $true
+  Set-AcceptanceStage "verifying-candidate-window"
+  $candidateRecord.App.Refresh()
+  if ($candidateRecord.App.MainWindowHandle -eq 0) {
+    throw "signed candidate window did not become visible"
+  }
+  $observations.candidateWindowReady = $true
 
   Set-AcceptanceStage "verifying-candidate-state"
   $candidateAppPath = Get-ProcessPath $candidateRecord.App
@@ -1051,7 +1043,7 @@ try {
   }
 
   $routeCounts = Get-SafeRouteCounts $fixtureStatePath
-  if ($routeCounts.releaseList -lt 2 -or
+  if ($routeCounts.releaseList -lt 3 -or
       $routeCounts.manifest -lt 2 -or
       $routeCounts.installer -lt 1 -or
       $routeCounts.rejected -ne 0) {

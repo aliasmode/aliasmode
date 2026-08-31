@@ -14,12 +14,8 @@ async function readInput() {
       !/^http:\/\/127\.0\.0\.1:\d+$/.test(input.dashboardOrigin)) {
     throw new Error("dashboard origin is invalid");
   }
-  if (!["click-update", "verify-candidate"].includes(input?.action)) {
+  if (input?.action !== "click-update") {
     throw new Error("desktop UI probe action is invalid");
-  }
-  if (input.action === "verify-candidate" &&
-      (typeof input?.profileName !== "string" || input.profileName.length === 0)) {
-    throw new Error("candidate profile name is missing");
   }
   return input;
 }
@@ -40,16 +36,6 @@ async function main() {
   const browser = await chromium.connectOverCDP(input.endpoint, { timeout: 30_000 });
   try {
     const page = await findDashboardPage(browser, input.dashboardOrigin);
-    if (input.action === "verify-candidate") {
-      await page.getByRole("button", { name: "Open Account and Settings", exact: true })
-        .waitFor({ state: "visible", timeout: 60_000 });
-      await page.locator(".workspace").waitFor({ state: "visible", timeout: 60_000 });
-      await page.getByText(input.profileName, { exact: true })
-        .waitFor({ state: "visible", timeout: 60_000 });
-      process.stdout.write('{"ok":true,"action":"candidate-dashboard"}\n');
-      return;
-    }
-
     const banner = page.locator(".update-banner");
     await banner.waitFor({ state: "visible", timeout: 60_000 });
     const announcedVersion = await banner.locator('[role="status"] strong').innerText();
