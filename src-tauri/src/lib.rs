@@ -553,7 +553,7 @@ pub fn run() {
                     .ok()
                     .as_deref(),
             ) {
-                webview_builder.additional_browser_args(args)
+                webview_builder.additional_browser_args(&args)
             } else {
                 webview_builder
             };
