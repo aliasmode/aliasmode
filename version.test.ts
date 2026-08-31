@@ -15,10 +15,14 @@ test("release version and updater trust stay aligned across the desktop bundle",
     bundle: { createUpdaterArtifacts: boolean | string; windows: { webviewInstallMode: { type: string }; nsis: { installMode: string } } };
     plugins: { updater: { pubkey: string; windows: { installMode: string } } };
   };
+  const updaterConfig = JSON.parse(readFileSync(join(root, "src-tauri", "tauri.updater.conf.json"), "utf8")) as {
+    bundle: { createUpdaterArtifacts: boolean; windows: { webviewInstallMode: { type: string } } };
+  };
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
   const cargoLock = readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8");
   const releasesSource = readFileSync(join(root, "src-tauri", "src", "releases.rs"), "utf8");
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release-candidate.yml"), "utf8");
+  const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
   const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
   const lockedVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "aliasmode-desktop"\r?\nversion = "([^"]+)"/)?.[1];
@@ -32,8 +36,15 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(tauriConfig.bundle.windows.webviewInstallMode.type).toBe("offlineInstaller");
   expect(tauriConfig.bundle.windows.nsis.installMode).toBe("currentUser");
   expect(tauriConfig.bundle.createUpdaterArtifacts).toBe(true);
+  expect(updaterConfig.bundle.createUpdaterArtifacts).toBe(true);
+  expect(updaterConfig.bundle.windows.webviewInstallMode.type).toBe("downloadBootstrapper");
   expect(releasesSource).toContain('const UPDATE_MANIFEST: &str = "latest-v2.json";');
   expect(releaseWorkflow).toContain('$latestPath = Join-Path $artifact "latest-v2.json"');
+  expect(releaseWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
+  expect(releaseWorkflow).not.toContain("nsis-updater");
+  expect(ciWorkflow).toContain("Build full offline installer");
+  expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
+  expect(ciWorkflow).not.toContain("nsis-updater");
   expect(releaseWorkflow).not.toContain('Join-Path $artifact "latest.json"');
   expect(releaseWorkflow).toContain("$updaterHeader[0] -ne 0x4d");
   expect(tauriConfig.plugins.updater.windows.installMode).toBe("passive");

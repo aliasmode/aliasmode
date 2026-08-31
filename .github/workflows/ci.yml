@@ -154,17 +154,30 @@ jobs:
           $env:ALIASMODE_LIVE_HEADFUL = "1"
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
-      - run: bunx tauri build --bundles nsis --no-sign
-      - name: Select NSIS installers
+      - name: Build full offline installer
+        run: bunx tauri build --bundles nsis --no-sign
+      - name: Preserve full offline installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
           $sourceName = "AliasMode_$($bundleVersion)_x64-setup.exe"
-          $fullInstaller = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $sourceName)
-          $slimInstaller = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis-updater" $sourceName)
-          if ($fullInstaller.Path -eq $slimInstaller.Path) { throw "full and updater NSIS installers must be distinct" }
-          "ALIASMODE_FULL_NSIS_INSTALLER=$($fullInstaller.Path)" | Add-Content $env:GITHUB_ENV
+          $source = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $sourceName)
+          $fullInstaller = Join-Path $env:RUNNER_TEMP "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
+          Copy-Item $source.Path $fullInstaller
+          "ALIASMODE_FULL_NSIS_INSTALLER=$fullInstaller" | Add-Content $env:GITHUB_ENV
+      - name: Build slim updater installer
+        run: bunx tauri build --bundles nsis --no-sign --config src-tauri/tauri.updater.conf.json
+      - name: Select slim updater installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
+          $sourceName = "AliasMode_$($bundleVersion)_x64-setup.exe"
+          $slimInstaller = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $sourceName)
+          if ($env:ALIASMODE_FULL_NSIS_INSTALLER -eq $slimInstaller.Path) {
+            throw "full and updater NSIS installers must be distinct"
+          }
           "ALIASMODE_SLIM_NSIS_INSTALLER=$($slimInstaller.Path)" | Add-Content $env:GITHUB_ENV
       - name: Stage Windows candidate
         shell: pwsh

@@ -255,11 +255,11 @@ jobs:
           try {
             bun run desktop:prepare
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor bundle preparation failed" }
-            bunx tauri build --bundles nsis --no-sign
+            bunx tauri build --bundles nsis --no-sign --config src-tauri/tauri.updater.conf.json
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor build failed" }
 
             $name = "AliasMode_$($successorVersion)_x64-setup.exe"
-            $source = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis-updater" $name)
+            $source = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $name)
             $root = Join-Path $env:RUNNER_TEMP "aliasmode-protected-successor"
             New-Item -ItemType Directory -Force $root | Out-Null
             $installer = Join-Path $root $name
