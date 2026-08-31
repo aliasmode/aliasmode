@@ -1708,6 +1708,7 @@ try {
     "" `
     @{
       ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"
       WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
     }
   $observations.standardUserTokenUsed = $true
