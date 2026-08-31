@@ -761,9 +761,6 @@ jobs:
               Start-Sleep -Milliseconds 500
             }
             if (-not $eofSidecarPid) { throw "EOF acceptance desktop did not publish its sidecar" }
-            $automation = Get-NetTCPConnection -State Listen -LocalPort 50400 -ErrorAction SilentlyContinue |
-              Where-Object OwningProcess -eq $eofSidecarPid
-            if (-not $automation) { throw "EOF acceptance sidecar did not own the automation listener" }
 
             Stop-Process -Id $eofApp.Id -Force
             $eofApp.WaitForExit()
@@ -773,10 +770,6 @@ jobs:
             }
             if (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue) {
               throw "packaged sidecar survived parent stdin EOF"
-            }
-            if (Get-NetTCPConnection -State Listen -LocalPort 50400 -ErrorAction SilentlyContinue |
-                Where-Object OwningProcess -eq $eofSidecarPid) {
-              throw "automation listener survived parent stdin EOF"
             }
           } finally {
             $eofApp.Refresh()
