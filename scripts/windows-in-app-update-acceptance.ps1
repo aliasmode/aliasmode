@@ -676,6 +676,7 @@ function Start-StandardUserProcess(
     $overrides
   )
   $process = [Diagnostics.Process]::GetProcessById($processId)
+  [void]$process.Handle
   $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid($processId)
   if (-not $ownerSid -or -not $ownerSid.Equals($UserSession.UserSid, [StringComparison]::OrdinalIgnoreCase)) {
     try { $process.Kill($true) } catch {}
