@@ -1325,7 +1325,8 @@ function Write-SafeDiagnostics(
   [string]$CandidateVersion,
   $RouteCounts,
   $Observations,
-  [int]$CleanupFailureCount
+  $SourceInstallerExitCode,
+  $CleanupFailures
 ) {
   $parent = Split-Path $Path -Parent
   if ($parent) { New-Item -ItemType Directory -Force $parent | Out-Null }
@@ -1337,7 +1338,8 @@ function Write-SafeDiagnostics(
     candidateVersion = $CandidateVersion
     routeCounts = $RouteCounts
     observations = $Observations
-    cleanupFailureCount = $CleanupFailureCount
+    sourceInstallerExitCode = $SourceInstallerExitCode
+    cleanupFailures = @($CleanupFailures)
   }
   [IO.File]::WriteAllText(
     $Path,
@@ -1456,8 +1458,11 @@ $cleanupFailures = [Collections.Generic.List[string]]::new()
 $routeCounts = [ordered]@{ releaseList = 0; manifest = 0; installer = 0; rejected = 0 }
 Set-AcceptanceStage "validating-inputs"
 $acceptanceSucceeded = $false
+$sourceInstallerExitCode = $null
 $observations = [ordered]@{
   publicInstallerVerified = $false
+  sourceInstallerAppPresent = $false
+  sourceInstallerRegistrationPresent = $false
   standardUserTokenUsed = $false
   publicDesktopReady = $false
   profileCreated = $false
@@ -1609,8 +1614,14 @@ try {
     Stop-ProcessTree $install
     throw "public $publicVersion installer timed out"
   }
-  if ($install.ExitCode -ne 0) { throw "public $publicVersion installer exited nonzero" }
-  if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
+  $sourceInstallerExitCode = $install.ExitCode
+  $observations.sourceInstallerAppPresent = Test-Path -LiteralPath $appPath -PathType Leaf
+  $observations.sourceInstallerRegistrationPresent =
+    (Test-Path -LiteralPath $manufacturerKey) -and (Test-Path -LiteralPath $uninstallKey)
+  if ($sourceInstallerExitCode -ne 0) {
+    throw "public $publicVersion installer exited with code $sourceInstallerExitCode"
+  }
+  if (-not $observations.sourceInstallerAppPresent) {
     throw "public $publicVersion desktop executable is missing after install"
   }
   New-Item -ItemType Directory -Force $appDataRoot | Out-Null
@@ -2104,7 +2115,8 @@ try {
     $CandidateVersion `
     $routeCounts `
     $observations `
-    $cleanupFailures.Count
+    $sourceInstallerExitCode `
+    $cleanupFailures
 } catch {
   $cleanupFailures.Add("safe diagnostics write failed")
   $overallSuccess = $false
@@ -2112,12 +2124,12 @@ try {
 
 if ($primaryFailure) {
   if ($cleanupFailures.Count -gt 0) {
-    throw "$($primaryFailure.Exception.Message); acceptance cleanup also failed in $($cleanupFailures.Count) area(s)"
+    throw "$($primaryFailure.Exception.Message); acceptance cleanup failed: $($cleanupFailures -join ', ')"
   }
   throw $primaryFailure
 }
 if ($cleanupFailures.Count -gt 0) {
-  throw "Windows updater acceptance cleanup failed in $($cleanupFailures.Count) area(s)"
+  throw "Windows updater acceptance cleanup failed: $($cleanupFailures -join ', ')"
 }
 
 Write-Host "Windows in-app updater acceptance passed: $publicVersion -> $CandidateVersion"
