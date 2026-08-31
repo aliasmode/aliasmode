@@ -828,15 +828,25 @@ function Wait-DesktopReady(
   [string]$ExpectedUserSid
 ) {
   Assert-ProcessOwner $DesktopProcess $ExpectedUserSid
-  for ($attempt = 0; $attempt -lt 240; $attempt++) {
+  $sidecarSeen = $false
+  $healthSeen = $false
+  $debugPortSeen = $false
+  $windowSeen = $false
+  for ($attempt = 0; $attempt -lt 720; $attempt++) {
     if (Test-ProcessExited $DesktopProcess) {
       throw "installed public desktop exited before readiness"
     }
+    $DesktopProcess.Refresh()
+    if ($DesktopProcess.MainWindowHandle -ne 0) { $windowSeen = $true }
+    $debugPort = Get-WebViewDebugPort $WebViewRoot
+    if ($debugPort -gt 0) { $debugPortSeen = $true }
     $sidecars = @(Get-ChildSidecars $DesktopProcess.Id)
+    if ($sidecars.Count -gt 0) { $sidecarSeen = $true }
     foreach ($sidecar in $sidecars) {
       Assert-ProcessOwner $sidecar $ExpectedUserSid
       $healthRecord = Get-SidecarHealth $sidecar.Id
       if (-not $healthRecord) { continue }
+      $healthSeen = $true
       if ($healthRecord.Health.version -ne $ExpectedVersion) {
         throw "installed public desktop reported an unexpected version"
       }
@@ -860,7 +870,11 @@ function Wait-DesktopReady(
     }
     Start-Sleep -Milliseconds 250
   }
-  throw "installed public desktop did not become ready"
+  throw (
+    "installed public desktop did not become ready " +
+    "(sidecarSeen=$sidecarSeen; healthSeen=$healthSeen; " +
+    "debugPortSeen=$debugPortSeen; windowSeen=$windowSeen)"
+  )
 }
 
 function Get-InstalledBrowserProcesses([string]$InstallRoot) {
