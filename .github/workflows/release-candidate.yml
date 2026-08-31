@@ -229,6 +229,7 @@ jobs:
             --dir $publicDir `
             --clobber
           if ($LASTEXITCODE -ne 0) { throw "public beta.45 assets could not be downloaded" }
+          Remove-Item Env:GH_TOKEN
           & ".\scripts\windows-in-app-update-acceptance.ps1" `
             -CandidateVersion $env:ALIASMODE_CANDIDATE_VERSION `
             -CandidateInstallerPath $installer `
