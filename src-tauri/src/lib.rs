@@ -39,9 +39,13 @@ const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 
 fn windows_acceptance_browser_args(enabled: bool, debug_port: Option<&str>) -> Option<String> {
-    let debug_port = debug_port?.parse::<u16>().ok().filter(|port| *port > 0)?;
-    enabled
-        .then(|| format!("{WINDOWS_ACCEPTANCE_BROWSER_ARGS} --remote-debugging-port={debug_port}"))
+    if !enabled {
+        return None;
+    }
+    let debug_port = debug_port.unwrap_or("0").parse::<u16>().ok()?;
+    Some(format!(
+        "{WINDOWS_ACCEPTANCE_BROWSER_ARGS} --remote-debugging-port={debug_port}"
+    ))
 }
 
 fn allowed_external_url(url: &str) -> bool {
@@ -286,7 +290,10 @@ mod tests {
     #[test]
     fn enables_webview_debugging_only_for_acceptance() {
         assert_eq!(windows_acceptance_browser_args(false, Some("50401")), None);
-        assert_eq!(windows_acceptance_browser_args(true, Some("0")), None);
+        assert_eq!(
+            windows_acceptance_browser_args(true, None),
+            Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0".to_owned()),
+        );
         assert_eq!(
             windows_acceptance_browser_args(true, Some("50401")),
             Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=50401".to_owned()),
