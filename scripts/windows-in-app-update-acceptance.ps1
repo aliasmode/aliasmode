@@ -806,7 +806,13 @@ function Get-SidecarHealth([int]$SidecarProcessId) {
   return $null
 }
 
-function Get-WebViewDebugPort([string]$WebViewRoot) {
+function Get-WebViewDebugPort([string]$WebViewRoot, [int]$ExpectedPort = 0) {
+  if ($ExpectedPort -gt 0) {
+    try {
+      Invoke-RestMethod "http://127.0.0.1:$ExpectedPort/json/version" -TimeoutSec 1 -NoProxy | Out-Null
+      return $ExpectedPort
+    } catch {}
+  }
   $activePortPath = Join-Path $WebViewRoot "EBWebView\DevToolsActivePort"
   if (-not (Test-Path -LiteralPath $activePortPath -PathType Leaf)) { return 0 }
   try {
@@ -825,6 +831,7 @@ function Wait-DesktopReady(
   [string]$ExpectedVersion,
   [string]$ExpectedRoot,
   [string]$WebViewRoot,
+  [int]$ExpectedDebugPort,
   [string]$ExpectedUserSid
 ) {
   Assert-ProcessOwner $DesktopProcess $ExpectedUserSid
@@ -838,7 +845,7 @@ function Wait-DesktopReady(
     }
     $DesktopProcess.Refresh()
     if ($DesktopProcess.MainWindowHandle -ne 0) { $windowSeen = $true }
-    $debugPort = Get-WebViewDebugPort $WebViewRoot
+    $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
     if ($debugPort -gt 0) { $debugPortSeen = $true }
     $sidecars = @(Get-ChildSidecars $DesktopProcess.Id)
     if ($sidecars.Count -gt 0) { $sidecarSeen = $true }
@@ -856,7 +863,7 @@ function Wait-DesktopReady(
       )) {
         throw "installed public desktop used an unexpected app-data root"
       }
-      $debugPort = Get-WebViewDebugPort $WebViewRoot
+      $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
       $DesktopProcess.Refresh()
       if ($debugPort -gt 0 -and $DesktopProcess.MainWindowHandle -ne 0) {
         return [pscustomobject]@{
@@ -1014,6 +1021,7 @@ function Wait-CandidateRelaunch(
   $OldRecord,
   [Diagnostics.Process[]]$OldBrowserProcesses,
   [string]$WebViewRoot,
+  [int]$ExpectedDebugPort,
   [string]$FixtureStatePath,
   [string]$ExpectedUserSid,
   $Observations
@@ -1059,7 +1067,7 @@ function Wait-CandidateRelaunch(
         }
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
-        $debugPort = Get-WebViewDebugPort $WebViewRoot
+        $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
         if ($debugPort -eq 0) { continue }
         $Observations.candidateWindowSeen = $true
         $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
@@ -1449,6 +1457,7 @@ $acceptanceUserSid = $null
 $acceptanceProfilePath = $null
 $userRunRoot = $null
 $userTempRoot = $null
+$acceptanceDebugPort = 0
 $installRoot = $null
 $webViewRoot = $null
 $appDataRoot = $null
@@ -1700,6 +1709,16 @@ try {
   Flush-DnsCache
   Assert-GithubResolvesToLoopback
 
+  $debugPortProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+  try {
+    $debugPortProbe.Server.ExclusiveAddressUse = $true
+    $debugPortProbe.Start()
+    $acceptanceDebugPort = ([Net.IPEndPoint]$debugPortProbe.LocalEndpoint).Port
+  } finally {
+    $debugPortProbe.Stop()
+  }
+  if ($acceptanceDebugPort -le 0) { throw "WebView debug port allocation failed" }
+
   Set-AcceptanceStage "starting-public-release"
   $publicDesktop = Start-StandardUserProcess `
     $acceptanceUserSession `
@@ -1708,7 +1727,7 @@ try {
     "" `
     @{
       ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=$acceptanceDebugPort"
       WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
     }
   $observations.standardUserTokenUsed = $true
@@ -1717,6 +1736,7 @@ try {
     $publicVersion `
     $appDataRoot `
     $webViewRoot `
+    $acceptanceDebugPort `
     $acceptanceUserSid
   $observations.publicDesktopReady = $true
 
@@ -1844,6 +1864,7 @@ try {
     $oldRecord `
     $oldBrowserProcesses `
     $webViewRoot `
+    $acceptanceDebugPort `
     $fixtureStatePath `
     $acceptanceUserSid `
     $observations
