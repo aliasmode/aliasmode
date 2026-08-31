@@ -222,13 +222,20 @@ jobs:
           $diagnostics = Join-Path $env:RUNNER_TEMP "aliasmode-windows-updater-acceptance.json"
           $publicDir = Join-Path $env:RUNNER_TEMP "aliasmode-public-beta45"
           New-Item -ItemType Directory -Force $publicDir | Out-Null
-          gh release download "v0.1.0-beta.45" `
-            --repo $env:GITHUB_REPOSITORY `
-            --pattern "AliasMode_0.1.0-beta.45_x64-setup.exe" `
-            --pattern "SHA256SUMS.txt" `
-            --dir $publicDir `
-            --clobber
-          if ($LASTEXITCODE -ne 0) { throw "public beta.45 assets could not be downloaded" }
+          Write-Host "AliasMode updater acceptance stage: downloading-public-release"
+          $download = Start-Process -PassThru -NoNewWindow -FilePath "gh" -ArgumentList @(
+            "release", "download", "v0.1.0-beta.45",
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--pattern", "AliasMode_0.1.0-beta.45_x64-setup.exe",
+            "--pattern", "SHA256SUMS.txt",
+            "--dir", $publicDir,
+            "--clobber"
+          )
+          if (-not $download.WaitForExit(300000)) {
+            try { $download.Kill($true) } catch {}
+            throw "public beta.45 asset download timed out"
+          }
+          if ($download.ExitCode -ne 0) { throw "public beta.45 assets could not be downloaded" }
           Remove-Item Env:GH_TOKEN
           & ".\scripts\windows-in-app-update-acceptance.ps1" `
             -CandidateVersion $env:ALIASMODE_CANDIDATE_VERSION `
