@@ -132,7 +132,7 @@ jobs:
           if ($actualHash -ne $expectedHash) { throw "Hermes installer checksum did not match" }
           git config --global core.autocrlf false
           if ($LASTEXITCODE -ne 0) { throw "Hermes git configuration failed" }
-          & $installer -SkipSetup -Commit $commit
+          & $installer -SkipSetup -Branch "v2026.8.19" -Commit $commit
           if ($LASTEXITCODE -ne 0) { throw "pinned Hermes installation failed" }
 
           $hermesBin = Join-Path $env:LOCALAPPDATA "hermes\hermes-agent\bin"

@@ -36,10 +36,12 @@ const ALLOWED_EXTERNAL_URLS: [&str; 4] = [
 ];
 
 const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0";
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 
-fn windows_acceptance_browser_args(enabled: bool) -> Option<&'static str> {
-    enabled.then_some(WINDOWS_ACCEPTANCE_BROWSER_ARGS)
+fn windows_acceptance_browser_args(enabled: bool, debug_port: Option<&str>) -> Option<String> {
+    let debug_port = debug_port?.parse::<u16>().ok().filter(|port| *port > 0)?;
+    enabled
+        .then(|| format!("{WINDOWS_ACCEPTANCE_BROWSER_ARGS} --remote-debugging-port={debug_port}"))
 }
 
 fn allowed_external_url(url: &str) -> bool {
@@ -283,10 +285,11 @@ mod tests {
 
     #[test]
     fn enables_webview_debugging_only_for_acceptance() {
-        assert_eq!(windows_acceptance_browser_args(false), None);
+        assert_eq!(windows_acceptance_browser_args(false, Some("50401")), None);
+        assert_eq!(windows_acceptance_browser_args(true, Some("0")), None);
         assert_eq!(
-            windows_acceptance_browser_args(true),
-            Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"),
+            windows_acceptance_browser_args(true, Some("50401")),
+            Some("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=50401".to_owned()),
         );
     }
 
@@ -541,10 +544,15 @@ pub fn run() {
                     }
                 });
             #[cfg(windows)]
-            let webview_builder = if let Some(args) = windows_acceptance_browser_args(matches!(
-                std::env::var("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG").as_deref(),
-                Ok("1")
-            )) {
+            let webview_builder = if let Some(args) = windows_acceptance_browser_args(
+                matches!(
+                    std::env::var("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG").as_deref(),
+                    Ok("1")
+                ),
+                std::env::var("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT")
+                    .ok()
+                    .as_deref(),
+            ) {
                 webview_builder.additional_browser_args(args)
             } else {
                 webview_builder

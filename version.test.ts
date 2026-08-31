@@ -57,10 +57,10 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance).toContain("LoadUserProfile");
   expect(updaterAcceptance).toContain('"Registry::HKEY_USERS\\$acceptanceUserSid');
   expect(updaterAcceptance).toContain("AliasModeAcceptanceDesktopAccess");
-  expect(updaterAcceptance).toContain("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
   expect(updaterAcceptance).toContain(
-    "--remote-debugging-port=$acceptanceDebugPort",
+    "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
   );
+  expect(updaterAcceptance).toContain("$acceptanceDebugPort");
   expect(updaterAcceptance).toContain("[void]$process.Handle");
   expect(updaterAcceptance).not.toContain("TokenLinkedToken");
   expect(updaterAcceptance).not.toContain("DuplicateTokenEx");
