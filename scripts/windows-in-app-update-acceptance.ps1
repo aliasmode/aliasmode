@@ -806,12 +806,27 @@ function Get-SidecarHealth([int]$SidecarProcessId) {
   return $null
 }
 
-function Get-WebViewDebugPort([string]$WebViewRoot, [int]$ExpectedPort = 0) {
+function Get-WebViewDebugPort(
+  [string]$WebViewRoot,
+  [int]$ExpectedPort = 0,
+  [string]$ExpectedUserSid = ""
+) {
   if ($ExpectedPort -gt 0) {
     try {
-      Invoke-RestMethod "http://127.0.0.1:$ExpectedPort/json/version" -TimeoutSec 1 -NoProxy | Out-Null
-      return $ExpectedPort
+      foreach ($listener in @(Get-NetTCPConnection `
+        -State Listen `
+        -LocalPort $ExpectedPort `
+        -ErrorAction Stop)) {
+        $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid(
+          [int]$listener.OwningProcess
+        )
+        if ([string]::IsNullOrWhiteSpace($ExpectedUserSid) -or
+            $ownerSid.Equals($ExpectedUserSid, [StringComparison]::OrdinalIgnoreCase)) {
+          return $ExpectedPort
+        }
+      }
     } catch {}
+    return 0
   }
   $activePortPath = Join-Path $WebViewRoot "EBWebView\DevToolsActivePort"
   if (-not (Test-Path -LiteralPath $activePortPath -PathType Leaf)) { return 0 }
@@ -824,6 +839,40 @@ function Get-WebViewDebugPort([string]$WebViewRoot, [int]$ExpectedPort = 0) {
     }
   } catch {}
   return 0
+}
+
+function Get-WebViewDebugEvidence([int]$ExpectedPort, [string]$ExpectedUserSid) {
+  $webViewSeen = $false
+  $expectedArgumentSeen = $false
+  $automaticArgumentSeen = $false
+  foreach ($record in @(Get-CimInstance Win32_Process `
+    -Filter "Name = 'msedgewebview2.exe'" `
+    -ErrorAction SilentlyContinue)) {
+    try {
+      $ownerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid(
+        [int]$record.ProcessId
+      )
+      if (-not $ownerSid.Equals(
+        $ExpectedUserSid,
+        [StringComparison]::OrdinalIgnoreCase
+      )) { continue }
+      $webViewSeen = $true
+      $commandLine = [string]$record.CommandLine
+      if ($commandLine.Contains(
+        "--remote-debugging-port=$ExpectedPort",
+        [StringComparison]::OrdinalIgnoreCase
+      )) { $expectedArgumentSeen = $true }
+      if ($commandLine.Contains(
+        "--remote-debugging-port=0",
+        [StringComparison]::OrdinalIgnoreCase
+      )) { $automaticArgumentSeen = $true }
+    } catch {}
+  }
+  return [pscustomobject]@{
+    WebViewSeen = $webViewSeen
+    ExpectedArgumentSeen = $expectedArgumentSeen
+    AutomaticArgumentSeen = $automaticArgumentSeen
+  }
 }
 
 function Wait-DesktopReady(
@@ -839,13 +888,18 @@ function Wait-DesktopReady(
   $healthSeen = $false
   $debugPortSeen = $false
   $windowSeen = $false
-  for ($attempt = 0; $attempt -lt 720; $attempt++) {
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  $deadline = [TimeSpan]::FromMinutes(3)
+  while ($timer.Elapsed -lt $deadline) {
     if (Test-ProcessExited $DesktopProcess) {
       throw "installed public desktop exited before readiness"
     }
     $DesktopProcess.Refresh()
     if ($DesktopProcess.MainWindowHandle -ne 0) { $windowSeen = $true }
-    $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
+    $debugPort = Get-WebViewDebugPort `
+      $WebViewRoot `
+      $ExpectedDebugPort `
+      $ExpectedUserSid
     if ($debugPort -gt 0) { $debugPortSeen = $true }
     $sidecars = @(Get-ChildSidecars $DesktopProcess.Id)
     if ($sidecars.Count -gt 0) { $sidecarSeen = $true }
@@ -863,7 +917,6 @@ function Wait-DesktopReady(
       )) {
         throw "installed public desktop used an unexpected app-data root"
       }
-      $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
       $DesktopProcess.Refresh()
       if ($debugPort -gt 0 -and $DesktopProcess.MainWindowHandle -ne 0) {
         return [pscustomobject]@{
@@ -877,10 +930,16 @@ function Wait-DesktopReady(
     }
     Start-Sleep -Milliseconds 250
   }
+  $debugEvidence = Get-WebViewDebugEvidence `
+    $ExpectedDebugPort `
+    $ExpectedUserSid
   throw (
     "installed public desktop did not become ready " +
     "(sidecarSeen=$sidecarSeen; healthSeen=$healthSeen; " +
-    "debugPortSeen=$debugPortSeen; windowSeen=$windowSeen)"
+    "debugPortSeen=$debugPortSeen; windowSeen=$windowSeen; " +
+    "webViewSeen=$($debugEvidence.WebViewSeen); " +
+    "expectedDebugArgumentSeen=$($debugEvidence.ExpectedArgumentSeen); " +
+    "automaticDebugArgumentSeen=$($debugEvidence.AutomaticArgumentSeen))"
   )
 }
 
@@ -959,6 +1018,9 @@ function Start-JavaScriptFixture([string]$RuntimePath, [string]$ScriptPath, [str
 }
 
 function Invoke-DesktopUiProbe(
+  $UserSession,
+  $DesktopAccess,
+  [string]$ProbeRoot,
   [string]$RuntimePath,
   [string]$ScriptPath,
   [int]$DebugPort,
@@ -968,38 +1030,38 @@ function Invoke-DesktopUiProbe(
   [string]$Action = "click-update",
   [string]$ExpectedSourceVersion = ""
 ) {
-  $start = [Diagnostics.ProcessStartInfo]::new()
-  $start.FileName = $RuntimePath
-  $start.ArgumentList.Add($ScriptPath)
-  $start.WorkingDirectory = $repoRoot
-  $start.UseShellExecute = $false
-  $start.CreateNoWindow = $true
-  $start.RedirectStandardInput = $true
-  $start.RedirectStandardOutput = $true
-  $start.RedirectStandardError = $true
-  $process = [Diagnostics.Process]::new()
-  $process.StartInfo = $start
-  if (-not $process.Start()) { throw "desktop UI probe did not start" }
+  $probeId = [Guid]::NewGuid().ToString("N")
+  $inputPath = Join-Path $ProbeRoot "ui-probe-$probeId-input.json"
+  $outputPath = Join-Path $ProbeRoot "ui-probe-$probeId-output.json"
+  $probeInput = [ordered]@{
+    endpoint = "http://127.0.0.1:$DebugPort"
+    dashboardOrigin = $DashboardOrigin
+    candidateVersion = $ExpectedCandidateVersion
+    sourceVersion = $ExpectedSourceVersion
+    action = $Action
+  }
+  [IO.File]::WriteAllText(
+    $inputPath,
+    ($probeInput | ConvertTo-Json -Compress),
+    [Text.UTF8Encoding]::new($false)
+  )
+  $arguments = "`"$ScriptPath`" `"$inputPath`" `"$outputPath`""
+  $process = Start-StandardUserProcess `
+    $UserSession `
+    $DesktopAccess `
+    $RuntimePath `
+    $arguments
   try {
-    $outputTask = $process.StandardOutput.ReadToEndAsync()
-    $errorTask = $process.StandardError.ReadToEndAsync()
-    $probeInput = [ordered]@{
-      endpoint = "http://127.0.0.1:$DebugPort"
-      dashboardOrigin = $DashboardOrigin
-      candidateVersion = $ExpectedCandidateVersion
-      sourceVersion = $ExpectedSourceVersion
-      action = $Action
-    }
-    $probeInput | ConvertTo-Json -Compress | ForEach-Object { $process.StandardInput.Write($_) }
-    $process.StandardInput.Close()
     if (-not $process.WaitForExit(120000)) {
       Stop-ProcessTree $process
       throw "desktop UI probe timed out"
     }
-    $output = $outputTask.GetAwaiter().GetResult()
-    [void]$errorTask.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) { throw "desktop UI probe failed" }
-    try { $result = $output | ConvertFrom-Json } catch { throw "desktop UI probe returned invalid output" }
+    try {
+      $result = [IO.File]::ReadAllText($outputPath) | ConvertFrom-Json
+    } catch {
+      throw "desktop UI probe returned invalid output"
+    }
     $expectedResult = switch ($Action) {
       "click-update" { "visible-update-now" }
       "click-update-and-wait-error" { "visible-update-rejected" }
@@ -1011,6 +1073,7 @@ function Invoke-DesktopUiProbe(
   } finally {
     if (-not (Test-ProcessExited $process)) { Stop-ProcessTree $process }
     $process.Dispose()
+    Remove-Item -LiteralPath $inputPath, $outputPath -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -1067,7 +1130,10 @@ function Wait-CandidateRelaunch(
         }
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
-        $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
+        $debugPort = Get-WebViewDebugPort `
+          $WebViewRoot `
+          $ExpectedDebugPort `
+          $ExpectedUserSid
         if ($debugPort -eq 0) { continue }
         $Observations.candidateWindowSeen = $true
         $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
@@ -1816,6 +1882,9 @@ try {
   $registrationChanged = $true
   $routesBeforeRejection = Get-SafeRouteCounts $fixtureStatePath
   Invoke-DesktopUiProbe `
+    $acceptanceUserSession `
+    $desktopAccess `
+    $userRunRoot `
     $runtime `
     $probeScript `
     $oldRecord.DebugPort `
@@ -1849,6 +1918,9 @@ try {
 
   Set-AcceptanceStage "clicking-visible-update"
   Invoke-DesktopUiProbe `
+    $acceptanceUserSession `
+    $desktopAccess `
+    $userRunRoot `
     $runtime `
     $probeScript `
     $oldRecord.DebugPort `
@@ -1890,6 +1962,9 @@ try {
 
   Set-AcceptanceStage "verifying-durable-update-result"
   Invoke-DesktopUiProbe `
+    $acceptanceUserSession `
+    $desktopAccess `
+    $userRunRoot `
     $runtime `
     $probeScript `
     $candidateRecord.DebugPort `

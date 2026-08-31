@@ -1,8 +1,14 @@
+import { readFile, writeFile } from "node:fs/promises";
 import { chromium } from "playwright-core";
 
+const inputPath = process.argv[2] ?? "";
+const outputPath = process.argv[3] ?? "";
+
 async function readInput() {
-  let text = "";
-  for await (const chunk of process.stdin) text += chunk;
+  let text = inputPath ? await readFile(inputPath, "utf8") : "";
+  if (!inputPath) {
+    for await (const chunk of process.stdin) text += chunk;
+  }
   const input = JSON.parse(text);
   if (typeof input?.endpoint !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(input.endpoint)) {
     throw new Error("desktop debug endpoint is invalid");
@@ -27,6 +33,15 @@ async function readInput() {
     throw new Error("source version is missing");
   }
   return input;
+}
+
+async function writeResult(result) {
+  const text = `${JSON.stringify(result)}\n`;
+  if (outputPath) {
+    await writeFile(outputPath, text, "utf8");
+  } else {
+    process.stdout.write(text);
+  }
 }
 
 async function findDashboardPage(browser, dashboardOrigin) {
@@ -54,7 +69,7 @@ async function main() {
           detail !== `Updated from ${input.sourceVersion} and verified the installed app after restart.`) {
         throw new Error("durable updater result did not confirm the exact version handoff");
       }
-      process.stdout.write('{"ok":true,"action":"verified-durable-success"}\n');
+      await writeResult({ ok: true, action: "verified-durable-success" });
       return;
     }
 
@@ -74,10 +89,10 @@ async function main() {
       await banner.locator('[role="alert"]').waitFor({ state: "visible", timeout: 120_000 });
       await updateButton.waitFor({ state: "visible", timeout: 30_000 });
       if (!(await updateButton.isEnabled())) throw new Error("Update now did not reset after rejection");
-      process.stdout.write('{"ok":true,"action":"visible-update-rejected"}\n');
+      await writeResult({ ok: true, action: "visible-update-rejected" });
       return;
     }
-    process.stdout.write('{"ok":true,"action":"visible-update-now"}\n');
+    await writeResult({ ok: true, action: "visible-update-now" });
   } finally {
     await browser.close().catch(() => undefined);
   }
