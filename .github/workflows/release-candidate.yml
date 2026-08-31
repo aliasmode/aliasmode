@@ -221,6 +221,17 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
+          $bunZip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+          $bunRoot = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
+          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $bunZip
+          if ((Get-FileHash $bunZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+              "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be") {
+            throw "official baseline Bun archive SHA-256 mismatch"
+          }
+          Expand-Archive $bunZip $bunRoot -Force
+          $baselineBun = (Get-ChildItem $bunRoot -Recurse -File -Filter "bun.exe" | Select-Object -First 1).FullName
+          if (-not $baselineBun) { throw "official baseline Bun executable is missing" }
+
           $sourceVersion = $env:ALIASMODE_CANDIDATE_VERSION
           $sourceSemantic = [System.Management.Automation.SemanticVersion]::Parse($sourceVersion)
           $successorVersion = if ($sourceVersion.Contains("-")) {
@@ -253,7 +264,7 @@ jobs:
           }
 
           try {
-            bun run desktop:prepare
+            & $baselineBun scripts/prepare-windows-bundle.ts
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor bundle preparation failed" }
             bunx tauri build --bundles nsis --no-sign --config src-tauri/tauri.updater.conf.json
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor build failed" }

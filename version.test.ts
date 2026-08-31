@@ -41,6 +41,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(releasesSource).toContain('const UPDATE_MANIFEST: &str = "latest-v2.json";');
   expect(releaseWorkflow).toContain('$latestPath = Join-Path $artifact "latest-v2.json"');
   expect(releaseWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
+  expect(releaseWorkflow).toContain("& $baselineBun scripts/prepare-windows-bundle.ts");
+  expect(releaseWorkflow).toContain("23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be");
+  expect(releaseWorkflow).not.toContain("bun run desktop:prepare");
   expect(releaseWorkflow).not.toContain("nsis-updater");
   expect(ciWorkflow).toContain("Build full offline installer");
   expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
