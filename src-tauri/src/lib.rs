@@ -58,6 +58,30 @@ fn boxed(error: impl Into<String>) -> Box<dyn Error> {
     io::Error::other(error.into()).into()
 }
 
+struct StartupCleanup<F: FnOnce()> {
+    cleanup: Option<F>,
+}
+
+impl<F: FnOnce()> StartupCleanup<F> {
+    fn new(cleanup: F) -> Self {
+        Self {
+            cleanup: Some(cleanup),
+        }
+    }
+
+    fn disarm(&mut self) {
+        let _ = self.cleanup.take();
+    }
+}
+
+impl<F: FnOnce()> Drop for StartupCleanup<F> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
 fn background_requested<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -177,13 +201,29 @@ mod tests {
     use super::{
         allowed_external_url, background_requested, cli_compatible_windows_path,
         configured_local_mode, parse_cloakpit_import_args, windows_acceptance_browser_args,
-        CloakpitImportRequest,
+        CloakpitImportRequest, StartupCleanup,
     };
     use std::{
+        cell::Cell,
         ffi::OsString,
         fs,
         path::{Path, PathBuf},
     };
+
+    #[test]
+    fn startup_cleanup_runs_only_while_armed() {
+        let cleaned = Cell::new(0);
+        {
+            let _guard = StartupCleanup::new(|| cleaned.set(cleaned.get() + 1));
+        }
+        assert_eq!(cleaned.get(), 1);
+
+        {
+            let mut guard = StartupCleanup::new(|| cleaned.set(cleaned.get() + 1));
+            guard.disarm();
+        }
+        assert_eq!(cleaned.get(), 1);
+    }
 
     #[test]
     fn recognizes_only_the_explicit_background_switch() {
@@ -433,6 +473,10 @@ pub fn run() {
                 background,
             ))
             .map_err(boxed)?;
+            let cleanup_sidecar = sidecar.clone();
+            let mut startup_cleanup = StartupCleanup::new(move || {
+                let _ = cleanup_sidecar.kill_owned();
+            });
 
             let runtime_descriptor = runtime_descriptor::RuntimeDescriptorState::new(
                 &data_dir,
@@ -456,7 +500,6 @@ pub fn run() {
                     .permission("allow-runtime-ready")
                     .permission("allow-update-bridge"),
             ) {
-                let _ = sidecar.kill_owned();
                 return Err(error.into());
             }
 
@@ -524,10 +567,7 @@ pub fn run() {
                 .build()
             {
                 Ok(window) => window,
-                Err(error) => {
-                    let _ = sidecar.kill_owned();
-                    return Err(error.into());
-                }
+                Err(error) => return Err(error.into()),
             };
 
             shutdown::install_close_handler(app.handle().clone(), window.clone(), sidecar, origin);
@@ -541,6 +581,7 @@ pub fn run() {
             {
                 eprintln!("AliasMode could not reconcile the previous update result: {error}");
             }
+            startup_cleanup.disarm();
             Ok(())
         })
         .build(tauri::generate_context!())

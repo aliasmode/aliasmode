@@ -43,9 +43,17 @@ using System.Runtime.InteropServices;
 using System.Text;
 
 public static class AliasModeStandardUserProcess {
-  private const uint SaferScopeUser = 2;
-  private const uint SaferLevelNormalUser = 0x00020000;
+  private const uint TokenAssignPrimary = 0x0001;
+  private const uint TokenDuplicate = 0x0002;
+  private const uint TokenQuery = 0x0008;
+  private const int TokenTypeClass = 8;
+  private const int TokenElevationTypeClass = 18;
+  private const int TokenLinkedTokenClass = 19;
   private const int TokenElevationClass = 20;
+  private const int TokenPrimary = 1;
+  private const int SecurityImpersonation = 2;
+  private const int TokenElevationTypeFull = 2;
+  private const int TokenElevationTypeLimited = 3;
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   private struct StartupInfo {
@@ -82,29 +90,23 @@ public static class AliasModeStandardUserProcess {
     public int isElevated;
   }
 
+  [StructLayout(LayoutKind.Sequential)]
+  private struct TokenLinkedToken {
+    public IntPtr linkedToken;
+  }
+
+  [DllImport("kernel32.dll")]
+  private static extern IntPtr GetCurrentProcess();
+
   [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool SaferCreateLevel(
-    uint scopeId,
-    uint levelId,
-    uint openFlags,
-    out IntPtr level,
-    IntPtr reserved
+  private static extern bool OpenProcessToken(
+    IntPtr process,
+    uint desiredAccess,
+    out IntPtr token
   );
 
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool SaferComputeTokenFromLevel(
-    IntPtr level,
-    IntPtr inputToken,
-    out IntPtr outputToken,
-    uint flags,
-    IntPtr reserved
-  );
-
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool SaferCloseLevel(IntPtr level);
-
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool GetTokenInformation(
+  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+  private static extern bool GetTokenElevation(
     IntPtr token,
     int informationClass,
     ref TokenElevation information,
@@ -112,7 +114,35 @@ public static class AliasModeStandardUserProcess {
     out int returnLength
   );
 
-  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+  private static extern bool GetTokenInteger(
+    IntPtr token,
+    int informationClass,
+    ref int information,
+    int informationLength,
+    out int returnLength
+  );
+
+  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+  private static extern bool GetLinkedToken(
+    IntPtr token,
+    int informationClass,
+    ref TokenLinkedToken information,
+    int informationLength,
+    out int returnLength
+  );
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool DuplicateTokenEx(
+    IntPtr existingToken,
+    uint desiredAccess,
+    IntPtr tokenAttributes,
+    int impersonationLevel,
+    int tokenType,
+    out IntPtr newToken
+  );
+
+  [DllImport("advapi32.dll", EntryPoint = "CreateProcessAsUserW", CharSet = CharSet.Unicode, SetLastError = true)]
   private static extern bool CreateProcessAsUser(
     IntPtr token,
     string applicationName,
@@ -130,27 +160,75 @@ public static class AliasModeStandardUserProcess {
   [DllImport("kernel32.dll", SetLastError = true)]
   private static extern bool CloseHandle(IntPtr handle);
 
+  private static int ReadTokenInteger(IntPtr token, int informationClass, string failure) {
+    int value = 0;
+    int returned;
+    if (!GetTokenInteger(token, informationClass, ref value, sizeof(int), out returned)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), failure);
+    }
+    return value;
+  }
+
+  private static int ReadTokenElevation(IntPtr token, string failure) {
+    TokenElevation elevation = new TokenElevation();
+    int returned;
+    if (!GetTokenElevation(
+      token,
+      TokenElevationClass,
+      ref elevation,
+      Marshal.SizeOf<TokenElevation>(),
+      out returned
+    )) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), failure);
+    }
+    return elevation.isElevated;
+  }
+
   public static int Start(string fileName, string arguments, string currentDirectory) {
-    IntPtr level = IntPtr.Zero;
+    IntPtr currentToken = IntPtr.Zero;
+    IntPtr linkedToken = IntPtr.Zero;
     IntPtr token = IntPtr.Zero;
     ProcessInformation process = new ProcessInformation();
     try {
-      if (!SaferCreateLevel(SaferScopeUser, SaferLevelNormalUser, 1, out level, IntPtr.Zero)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user level creation failed");
+      if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out currentToken)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "release runner token open failed");
       }
-      if (!SaferComputeTokenFromLevel(level, IntPtr.Zero, out token, 0, IntPtr.Zero)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user token creation failed");
+      if (ReadTokenElevation(currentToken, "release runner elevation query failed") == 0 ||
+          ReadTokenInteger(currentToken, TokenElevationTypeClass, "release runner elevation type query failed") != TokenElevationTypeFull) {
+        throw new InvalidOperationException("release runner must provide an elevated split token");
       }
-      TokenElevation elevation = new TokenElevation();
+
+      TokenLinkedToken linked = new TokenLinkedToken();
       int returned;
-      if (!GetTokenInformation(
-        token,
-        TokenElevationClass,
-        ref elevation,
-        Marshal.SizeOf<TokenElevation>(),
+      if (!GetLinkedToken(
+        currentToken,
+        TokenLinkedTokenClass,
+        ref linked,
+        Marshal.SizeOf<TokenLinkedToken>(),
         out returned
-      ) || elevation.isElevated != 0) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user token verification failed");
+      ) || linked.linkedToken == IntPtr.Zero) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user linked token query failed");
+      }
+      linkedToken = linked.linkedToken;
+      if (ReadTokenElevation(linkedToken, "standard-user linked token elevation query failed") != 0 ||
+          ReadTokenInteger(linkedToken, TokenElevationTypeClass, "standard-user linked token type query failed") != TokenElevationTypeLimited) {
+        throw new InvalidOperationException("linked token is not a limited standard-user token");
+      }
+
+      if (!DuplicateTokenEx(
+        linkedToken,
+        TokenAssignPrimary | TokenDuplicate | TokenQuery,
+        IntPtr.Zero,
+        SecurityImpersonation,
+        TokenPrimary,
+        out token
+      )) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user primary token creation failed");
+      }
+      if (ReadTokenElevation(token, "standard-user token elevation query failed") != 0 ||
+          ReadTokenInteger(token, TokenElevationTypeClass, "standard-user token type query failed") != TokenElevationTypeLimited ||
+          ReadTokenInteger(token, TokenTypeClass, "standard-user primary token query failed") != TokenPrimary) {
+        throw new InvalidOperationException("standard-user token verification failed");
       }
 
       StartupInfo startup = new StartupInfo();
@@ -179,7 +257,8 @@ public static class AliasModeStandardUserProcess {
       if (process.thread != IntPtr.Zero) CloseHandle(process.thread);
       if (process.process != IntPtr.Zero) CloseHandle(process.process);
       if (token != IntPtr.Zero) CloseHandle(token);
-      if (level != IntPtr.Zero) SaferCloseLevel(level);
+      if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
+      if (currentToken != IntPtr.Zero) CloseHandle(currentToken);
     }
   }
 }

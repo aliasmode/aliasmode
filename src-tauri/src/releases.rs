@@ -264,7 +264,13 @@ async fn discover_update(
         })
         .version_comparator(|_, _| true);
     let builder = if let Some(handoff) = handoff {
+        let app_handle = app.clone();
+        let sidecar = app.state::<SidecarSupervisor>().inner().clone();
         builder
+            .on_before_exit(move || {
+                let _ = sidecar.kill_owned();
+                app_handle.cleanup_before_exit();
+            })
             .relaunch_args([handoff.relaunch_argument()])
             .clear_installer_args()
             .installer_args(handoff.installer_arguments())

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   DESKTOP_PROTOCOL,
   DesktopCredentialBridge,
@@ -56,6 +58,12 @@ test("desktop control accepts only the fixed nonce-bound shutdown command", () =
   expect(isDesktopShutdownCommand(JSON.stringify({ protocol: DESKTOP_PROTOCOL, command: "shutdown", nonce: "cd".repeat(32) }), NONCE)).toBe(false);
   expect(isDesktopShutdownCommand(JSON.stringify({ protocol: DESKTOP_PROTOCOL, command: "run", nonce: NONCE }), NONCE)).toBe(false);
   expect(isDesktopShutdownCommand("not json", NONCE)).toBe(false);
+});
+
+test("desktop control gracefully shuts down when the parent stdin pipe closes", () => {
+  const source = readFileSync(join(import.meta.dir, "cli.ts"), "utf8");
+  expect(source).toContain('process.stdin.once("end", shutdown);');
+  expect(source).toContain('process.stdin.once("close", shutdown);');
 });
 
 test("desktop credential bridge waits for a nonce-bound parent acknowledgement", async () => {

@@ -355,6 +355,8 @@ function attachDesktopControl(
       if (isDesktopShutdownCommand(line, health.instance)) shutdown();
     }
   });
+  process.stdin.once("end", shutdown);
+  process.stdin.once("close", shutdown);
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   process.stdout.write(`${JSON.stringify(desktopReadyRecord(health.instance, port))}\n`);

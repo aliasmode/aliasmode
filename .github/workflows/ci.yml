@@ -745,6 +745,50 @@ jobs:
           }
           if (Test-Path $descriptorPath) { throw "runtime descriptor survived desktop shutdown" }
 
+          $eofApp = Start-Process -PassThru $appPath
+          $eofSidecarPid = $null
+          try {
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              $eofApp.Refresh()
+              if ($eofApp.HasExited) { throw "EOF acceptance desktop exited before readiness" }
+              if (Test-Path $descriptorPath -PathType Leaf) {
+                $eofDescriptor = Get-Content $descriptorPath | ConvertFrom-Json
+                if ($eofDescriptor.desktopPid -eq $eofApp.Id) {
+                  $eofSidecarPid = [int]$eofDescriptor.sidecarPid
+                  break
+                }
+              }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $eofSidecarPid) { throw "EOF acceptance desktop did not publish its sidecar" }
+            $automation = Get-NetTCPConnection -State Listen -LocalPort 50400 -ErrorAction SilentlyContinue |
+              Where-Object OwningProcess -eq $eofSidecarPid
+            if (-not $automation) { throw "EOF acceptance sidecar did not own the automation listener" }
+
+            Stop-Process -Id $eofApp.Id -Force
+            $eofApp.WaitForExit()
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              if (-not (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue)) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue) {
+              throw "packaged sidecar survived parent stdin EOF"
+            }
+            if (Get-NetTCPConnection -State Listen -LocalPort 50400 -ErrorAction SilentlyContinue |
+                Where-Object OwningProcess -eq $eofSidecarPid) {
+              throw "automation listener survived parent stdin EOF"
+            }
+          } finally {
+            $eofApp.Refresh()
+            if (-not $eofApp.HasExited) {
+              Stop-Process -Id $eofApp.Id -Force
+              $eofApp.WaitForExit()
+            }
+            if ($eofSidecarPid -and (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue)) {
+              Stop-Process -Id $eofSidecarPid -Force
+            }
+          }
+
           $degradedApp = Start-Process -PassThru $appPath
           $degradedSidecarPid = $null
           try {

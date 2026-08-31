@@ -23,6 +23,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   const releasesSource = readFileSync(join(root, "src-tauri", "src", "releases.rs"), "utf8");
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release-candidate.yml"), "utf8");
   const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const updaterAcceptance = readFileSync(join(root, "scripts", "windows-in-app-update-acceptance.ps1"), "utf8");
   const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
   const lockedVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "aliasmode-desktop"\r?\nversion = "([^"]+)"/)?.[1];
@@ -39,6 +40,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterConfig.bundle.createUpdaterArtifacts).toBe(true);
   expect(updaterConfig.bundle.windows.webviewInstallMode.type).toBe("downloadBootstrapper");
   expect(releasesSource).toContain('const UPDATE_MANIFEST: &str = "latest-v2.json";');
+  expect(releasesSource).toContain(".on_before_exit(move || {");
+  expect(releasesSource).toContain("let _ = sidecar.kill_owned();");
+  expect(releasesSource).toContain("app_handle.cleanup_before_exit();");
   expect(releaseWorkflow).toContain('$latestPath = Join-Path $artifact "latest-v2.json"');
   expect(releaseWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
   expect(releaseWorkflow).toContain("& $baselineBun scripts/prepare-windows-bundle.ts");
@@ -48,6 +52,10 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).toContain("Build full offline installer");
   expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
   expect(ciWorkflow).not.toContain("nsis-updater");
+  expect(updaterAcceptance).toContain("TokenLinkedTokenClass = 19");
+  expect(updaterAcceptance).toContain("TokenElevationTypeLimited = 3");
+  expect(updaterAcceptance).toContain("DuplicateTokenEx(");
+  expect(updaterAcceptance).not.toContain("SaferComputeTokenFromLevel");
   expect(releaseWorkflow).not.toContain('Join-Path $artifact "latest.json"');
   expect(releaseWorkflow).toContain("$updaterHeader[0] -ne 0x4d");
   expect(tauriConfig.plugins.updater.windows.installMode).toBe("passive");
