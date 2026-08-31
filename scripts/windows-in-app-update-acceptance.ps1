@@ -503,50 +503,60 @@ function New-AcceptanceCertificates([string]$CertificateRoot) {
   }
 }
 
-function Add-CurrentUserRootCertificate($Certificate) {
+function Invoke-CertUtil([string[]]$Arguments, [string]$Description) {
+  $start = [Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = Join-Path $env:SystemRoot "System32\certutil.exe"
+  foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $start
+  try {
+    if (-not $process.Start()) { throw "$Description did not start" }
+    if (-not $process.WaitForExit(30000)) {
+      try { Stop-ProcessTree $process } catch {}
+      throw "$Description timed out"
+    }
+    if ($process.ExitCode -ne 0) { throw "$Description exited with code $($process.ExitCode)" }
+  } finally {
+    $process.Dispose()
+  }
+}
+
+function Get-LocalMachineRootCertificateCount($Certificate) {
   $store = [Security.Cryptography.X509Certificates.X509Store]::new(
     [Security.Cryptography.X509Certificates.StoreName]::Root,
-    [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+    [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
   )
   try {
-    $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    $store.Add($Certificate)
-    $matches = @($store.Certificates.Find(
+    $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+    return @($store.Certificates.Find(
       [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
       $Certificate.Thumbprint,
       $false
-    ))
-    if ($matches.Count -ne 1) { throw "temporary CA trust was not installed exactly once" }
+    )).Count
   } finally {
     $store.Close()
     $store.Dispose()
   }
 }
 
-function Remove-CurrentUserRootCertificate($Certificate) {
-  $store = [Security.Cryptography.X509Certificates.X509Store]::new(
-    [Security.Cryptography.X509Certificates.StoreName]::Root,
-    [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-  )
-  try {
-    $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    foreach ($match in @($store.Certificates.Find(
-      [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-      $Certificate.Thumbprint,
-      $false
-    ))) {
-      $store.Remove($match)
-    }
-    if (@($store.Certificates.Find(
-      [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-      $Certificate.Thumbprint,
-      $false
-    )).Count -ne 0) {
-      throw "temporary CA trust survived cleanup"
-    }
-  } finally {
-    $store.Close()
-    $store.Dispose()
+function Add-LocalMachineRootCertificate($Certificate, [string]$CertificatePath) {
+  Invoke-CertUtil `
+    -Arguments @("-f", "-addstore", "Root", $CertificatePath) `
+    -Description "temporary CA installation"
+  if ((Get-LocalMachineRootCertificateCount $Certificate) -ne 1) {
+    throw "temporary CA trust was not installed exactly once"
+  }
+}
+
+function Remove-LocalMachineRootCertificate($Certificate) {
+  if ((Get-LocalMachineRootCertificateCount $Certificate) -eq 0) { return }
+  Invoke-CertUtil `
+    -Arguments @("-f", "-delstore", "Root", $Certificate.Thumbprint) `
+    -Description "temporary CA removal"
+  if ((Get-LocalMachineRootCertificateCount $Certificate) -ne 0) {
+    throw "temporary CA trust survived cleanup"
   }
 }
 
@@ -811,11 +821,14 @@ try {
   } finally {
     $portProbe.Stop()
   }
+  Set-AcceptanceStage "creating-https-certificates"
   $certificates = New-AcceptanceCertificates $certificateRoot
   $trustedCa = $certificates.Ca
   $caTrusted = $true
-  Add-CurrentUserRootCertificate $trustedCa
+  Set-AcceptanceStage "trusting-https-certificate"
+  Add-LocalMachineRootCertificate $trustedCa $certificates.CaPath
 
+  Set-AcceptanceStage "starting-https-fixture"
   $fixtureConfig = [ordered]@{
     candidateVersion = $CandidateVersion
     manifestUrl = $candidateManifestUrl
@@ -844,6 +857,7 @@ try {
   }
   if (-not $fixtureReady) { throw "HTTPS fixture did not become ready" }
 
+  Set-AcceptanceStage "mapping-github-hosts"
   $hostsOriginalBytes = [IO.File]::ReadAllBytes($hostsPath)
   Assert-NoGithubHostsMapping $hostsOriginalBytes
   $hostsChanged = $true
@@ -1048,7 +1062,7 @@ try {
     try { Flush-DnsCache } catch { $cleanupFailures.Add("restored DNS flush failed") }
   }
   if ($caTrusted -and $trustedCa) {
-    try { Remove-CurrentUserRootCertificate $trustedCa } catch {
+    try { Remove-LocalMachineRootCertificate $trustedCa } catch {
       $cleanupFailures.Add("temporary CA cleanup failed")
     }
   }

@@ -210,6 +210,7 @@ jobs:
           $hashLines = @(Get-Content (Join-Path $artifact "SHA256SUMS.txt"))
           if ($hashLines.Count -ne 5) { throw "release checksum manifest must hash exactly five files" }
       - name: Test public beta.45 through the real in-app updater
+        timeout-minutes: 25
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
