@@ -92,8 +92,8 @@ jobs:
             throw "rustc identity is not 1.89.0"
           }
           $activeToolchain = (& rustup show active-toolchain).Trim()
-          if ($LASTEXITCODE -ne 0 -or $activeToolchain -notmatch '^1\.89\.0-') {
-            throw "active Rust toolchain is not 1.89.0"
+          if ($LASTEXITCODE -ne 0 -or $activeToolchain -notmatch '^1\.89(?:\.0)?-') {
+            throw "active Rust toolchain is not 1.89"
           }
           foreach ($name in @("RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
