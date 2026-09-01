@@ -12,35 +12,428 @@ permissions:
   actions: read
   contents: read
 
+concurrency:
+  group: windows-update-candidate-${{ inputs.run_id }}
+  cancel-in-progress: false
+
 jobs:
-  candidate:
-    name: Sign and test private update candidate
+  provenance:
+    name: Validate release provenance
     runs-on: windows-latest
-    environment: windows-release
+    outputs:
+      product_key: ${{ steps.verify.outputs.product_key }}
+      source: ${{ steps.verify.outputs.source }}
+      version: ${{ steps.verify.outputs.version }}
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
       - name: Validate candidate source run
+        id: source_run
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           INSTALLER_RUN_ID: ${{ inputs.run_id }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:GITHUB_REF -ne "refs/heads/main") {
+          if ($env:GITHUB_REF -cne "refs/heads/main") {
             throw "update candidates must run from main"
           }
+          if ($env:INSTALLER_RUN_ID -notmatch '^[1-9][0-9]*$') {
+            throw "installer run ID must be a positive integer"
+          }
+          & git fetch origin main
+          if ($LASTEXITCODE -ne 0) { throw "could not resolve current origin/main" }
+          $remoteMain = (& git rev-parse origin/main).Trim()
+          $checkedOut = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $remoteMain -cne $env:GITHUB_SHA -or $checkedOut -cne $env:GITHUB_SHA) {
+            throw "release workflow source is not current origin/main"
+          }
+          if (@(& git status --porcelain --untracked-files=all).Count -ne 0) {
+            throw "release workflow source tree is not exact and clean"
+          }
+
           $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:INSTALLER_RUN_ID" | ConvertFrom-Json
-          if ($run.name -ne "Client CI" -or $run.path -ne ".github/workflows/ci.yml" -or $run.conclusion -ne "success" -or
-              $run.event -ne "push" -or $run.head_branch -ne "main") {
+          if (
+            $run.name -cne "Client CI" -or
+            $run.path -cne ".github/workflows/ci.yml" -or
+            $run.status -cne "completed" -or
+            $run.conclusion -cne "success" -or
+            $run.event -cne "push" -or
+            $run.head_branch -cne "main"
+          ) {
             throw "installer run must be a successful Client CI push from main"
           }
-          $source = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$($run.head_sha)" | ConvertFrom-Json
-          $current = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$env:GITHUB_SHA" | ConvertFrom-Json
-          if ($source.tree.sha -ne $current.tree.sha) {
+          if (
+            $run.repository.full_name -cne $env:GITHUB_REPOSITORY -or
+            $run.head_repository.full_name -cne $env:GITHUB_REPOSITORY -or
+            $run.head_sha -cne $env:GITHUB_SHA
+          ) {
+            throw "installer run repository or source identity did not match current main"
+          }
+          $sourceCommit = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$($run.head_sha)" | ConvertFrom-Json
+          $currentCommit = gh api "repos/$env:GITHUB_REPOSITORY/git/commits/$env:GITHUB_SHA" | ConvertFrom-Json
+          if ($sourceCommit.tree.sha -cne $currentCommit.tree.sha) {
             throw "installer run source tree does not match current main"
           }
+          "source=$($run.head_sha)" | Add-Content $env:GITHUB_OUTPUT
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+      - name: Verify candidate artifact and version
+        id: verify
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WINDOWS_SOURCE: ${{ steps.source_run.outputs.source }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          bun test version.test.ts
+          if ($LASTEXITCODE -ne 0) { throw "version alignment test failed" }
+
+          $version = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).version
+          $semantic = [Management.Automation.SemanticVersion]::Parse($version)
+          if ($semantic.ToString() -cne $version) { throw "candidate version is not canonical" }
+          $fullName = "AliasMode_${version}_x64-offline-setup.exe"
+          $slimName = "AliasMode_${version}_x64-setup.exe"
+          $payloadNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
+          $requiredNames = @($payloadNames + "artifact-manifest.json") | Sort-Object
+          $entries = @(Get-ChildItem -LiteralPath ".\candidate" -Force)
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          if (
+            $entries.Count -ne 6 -or
+            @($entries | Where-Object {
+              $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            }).Count -ne 0 -or
+            ($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")
+          ) {
+            throw "candidate artifact must contain exactly six regular files"
+          }
+
+          $manifest = Get-Content ".\candidate\artifact-manifest.json" -Raw | ConvertFrom-Json
+          $productKey = [string]$manifest.productKey
+          if (
+            $manifest.schema -ne 1 -or
+            $manifest.role -cne "candidate" -or
+            $manifest.source -cne $env:WINDOWS_SOURCE -or
+            $manifest.version -cne $version -or
+            $productKey -notmatch '^[a-f0-9]{64}$'
+          ) {
+            throw "candidate artifact provenance is invalid"
+          }
+          $manifestArguments = @(
+            ".\candidate",
+            "--role", "candidate",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $version,
+            "--product-key", $productKey
+          )
+          foreach ($name in $payloadNames) { $manifestArguments += @("--file", $name) }
+          & bun scripts/windows-artifact-manifest.ts verify @manifestArguments
+          if ($LASTEXITCODE -ne 0) { throw "candidate artifact manifest verification failed" }
+
+          $checksums = @{}
+          foreach ($line in @([IO.File]::ReadAllLines(".\candidate\SHA256SUMS.txt"))) {
+            if ($line -notmatch '^([a-f0-9]{64})  ([^\\/]+)$' -or $checksums.ContainsKey($Matches[2])) {
+              throw "candidate checksum manifest is malformed"
+            }
+            $checksums[$Matches[2]] = $Matches[1]
+          }
+          if ($checksums.Count -ne 2 -or -not $checksums.ContainsKey($fullName) -or -not $checksums.ContainsKey($slimName)) {
+            throw "candidate checksum manifest must contain exactly both installers"
+          }
+          foreach ($name in @($fullName, $slimName)) {
+            $installer = Join-Path ".\candidate" $name
+            $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -cne $checksums[$name]) { throw "candidate installer SHA-256 mismatch: $name" }
+            $stream = [IO.File]::OpenRead($installer)
+            try {
+              if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+                throw "candidate installer must be a Windows PE file: $name"
+              }
+            } finally {
+              $stream.Dispose()
+            }
+          }
+          $fullSize = (Get-Item -LiteralPath (Join-Path ".\candidate" $fullName)).Length
+          $slimSize = (Get-Item -LiteralPath (Join-Path ".\candidate" $slimName)).Length
+          $sizes = Get-Content ".\candidate\size-report.json" -Raw | ConvertFrom-Json
+          if (
+            $sizes.full.name -cne $fullName -or $sizes.full.bytes -ne $fullSize -or
+            $sizes.slim.name -cne $slimName -or $sizes.slim.bytes -ne $slimSize -or
+            $sizes.deltaBytes -ne ($fullSize - $slimSize) -or $sizes.deltaBytes -lt 100MB
+          ) {
+            throw "candidate installer size report is inconsistent"
+          }
+          $browser = Get-Content ".\candidate\browser.json" -Raw | ConvertFrom-Json
+          if ($browser.executable -cne "chrome.exe" -or [string]$browser.sha256 -notmatch '^[a-f0-9]{64}$') {
+            throw "candidate browser metadata is invalid"
+          }
+
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
+          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers | Write-Output)
+          foreach ($release in $releases) {
+            if ($release.draft -or -not $release.tag_name.StartsWith("v")) { continue }
+            try {
+              $published = [Management.Automation.SemanticVersion]::Parse($release.tag_name.Substring(1))
+            } catch {
+              continue
+            }
+            if ($semantic -le $published) {
+              throw "candidate version $version must be newer than published release $($release.tag_name)"
+            }
+          }
+
+          "product_key=$productKey" | Add-Content $env:GITHUB_OUTPUT
+          "source=$env:WINDOWS_SOURCE" | Add-Content $env:GITHUB_OUTPUT
+          "version=$version" | Add-Content $env:GITHUB_OUTPUT
+      - name: Upload verified release provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-release-provenance
+          path: candidate
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  sign_current:
+    name: Sign current release assets
+    needs: provenance
+    runs-on: windows-latest
+    environment: windows-release
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scripts/updater-signature-check -> target
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-release-provenance
+          path: candidate
+      - name: Verify current producer input
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $arguments = @(
+            ".\candidate",
+            "--role", "candidate",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $fullName,
+            "--file", $slimName,
+            "--file", "browser.json",
+            "--file", "SHA256SUMS.txt",
+            "--file", "size-report.json"
+          )
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "current producer input verification failed" }
+      - name: Sign updater and build release assets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (
+            [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+            [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+          ) {
+            throw "protected Tauri updater signing secrets are unavailable"
+          }
+
+          $tag = "v$($env:WINDOWS_VERSION)"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $signatureName = "$slimName.sig"
+          $artifact = ".\artifacts\signed-current"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          $fullInstaller = Join-Path $artifact $fullName
+          $slimInstaller = Join-Path $artifact $slimName
+          Copy-Item (Join-Path ".\candidate" $fullName) $fullInstaller
+          Copy-Item (Join-Path ".\candidate" $slimName) $slimInstaller
+
+          $updaterHeader = [IO.File]::ReadAllBytes($slimInstaller)[0..1]
+          if ($updaterHeader[0] -ne 0x4d -or $updaterHeader[1] -ne 0x5a) {
+            throw "updater artifact must be a raw Windows PE"
+          }
+          try {
+            bunx tauri signer sign $slimInstaller
+            $signExit = $LASTEXITCODE
+          } finally {
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+          }
+          if ($signExit -ne 0) { throw "Tauri updater signing failed" }
+          $signaturePath = "$slimInstaller.sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "updater signature is missing"
+          }
+
+          $publicKey = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $slimInstaller $signaturePath $publicKey
+          if ($LASTEXITCODE -ne 0) { throw "updater signature verification failed" }
+          $corrupt = Join-Path $env:RUNNER_TEMP "corrupt-current-update.exe"
+          Copy-Item $slimInstaller $corrupt
+          $bytes = [IO.File]::ReadAllBytes($corrupt)
+          $middle = [Math]::Floor($bytes.Length / 2)
+          $bytes[$middle] = $bytes[$middle] -bxor 1
+          [IO.File]::WriteAllBytes($corrupt, $bytes)
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $corrupt $signaturePath $publicKey
+          if ($LASTEXITCODE -eq 0) { throw "corrupted updater unexpectedly passed signature verification" }
+          $global:LASTEXITCODE = 0
+
+          $signature = [IO.File]::ReadAllText($signaturePath).Trim()
+          if ([string]::IsNullOrWhiteSpace($signature)) { throw "updater signature is blank" }
+          $releaseBase = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag"
+          $slimDownloadUrl = "$releaseBase/$slimName"
+          $latestPath = Join-Path $artifact "latest-v2.json"
+          [ordered]@{
+            version = $env:WINDOWS_VERSION
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                url = $slimDownloadUrl
+                signature = $signature
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content $latestPath -Encoding utf8
+          $latest = Get-Content $latestPath -Raw | ConvertFrom-Json
+          if (
+            $latest.version -cne $env:WINDOWS_VERSION -or
+            @($latest.platforms.PSObject.Properties).Count -ne 1 -or
+            $latest.platforms."windows-x86_64".url -cne $slimDownloadUrl -or
+            $latest.platforms."windows-x86_64".signature -cne $signature
+          ) {
+            throw "generated updater manifest is inconsistent"
+          }
+
+          $bootstrapPath = Join-Path $artifact "aliasmode-agent-bootstrap.json"
+          bun scripts/write-agent-bootstrap-manifest.ts $fullInstaller $releaseBase $bootstrapPath
+          if ($LASTEXITCODE -ne 0) { throw "agent bootstrap manifest generation failed" }
+          $bootstrap = Get-Content $bootstrapPath -Raw | ConvertFrom-Json
+          $fullHash = (Get-FileHash -LiteralPath $fullInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if (
+            $bootstrap.version -cne $env:WINDOWS_VERSION -or
+            $bootstrap.installer.name -cne $fullName -or
+            $bootstrap.installer.url -cne "$releaseBase/$fullName" -or
+            $bootstrap.installer.sha256 -cne $fullHash -or
+            $bootstrap.installer.size -ne (Get-Item -LiteralPath $fullInstaller).Length
+          ) {
+            throw "generated agent bootstrap manifest is inconsistent"
+          }
+
+          $hashInputs = @($fullInstaller, $slimInstaller, $signaturePath, $latestPath, $bootstrapPath)
+          $hashLines = @(
+            $hashInputs |
+              Sort-Object { Split-Path $_ -Leaf } |
+              ForEach-Object {
+                "$((Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)"
+              }
+          )
+          [IO.File]::WriteAllText(
+            (Join-Path $artifact "SHA256SUMS.txt"),
+            (($hashLines -join "`n") + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+          $releaseNames = @(
+            $fullName,
+            $slimName,
+            $signatureName,
+            "latest-v2.json",
+            "aliasmode-agent-bootstrap.json",
+            "SHA256SUMS.txt"
+          )
+          $entries = @(Get-ChildItem -LiteralPath $artifact -Force)
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          $expectedNames = @($releaseNames | Sort-Object)
+          if (
+            $entries.Count -ne 6 -or
+            @($entries | Where-Object {
+              $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            }).Count -ne 0 -or
+            ($actualNames -cjoin "`n") -cne ($expectedNames -cjoin "`n")
+          ) {
+            throw "release producer must contain exactly six regular assets"
+          }
+
+          $releaseHashes = @{}
+          foreach ($line in @([IO.File]::ReadAllLines((Join-Path $artifact "SHA256SUMS.txt")))) {
+            if ($line -notmatch '^([a-f0-9]{64})  ([^\\/]+)$' -or $releaseHashes.ContainsKey($Matches[2])) {
+              throw "release checksum manifest is malformed"
+            }
+            $releaseHashes[$Matches[2]] = $Matches[1]
+          }
+          $hashedNames = @($releaseNames | Where-Object { $_ -cne "SHA256SUMS.txt" } | Sort-Object)
+          if ((@($releaseHashes.Keys | Sort-Object) -cjoin "`n") -cne ($hashedNames -cjoin "`n")) {
+            throw "release checksum manifest must hash exactly five assets"
+          }
+          foreach ($name in $hashedNames) {
+            $actual = (Get-FileHash -LiteralPath (Join-Path $artifact $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -cne $releaseHashes[$name]) { throw "release asset SHA-256 mismatch: $name" }
+          }
+
+          $producerArguments = @(
+            $artifact,
+            "--role", "signed-current",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY
+          )
+          foreach ($name in $releaseNames) { $producerArguments += @("--file", $name) }
+          & bun scripts/windows-artifact-manifest.ts create @producerArguments
+          if ($LASTEXITCODE -ne 0) { throw "signed-current producer manifest creation failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @producerArguments
+          if ($LASTEXITCODE -ne 0) { throw "signed-current producer manifest verification failed" }
+      - name: Upload signed current producer
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-signed-current
+          path: artifacts/signed-current
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  synthetic_successor:
+    name: Build protected synthetic successor
+    needs: provenance
+    runs-on: windows-latest
+    environment: windows-release
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
@@ -54,199 +447,37 @@ jobs:
             scripts/updater-signature-check -> target
           cache-on-failure: true
       - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: aliasmode-windows-candidate
-          path: candidate
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.run_id }}
-      - name: Verify candidate installers
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $version = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $fullName = "AliasMode_$($version)_x64-offline-setup.exe"
-          $slimName = "AliasMode_$($version)_x64-setup.exe"
-          $requiredNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
-          $actualNames = @(Get-ChildItem ".\candidate" -File | ForEach-Object Name)
-          $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
-          $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
-          if ($missing.Count -ne 0 -or $unexpected.Count -ne 0) {
-            throw "candidate files did not match the required installer set"
-          }
-          $checksums = @{}
-          foreach ($line in @(Get-Content ".\candidate\SHA256SUMS.txt")) {
-            if ($line -notmatch '^([a-f0-9]{64})  (.+)$' -or $checksums.ContainsKey($Matches[2])) {
-              throw "candidate checksum manifest is malformed"
-            }
-            $checksums[$Matches[2]] = $Matches[1]
-          }
-          if ($checksums.Count -ne 2) { throw "candidate checksum manifest must contain both installers" }
-          foreach ($name in @($fullName, $slimName)) {
-            if (-not $checksums.ContainsKey($name)) { throw "candidate checksum manifest is missing $name" }
-            $installer = Resolve-Path (Join-Path ".\candidate" $name)
-            $actual = (Get-FileHash $installer.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $checksums[$name]) { throw "candidate installer SHA-256 mismatch: $name" }
-          }
-          $metadata = Get-Content ".\candidate\browser.json" | ConvertFrom-Json
-          if ($metadata.executable -ne "chrome.exe" -or $metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
-            throw "candidate browser metadata is invalid"
-          }
-          $fullInstaller = Resolve-Path (Join-Path ".\candidate" $fullName)
-          $slimInstaller = Resolve-Path (Join-Path ".\candidate" $slimName)
-          "ALIASMODE_CANDIDATE_FULL_INSTALLER=$($fullInstaller.Path)" | Add-Content $env:GITHUB_ENV
-          "ALIASMODE_CANDIDATE_SLIM_INSTALLER=$($slimInstaller.Path)" | Add-Content $env:GITHUB_ENV
-      - name: Validate candidate version
+      - name: Build unsigned synthetic successor
+        id: build
         shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:GITHUB_REF -ne "refs/heads/main") {
-            throw "update candidates must run from main"
-          }
-          bun test version.test.ts
-          if ($LASTEXITCODE -ne 0) { throw "version alignment test failed" }
 
-          $version = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $candidateVersion = [System.Management.Automation.SemanticVersion]::Parse($version)
-          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
-          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers | Write-Output)
-          foreach ($release in $releases) {
-            if ($release.draft -or -not $release.tag_name.StartsWith("v")) { continue }
-            try {
-              $published = [System.Management.Automation.SemanticVersion]::Parse($release.tag_name.Substring(1))
-            } catch {
-              continue
-            }
-            if ($candidateVersion -le $published) {
-              throw "candidate version $version must be newer than published release $($release.tag_name)"
-            }
-          }
-          "ALIASMODE_CANDIDATE_VERSION=$version" | Add-Content $env:GITHUB_ENV
-          "ALIASMODE_CANDIDATE_TAG=v$version" | Add-Content $env:GITHUB_ENV
-      - name: Sign updater and build manifest
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
-              [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
-            throw "protected Tauri updater signing secrets are unavailable"
-          }
-
-          $fullName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-offline-setup.exe"
-          $slimName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
-          $artifact = ".\artifacts\windows-update-candidate"
-          New-Item -ItemType Directory -Force $artifact | Out-Null
-          $fullInstaller = Join-Path $artifact $fullName
-          $slimInstaller = Join-Path $artifact $slimName
-          Copy-Item $env:ALIASMODE_CANDIDATE_FULL_INSTALLER $fullInstaller
-          Copy-Item $env:ALIASMODE_CANDIDATE_SLIM_INSTALLER $slimInstaller
-          $updaterHeader = [IO.File]::ReadAllBytes($slimInstaller)[0..1]
-          if ($updaterHeader[0] -ne 0x4d -or $updaterHeader[1] -ne 0x5a) {
-            throw "updater artifact must be a raw Windows PE"
-          }
-          bunx tauri signer sign $slimInstaller
-          if ($LASTEXITCODE -ne 0) { throw "Tauri updater signing failed" }
-          $signaturePath = "$slimInstaller.sig"
-          if (-not (Test-Path $signaturePath -PathType Leaf)) { throw "updater signature is missing" }
-
-          $config = Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json
-          $publicKey = $config.plugins.updater.pubkey
-          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $slimInstaller $signaturePath $publicKey
-          if ($LASTEXITCODE -ne 0) { throw "updater signature verification failed" }
-
-          $corrupt = Join-Path $env:RUNNER_TEMP "corrupt-update.exe"
-          Copy-Item $slimInstaller $corrupt
-          $bytes = [IO.File]::ReadAllBytes($corrupt)
-          $bytes[[Math]::Floor($bytes.Length / 2)] = $bytes[[Math]::Floor($bytes.Length / 2)] -bxor 1
-          [IO.File]::WriteAllBytes($corrupt, $bytes)
-          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $corrupt $signaturePath $publicKey
-          if ($LASTEXITCODE -eq 0) { throw "corrupted updater unexpectedly passed signature verification" }
-          $global:LASTEXITCODE = 0
-
-          $signature = (Get-Content $signaturePath -Raw).Trim()
-          $releaseBase = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$($env:ALIASMODE_CANDIDATE_TAG)"
-          $slimDownloadUrl = "$releaseBase/$slimName"
-          $manifest = [ordered]@{
-            version = $env:ALIASMODE_CANDIDATE_VERSION
-            platforms = [ordered]@{
-              "windows-x86_64" = [ordered]@{
-                url = $slimDownloadUrl
-                signature = $signature
-              }
-            }
-          }
-          $latestPath = Join-Path $artifact "latest-v2.json"
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content $latestPath -Encoding utf8
-          $parsed = Get-Content $latestPath | ConvertFrom-Json
-          if ($parsed.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
-              @($parsed.platforms.PSObject.Properties).Count -ne 1 -or
-              $parsed.platforms."windows-x86_64".url -ne $slimDownloadUrl -or
-              $parsed.platforms."windows-x86_64".signature -ne $signature) {
-            throw "generated updater manifest is inconsistent"
-          }
-
-          $bootstrapPath = Join-Path $artifact "aliasmode-agent-bootstrap.json"
-          bun scripts/write-agent-bootstrap-manifest.ts $fullInstaller $releaseBase $bootstrapPath
-          if ($LASTEXITCODE -ne 0) { throw "agent bootstrap manifest generation failed" }
-          $bootstrap = Get-Content $bootstrapPath | ConvertFrom-Json
-          $fullDownloadUrl = "$releaseBase/$fullName"
-          $fullHash = (Get-FileHash $fullInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($bootstrap.version -ne $env:ALIASMODE_CANDIDATE_VERSION -or
-              $bootstrap.installer.name -ne $fullName -or
-              $bootstrap.installer.url -ne $fullDownloadUrl -or
-              $bootstrap.installer.sha256 -ne $fullHash -or
-              $bootstrap.installer.size -ne (Get-Item $fullInstaller).Length) {
-            throw "generated agent bootstrap manifest is inconsistent"
-          }
-
-          $hashInputs = @($fullInstaller, $slimInstaller, $signaturePath, $latestPath, $bootstrapPath)
-          $hashInputs |
-            Sort-Object { Split-Path $_ -Leaf } |
-            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } |
-            Set-Content (Join-Path $artifact "SHA256SUMS.txt")
-          $requiredNames = @($fullName, $slimName, "$slimName.sig", "latest-v2.json", "aliasmode-agent-bootstrap.json", "SHA256SUMS.txt")
-          $actualNames = @(Get-ChildItem $artifact -File | ForEach-Object Name)
-          $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
-          $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
-          if ($missing.Count -ne 0 -or $unexpected.Count -ne 0) {
-            throw "update candidate must contain exactly the six release assets"
-          }
-          $hashLines = @(Get-Content (Join-Path $artifact "SHA256SUMS.txt"))
-          if ($hashLines.Count -ne 5) { throw "release checksum manifest must hash exactly five files" }
-      - name: Build protected synthetic successor
-        timeout-minutes: 35
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
           $bunZip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
           $bunRoot = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
           Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $bunZip
-          if ((Get-FileHash $bunZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne
-              "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be") {
+          $expectedBunSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
+          if ((Get-FileHash -LiteralPath $bunZip -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedBunSha) {
             throw "official baseline Bun archive SHA-256 mismatch"
           }
           Expand-Archive $bunZip $bunRoot -Force
-          $baselineBun = (Get-ChildItem $bunRoot -Recurse -File -Filter "bun.exe" | Select-Object -First 1).FullName
-          if (-not $baselineBun) { throw "official baseline Bun executable is missing" }
+          $bunCandidates = @(Get-ChildItem $bunRoot -Recurse -File -Filter "bun.exe")
+          if ($bunCandidates.Count -ne 1) { throw "official baseline Bun archive must contain exactly one bun.exe" }
+          $baselineBun = $bunCandidates[0].FullName
+          if ((& $baselineBun --version).Trim() -cne "1.2.21") {
+            throw "official baseline Bun version is incorrect"
+          }
 
-          $sourceVersion = $env:ALIASMODE_CANDIDATE_VERSION
-          $sourceSemantic = [System.Management.Automation.SemanticVersion]::Parse($sourceVersion)
-          $successorVersion = if ($sourceVersion.Contains("-")) {
-            "$sourceVersion.acceptance.1"
+          $sourceSemantic = [Management.Automation.SemanticVersion]::Parse($env:WINDOWS_VERSION)
+          $successorVersion = if ($env:WINDOWS_VERSION.Contains("-")) {
+            "$($env:WINDOWS_VERSION).acceptance.1"
           } else {
             "$($sourceSemantic.Major).$($sourceSemantic.Minor).$($sourceSemantic.Patch + 1)-acceptance.1"
           }
-          $successorSemantic = [System.Management.Automation.SemanticVersion]::Parse($successorVersion)
-          if ($successorSemantic -le $sourceSemantic -or $successorSemantic.ToString() -ne $successorVersion) {
+          $successorSemantic = [Management.Automation.SemanticVersion]::Parse($successorVersion)
+          if ($successorSemantic -le $sourceSemantic -or $successorSemantic.ToString() -cne $successorVersion) {
             throw "synthetic successor version is not canonical and newer"
           }
 
@@ -259,12 +490,12 @@ jobs:
           )
           foreach ($path in $versionFiles) {
             $text = [IO.File]::ReadAllText($path)
-            if ([regex]::Matches($text, [regex]::Escape($sourceVersion)).Count -ne 1) {
+            if ([regex]::Matches($text, [regex]::Escape($env:WINDOWS_VERSION)).Count -ne 1) {
               throw "synthetic successor version replacement is ambiguous: $path"
             }
             [IO.File]::WriteAllText(
               $path,
-              $text.Replace($sourceVersion, $successorVersion),
+              $text.Replace($env:WINDOWS_VERSION, $successorVersion),
               [Text.UTF8Encoding]::new($false)
             )
           }
@@ -272,199 +503,508 @@ jobs:
           try {
             & $baselineBun scripts/prepare-windows-bundle.ts
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor bundle preparation failed" }
-            bunx tauri build --bundles nsis --no-sign --config src-tauri/tauri.updater.conf.json
+            $artifact = ".\artifacts\synthetic-successor"
+            & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory $artifact
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor build failed" }
 
-            $name = "AliasMode_$($successorVersion)_x64-setup.exe"
-            $source = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $name)
-            $root = Join-Path $env:RUNNER_TEMP "aliasmode-protected-successor"
-            New-Item -ItemType Directory -Force $root | Out-Null
-            $installer = Join-Path $root $name
-            Copy-Item $source.Path $installer
-            $header = [IO.File]::ReadAllBytes($installer)[0..1]
-            if ($header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
-              throw "synthetic updater must be a raw Windows PE"
+            $name = "AliasMode_${successorVersion}_x64-setup.exe"
+            $installer = Join-Path $artifact $name
+            if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+              throw "synthetic successor installer is missing"
             }
-            bunx tauri signer sign $installer
-            if ($LASTEXITCODE -ne 0) { throw "synthetic successor signing failed" }
-            $signaturePath = "$installer.sig"
-            $publicKey = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).plugins.updater.pubkey
-            cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $installer $signaturePath $publicKey
-            if ($LASTEXITCODE -ne 0) { throw "synthetic successor signature verification failed" }
-
-            $tag = "v$successorVersion"
-            $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$name"
-            $manifest = [ordered]@{
-              version = $successorVersion
-              platforms = [ordered]@{
-                "windows-x86_64" = [ordered]@{
-                  url = $url
-                  signature = ([IO.File]::ReadAllText($signaturePath).Trim())
-                }
-              }
-            }
-            $manifestPath = Join-Path $root "latest-v2.json"
-            $manifest | ConvertTo-Json -Depth 5 | Set-Content $manifestPath -Encoding utf8
-            "ALIASMODE_SUCCESSOR_VERSION=$successorVersion" | Add-Content $env:GITHUB_ENV
-            "ALIASMODE_SUCCESSOR_INSTALLER=$installer" | Add-Content $env:GITHUB_ENV
-            "ALIASMODE_SUCCESSOR_SIGNATURE=$signaturePath" | Add-Content $env:GITHUB_ENV
-            "ALIASMODE_SUCCESSOR_MANIFEST=$manifestPath" | Add-Content $env:GITHUB_ENV
+            "version=$successorVersion" | Add-Content $env:GITHUB_OUTPUT
           } finally {
-            git checkout -- @versionFiles
+            & git checkout -- @versionFiles
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor source restoration failed" }
           }
-      - name: Test candidate through the exact updater protocol
-        timeout-minutes: 35
+      - name: Sign and verify synthetic successor
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SUCCESSOR_VERSION: ${{ steps.build.outputs.version }}
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
         run: |
           $ErrorActionPreference = "Stop"
-          $artifact = Resolve-Path ".\artifacts\windows-update-candidate"
-          $sourceInstaller = Join-Path $artifact.Path "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-offline-setup.exe"
-          $sourceChecksums = Join-Path $artifact.Path "SHA256SUMS.txt"
-          $diagnostics = Join-Path $env:RUNNER_TEMP "aliasmode-windows-updater-acceptance.json"
-          & ".\scripts\windows-in-app-update-acceptance.ps1" `
-            -SourceVersion $env:ALIASMODE_CANDIDATE_VERSION `
-            -SourceInstallerPath $sourceInstaller `
-            -SourceChecksumsPath $sourceChecksums `
-            -CandidateVersion $env:ALIASMODE_SUCCESSOR_VERSION `
-            -CandidateInstallerPath $env:ALIASMODE_SUCCESSOR_INSTALLER `
-            -CandidateSignaturePath $env:ALIASMODE_SUCCESSOR_SIGNATURE `
-            -CandidateManifestPath $env:ALIASMODE_SUCCESSOR_MANIFEST `
-            -DiagnosticsPath $diagnostics
-      - uses: actions/upload-artifact@v4
-        if: always()
+          if (
+            [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+            [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+          ) {
+            throw "protected Tauri updater signing secrets are unavailable"
+          }
+          $artifact = ".\artifacts\synthetic-successor"
+          $name = "AliasMode_$($env:SUCCESSOR_VERSION)_x64-setup.exe"
+          $installer = Join-Path $artifact $name
+          try {
+            bunx tauri signer sign $installer
+            $signExit = $LASTEXITCODE
+          } finally {
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+          }
+          if ($signExit -ne 0) { throw "synthetic successor signing failed" }
+          $signaturePath = "$installer.sig"
+          if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "synthetic successor signature is missing"
+          }
+
+          $publicKey = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $installer $signaturePath $publicKey
+          if ($LASTEXITCODE -ne 0) { throw "synthetic successor signature verification failed" }
+          $corrupt = Join-Path $env:RUNNER_TEMP "corrupt-successor-update.exe"
+          Copy-Item $installer $corrupt
+          $bytes = [IO.File]::ReadAllBytes($corrupt)
+          $middle = [Math]::Floor($bytes.Length / 2)
+          $bytes[$middle] = $bytes[$middle] -bxor 1
+          [IO.File]::WriteAllBytes($corrupt, $bytes)
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- $corrupt $signaturePath $publicKey
+          if ($LASTEXITCODE -eq 0) { throw "corrupted synthetic successor unexpectedly passed signature verification" }
+          $global:LASTEXITCODE = 0
+
+          $signature = [IO.File]::ReadAllText($signaturePath).Trim()
+          $tag = "v$($env:SUCCESSOR_VERSION)"
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$name"
+          $manifestPath = Join-Path $artifact "latest-v2.json"
+          [ordered]@{
+            version = $env:SUCCESSOR_VERSION
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                url = $url
+                signature = $signature
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content $manifestPath -Encoding utf8
+          $latest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          if (
+            $latest.version -cne $env:SUCCESSOR_VERSION -or
+            @($latest.platforms.PSObject.Properties).Count -ne 1 -or
+            $latest.platforms."windows-x86_64".url -cne $url -or
+            $latest.platforms."windows-x86_64".signature -cne $signature
+          ) {
+            throw "synthetic successor manifest is inconsistent"
+          }
+
+          $producerArguments = @(
+            $artifact,
+            "--role", "synthetic-successor",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:SUCCESSOR_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $name,
+            "--file", "$name.sig",
+            "--file", "latest-v2.json"
+          )
+          & bun scripts/windows-artifact-manifest.ts create @producerArguments
+          if ($LASTEXITCODE -ne 0) { throw "synthetic successor producer manifest creation failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @producerArguments
+          if ($LASTEXITCODE -ne 0) { throw "synthetic successor producer manifest verification failed" }
+      - name: Upload synthetic successor producer
+        uses: actions/upload-artifact@v4
         with:
-          name: aliasmode-windows-in-app-update-diagnostics
-          path: ${{ runner.temp }}/aliasmode-windows-updater-acceptance.json
-          if-no-files-found: warn
+          name: aliasmode-synthetic-successor
+          path: artifacts/synthetic-successor
+          if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+
+  previous_upgrade_acceptance:
+    name: Previous-version upgrade acceptance
+    needs: [provenance, sign_current]
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-signed-current
+          path: signed-current
+      - name: Verify signed current producer
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $arguments = @(
+            ".\signed-current",
+            "--role", "signed-current",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $fullName,
+            "--file", $slimName,
+            "--file", "$slimName.sig",
+            "--file", "latest-v2.json",
+            "--file", "aliasmode-agent-bootstrap.json",
+            "--file", "SHA256SUMS.txt"
+          )
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "signed current producer verification failed" }
       - name: Test previous-version upgrade and data preservation
+        timeout-minutes: 35
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-
-          function Wait-AliasModeReady([string]$appPath, [string]$expectedVersion) {
-            $app = Get-Process -Name "AliasMode" -ErrorAction SilentlyContinue |
-              Where-Object { $_.Path -eq $appPath } |
-              Select-Object -First 1
-            if (-not $app) { $app = Start-Process -PassThru $appPath }
-            for ($attempt = 0; $attempt -lt 180; $attempt++) {
-              $app.Refresh()
-              if ($app.HasExited) { throw "AliasMode exited before readiness" }
-              $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-                Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
-                Select-Object -First 1
-              if ($sidecar) {
-                $ports = Get-NetTCPConnection -State Listen -OwningProcess $sidecar.ProcessId -ErrorAction SilentlyContinue |
-                  Select-Object -ExpandProperty LocalPort -Unique
-                foreach ($port in $ports) {
-                  try {
-                    $origin = "http://127.0.0.1:$port"
-                    $health = Invoke-RestMethod "$origin/ui/api/health" -TimeoutSec 1
-                    if ($health.ok -eq $true -and $health.version -eq $expectedVersion) {
-                      return [pscustomobject]@{ App = $app; SidecarPid = [int]$sidecar.ProcessId; Origin = $origin; Health = $health }
-                    }
-                  } catch {}
-                }
-              }
-              Start-Sleep -Milliseconds 500
-            }
-            throw "AliasMode $expectedVersion did not become ready"
-          }
-
-          function Stop-AliasMode($record) {
-            if (-not $record.App.CloseMainWindow()) { throw "AliasMode rejected its close request" }
-            if (-not $record.App.WaitForExit(180000)) { throw "AliasMode did not exit after cleanup" }
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              if (-not (Get-Process -Id $record.SidecarPid -ErrorAction SilentlyContinue)) { return }
-              Start-Sleep -Milliseconds 500
-            }
-            throw "AliasMode sidecar survived shutdown"
-          }
-
-          $candidateVersion = [System.Management.Automation.SemanticVersion]::Parse($env:ALIASMODE_CANDIDATE_VERSION)
-          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json" }
-          $releases = @(Invoke-RestMethod "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers | Write-Output)
-          $previous = $releases |
-            Where-Object { -not $_.draft -and $_.tag_name.StartsWith("v") } |
-            ForEach-Object {
-              try {
-                $version = [System.Management.Automation.SemanticVersion]::Parse($_.tag_name.Substring(1))
-                if ($version -lt $candidateVersion) { [pscustomobject]@{ Release = $_; Version = $version } }
-              } catch {}
-            } |
-            Sort-Object Version -Descending |
-            Select-Object -First 1
-          if (-not $previous) { throw "no previous public release is available for upgrade acceptance" }
-          $offlineInstallerName = "AliasMode_$($previous.Version)_x64-offline-setup.exe"
-          $legacyInstallerName = "AliasMode_$($previous.Version)_x64-setup.exe"
-          $oldInstallerAsset = @()
-          foreach ($installerName in @($offlineInstallerName, $legacyInstallerName)) {
-            $matches = @($previous.Release.assets | Where-Object { $_.name -eq $installerName })
-            if ($matches.Count -gt 1) { throw "previous release installer asset is ambiguous: $installerName" }
-            if ($matches.Count -eq 1) {
-              $oldInstallerAsset = $matches
-              break
-            }
-          }
-          $oldChecksumAsset = @($previous.Release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" })
-          if ($oldInstallerAsset.Count -ne 1 -or $oldChecksumAsset.Count -ne 1) {
-            throw "previous release assets are incomplete"
-          }
-          $oldInstaller = Join-Path $env:RUNNER_TEMP $oldInstallerAsset[0].name
-          $oldChecksums = Join-Path $env:RUNNER_TEMP "old-SHA256SUMS.txt"
-          Invoke-WebRequest $oldInstallerAsset[0].browser_download_url -OutFile $oldInstaller
-          Invoke-WebRequest $oldChecksumAsset[0].browser_download_url -OutFile $oldChecksums
-          $checksumPattern = '^([a-fA-F0-9]{64})  ' + [regex]::Escape($oldInstallerAsset[0].name) + '$'
-          $checksumLines = @(Get-Content $oldChecksums | Where-Object { $_ -match $checksumPattern })
-          if ($checksumLines.Count -ne 1) { throw "previous installer checksum is missing or ambiguous" }
-          $checksumMatch = [regex]::Match($checksumLines[0], $checksumPattern)
-          if (-not $checksumMatch.Success) { throw "previous installer checksum is malformed" }
-          $expectedChecksum = $checksumMatch.Groups[1].Value.ToLowerInvariant()
-          if ((Get-FileHash $oldInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedChecksum) {
-            throw "previous installer checksum mismatch"
-          }
-
-          $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode update acceptance"
-          $install = Start-Process -Wait -PassThru $oldInstaller -ArgumentList @("/S", "/D=$installRoot")
-          if ($install.ExitCode -ne 0) { throw "previous installer exited with code $($install.ExitCode)" }
-          $appPath = Join-Path $installRoot "AliasMode.exe"
-          $old = Wait-AliasModeReady $appPath $previous.Version.ToString()
-          $mode = Invoke-RestMethod "$($old.Origin)/ui/api/app-mode"
-          if ($mode.mode -eq "unconfigured") {
-            Invoke-RestMethod "$($old.Origin)/ui/api/app-mode" -Method Post -ContentType "application/json" -Body '{"mode":"local"}' | Out-Null
-            Stop-AliasMode $old
-            $old = Wait-AliasModeReady $appPath $previous.Version.ToString()
-          }
-          $profile = Invoke-RestMethod "$($old.Origin)/ui/api/profiles" -Method Post -ContentType "application/json" -Body '{"name":"update-preservation-sentinel"}'
-          if ($profile.ok -ne $true -or [string]::IsNullOrWhiteSpace($profile.id)) { throw "could not create upgrade sentinel profile" }
-          $sentinel = Join-Path $old.Health.root "upgrade-sentinel.txt"
-          "preserve-me" | Set-Content $sentinel
-          $oldRoot = $old.Health.root
-          $oldInstance = $old.Health.instance
-          if ([string]::IsNullOrWhiteSpace($oldInstance)) { throw "previous version health response omitted its instance ID" }
-          Stop-AliasMode $old
-
-          $candidateInstaller = Resolve-Path ".\artifacts\windows-update-candidate\AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-setup.exe"
-          $updater = Start-Process -PassThru $candidateInstaller.Path -ArgumentList @("/P", "/R", "/UPDATE", "/ARGS")
-          if (-not $updater.WaitForExit(300000)) { throw "candidate updater did not exit" }
-          if ($updater.ExitCode -ne 0) { throw "candidate updater exited with code $($updater.ExitCode)" }
-          $updated = Wait-AliasModeReady $appPath $env:ALIASMODE_CANDIDATE_VERSION
-          if ($updated.Health.root -ne $oldRoot) { throw "update changed the app-data root" }
-          $updatedInstance = $updated.Health.instance
-          if ([string]::IsNullOrWhiteSpace($updatedInstance) -or $updatedInstance -eq $oldInstance) {
-            throw "updated app did not start a new instance"
-          }
-          if ((Get-Content $sentinel -Raw).Trim() -ne "preserve-me") { throw "update changed app-data sentinel content" }
-          $roster = Invoke-RestMethod "$($updated.Origin)/ui/api/profiles"
-          if (-not ($roster.profiles | Where-Object { $_.id -eq $profile.id -and $_.name -eq "update-preservation-sentinel" })) {
-            throw "update did not preserve the sentinel profile"
-          }
-          Stop-AliasMode $updated
-      - uses: actions/upload-artifact@v4
+          $diagnostics = ".\diagnostics\previous-upgrade.json"
+          & .\scripts\windows-previous-upgrade-acceptance.ps1 `
+            -CandidateVersion $env:WINDOWS_VERSION `
+            -FullInstallerPath ".\signed-current\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -ChecksumsPath ".\signed-current\SHA256SUMS.txt" `
+            -Repository $env:GITHUB_REPOSITORY `
+            -GitHubToken $env:GITHUB_TOKEN `
+            -DiagnosticsPath $diagnostics
+      - name: Upload previous-upgrade diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: aliasmode-windows-update-candidate
-          path: artifacts/windows-update-candidate
-          if-no-files-found: error
+          name: aliasmode-windows-previous-upgrade-diagnostics-${{ github.run_attempt }}
+          path: diagnostics
+          if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
+
+  exact_updater_acceptance:
+    name: Exact in-app updater acceptance
+    needs: [provenance, sign_current, synthetic_successor]
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scripts/updater-signature-check -> target
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-signed-current
+          path: signed-current
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-synthetic-successor
+          path: synthetic-successor
+      - name: Verify acceptance producer artifacts
+        shell: pwsh
+        env:
+          SUCCESSOR_VERSION: ${{ needs.synthetic_successor.outputs.version }}
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $currentArguments = @(
+            ".\signed-current",
+            "--role", "signed-current",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $fullName,
+            "--file", $slimName,
+            "--file", "$slimName.sig",
+            "--file", "latest-v2.json",
+            "--file", "aliasmode-agent-bootstrap.json",
+            "--file", "SHA256SUMS.txt"
+          )
+          & bun scripts/windows-artifact-manifest.ts verify @currentArguments
+          if ($LASTEXITCODE -ne 0) { throw "signed current producer verification failed" }
+
+          $successorName = "AliasMode_$($env:SUCCESSOR_VERSION)_x64-setup.exe"
+          $successorArguments = @(
+            ".\synthetic-successor",
+            "--role", "synthetic-successor",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:SUCCESSOR_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $successorName,
+            "--file", "$successorName.sig",
+            "--file", "latest-v2.json"
+          )
+          & bun scripts/windows-artifact-manifest.ts verify @successorArguments
+          if ($LASTEXITCODE -ne 0) { throw "synthetic successor producer verification failed" }
+
+          $publicKey = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- `
+            ".\signed-current\$slimName" `
+            ".\signed-current\$slimName.sig" `
+            $publicKey
+          if ($LASTEXITCODE -ne 0) { throw "current updater signature verification failed" }
+          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- `
+            ".\synthetic-successor\$successorName" `
+            ".\synthetic-successor\$successorName.sig" `
+            $publicKey
+          if ($LASTEXITCODE -ne 0) { throw "successor updater signature verification failed" }
+      - name: Test candidate through the exact updater protocol
+        timeout-minutes: 35
+        shell: pwsh
+        env:
+          SUCCESSOR_VERSION: ${{ needs.synthetic_successor.outputs.version }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $successorName = "AliasMode_$($env:SUCCESSOR_VERSION)_x64-setup.exe"
+          & .\scripts\windows-in-app-update-acceptance.ps1 `
+            -SourceVersion $env:WINDOWS_VERSION `
+            -SourceInstallerPath ".\signed-current\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -SourceChecksumsPath ".\signed-current\SHA256SUMS.txt" `
+            -CandidateVersion $env:SUCCESSOR_VERSION `
+            -CandidateInstallerPath ".\synthetic-successor\$successorName" `
+            -CandidateSignaturePath ".\synthetic-successor\$successorName.sig" `
+            -CandidateManifestPath ".\synthetic-successor\latest-v2.json" `
+            -DiagnosticsPath ".\diagnostics\in-app-update.json"
+      - name: Upload exact-updater diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-in-app-update-diagnostics-${{ github.run_attempt }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+  publish_release:
+    name: Publish verified prerelease
+    needs: [provenance, sign_current, previous_upgrade_acceptance, exact_updater_acceptance]
+    runs-on: ubuntu-latest
+    environment: windows-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-signed-current
+          path: signed-current
+      - name: Verify publish producer artifact
+        shell: bash
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          set -euo pipefail
+          full_name="AliasMode_${WINDOWS_VERSION}_x64-offline-setup.exe"
+          slim_name="AliasMode_${WINDOWS_VERSION}_x64-setup.exe"
+          bun scripts/windows-artifact-manifest.ts verify ./signed-current \
+            --role signed-current \
+            --source "$WINDOWS_SOURCE" \
+            --version "$WINDOWS_VERSION" \
+            --product-key "$WINDOWS_PRODUCT_KEY" \
+            --file "$full_name" \
+            --file "$slim_name" \
+            --file "$slim_name.sig" \
+            --file latest-v2.json \
+            --file aliasmode-agent-bootstrap.json \
+            --file SHA256SUMS.txt
+      - name: Create, verify, and publish exact release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ needs.provenance.outputs.source }}
+          RELEASE_VERSION: ${{ needs.provenance.outputs.version }}
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/signed-current"
+          tag="v${RELEASE_VERSION}"
+          release_name="AliasMode ${RELEASE_VERSION}"
+          marker="<!-- aliasmode-release-run:${GITHUB_RUN_ID};source:${RELEASE_SOURCE} -->"
+          full_name="AliasMode_${RELEASE_VERSION}_x64-offline-setup.exe"
+          slim_name="AliasMode_${RELEASE_VERSION}_x64-setup.exe"
+          required=(
+            "$full_name"
+            "$slim_name"
+            "$slim_name.sig"
+            "latest-v2.json"
+            "aliasmode-agent-bootstrap.json"
+            "SHA256SUMS.txt"
+          )
+          mapfile -t expected_names < <(printf '%s\n' "${required[@]}" | sort)
+          mapfile -t actual_names < <(find "$root" -mindepth 1 -maxdepth 1 -type f ! -name artifact-manifest.json -printf '%f\n' | sort)
+          if [[ "${#actual_names[@]}" -ne 6 || "$(printf '%s\n' "${actual_names[@]}")" != "$(printf '%s\n' "${expected_names[@]}")" ]]; then
+            printf 'publish producer does not contain the exact six release assets\n' >&2
+            exit 1
+          fi
+          if find "$root" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+            printf 'publish producer contains a non-file entry\n' >&2
+            exit 1
+          fi
+          if [[ "$(wc -l < "$root/SHA256SUMS.txt")" -ne 5 ]]; then
+            printf 'release checksum manifest must contain exactly five lines\n' >&2
+            exit 1
+          fi
+          (
+            cd "$root"
+            sha256sum --check --strict SHA256SUMS.txt
+          )
+          mapfile -t checksum_names < <(cut -d' ' -f3- "$root/SHA256SUMS.txt" | sort)
+          mapfile -t expected_hashed < <(printf '%s\n' "${required[@]}" | grep -v '^SHA256SUMS\.txt$' | sort)
+          if [[ "$(printf '%s\n' "${checksum_names[@]}")" != "$(printf '%s\n' "${expected_hashed[@]}")" ]]; then
+            printf 'release checksum manifest names are not exact\n' >&2
+            exit 1
+          fi
+
+          releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100")"
+          matches="$(jq --arg tag "$tag" '[.[] | select(.tag_name == $tag)]' <<<"$releases")"
+          match_count="$(jq 'length' <<<"$matches")"
+          already_published=false
+          if [[ "$match_count" -gt 1 ]]; then
+            printf 'release tag is ambiguous\n' >&2
+            exit 1
+          fi
+          if [[ "$match_count" -eq 1 ]]; then
+            release="$(jq '.[0]' <<<"$matches")"
+            if [[ "$(jq -r '.prerelease' <<<"$release")" != true ||
+                  "$(jq -r '.target_commitish' <<<"$release")" != "$RELEASE_SOURCE" ||
+                  "$(jq -r '.name' <<<"$release")" != "$release_name" ||
+                  "$(jq -r '.body' <<<"$release")" != "$marker" ]]; then
+              printf 'existing release conflicts with this source run\n' >&2
+              exit 1
+            fi
+            if [[ "$(jq -r '.draft' <<<"$release")" == false ]]; then
+              already_published=true
+            fi
+          else
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+              printf 'tag already exists without the expected draft release\n' >&2
+              exit 1
+            fi
+            release="$(
+              jq -n \
+                --arg tag "$tag" \
+                --arg source "$RELEASE_SOURCE" \
+                --arg name "$release_name" \
+                --arg body "$marker" \
+                '{tag_name:$tag,target_commitish:$source,name:$name,body:$body,draft:true,prerelease:true}' |
+                gh api --method POST "repos/$GITHUB_REPOSITORY/releases" --input -
+            )"
+          fi
+          release_id="$(jq -r '.id' <<<"$release")"
+          if [[ ! "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'draft release ID is invalid\n' >&2
+            exit 1
+          fi
+
+          declare -A local_hashes
+          for name in "${required[@]}"; do
+            local_hashes["$name"]="$(sha256sum "$root/$name" | cut -d' ' -f1)"
+          done
+          for name in "${required[@]}"; do
+            assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")"
+            matching="$(jq --arg name "$name" '[.[] | select(.name == $name)]' <<<"$assets")"
+            count="$(jq 'length' <<<"$matching")"
+            if [[ "$count" -gt 1 ]]; then
+              printf 'release asset is ambiguous: %s\n' "$name" >&2
+              exit 1
+            fi
+            if [[ "$already_published" == true && "$count" -ne 1 ]]; then
+              printf 'published release is missing an exact asset: %s\n' "$name" >&2
+              exit 1
+            fi
+            if [[ "$count" -eq 1 ]]; then
+              asset_id="$(jq -r '.[0].id' <<<"$matching")"
+              asset_state="$(jq -r '.[0].state' <<<"$matching")"
+              if [[ "$asset_state" == starter ]]; then
+                if [[ "$already_published" == true ]]; then
+                  printf 'published release contains an incomplete asset: %s\n' "$name" >&2
+                  exit 1
+                fi
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              elif [[ "$asset_state" == uploaded ]]; then
+                remote="$RUNNER_TEMP/existing-$asset_id"
+                gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$remote"
+                if [[ "$(sha256sum "$remote" | cut -d' ' -f1)" != "${local_hashes[$name]}" ]]; then
+                  printf 'existing draft asset conflicts with local producer: %s\n' "$name" >&2
+                  exit 1
+                fi
+                continue
+              else
+                printf 'existing draft asset has an invalid state: %s/%s\n' "$name" "$asset_state" >&2
+                exit 1
+              fi
+            fi
+            encoded="$(jq -rn --arg value "$name" '$value|@uri')"
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --request POST \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/octet-stream' \
+              --data-binary "@$root/$name" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$encoded" \
+              >/dev/null
+          done
+
+          assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100")"
+          mapfile -t remote_names < <(jq -r '.[].name' <<<"$assets" | sort)
+          if [[ "${#remote_names[@]}" -ne 6 || "$(printf '%s\n' "${remote_names[@]}")" != "$(printf '%s\n' "${expected_names[@]}")" ]]; then
+            printf 'draft release does not contain the exact six assets\n' >&2
+            exit 1
+          fi
+          if [[ "$(jq '[.[] | select(.state != "uploaded")] | length' <<<"$assets")" -ne 0 ]]; then
+            printf 'draft release contains an asset that is not fully uploaded\n' >&2
+            exit 1
+          fi
+          for name in "${required[@]}"; do
+            asset_id="$(jq -r --arg name "$name" '.[] | select(.name == $name) | .id' <<<"$assets")"
+            remote="$RUNNER_TEMP/verified-$asset_id"
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$remote"
+            if [[ "$(sha256sum "$remote" | cut -d' ' -f1)" != "${local_hashes[$name]}" ]]; then
+              printf 'uploaded release asset SHA-256 mismatch: %s\n' "$name" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "$already_published" == true ]]; then
+            published="$release"
+          else
+            published="$(jq -n '{draft:false,prerelease:true}' | gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" --input -)"
+          fi
+          if [[ "$(jq -r '.draft' <<<"$published")" != false ||
+                "$(jq -r '.prerelease' <<<"$published")" != true ||
+                "$(jq -r '.tag_name' <<<"$published")" != "$tag" ||
+                "$(jq -r '.target_commitish' <<<"$published")" != "$RELEASE_SOURCE" ]]; then
+            printf 'published prerelease identity is inconsistent\n' >&2
+            exit 1
+          fi
+          ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")"
+          object_type="$(jq -r '.object.type' <<<"$ref")"
+          object_sha="$(jq -r '.object.sha' <<<"$ref")"
+          if [[ "$object_type" == tag ]]; then
+            tag_object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")"
+            object_type="$(jq -r '.object.type' <<<"$tag_object")"
+            object_sha="$(jq -r '.object.sha' <<<"$tag_object")"
+          fi
+          if [[ "$object_type" != commit || "$object_sha" != "$RELEASE_SOURCE" ]]; then
+            printf 'published release tag does not point to the validated source\n' >&2
+            exit 1
+          fi

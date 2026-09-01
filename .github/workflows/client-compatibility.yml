@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: Successful Client CI run containing aliasmode-windows-unsigned
+        description: Successful Client CI run containing aliasmode-windows-candidate
         required: true
         type: string
 
@@ -12,28 +12,116 @@ permissions:
   actions: read
   contents: read
 
+concurrency:
+  group: windows-client-compatibility-${{ inputs.run_id }}
+  cancel-in-progress: true
+
 jobs:
   clients:
     name: Claude Code, Codex, OpenClaw, and Hermes
     runs-on: windows-latest
     steps:
       - name: Validate installer run
+        id: installer_run
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           INSTALLER_RUN_ID: ${{ inputs.run_id }}
         run: |
-          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:INSTALLER_RUN_ID" | ConvertFrom-Json
-          if ($run.name -ne "Client CI" -or $run.conclusion -ne "success") {
-            throw "installer run must be a successful Client CI run"
+          $ErrorActionPreference = "Stop"
+          if ($env:INSTALLER_RUN_ID -notmatch '^[1-9][0-9]*$') {
+            throw "installer run ID must be a positive integer"
           }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:INSTALLER_RUN_ID" | ConvertFrom-Json
+          if (
+            $run.name -cne "Client CI" -or
+            $run.path -cne ".github/workflows/ci.yml" -or
+            $run.status -cne "completed" -or
+            $run.conclusion -cne "success" -or
+            $run.event -cne "push" -or
+            $run.head_branch -cne "main"
+          ) {
+            throw "installer run must be a successful main push through Client CI"
+          }
+          if (
+            $run.repository.full_name -cne $env:GITHUB_REPOSITORY -or
+            $run.head_repository.full_name -cne $env:GITHUB_REPOSITORY
+          ) {
+            throw "installer run repository identity did not match"
+          }
+          $source = [string]$run.head_sha
+          if ($source -notmatch '^[a-f0-9]{40}$') { throw "installer run source SHA is invalid" }
+          "source=$source" | Add-Content $env:GITHUB_OUTPUT
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.installer_run.outputs.source }}
+      - name: Verify exact source checkout
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE: ${{ steps.installer_run.outputs.source }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $actualSource = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualSource -cne $env:EXPECTED_SOURCE) {
+            throw "checked-out source did not match the installer run"
+          }
+          $status = @(& git status --porcelain --untracked-files=all)
+          if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+            throw "checked-out source tree is not exact and clean"
+          }
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
       - uses: actions/download-artifact@v4
         with:
-          name: aliasmode-windows-unsigned
+          name: aliasmode-windows-candidate
           path: artifact
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.run_id }}
+      - name: Verify candidate provenance and files
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE: ${{ steps.installer_run.outputs.source }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifact = Join-Path $env:GITHUB_WORKSPACE "artifact"
+          $version = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "candidate source version is missing" }
+          $fullName = "AliasMode_${version}_x64-offline-setup.exe"
+          $slimName = "AliasMode_${version}_x64-setup.exe"
+          $payloadNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
+          $requiredNames = @($payloadNames + "artifact-manifest.json") | Sort-Object
+          $entries = @(Get-ChildItem -LiteralPath $artifact -Force)
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          if (
+            $entries.Count -ne 6 -or
+            @($entries | Where-Object {
+              $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            }).Count -ne 0 -or
+            ($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")
+          ) {
+            throw "candidate artifact must contain exactly its six regular files"
+          }
+          $manifest = Get-Content (Join-Path $artifact "artifact-manifest.json") -Raw | ConvertFrom-Json
+          $productKey = [string]$manifest.productKey
+          if ($manifest.schema -ne 1 -or $manifest.role -cne "candidate" -or
+              $manifest.source -cne $env:EXPECTED_SOURCE -or $manifest.version -cne $version -or
+              $productKey -notmatch '^[a-f0-9]{64}$') {
+            throw "candidate artifact provenance is invalid"
+          }
+          $arguments = @(
+            $artifact,
+            "--role", "candidate",
+            "--source", $env:EXPECTED_SOURCE,
+            "--version", $version,
+            "--product-key", $productKey
+          )
+          foreach ($name in $payloadNames) { $arguments += @("--file", $name) }
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "candidate artifact manifest verification failed" }
+          "ALIASMODE_CANDIDATE_VERSION=$version" | Add-Content $env:GITHUB_ENV
       - uses: actions/setup-node@v4
         with:
           node-version: 24.15.0
@@ -59,22 +147,31 @@ jobs:
           ) | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           $npmPrefix | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
 
-          $installers = @(Get-ChildItem "$env:GITHUB_WORKSPACE\artifact" -Filter "*.exe" -File)
-          if ($installers.Count -ne 1) { throw "expected exactly one AliasMode installer" }
+          if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_CANDIDATE_VERSION)) {
+            throw "verified AliasMode candidate version is missing"
+          }
+          $installerName = "AliasMode_$($env:ALIASMODE_CANDIDATE_VERSION)_x64-offline-setup.exe"
+          $installer = Get-Item (Join-Path $env:GITHUB_WORKSPACE "artifact\$installerName")
           $checksumFile = Join-Path $env:GITHUB_WORKSPACE "artifact\SHA256SUMS.txt"
-          $checksum = (Get-Content $checksumFile -Raw).Trim() -split '\s+', 2
-          if ($checksum.Count -ne 2 -or $checksum[1] -ne $installers[0].Name) {
-            throw "AliasMode artifact checksum manifest is invalid"
+          $checksumPattern = '^([a-f0-9]{64})  ' + [regex]::Escape($installerName) + '$'
+          $checksumLines = @([IO.File]::ReadAllLines($checksumFile) | Where-Object { $_ -match $checksumPattern })
+          if ($checksumLines.Count -ne 1) { throw "AliasMode full installer checksum is missing or ambiguous" }
+          $expectedChecksum = [regex]::Match($checksumLines[0], $checksumPattern).Groups[1].Value
+          $actual = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $expectedChecksum) { throw "AliasMode full installer checksum did not match" }
+          $stream = [IO.File]::OpenRead($installer.FullName)
+          try {
+            if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+              throw "AliasMode full installer is not a Windows PE file"
+            }
+          } finally {
+            $stream.Dispose()
           }
-          $actual = (Get-FileHash $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $checksum[0].ToLowerInvariant()) {
-            throw "AliasMode installer checksum did not match"
-          }
-          if ((Get-AuthenticodeSignature $installers[0].FullName).Status -ne "NotSigned") {
+          if ((Get-AuthenticodeSignature $installer.FullName).Status -ne "NotSigned") {
             throw "AliasMode compatibility artifact was expected to be unsigned"
           }
 
-          $install = Start-Process -Wait -PassThru $installers[0].FullName -ArgumentList @(
+          $install = Start-Process -Wait -PassThru $installer.FullName -ArgumentList @(
             "/S",
             "/D=$installRoot"
           )

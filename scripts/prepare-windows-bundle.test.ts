@@ -42,6 +42,12 @@ function workspace(): string {
 test("Windows bundle preparation packages the official runtime and records its hash", async () => {
   const cwd = workspace();
   const browserBytes = "official-browser";
+  const staging = join(cwd, "src-tauri", "target", "desktop-staging");
+  const browserCache = join(cwd, "src-tauri", "target", "cloakbrowser-cache");
+  mkdirSync(staging, { recursive: true });
+  mkdirSync(browserCache, { recursive: true });
+  writeFileSync(join(staging, "stale"), "remove");
+  writeFileSync(join(browserCache, "cached-download"), "keep");
   try {
     const metadata = await prepareWindowsBundle({
       cwd,
@@ -53,8 +59,12 @@ test("Windows bundle preparation packages the official runtime and records its h
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
-      installBrowser: async (staging) => {
-        const runtime = join(staging, "cloakbrowser");
+      installBrowser: async (installCwd, cacheDir) => {
+        expect(installCwd).toBe(staging);
+        expect(cacheDir).toBe(browserCache);
+        expect(existsSync(join(staging, "stale"))).toBe(false);
+        expect(readFileSync(join(cacheDir, "cached-download"), "utf8")).toBe("keep");
+        const runtime = join(cacheDir, "cloakbrowser");
         mkdirSync(join(runtime, "locales"), { recursive: true });
         writeFileSync(join(runtime, "chrome.exe"), browserBytes);
         writeFileSync(join(runtime, "chromedriver.exe"), "driver");
@@ -83,6 +93,7 @@ test("Windows bundle preparation packages the official runtime and records its h
     expect(readFileSync(join(cwd, "src-tauri", "binaries", "aliasmode-mcp-x86_64-pc-windows-msvc.exe"), "utf8")).toBe("agent");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "generated", "browser.json"), "utf8"))).toEqual(metadata);
     expect(readFileSync(join(cwd, "src-tauri", "generated", "VERSION.txt"), "utf8")).toBe(`${ALIASMODE_VERSION}\n`);
+    expect(readFileSync(join(browserCache, "cached-download"), "utf8")).toBe("keep");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -101,8 +112,8 @@ test("Windows bundle preparation rejects a non-Windows browser payload", async (
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
-      installBrowser: async (staging) => {
-        const runtime = join(staging, "cloakbrowser");
+      installBrowser: async (_staging, cacheDir) => {
+        const runtime = join(cacheDir, "cloakbrowser");
         mkdirSync(runtime, { recursive: true });
         writeFileSync(join(runtime, "chrome"), "browser");
         writeFileSync(join(runtime, "libEGL.so"), "linux");
@@ -115,7 +126,7 @@ test("Windows bundle preparation rejects a non-Windows browser payload", async (
   }
 });
 
-test("Windows bundle preparation rejects installer paths outside staging", async () => {
+test("Windows bundle preparation rejects installer paths outside its cache", async () => {
   const cwd = workspace();
   const outside = join(cwd, "outside", "chrome.exe");
   mkdirSync(join(cwd, "outside"), { recursive: true });
@@ -132,7 +143,7 @@ test("Windows bundle preparation rejects installer paths outside staging", async
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
       installBrowser: async () => ({ path: outside, sha256: sha256("browser") }),
-    })).rejects.toThrow("outside its staging directory");
+    })).rejects.toThrow("outside its cache directory");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -151,8 +162,8 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
-      installBrowser: async (staging) => {
-        const runtime = join(staging, "cloakbrowser");
+      installBrowser: async (_staging, cacheDir) => {
+        const runtime = join(cacheDir, "cloakbrowser");
         mkdirSync(runtime, { recursive: true });
         const executable = join(runtime, "chrome.exe");
         writeFileSync(executable, "browser");

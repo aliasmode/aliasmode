@@ -28,6 +28,7 @@
         "silent": true
       },
       "nsis": {
+        "compression": "zlib",
         "installMode": "currentUser",
         "installerHooks": "windows/installer-hooks.nsh"
       }

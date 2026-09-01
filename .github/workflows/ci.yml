@@ -5,10 +5,29 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+    inputs:
+      client_ci_reusable_call:
+        description: Marks this run as a reusable workflow invocation.
+        required: false
+        default: true
+        type: boolean
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: >-
+    client-ci-${{
+      inputs.client_ci_reusable_call == true && format('call-{0}', github.run_id) ||
+      github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.run_id) ||
+      format('{0}-{1}', github.event_name, github.event.pull_request.number || github.ref)
+    }}
+  cancel-in-progress: >-
+    ${{
+      inputs.client_ci_reusable_call != true &&
+      (github.event_name == 'push' || github.event_name == 'pull_request')
+    }}
 
 jobs:
   ubuntu:
@@ -28,23 +47,314 @@ jobs:
       - run: bun run typecheck
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
-  macos:
-    name: macOS source tests and checks
-    runs-on: macos-15
+  windows_cache:
+    name: Windows cache and provenance
+    runs-on: windows-latest
+    outputs:
+      baseline_bun_sha: ${{ steps.provenance.outputs.baseline_bun_sha }}
+      cache_hit: ${{ steps.cache_status.outputs.cache_hit }}
+      product_key: ${{ steps.provenance.outputs.product_key }}
+      source: ${{ steps.provenance.outputs.source }}
+      version: ${{ steps.provenance.outputs.version }}
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22.23.2
-      - run: bun install --frozen-lockfile
-      - run: bun test
-      - run: bun run typecheck
+          toolchain: 1.89
+      - name: Compute Windows product provenance
+        id: provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $baselineUrl = "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip"
+          $expectedBaselineSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
+          $baselineZip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+          Invoke-WebRequest $baselineUrl -OutFile $baselineZip
+          $baselineSha = (Get-FileHash -LiteralPath $baselineZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($baselineSha -ne $expectedBaselineSha) {
+            throw "official baseline Bun archive SHA-256 mismatch"
+          }
 
-  windows_build:
-    name: Windows NSIS build and checks
+          $setupBunVersion = (& bun --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $setupBunVersion -ne "1.2.21") {
+            throw "setup Bun identity is not 1.2.21"
+          }
+          $setupBunPath = (Get-Command bun -ErrorAction Stop).Source
+          $setupBunSha = (Get-FileHash -LiteralPath $setupBunPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($setupBunSha -notmatch '^[a-f0-9]{64}$') { throw "setup Bun SHA-256 is invalid" }
+
+          $rustcIdentity = ((& rustc -Vv) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -or $rustcIdentity -notmatch '^rustc 1\.89\.0') {
+            throw "rustc identity is not 1.89.0"
+          }
+          $activeToolchain = (& rustup show active-toolchain).Trim()
+          if ($LASTEXITCODE -ne 0 -or $activeToolchain -notmatch '^1\.89\.0-') {
+            throw "active Rust toolchain is not 1.89.0"
+          }
+          foreach ($name in @("RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "runner identity is missing $name"
+            }
+          }
+
+          $version = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).version
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Tauri bundle version is missing" }
+          if ([string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) { throw "GitHub source identity is missing" }
+
+          $toolchainIdentity = @(
+            "setup-bun=1.2.21:$setupBunSha"
+            "baseline-bun=1.2.21:$baselineSha"
+            "rustc=$rustcIdentity"
+            "rust-toolchain=$activeToolchain"
+            "runner=$env:RUNNER_OS/$env:RUNNER_ARCH/$env:ImageOS/$env:ImageVersion"
+            "build-recipe=windows-nsis-zlib-v1"
+          ) -join "`n"
+          $externalIdentity = @(
+            "node-win-x64=22.23.2:1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
+            "cloakbrowser-wrapper=0.4.11"
+            "cloakbrowser-platform=windows-x64"
+            "cloakbrowser-version=146.0.7680.177.5"
+            "cloakbrowser-archive-sha256=b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe"
+            "cloakbrowser-executable-sha256=03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80"
+          ) -join "`n"
+          $keyOutput = @(
+            & bun scripts/windows-product-key.ts `
+              --repo-root $env:GITHUB_WORKSPACE `
+              --version $version `
+              --toolchain $toolchainIdentity `
+              --external $externalIdentity
+          )
+          if ($LASTEXITCODE -ne 0 -or $keyOutput.Count -ne 1) {
+            throw "Windows product key computation failed"
+          }
+          $productKey = ([string]$keyOutput[0]).Trim()
+          if ($productKey -notmatch '^[a-f0-9]{64}$') { throw "Windows product key is invalid" }
+
+          "baseline_bun_sha=$baselineSha" | Add-Content $env:GITHUB_OUTPUT
+          "product_key=$productKey" | Add-Content $env:GITHUB_OUTPUT
+          "source=$env:GITHUB_SHA" | Add-Content $env:GITHUB_OUTPUT
+          "version=$version" | Add-Content $env:GITHUB_OUTPUT
+      - name: Restore exact Windows candidate cache
+        id: candidate_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: artifacts/windows-candidate
+          key: aliasmode-windows-candidate-v2-${{ steps.provenance.outputs.product_key }}
+      - name: Normalize candidate cache result
+        id: cache_status
+        shell: pwsh
+        env:
+          RESTORED_CACHE_HIT: ${{ steps.candidate_cache.outputs.cache-hit }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:RESTORED_CACHE_HIT -eq "true") {
+            $cacheHit = "true"
+          } elseif ([string]::IsNullOrEmpty($env:RESTORED_CACHE_HIT) -or $env:RESTORED_CACHE_HIT -eq "false") {
+            $cacheHit = "false"
+          } else {
+            throw "candidate cache returned an invalid result"
+          }
+          "cache_hit=$cacheHit" | Add-Content $env:GITHUB_OUTPUT
+      - name: Verify cached Windows candidate
+        if: steps.cache_status.outputs.cache_hit == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ steps.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ steps.provenance.outputs.source }}
+          WINDOWS_VERSION: ${{ steps.provenance.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $candidate = ".\artifacts\windows-candidate"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $payloadNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
+          $requiredNames = @($payloadNames + "artifact-manifest.json") | Sort-Object
+          $entries = @(Get-ChildItem -LiteralPath $candidate -Force)
+          if ($entries.Count -ne 6 -or @($entries | Where-Object {
+            $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+          }).Count -ne 0) {
+            throw "cached candidate must contain exactly six regular files"
+          }
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          if (($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")) {
+            throw "cached candidate files did not match the required installer set"
+          }
+
+          $manifest = Get-Content (Join-Path $candidate "artifact-manifest.json") -Raw | ConvertFrom-Json
+          $originalSource = [string]$manifest.source
+          if ($manifest.schema -ne 1 -or $manifest.role -cne "candidate" -or
+              $manifest.version -cne $env:WINDOWS_VERSION -or
+              $manifest.productKey -cne $env:WINDOWS_PRODUCT_KEY -or
+              $originalSource -notmatch '^[a-f0-9]{40}$') {
+            throw "cached candidate provenance is invalid"
+          }
+          $originalArguments = @(
+            $candidate,
+            "--role", "candidate",
+            "--source", $originalSource,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY
+          )
+          foreach ($name in $payloadNames) { $originalArguments += @("--file", $name) }
+          & bun scripts/windows-artifact-manifest.ts verify @originalArguments
+          if ($LASTEXITCODE -ne 0) { throw "cached candidate manifest verification failed" }
+
+          $currentArguments = @(
+            $candidate,
+            "--role", "candidate",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY
+          )
+          foreach ($name in $payloadNames) { $currentArguments += @("--file", $name) }
+          & bun scripts/windows-artifact-manifest.ts create @currentArguments
+          if ($LASTEXITCODE -ne 0) { throw "cached candidate provenance promotion failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @currentArguments
+          if ($LASTEXITCODE -ne 0) { throw "promoted candidate manifest verification failed" }
+
+          $installers = @(
+            (Join-Path $candidate $fullName),
+            (Join-Path $candidate $slimName)
+          )
+          foreach ($installer in $installers) {
+            $stream = [IO.File]::OpenRead($installer)
+            try {
+              if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+                throw "cached installer must be a Windows PE file"
+              }
+            } finally {
+              $stream.Dispose()
+            }
+          }
+
+          $checksums = @{}
+          $checksumLines = @([IO.File]::ReadAllLines((Join-Path $candidate "SHA256SUMS.txt")))
+          foreach ($line in $checksumLines) {
+            if ($line -notmatch '^([a-f0-9]{64})  ([^\\/]+)$' -or $checksums.ContainsKey($Matches[2])) {
+              throw "cached candidate checksum manifest is malformed"
+            }
+            $checksums[$Matches[2]] = $Matches[1]
+          }
+          if ($checksums.Count -ne 2 -or -not $checksums.ContainsKey($fullName) -or -not $checksums.ContainsKey($slimName)) {
+            throw "cached candidate checksum manifest must contain exactly both installers"
+          }
+          foreach ($installer in $installers) {
+            $name = Split-Path $installer -Leaf
+            $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $checksums[$name]) { throw "cached candidate installer SHA-256 mismatch: $name" }
+          }
+
+          $fullSize = (Get-Item -LiteralPath $installers[0]).Length
+          $slimSize = (Get-Item -LiteralPath $installers[1]).Length
+          $sizeReport = Get-Content (Join-Path $candidate "size-report.json") -Raw | ConvertFrom-Json
+          if ($sizeReport.full.name -cne $fullName -or $sizeReport.slim.name -cne $slimName -or
+              $sizeReport.full.bytes -ne $fullSize -or $sizeReport.slim.bytes -ne $slimSize -or
+              $sizeReport.deltaBytes -ne ($fullSize - $slimSize) -or $sizeReport.deltaBytes -lt 100MB) {
+            throw "cached candidate installer size report is inconsistent"
+          }
+          $metadata = Get-Content (Join-Path $candidate "browser.json") -Raw | ConvertFrom-Json
+          if ($metadata.executable -cne "chrome.exe" -or [string]$metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
+            throw "cached candidate browser metadata is invalid"
+          }
+      - name: Upload cached Windows candidate
+        if: steps.cache_status.outputs.cache_hit == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: artifacts/windows-candidate
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows_prepare:
+    name: Windows prepared bundle inputs
+    needs: windows_cache
+    if: needs.windows_cache.outputs.cache_hit == 'false'
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - run: bun install --frozen-lockfile
+      - name: Prepare bundle with verified official baseline Bun
+        shell: pwsh
+        env:
+          EXPECTED_BASELINE_SHA: ${{ needs.windows_cache.outputs.baseline_bun_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pinnedSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
+          if ($env:EXPECTED_BASELINE_SHA -ne $pinnedSha) { throw "baseline Bun provenance is inconsistent" }
+          $zip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+          $root = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
+          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $zip
+          $actualSha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -ne $env:EXPECTED_BASELINE_SHA) { throw "official baseline Bun archive SHA-256 mismatch" }
+          Expand-Archive $zip $root -Force
+          $baselineCandidates = @(Get-ChildItem $root -Recurse -File -Filter "bun.exe")
+          if ($baselineCandidates.Count -ne 1) { throw "official baseline Bun archive must contain exactly one bun.exe" }
+          $baselineBun = $baselineCandidates[0].FullName
+          $baselineVersion = (& $baselineBun --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $baselineVersion -ne "1.2.21") { throw "official baseline Bun version is incorrect" }
+          & $baselineBun scripts/prepare-windows-bundle.ts
+          if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
+      - name: Archive prepared bundle inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($directory in @(
+            ".\src-tauri\binaries",
+            ".\src-tauri\generated",
+            ".\src-tauri\resources"
+          )) {
+            if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+              throw "prepared bundle directory is missing: $directory"
+            }
+          }
+          $artifact = ".\artifacts\windows-prepared"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          $archive = Join-Path $artifact "windows-prepared.zip"
+          & tar.exe -a -cf $archive -C ".\src-tauri" binaries generated resources
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "prepared bundle archive failed"
+          }
+      - name: Create and verify prepared-input manifest
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $arguments = @(
+            ".\artifacts\windows-prepared",
+            "--role", "prepared",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", "windows-prepared.zip"
+          )
+          & bun scripts/windows-artifact-manifest.ts create @arguments
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest creation failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-prepared
+          path: artifacts/windows-prepared
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows_full:
+    name: Windows full offline package
+    needs: [windows_cache, windows_prepare]
+    if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -55,29 +365,202 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.89
-          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
           cache-on-failure: true
       - run: bun install --frozen-lockfile
-      - name: Prepare bundle with official baseline Bun
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-prepared
+          path: artifacts/windows-prepared
+      - name: Verify and extract prepared inputs
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & bun scripts/windows-artifact-manifest.ts verify ".\artifacts\windows-prepared" `
+            --role prepared `
+            --source $env:WINDOWS_SOURCE `
+            --version $env:WINDOWS_VERSION `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file windows-prepared.zip
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
+          & tar.exe -xf ".\artifacts\windows-prepared\windows-prepared.zip" -C ".\src-tauri"
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
+      - name: Build full offline installer with zlib
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $zip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
-          $root = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
-          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $zip
-          Expand-Archive $zip $root -Force
-          $baselineBun = (Get-ChildItem $root -Recurse -File -Filter "bun.exe" | Select-Object -First 1).FullName
-          if (-not $baselineBun) { throw "official baseline Bun executable is missing" }
-          & $baselineBun scripts/prepare-windows-bundle.ts
-          if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
+          & .\scripts\build-windows-installer.ps1 -Flavor full -OutputDirectory ".\artifacts\windows-full"
+      - name: Create and verify full-package manifest
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $directory = ".\artifacts\windows-full"
+          $installerName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $installer = Join-Path $directory $installerName
+          Copy-Item ".\src-tauri\generated\browser.json" (Join-Path $directory "browser.json")
+          "$((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant())  $installerName" |
+            Set-Content (Join-Path $directory "SHA256SUMS.txt") -Encoding utf8
+          $arguments = @(
+            $directory,
+            "--role", "full",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $installerName,
+            "--file", "browser.json",
+            "--file", "SHA256SUMS.txt"
+          )
+          & bun scripts/windows-artifact-manifest.ts create @arguments
+          if ($LASTEXITCODE -ne 0) { throw "full-package manifest creation failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "full-package manifest verification failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-full
+          path: artifacts/windows-full
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows_slim:
+    name: Windows slim updater package
+    needs: [windows_cache, windows_prepare]
+    if: needs.windows_cache.outputs.cache_hit == 'false'
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-prepared
+          path: artifacts/windows-prepared
+      - name: Verify and extract prepared inputs
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & bun scripts/windows-artifact-manifest.ts verify ".\artifacts\windows-prepared" `
+            --role prepared `
+            --source $env:WINDOWS_SOURCE `
+            --version $env:WINDOWS_VERSION `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file windows-prepared.zip
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
+          & tar.exe -xf ".\artifacts\windows-prepared\windows-prepared.zip" -C ".\src-tauri"
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
+      - name: Build slim updater installer with zlib (--config src-tauri/tauri.updater.conf.json)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory ".\artifacts\windows-slim"
+      - name: Create and verify slim-package manifest
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $directory = ".\artifacts\windows-slim"
+          $installerName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $arguments = @(
+            $directory,
+            "--role", "slim",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $installerName
+          )
+          & bun scripts/windows-artifact-manifest.ts create @arguments
+          if ($LASTEXITCODE -ne 0) { throw "slim-package manifest creation failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "slim-package manifest verification failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-slim
+          path: artifacts/windows-slim
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  windows_source:
+    name: Windows source tests and checks
+    needs: [windows_cache, windows_prepare]
+    if: >-
+      ${{
+        always() &&
+        needs.windows_cache.result == 'success' &&
+        (
+          needs.windows_cache.outputs.cache_hit == 'true' ||
+          (needs.windows_cache.outputs.cache_hit == 'false' && needs.windows_prepare.result == 'success')
+        )
+      }}
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+      - run: bun install --frozen-lockfile
+      - if: needs.windows_cache.outputs.cache_hit == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-prepared
+          path: artifacts/windows-prepared
+      - name: Verify and extract prepared inputs
+        if: needs.windows_cache.outputs.cache_hit == 'false'
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & bun scripts/windows-artifact-manifest.ts verify ".\artifacts\windows-prepared" `
+            --role prepared `
+            --source $env:WINDOWS_SOURCE `
+            --version $env:WINDOWS_VERSION `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file windows-prepared.zip
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
+          & tar.exe -xf ".\artifacts\windows-prepared\windows-prepared.zip" -C ".\src-tauri"
+          if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
       - run: bun test
-      - run: bun run typecheck
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
+        if: needs.windows_cache.outputs.cache_hit == 'false'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -132,7 +615,11 @@ jobs:
             Pop-Location
           }
       - name: Smoke-test authenticated Cloud proxies
-        if: github.repository != 'aliasmode/aliasmode'
+        if: >-
+          ${{
+            needs.windows_cache.outputs.cache_hit == 'false' &&
+            github.repository != 'aliasmode/aliasmode'
+          }}
         shell: pwsh
         env:
           ALIASMODE_LIVE_PROXY_HOST: ${{ secrets.ALIASMODE_LIVE_PROXY_HOST }}
@@ -154,51 +641,80 @@ jobs:
           $env:ALIASMODE_LIVE_HEADFUL = "1"
           bun test --silent proxy-live.test.ts -t "real Cloud lifecycle"
           if ($LASTEXITCODE -ne 0) { throw "authenticated Cloud proxy smoke exited with code $LASTEXITCODE" }
-      - name: Build full offline installer
-        run: bunx tauri build --bundles nsis --no-sign
-      - name: Preserve full offline installer
+
+  windows_candidate:
+    name: Windows candidate assembly
+    needs: [windows_cache, windows_full, windows_slim]
+    if: >-
+      ${{
+        always() &&
+        needs.windows_cache.result == 'success' &&
+        needs.windows_cache.outputs.cache_hit == 'false' &&
+        needs.windows_full.result == 'success' &&
+        needs.windows_slim.result == 'success'
+      }}
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-full
+          path: artifacts/windows-full
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-slim
+          path: artifacts/windows-slim
+      - name: Verify package manifests and assemble candidate
         shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $sourceName = "AliasMode_$($bundleVersion)_x64-setup.exe"
-          $source = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $sourceName)
-          $fullInstaller = Join-Path $env:RUNNER_TEMP "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
-          Copy-Item $source.Path $fullInstaller
-          "ALIASMODE_FULL_NSIS_INSTALLER=$fullInstaller" | Add-Content $env:GITHUB_ENV
-      - name: Build slim updater installer
-        run: bunx tauri build --bundles nsis --no-sign --config src-tauri/tauri.updater.conf.json
-      - name: Select slim updater installer
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $sourceName = "AliasMode_$($bundleVersion)_x64-setup.exe"
-          $slimInstaller = Resolve-Path (Join-Path ".\src-tauri\target\release\bundle\nsis" $sourceName)
-          if ($env:ALIASMODE_FULL_NSIS_INSTALLER -eq $slimInstaller.Path) {
-            throw "full and updater NSIS installers must be distinct"
-          }
-          "ALIASMODE_SLIM_NSIS_INSTALLER=$($slimInstaller.Path)" | Add-Content $env:GITHUB_ENV
-      - name: Stage Windows candidate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $fullName = "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
-          $slimName = "AliasMode_$($bundleVersion)_x64-setup.exe"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          & bun scripts/windows-artifact-manifest.ts verify ".\artifacts\windows-full" `
+            --role full `
+            --source $env:WINDOWS_SOURCE `
+            --version $env:WINDOWS_VERSION `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file $fullName `
+            --file browser.json `
+            --file SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "full-package manifest verification failed" }
+          & bun scripts/windows-artifact-manifest.ts verify ".\artifacts\windows-slim" `
+            --role slim `
+            --source $env:WINDOWS_SOURCE `
+            --version $env:WINDOWS_VERSION `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file $slimName
+          if ($LASTEXITCODE -ne 0) { throw "slim-package manifest verification failed" }
+
           $candidate = ".\artifacts\windows-candidate"
           New-Item -ItemType Directory -Force $candidate | Out-Null
           $fullInstaller = Join-Path $candidate $fullName
           $slimInstaller = Join-Path $candidate $slimName
-          Copy-Item $env:ALIASMODE_FULL_NSIS_INSTALLER $fullInstaller
-          Copy-Item $env:ALIASMODE_SLIM_NSIS_INSTALLER $slimInstaller
-          $updaterHeader = [IO.File]::ReadAllBytes($slimInstaller)[0..1]
-          if ($updaterHeader[0] -ne 0x4d -or $updaterHeader[1] -ne 0x5a) {
-            throw "updater artifact must be a raw Windows PE"
+          Copy-Item (Join-Path ".\artifacts\windows-full" $fullName) $fullInstaller
+          Copy-Item (Join-Path ".\artifacts\windows-slim" $slimName) $slimInstaller
+          Copy-Item ".\artifacts\windows-full\browser.json" (Join-Path $candidate "browser.json")
+
+          foreach ($installer in @($fullInstaller, $slimInstaller)) {
+            $stream = [IO.File]::OpenRead($installer)
+            try {
+              if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+                throw "candidate installer must be a Windows PE file"
+              }
+            } finally {
+              $stream.Dispose()
+            }
           }
-          Copy-Item ".\src-tauri\generated\browser.json" (Join-Path $candidate "browser.json")
-          $fullSize = (Get-Item $fullInstaller).Length
-          $slimSize = (Get-Item $slimInstaller).Length
+          $fullSize = (Get-Item -LiteralPath $fullInstaller).Length
+          $slimSize = (Get-Item -LiteralPath $slimInstaller).Length
           $sizeDelta = $fullSize - $slimSize
           if ($sizeDelta -lt 100MB) { throw "full installer must exceed updater installer by at least 100 MiB" }
           [ordered]@{
@@ -207,71 +723,118 @@ jobs:
             deltaBytes = $sizeDelta
           } | ConvertTo-Json | Set-Content (Join-Path $candidate "size-report.json") -Encoding utf8
           @($fullInstaller, $slimInstaller) |
-            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } |
-            Set-Content (Join-Path $candidate "SHA256SUMS.txt")
-      - uses: actions/upload-artifact@v4
+            ForEach-Object { "$((Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant())  $(Split-Path $_ -Leaf)" } |
+            Set-Content (Join-Path $candidate "SHA256SUMS.txt") -Encoding utf8
+
+          $metadata = Get-Content (Join-Path $candidate "browser.json") -Raw | ConvertFrom-Json
+          if ($metadata.executable -cne "chrome.exe" -or [string]$metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
+            throw "candidate browser metadata is invalid"
+          }
+          $requiredNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json") | Sort-Object
+          $entries = @(Get-ChildItem -LiteralPath $candidate -Force)
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          if ($entries.Count -ne 5 -or @($entries | Where-Object {
+            $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+          }).Count -ne 0 -or ($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")) {
+            throw "candidate must contain exactly the five required regular files"
+          }
+
+          $arguments = @(
+            $candidate,
+            "--role", "candidate",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY
+          )
+          foreach ($name in $requiredNames) { $arguments += @("--file", $name) }
+          & bun scripts/windows-artifact-manifest.ts create @arguments
+          if ($LASTEXITCODE -ne 0) { throw "candidate manifest creation failed" }
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "candidate manifest verification failed" }
+      - name: Upload assembled Windows candidate
+        uses: actions/upload-artifact@v4
         with:
           name: aliasmode-windows-candidate
           path: artifacts/windows-candidate
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
+          compression-level: 0
 
-  windows:
-    name: Windows NSIS installer
-    needs: windows_build
+  windows_accept_runtime:
+    name: Windows installed runtime acceptance
+    needs: [windows_cache, windows_full]
+    if: >-
+      ${{
+        always() &&
+        needs.windows_cache.result == 'success' &&
+        (
+          needs.windows_cache.outputs.cache_hit == 'true' ||
+          (needs.windows_cache.outputs.cache_hit == 'false' && needs.windows_full.result == 'success')
+        )
+      }}
     runs-on: windows-latest
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - if: needs.windows_cache.outputs.cache_hit == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: aliasmode-windows-candidate
-          path: candidate
-      - name: Verify Windows candidate
+          path: package
+      - if: needs.windows_cache.outputs.cache_hit == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-full
+          path: package
+      - name: Run installed runtime acceptance
         shell: pwsh
+        env:
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $fullName = "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
-          $slimName = "AliasMode_$($bundleVersion)_x64-setup.exe"
-          $requiredNames = @($fullName, $slimName, "browser.json", "SHA256SUMS.txt", "size-report.json")
-          $actualNames = @(Get-ChildItem ".\candidate" -File | ForEach-Object Name)
-          $missing = @($requiredNames | Where-Object { $_ -notin $actualNames })
-          $unexpected = @($actualNames | Where-Object { $_ -notin $requiredNames })
-          if ($missing.Count -ne 0 -or $unexpected.Count -ne 0) {
-            throw "candidate files did not match the required installer set"
-          }
-          $fullInstaller = Resolve-Path (Join-Path ".\candidate" $fullName)
-          $slimInstaller = Resolve-Path (Join-Path ".\candidate" $slimName)
-          $checksums = @{}
-          foreach ($line in @(Get-Content ".\candidate\SHA256SUMS.txt")) {
-            if ($line -notmatch '^([a-f0-9]{64})  (.+)$' -or $checksums.ContainsKey($Matches[2])) {
-              throw "candidate checksum manifest is malformed"
-            }
-            $checksums[$Matches[2]] = $Matches[1]
-          }
-          if ($checksums.Count -ne 2) { throw "candidate checksum manifest must contain both installers" }
-          foreach ($installer in @($fullInstaller, $slimInstaller)) {
-            $name = Split-Path $installer.Path -Leaf
-            if (-not $checksums.ContainsKey($name)) { throw "candidate checksum manifest is missing $name" }
-            $actual = (Get-FileHash $installer.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $checksums[$name]) { throw "candidate installer SHA-256 mismatch: $name" }
-          }
-          $sizeReport = Get-Content ".\candidate\size-report.json" | ConvertFrom-Json
-          $fullSize = (Get-Item $fullInstaller.Path).Length
-          $slimSize = (Get-Item $slimInstaller.Path).Length
-          if ($sizeReport.full.name -ne $fullName -or $sizeReport.slim.name -ne $slimName -or
-              $sizeReport.full.bytes -ne $fullSize -or $sizeReport.slim.bytes -ne $slimSize -or
-              $sizeReport.deltaBytes -ne ($fullSize - $slimSize) -or $sizeReport.deltaBytes -lt 100MB) {
-            throw "candidate installer size report is inconsistent"
-          }
-          $metadata = Get-Content ".\candidate\browser.json" | ConvertFrom-Json
-          if ($metadata.executable -ne "chrome.exe" -or $metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
-            throw "candidate browser metadata is invalid"
-          }
-          $metadataPath = Resolve-Path ".\candidate\browser.json"
-          "ALIASMODE_NSIS_INSTALLER=$($fullInstaller.Path)" | Add-Content $env:GITHUB_ENV
-          "ALIASMODE_BROWSER_METADATA=$($metadataPath.Path)" | Add-Content $env:GITHUB_ENV
-      - name: Smoke-test installed desktop and headful Cloud proxies
+          & .\scripts\windows-installed-acceptance.ps1 `
+            -Shard runtime `
+            -InstallerPath ".\package\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -ChecksumsPath ".\package\SHA256SUMS.txt" `
+            -BrowserMetadataPath ".\package\browser.json" `
+            -DiagnosticsPath ".\diagnostics\runtime.json"
+      - name: Upload runtime acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-runtime-diagnostics-${{ github.run_attempt }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+  windows_accept_browser:
+    name: Windows installed browser acceptance
+    needs: [windows_cache, windows_full]
+    if: >-
+      ${{
+        always() &&
+        needs.windows_cache.result == 'success' &&
+        (
+          needs.windows_cache.outputs.cache_hit == 'true' ||
+          (needs.windows_cache.outputs.cache_hit == 'false' && needs.windows_full.result == 'success')
+        )
+      }}
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - if: needs.windows_cache.outputs.cache_hit == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: package
+      - if: needs.windows_cache.outputs.cache_hit == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-full
+          path: package
+      - name: Run installed browser acceptance
         shell: pwsh
         env:
           ALIASMODE_LIVE_PROXY_HOST: ${{ secrets.ALIASMODE_LIVE_PROXY_HOST }}
@@ -279,1270 +842,196 @@ jobs:
           ALIASMODE_LIVE_PROXY_USER: ${{ secrets.ALIASMODE_LIVE_PROXY_USER }}
           ALIASMODE_LIVE_PROXY_PASS: ${{ secrets.ALIASMODE_LIVE_PROXY_PASS }}
           ALIASMODE_LIVE_PROXY_IP: ${{ secrets.ALIASMODE_LIVE_PROXY_IP }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $liveProxyEnvironmentNames = @(
-            "ALIASMODE_LIVE_PROXY_HOST",
-            "ALIASMODE_LIVE_PROXY_PORT",
-            "ALIASMODE_LIVE_PROXY_USER",
-            "ALIASMODE_LIVE_PROXY_PASS",
-            "ALIASMODE_LIVE_PROXY_IP"
-          )
-          $savedLiveProxyEnvironment = @{}
-          foreach ($name in $liveProxyEnvironmentNames) {
-            $savedLiveProxyEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-            [Environment]::SetEnvironmentVariable($name, $null, "Process")
-          }
-          $installRoot = Join-Path $env:RUNNER_TEMP "aliasmode installed"
-          Remove-Item $installRoot -Recurse -Force -ErrorAction SilentlyContinue
-          if (Test-Path $installRoot) { throw "installed acceptance root was not clean" }
-          $install = Start-Process -Wait -PassThru $env:ALIASMODE_NSIS_INSTALLER -ArgumentList @(
-            "/S",
-            "/D=$installRoot"
-          )
-          if ($install.ExitCode -ne 0) { throw "silent NSIS install exited with code $($install.ExitCode)" }
-
-          $appPath = Join-Path $installRoot "AliasMode.exe"
-          if (-not (Test-Path $appPath -PathType Leaf)) { throw "installed AliasMode executable is missing" }
-          $sidecars = @(Get-ChildItem $installRoot -Recurse -File -Filter "aliasmode-sidecar*.exe")
-          if ($sidecars.Count -ne 1) { throw "expected exactly one installed sidecar, found $($sidecars.Count)" }
-          $sidecarBytes = [IO.File]::ReadAllBytes($sidecars[0].FullName)
-          $sidecarText = [Text.Encoding]::UTF8.GetString($sidecarBytes) + [Text.Encoding]::Unicode.GetString($sidecarBytes)
-          foreach ($sourcePath in @($env:GITHUB_WORKSPACE, $env:GITHUB_WORKSPACE.Replace("\", "/"))) {
-            if ($sidecarText.IndexOf($sourcePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-              throw "installed sidecar embeds its source checkout path"
-            }
-          }
-          if (Test-Path ".\node_modules") {
-            Remove-Item ".\node_modules" -Recurse -Force
-          }
-          if (Test-Path ".\node_modules") { throw "checkout node_modules remained available to installed acceptance" }
-
-          $appData = Join-Path $env:APPDATA "com.aliasmode.desktop"
-          Remove-Item $appData -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force $appData | Out-Null
-          @{ version = 1; mode = "local"; localAnalytics = $false } |
-            ConvertTo-Json -Compress |
-            Set-Content (Join-Path $appData "config.json")
-          $descriptorPath = Join-Path $appData "agent-runtime.json"
-
-          $automationPortBlocker = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 50400)
-          $automationPortBlocker.Server.ExclusiveAddressUse = $true
-          $automationPortBlocker.Start()
-          if (-not $automationPortBlocker.Server.IsBound) {
-            throw "fixed automation port conflict fixture did not bind"
-          }
-
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $helper = Join-Path $installRoot "aliasmode-mcp.exe"
-          $playwrightRuntime = Join-Path $installRoot "playwright"
-          $node = Join-Path $playwrightRuntime "node\node.exe"
-          $mcpHost = Join-Path $playwrightRuntime "agent\mcp-host.mjs"
-          foreach ($path in @(
-            $helper,
-            $node,
-            $mcpHost,
-            (Join-Path $playwrightRuntime "agent\playwright-proxy.mjs"),
-            (Join-Path $playwrightRuntime "agent\playwright-runner.mjs"),
-            (Join-Path $playwrightRuntime "agent\runtime-client.mjs")
-          )) {
-            if (-not (Test-Path $path -PathType Leaf)) { throw "installed agent runtime file is missing: $path" }
-          }
-          if ((& $node --version).Trim() -ne "v22.23.2") { throw "installed Node runtime version is incorrect" }
-          foreach ($package in @{
-            "playwright-core" = "1.58.2"
-            "@modelcontextprotocol\sdk" = "1.30.0"
-            "@playwright\mcp" = "0.0.56"
-            "playwright" = "1.58.0-alpha-2026-01-16"
-          }.GetEnumerator()) {
-            $manifest = Join-Path $playwrightRuntime "node_modules\$($package.Key)\package.json"
-            if (-not (Test-Path $manifest -PathType Leaf)) { throw "installed agent package is missing: $($package.Key)" }
-            if ((Get-Content $manifest | ConvertFrom-Json).version -ne $package.Value) {
-              throw "installed agent package version is incorrect: $($package.Key)"
-            }
-          }
-
-          $helperVersion = & $helper version | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or -not $helperVersion.ok -or $helperVersion.result.version -ne $bundleVersion) {
-            throw "installed agent helper returned an incorrect version"
-          }
-          $setup = & $helper setup --client generic --yes | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or -not $setup.ok -or $setup.result.clients.Count -ne 0) {
-            throw "installed generic MCP setup failed"
-          }
-          if (
-            $setup.result.mcp.command -ne $helper -or
-            $setup.result.mcp.args.Count -ne 1 -or
-            $setup.result.mcp.args[0] -ne "serve" -or
-            $setup.result.generic.mcpServers.aliasmode.command -ne $helper -or
-            $setup.result.generic.mcpServers.aliasmode.args[0] -ne "serve"
-          ) {
-            throw "installed generic MCP setup returned incorrect paths"
-          }
-
-          function Read-McpResponse([System.Diagnostics.Process]$process, [int]$id) {
-            for ($attempt = 0; $attempt -lt 50; $attempt++) {
-              $response = $process.StandardOutput.ReadLine() | ConvertFrom-Json
-              if ($response.id -eq $id) { return $response }
-            }
-            throw "installed MCP host did not return response $id"
-          }
-
-          $mcpStart = [System.Diagnostics.ProcessStartInfo]::new()
-          $mcpStart.FileName = $helper
-          $mcpStart.ArgumentList.Add("serve")
-          $mcpStart.WorkingDirectory = $installRoot
-          $mcpStart.UseShellExecute = $false
-          $mcpStart.CreateNoWindow = $true
-          $mcpStart.RedirectStandardInput = $true
-          $mcpStart.RedirectStandardOutput = $true
-          $mcpStart.Environment["ALIASMODE_MCP_DIAGNOSTICS"] = "1"
-          $mcp = [System.Diagnostics.Process]::new()
-          $mcp.StartInfo = $mcpStart
-          if (-not $mcp.Start()) { throw "installed MCP host did not start" }
-          $mcpShutdownFailure = $null
-          $preexistingProfileId = $null
-          $ownedProfileId = $null
-          try {
-            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aliasmode-ci","version":"1"}}}')
-            $initialize = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
-            if ($initialize.id -ne 1 -or -not $initialize.result.serverInfo) {
-              throw "installed MCP host returned an invalid initialize response"
-            }
-            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}')
-            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
-            $toolResponse = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
-            if ($toolResponse.id -ne 2) { throw "installed MCP host returned an invalid tools/list response" }
-            $toolNames = @($toolResponse.result.tools | ForEach-Object { $_.name })
-            foreach ($name in @(
-              "aliasmode_profiles_list",
-              "aliasmode_profile_create",
-              "aliasmode_profile_delete",
-              "aliasmode_browser_open",
-              "aliasmode_browser_select",
-              "aliasmode_browser_status",
-              "aliasmode_browser_close",
-              "browser_close",
-              "browser_evaluate",
-              "browser_press_key",
-              "browser_click",
-              "browser_run_code"
-            )) {
-              if ($toolNames -notcontains $name) { throw "installed MCP host did not expose $name" }
-            }
-            foreach ($tool in @($toolResponse.result.tools)) {
-              if (-not $tool.annotations -or [string]::IsNullOrWhiteSpace([string]$tool.annotations.title)) {
-                throw "installed MCP tool $($tool.name) has no title annotation"
-              }
-              foreach ($hint in @("readOnlyHint", "destructiveHint", "openWorldHint")) {
-                if ($tool.annotations.PSObject.Properties.Name -notcontains $hint) {
-                  throw "installed MCP tool $($tool.name) has no $hint annotation"
-                }
-              }
-            }
-            $initialToolSchemas = ConvertTo-Json -InputObject @($toolResponse.result.tools) -Compress -Depth 100
-
-            if (-not (Test-Path $descriptorPath -PathType Leaf)) { throw "background runtime descriptor is missing" }
-            $descriptor = Get-Content $descriptorPath | ConvertFrom-Json
-            if (
-              $descriptor.protocol -ne "aliasmode-runtime-v1" -or
-              $descriptor.appVersion -ne $bundleVersion -or
-              $descriptor.readiness -ne "local" -or
-              $descriptor.generation -notmatch '^[a-f0-9]{64}$' -or
-              $descriptor.nonce -notmatch '^[a-f0-9]{64}$' -or
-              $descriptor.generation -eq $descriptor.nonce -or
-              $descriptor.port -le 0 -or
-              $descriptor.desktopPid -le 0 -or
-              $descriptor.sidecarPid -le 0
-            ) {
-              throw "background runtime descriptor is invalid"
-            }
-            $backgroundProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($descriptor.desktopPid)"
-            if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
-              throw "MCP host did not launch AliasMode in background mode"
-            }
-            Add-Type -TypeDefinition @'
-            using System;
-            using System.Runtime.InteropServices;
-            public static class AliasModeWindow {
-              private delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
-              [StructLayout(LayoutKind.Sequential)]
-              private struct Rect { public int Left, Top, Right, Bottom; }
-              [DllImport("user32.dll")]
-              private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
-              [DllImport("user32.dll")]
-              private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
-              [DllImport("user32.dll")]
-              private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
-              [DllImport("user32.dll")]
-              private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
-              [DllImport("user32.dll")]
-              [return: MarshalAs(UnmanagedType.Bool)]
-              public static extern bool IsWindowVisible(IntPtr handle);
-
-              public static IntPtr FindAppWindow(uint processId, bool visibleOnly) {
-                IntPtr found = IntPtr.Zero;
-                EnumWindows((handle, _) => {
-                  GetWindowThreadProcessId(handle, out uint owner);
-                  if (owner != processId || !GetWindowRect(handle, out Rect rect)) return true;
-                  if (rect.Right - rect.Left < 200 || rect.Bottom - rect.Top < 200) return true;
-                  if (visibleOnly && !IsWindowVisible(handle)) return true;
-                  found = handle;
-                  return false;
-                }, IntPtr.Zero);
-                return found;
-              }
-
-              public static bool CloseWindow(IntPtr handle) {
-                return PostMessage(handle, 0x0010, IntPtr.Zero, IntPtr.Zero);
-              }
-            }
-          '@
-            $backgroundVisible = $false
-            for ($attempt = 0; $attempt -lt 20; $attempt++) {
-              $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
-              if ($mainWindow -ne [IntPtr]::Zero) {
-                $backgroundVisible = $true
-                break
-              }
-              Start-Sleep -Milliseconds 100
-            }
-            if ($backgroundVisible) {
-              throw "background AliasMode exposed its main window"
-            }
-
-            $preexisting = (& $helper profiles create --name ci-preexisting | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or -not $preexisting.ok -or -not $preexisting.result.id) {
-              throw "installed helper could not create the pre-existing profile"
-            }
-            $preexistingProfileId = $preexisting.result.id
-            $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
-              throw "installed helper could not open the pre-existing browser"
-            }
-
-            $selectRequest = @{
-              jsonrpc = "2.0"
-              id = 3
-              method = "tools/call"
-              params = @{
-                name = "aliasmode_browser_select"
-                arguments = @{ profileId = $preexistingProfileId }
-              }
-            } | ConvertTo-Json -Compress -Depth 8
-            $mcp.StandardInput.WriteLine($selectRequest)
-            $selected = Read-McpResponse $mcp 3
-            if ($selected.result.isError -eq $true) {
-              throw "installed MCP host could not select the pre-existing browser"
-            }
-
-            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":30,"method":"tools/list","params":{}}')
-            $selectedTools = Read-McpResponse $mcp 30
-            $selectedToolSchemas = ConvertTo-Json -InputObject @($selectedTools.result.tools) -Compress -Depth 100
-            if ($selectedToolSchemas -cne $initialToolSchemas) {
-              throw "installed MCP tool schemas changed after browser selection"
-            }
-
-            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"browser_close","arguments":{}}}')
-            $closed = Read-McpResponse $mcp 31
-            if ($closed.result.isError -eq $true) {
-              throw "installed MCP host could not close the selected browser"
-            }
-            $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":32,"method":"tools/list","params":{}}')
-            $closedTools = Read-McpResponse $mcp 32
-            $closedToolSchemas = ConvertTo-Json -InputObject @($closedTools.result.tools) -Compress -Depth 100
-            if ($closedToolSchemas -cne $initialToolSchemas) {
-              throw "installed MCP tool schemas changed after browser close"
-            }
-
-            $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
-              throw "installed helper could not reopen the pre-existing browser"
-            }
-
-            $createRequest = @{
-              jsonrpc = "2.0"
-              id = 4
-              method = "tools/call"
-              params = @{
-                name = "aliasmode_profile_create"
-                arguments = @{ name = "ci-owned" }
-              }
-            } | ConvertTo-Json -Compress -Depth 8
-            $mcp.StandardInput.WriteLine($createRequest)
-            $created = Read-McpResponse $mcp 4
-            $ownedProfileId = $created.result.structuredContent.id
-            if ($created.result.isError -eq $true -or -not $ownedProfileId) {
-              throw "installed MCP host could not create its owned profile"
-            }
-
-            $openRequest = @{
-              jsonrpc = "2.0"
-              id = 5
-              method = "tools/call"
-              params = @{
-                name = "aliasmode_browser_open"
-                arguments = @{ profileId = $ownedProfileId; headless = $true }
-              }
-            } | ConvertTo-Json -Compress -Depth 8
-            $mcp.StandardInput.WriteLine($openRequest)
-            $ownedOpen = Read-McpResponse $mcp 5
-            if (
-              $ownedOpen.result.isError -eq $true -or
-              $ownedOpen.result.structuredContent.profileId -ne $ownedProfileId
-            ) {
-              throw "installed MCP host could not open its owned browser"
-            }
-          } finally {
-            $mcp.StandardInput.Close()
-            if (-not $mcp.WaitForExit(60000)) {
-              Stop-Process -Id $mcp.Id -Force
-              $mcp.WaitForExit()
-              $mcpShutdownFailure = "installed MCP host survived safe browser cleanup"
-            }
-          }
-          if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
-          if (-not (Get-Process -Id $descriptor.desktopPid -ErrorAction SilentlyContinue)) {
-            throw "background desktop did not survive MCP disconnect"
-          }
-          if (-not (Test-Path $descriptorPath -PathType Leaf)) {
-            throw "runtime descriptor did not survive MCP disconnect"
-          }
-
-          $ownedStopped = $false
-          for ($attempt = 0; $attempt -lt 30; $attempt++) {
-            $ownedStatus = (& $helper browser status --profile $ownedProfileId | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or -not $ownedStatus.ok) {
-              throw "installed helper could not inspect the MCP-owned browser"
-            }
-            if (-not $ownedStatus.result.running) {
-              $ownedStopped = $true
-              break
-            }
-            Start-Sleep -Milliseconds 500
-          }
-          if (-not $ownedStopped) {
-            throw "MCP-owned browser survived its connection"
-          }
-          $preexistingStatus = (& $helper browser status --profile $preexistingProfileId | ConvertFrom-Json)
-          if ($LASTEXITCODE -ne 0 -or -not $preexistingStatus.ok -or -not $preexistingStatus.result.running) {
-            throw "pre-existing browser did not survive MCP disconnect"
-          }
-          $preexistingClosed = (& $helper browser close --profile $preexistingProfileId | ConvertFrom-Json)
-          if (
-            $LASTEXITCODE -ne 0 -or
-            -not $preexistingClosed.ok -or
-            -not $preexistingClosed.result.closed -or
-            $preexistingClosed.result.deleted
-          ) {
-            throw "installed helper could not close the preserved browser"
-          }
-          foreach ($persistentProfileId in @($preexistingProfileId, $ownedProfileId)) {
-            $deleted = (& $helper profiles delete --profile $persistentProfileId | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or -not $deleted.ok -or -not $deleted.result.deleted) {
-              throw "installed helper could not delete a lifecycle profile"
-            }
-          }
-
-          $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
-          if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
-            throw "installed JSON CLI could not create a temporary profile: $($profile.error)"
-          }
-          $profileId = $profile.result.id
-          $opened = & $helper browser open --profile $profileId --headless | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or -not $opened.ok -or -not $opened.result.headless -or $opened.result.alreadyOpen) {
-            $sidecarLog = Get-ChildItem (Join-Path $appData "logs\aliasmode-*.log") -File -ErrorAction SilentlyContinue |
-              Sort-Object LastWriteTime -Descending |
-              Select-Object -First 1
-            if ($sidecarLog) {
-              Get-Content $sidecarLog.FullName |
-                Select-String -Pattern 'sidecar start|launching .* on port|launch stage' |
-                Select-Object -Last 12 |
-                ForEach-Object {
-                  $safeTrace = $_.Line -replace 'pid=\d+', 'pid=<pid>'
-                  $safeTrace = $safeTrace -replace 'launching [A-Za-z0-9_-]+ on port \d+.*', 'launching <profile> on port <port>'
-                  $safeTrace = $safeTrace -replace '[A-Za-z0-9_-]+: launch stage', '<profile>: launch stage'
-                  Write-Host "launch trace: $safeTrace"
-                }
-            }
-            throw "installed JSON CLI could not open a headless browser: $($opened.error)"
-          }
-          $status = & $helper browser status --profile $profileId | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or -not $status.ok -or -not $status.result.running) {
-            throw "installed JSON CLI did not report its browser as running: $($status.error)"
-          }
-          $closed = & $helper browser close --profile $profileId | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or -not $closed.ok -or -not $closed.result.closed -or -not $closed.result.deleted) {
-            throw "installed JSON CLI did not close and delete its temporary profile: $($closed.error)"
-          }
-
-          $app = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
-          $reveal = Start-Process -PassThru $appPath
-          if (-not $reveal.WaitForExit(15000)) {
-            Stop-Process -Id $reveal.Id -Force
-            throw "second normal AliasMode launch did not return to the background instance"
-          }
-          if ($reveal.ExitCode -ne 0) {
-            throw "second normal AliasMode launch exited with code $($reveal.ExitCode)"
-          }
-          $sidecarPid = $null
-          $shutdownFailure = $null
-          try {
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              $app.Refresh()
-              if ($app.HasExited) { throw "installed AliasMode exited before desktop readiness" }
-              $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
-                Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
-                Select-Object -First 1
-              if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
-              $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
-              if ($sidecarPid -and $mainWindow -ne [IntPtr]::Zero) { break }
-              Start-Sleep -Milliseconds 500
-            }
-            if (-not $sidecarPid) { throw "installed desktop did not start its packaged sidecar" }
-            if ($mainWindow -eq [IntPtr]::Zero) {
-              throw "installed desktop did not show its main window"
-            }
-            Start-Sleep -Seconds 2
-            $app.Refresh()
-            $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
-            if (
-              $app.HasExited -or
-              -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) -or
-              $mainWindow -eq [IntPtr]::Zero
-            ) {
-              throw "installed desktop did not remain ready"
-            }
-          } finally {
-            $app.Refresh()
-            if (-not $app.HasExited) {
-              if (-not [AliasModeWindow]::CloseWindow($mainWindow)) {
-                $shutdownFailure = "installed desktop rejected its main-window close request"
-              } elseif (-not $app.WaitForExit(15000)) {
-                $shutdownFailure = "installed desktop did not exit after its main window closed"
-              }
-              $app.Refresh()
-              if (-not $app.HasExited) {
-                Stop-Process -Id $app.Id -Force
-                $app.WaitForExit()
-              }
-            }
-          }
-          if ($sidecarPid) {
-            for ($attempt = 0; $attempt -lt 30; $attempt++) {
-              if (-not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue)) { break }
-              Start-Sleep -Milliseconds 500
-            }
-            if (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) {
-              Stop-Process -Id $sidecarPid -Force
-              if (-not $shutdownFailure) { $shutdownFailure = "packaged sidecar survived desktop shutdown" }
-            }
-          }
-          if ($shutdownFailure) { throw $shutdownFailure }
-          for ($attempt = 0; $attempt -lt 30; $attempt++) {
-            if (-not (Test-Path $descriptorPath)) { break }
-            Start-Sleep -Milliseconds 500
-          }
-          if (Test-Path $descriptorPath) { throw "runtime descriptor survived desktop shutdown" }
-
-          $eofApp = Start-Process -PassThru $appPath
-          $eofSidecarPid = $null
-          try {
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              $eofApp.Refresh()
-              if ($eofApp.HasExited) { throw "EOF acceptance desktop exited before readiness" }
-              if (Test-Path $descriptorPath -PathType Leaf) {
-                $eofDescriptor = Get-Content $descriptorPath | ConvertFrom-Json
-                if ($eofDescriptor.desktopPid -eq $eofApp.Id) {
-                  $eofSidecarPid = [int]$eofDescriptor.sidecarPid
-                  break
-                }
-              }
-              Start-Sleep -Milliseconds 500
-            }
-            if (-not $eofSidecarPid) { throw "EOF acceptance desktop did not publish its sidecar" }
-
-            Stop-Process -Id $eofApp.Id -Force
-            $eofApp.WaitForExit()
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              if (-not (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue)) { break }
-              Start-Sleep -Milliseconds 500
-            }
-            if (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue) {
-              throw "packaged sidecar survived parent stdin EOF"
-            }
-          } finally {
-            $eofApp.Refresh()
-            if (-not $eofApp.HasExited) {
-              Stop-Process -Id $eofApp.Id -Force
-              $eofApp.WaitForExit()
-            }
-            if ($eofSidecarPid -and (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue)) {
-              Stop-Process -Id $eofSidecarPid -Force
-            }
-          }
-
-          $degradedApp = Start-Process -PassThru $appPath
-          $degradedSidecarPid = $null
-          try {
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              $degradedApp.Refresh()
-              if ($degradedApp.HasExited) { throw "degraded desktop exited before readiness" }
-              if (Test-Path $descriptorPath -PathType Leaf) {
-                $degradedDescriptor = Get-Content $descriptorPath | ConvertFrom-Json
-                if ($degradedDescriptor.desktopPid -eq $degradedApp.Id) {
-                  $degradedSidecarPid = [int]$degradedDescriptor.sidecarPid
-                  break
-                }
-              }
-              Start-Sleep -Milliseconds 500
-            }
-            if (-not $degradedSidecarPid) { throw "degraded desktop did not publish its runtime descriptor" }
-            Stop-Process -Id $degradedSidecarPid -Force
-            if (-not $degradedApp.WaitForExit(15000)) {
-              throw "degraded desktop did not exit after unexpected sidecar termination"
-            }
-            if ($degradedApp.ExitCode -eq 0) {
-              throw "degraded desktop reported success after unexpected sidecar termination"
-            }
-            for ($attempt = 0; $attempt -lt 30; $attempt++) {
-              if (-not (Test-Path $descriptorPath)) { break }
-              Start-Sleep -Milliseconds 500
-            }
-            if (Test-Path $descriptorPath) {
-              throw "runtime descriptor survived unexpected sidecar termination"
-            }
-          } finally {
-            $degradedApp.Refresh()
-            if (-not $degradedApp.HasExited) {
-              Stop-Process -Id $degradedApp.Id -Force
-              $degradedApp.WaitForExit()
-            }
-          }
-
-          $metadata = Get-Content $env:ALIASMODE_BROWSER_METADATA | ConvertFrom-Json
-          if ($metadata.executable -ne "chrome.exe") { throw "Windows browser metadata does not target chrome.exe" }
-          $browserPath = Join-Path $installRoot "cloakbrowser\chrome.exe"
-          if (-not (Test-Path $browserPath -PathType Leaf)) { throw "installed CloakBrowser executable is missing" }
-          if (-not (Test-Path (Join-Path $playwrightRuntime "node\node.exe") -PathType Leaf)) {
-            throw "installed official Node runtime is missing"
-          }
-          if (-not (Test-Path (Join-Path $playwrightRuntime "worker.mjs") -PathType Leaf)) {
-            throw "installed Playwright worker is missing"
-          }
-          if (-not (Test-Path (Join-Path $playwrightRuntime "node_modules\playwright-core\package.json") -PathType Leaf)) {
-            throw "installed Playwright runtime is missing"
-          }
-          if (-not (Test-Path (Join-Path $playwrightRuntime "node_modules\ws\package.json") -PathType Leaf)) {
-            throw "installed Playwright WebSocket runtime is missing"
-          }
-
-          $workerStart = [System.Diagnostics.ProcessStartInfo]::new()
-          $workerStart.FileName = Join-Path $playwrightRuntime "node\node.exe"
-          $workerStart.ArgumentList.Add("--input-type=module")
-          $workerStart.ArgumentList.Add("--eval")
-          $workerStart.ArgumentList.Add(@'
-          import { pathToFileURL } from "node:url";
-          try {
-            await import(pathToFileURL(process.argv[1]).href);
-          } catch {
-            process.stdout.write(JSON.stringify({
-              version: 1,
-              ok: false,
-              error: { code: "runtime_unavailable", message: "Playwright runtime is unavailable" },
-            }));
-            process.exitCode = 1;
-          }
-          '@)
-          $workerStart.ArgumentList.Add((Join-Path $playwrightRuntime "worker.mjs"))
-          $workerStart.UseShellExecute = $false
-          $workerStart.RedirectStandardInput = $true
-          $workerStart.RedirectStandardOutput = $true
-          $workerStart.RedirectStandardError = $true
-          foreach ($name in @($workerStart.Environment.Keys)) {
-            if ($name -match '^(ALIASMODE_|CLOAKBROWSER_)' -or $name -match '^(NODE_OPTIONS|NODE_PATH|HUB_PASSWORD)$') {
-              $workerStart.Environment.Remove($name)
-            }
-          }
-          $worker = [System.Diagnostics.Process]::new()
-          $worker.StartInfo = $workerStart
-          if (-not $worker.Start()) { throw "installed Playwright worker did not start" }
-          $worker.StandardInput.Write('{"version":1,"operation":"page","payload":{"endpoint":"not-a-url"}}')
-          $worker.StandardInput.Close()
-          $workerOutput = $worker.StandardOutput.ReadToEnd()
-          $workerError = $worker.StandardError.ReadToEnd()
-          $worker.WaitForExit()
-          if ($worker.ExitCode -ne 1) { throw "installed Playwright worker exited with code $($worker.ExitCode)" }
-          try { $workerResponse = $workerOutput | ConvertFrom-Json } catch { throw "installed Playwright worker returned malformed JSON" }
-          if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "invalid_request") {
-            throw "installed Playwright worker returned an unexpected protocol response"
-          }
-          if (-not [string]::IsNullOrEmpty($workerError)) { throw "installed Playwright worker wrote to stderr" }
-
-          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = $playwrightRuntime
-          $env:CLOAKBROWSER_BINARY_PATH = $browserPath
-          $env:CLOAKBROWSER_BINARY_SHA256 = $metadata.sha256
-          $env:ALIASMODE_SESSION_LAUNCH = "0"
-
-          $windowAcceptanceRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed-window-acceptance"
-          Remove-Item $windowAcceptanceRoot -Recurse -Force -ErrorAction SilentlyContinue
-          $windowAcceptanceFailure = $null
-          $windowCleanupFailure = $null
-          try {
-            & $sidecars[0].FullName __cloud-launcher-smoke --windows-window-acceptance --state-root $windowAcceptanceRoot
-            if ($LASTEXITCODE -ne 0) {
-              throw "installed native CloakBrowser window acceptance exited with code $LASTEXITCODE"
-            }
-          } catch {
-            $windowAcceptanceFailure = $_
-          } finally {
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              try {
-                $windowProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop |
-                  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($windowAcceptanceRoot) })
-              } catch {
-                if (-not $windowCleanupFailure) { $windowCleanupFailure = $_ }
-                $windowProcesses = @()
-                break
-              }
-              if ($windowProcesses.Count -eq 0) { break }
-              foreach ($candidate in $windowProcesses) {
-                try {
-                  $process = Get-Process -Id $candidate.ProcessId -ErrorAction Stop
-                  $process.Kill($true)
-                  [void]$process.WaitForExit(5000)
-                } catch {
-                  if ((Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue) -and -not $windowCleanupFailure) {
-                    $windowCleanupFailure = $_
-                  }
-                }
-              }
-              Start-Sleep -Milliseconds 250
-            }
-            try {
-              $windowProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop |
-                Where-Object { $_.CommandLine -and $_.CommandLine.Contains($windowAcceptanceRoot) })
-              if ($windowProcesses.Count -ne 0 -and -not $windowCleanupFailure) {
-                $windowCleanupFailure = "native CloakBrowser acceptance processes survived cleanup"
-              }
-            } catch {
-              if (-not $windowCleanupFailure) { $windowCleanupFailure = $_ }
-            }
-            for ($attempt = 0; $attempt -lt 20; $attempt++) {
-              try { Remove-Item $windowAcceptanceRoot -Recurse -Force -ErrorAction Stop } catch {}
-              if (-not (Test-Path $windowAcceptanceRoot)) { break }
-              Start-Sleep -Milliseconds 250
-            }
-            if ((Test-Path $windowAcceptanceRoot) -and -not $windowCleanupFailure) {
-              $windowCleanupFailure = "native CloakBrowser acceptance state survived cleanup"
-            }
-          }
-          if ($windowAcceptanceFailure -and $windowCleanupFailure) {
-            throw "$($windowAcceptanceFailure.Exception.Message); cleanup also failed: $windowCleanupFailure"
-          }
-          if ($windowAcceptanceFailure) { throw $windowAcceptanceFailure }
-          if ($windowCleanupFailure) { throw $windowCleanupFailure }
-
-          $cloudAcceptanceRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed-cloud-restore"
-          Remove-Item $cloudAcceptanceRoot -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force $cloudAcceptanceRoot | Out-Null
-          $savedEnvironment = @{}
-          $acceptanceEnvironmentNames = @(
-            "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",
-            "WEBVIEW2_USER_DATA_FOLDER",
-            "ALIASMODE_CLOUD_URL",
-            "ALIASMODE_SUPABASE_URL",
-            "ALIASMODE_SUPABASE_ANON_KEY"
-          )
-          foreach ($name in $acceptanceEnvironmentNames) {
-            $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-          }
-
-          Add-Type @'
-          using System.ComponentModel;
-          using System.Runtime.InteropServices;
-          public static class AliasModeAcceptanceCredentials {
-            [DllImport("Advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
-            public static extern bool Delete(string target, uint type, uint flags);
-
-            [DllImport("Advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
-            private static extern bool Read(string target, uint type, uint flags, out System.IntPtr credential);
-
-            [DllImport("Advapi32.dll", EntryPoint = "CredFree")]
-            private static extern void Free(System.IntPtr credential);
-
-            public static bool Exists(string target) {
-              System.IntPtr credential;
-              if (Read(target, 1, 0, out credential)) {
-                Free(credential);
-                return true;
-              }
-              int error = Marshal.GetLastWin32Error();
-              if (error == 1168) return false;
-              throw new Win32Exception(error);
-            }
-          }
-          '@
-
-          $acceptanceCredentialTargets = @(
-            "AliasMode/refresh-token",
-            "AliasMode/device-credential",
-            "AliasMode/queue-encryption-key"
-          )
-
-          function Remove-AliasModeAcceptanceCredentials {
-            foreach ($target in $acceptanceCredentialTargets) {
-              [void][AliasModeAcceptanceCredentials]::Delete($target, 1, 0)
-            }
-          }
-
-          function Assert-AliasModeAcceptanceCredentialsAbsent {
-            foreach ($target in $acceptanceCredentialTargets) {
-              if ([AliasModeAcceptanceCredentials]::Exists($target)) {
-                throw "Cloud acceptance credential cleanup was not confirmed"
-              }
-            }
-          }
-
-          function Get-FreeLoopbackPort {
-            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-            $listener.Start()
-            try { return ([Net.IPEndPoint]$listener.LocalEndpoint).Port }
-            finally { $listener.Stop() }
-          }
-
-          $trackedPids = [Collections.Generic.HashSet[int]]::new()
-          $fixtureProcess = $null
-          $activeAcceptanceApp = $null
-          $fixturePort = Get-FreeLoopbackPort
-          $fixtureUrl = "http://127.0.0.1:$fixturePort"
-          $isolatedState = Join-Path (
-            [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
-          ) "com.aliasmode.desktop"
-          Remove-Item $isolatedState -Recurse -Force -ErrorAction SilentlyContinue
-          if (Test-Path $isolatedState) { throw "installed Cloud acceptance state root was not clean" }
-          New-Item -ItemType Directory -Force $isolatedState | Out-Null
-          $config = @{
-            version = 1
-            mode = "cloud"
-            cloudUrl = $fixtureUrl
-            localAnalytics = $false
-          } | ConvertTo-Json
-          [IO.File]::WriteAllText(
-            (Join-Path $isolatedState "config.json"),
-            $config,
-            [Text.UTF8Encoding]::new($false)
-          )
-
-          [Environment]::SetEnvironmentVariable("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "1", "Process")
-          [Environment]::SetEnvironmentVariable("ALIASMODE_CLOUD_URL", $fixtureUrl, "Process")
-          [Environment]::SetEnvironmentVariable("ALIASMODE_SUPABASE_URL", $fixtureUrl, "Process")
-          [Environment]::SetEnvironmentVariable("ALIASMODE_SUPABASE_ANON_KEY", "aliasmode-fixture-anon", "Process")
-
-          $acceptanceCredentialCanaries = @{
-            seededRefresh = "aliasmode-acceptance-refresh-seeded"
-            rotatedRefresh = "aliasmode-fixture-refresh-rotated"
-            access = "aliasmode-fixture-access"
-            device = "aliasmode-acceptance-device"
-            queue = "YWxpYXNtb2RlLWFjY2VwdGFuY2UtcXVldWUta2V5MDE="
-          }
-
-          function Assert-AliasModeAcceptanceLogsExcludeCredentials {
-            $logRoot = Join-Path $isolatedState "logs"
-            $logFiles = @(Get-ChildItem $logRoot -Recurse -File -ErrorAction SilentlyContinue)
-            if ($logFiles.Count -eq 0) { throw "installed Cloud acceptance sidecar log was not found" }
-            foreach ($file in $logFiles) {
-              $content = [IO.File]::ReadAllText($file.FullName)
-              foreach ($canary in $acceptanceCredentialCanaries.Values) {
-                if ($content.Contains($canary, [StringComparison]::Ordinal)) {
-                  throw "Cloud acceptance log exposed a synthetic credential"
-                }
-              }
-            }
-          }
-
-          function Start-CloudRestoreFixture([string]$mode, [string]$initialRefresh) {
-            $process = Start-Process -PassThru $sidecars[0].FullName -ArgumentList @(
-              "__cloud-restore-fixture",
-              "--port", "$fixturePort",
-              "--mode", $mode,
-              "--initial-refresh", $initialRefresh
-            )
-            [void]$trackedPids.Add([int]$process.Id)
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              $process.Refresh()
-              if ($process.HasExited) { throw "Cloud restore fixture $mode exited before readiness" }
-              try {
-                $health = Invoke-RestMethod "$fixtureUrl/health" -TimeoutSec 1
-                if ($health.ok -eq $true -and $health.mode -eq $mode) { return $process }
-              } catch {}
-              Start-Sleep -Milliseconds 100
-            }
-            throw "Cloud restore fixture $mode did not become ready"
-          }
-
-          function Stop-CloudRestoreFixture($process) {
-            if (-not $process) { return }
-            Stop-AcceptanceProcess $process
-            for ($attempt = 0; $attempt -lt 50; $attempt++) {
-              try {
-                Invoke-RestMethod "$fixtureUrl/health" -TimeoutSec 1 | Out-Null
-                Start-Sleep -Milliseconds 100
-              } catch { return }
-            }
-            throw "Cloud restore fixture did not release its loopback port"
-          }
-
-          function Stop-AcceptanceProcess($process) {
-            if (-not $process) { return }
-            $process.Refresh()
-            if (-not $process.HasExited) {
-              $process.Kill($true)
-              if (-not $process.WaitForExit(10000)) {
-                throw "Cloud acceptance process tree did not exit"
-              }
-            }
-          }
-
-          function Start-InstalledCloudAcceptanceApp {
-            $webviewRoot = Join-Path $cloudAcceptanceRoot "webview-$([Guid]::NewGuid().ToString('N'))"
-            [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webviewRoot, "Process")
-            $process = Start-Process -PassThru $appPath
-            [void]$trackedPids.Add([int]$process.Id)
-            $sidecarPid = 0
-            $debugPort = 0
-            $debugReady = $false
-            for ($attempt = 0; $attempt -lt 120; $attempt++) {
-              $process.Refresh()
-              if ($process.HasExited) { throw "installed Cloud acceptance app exited before readiness" }
-              if ($sidecarPid -le 0) {
-                $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($process.Id)" -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
-                  Select-Object -First 1
-                if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
-              }
-              if ($debugPort -le 0) {
-                $activePortPath = Join-Path $webviewRoot "EBWebView\DevToolsActivePort"
-                if (Test-Path $activePortPath -PathType Leaf) {
-                  try {
-                    $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
-                    $parsedPort = 0
-                    if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
-                      $debugPort = $parsedPort
-                    }
-                  } catch {}
-                }
-              }
-              if ($debugPort -gt 0) {
-                try {
-                  Invoke-RestMethod "http://127.0.0.1:$debugPort/json/version" -TimeoutSec 1 | Out-Null
-                  $debugReady = $true
-                } catch {}
-              }
-              if ($sidecarPid -gt 0 -and $process.MainWindowHandle -ne 0 -and $debugReady) { break }
-              Start-Sleep -Milliseconds 250
-            }
-            if ($sidecarPid -le 0) { throw "installed Cloud acceptance app did not start its packaged sidecar" }
-            if ($process.MainWindowHandle -eq 0) { throw "installed Cloud acceptance app did not create its main window" }
-            if ($debugPort -le 0) { throw "installed Cloud acceptance WebView2 endpoint was not published" }
-            if (-not $debugReady) { throw "installed Cloud acceptance WebView2 endpoint did not become ready" }
-            [void]$trackedPids.Add($sidecarPid)
-            return [pscustomobject]@{
-              Process = $process
-              SidecarPid = $sidecarPid
-              DebugPort = $debugPort
-            }
-          }
-
-          function Stop-InstalledCloudAcceptanceApp($record) {
-            if (-not $record) { return }
-            $process = $record.Process
-            $process.Refresh()
-            if (-not $process.HasExited) {
-              if (-not $process.CloseMainWindow()) {
-                throw "installed Cloud acceptance app rejected its close request"
-              }
-              if (-not $process.WaitForExit(30000)) {
-                throw "installed Cloud acceptance app did not exit during restart"
-              }
-            }
-            for ($attempt = 0; $attempt -lt 60; $attempt++) {
-              if (-not (Get-Process -Id $record.SidecarPid -ErrorAction SilentlyContinue)) { return }
-              Start-Sleep -Milliseconds 250
-            }
-            throw "installed Cloud acceptance sidecar survived app restart"
-          }
-
-          $desktopProbe = @'
-          import { join } from "node:path";
-          import { pathToFileURL } from "node:url";
-
-          let input = "";
-          for await (const chunk of process.stdin) input += chunk;
-          const { runtimeRoot, endpoint, fixtureEndpoint, action, expected } = JSON.parse(input);
-          if (!runtimeRoot || !endpoint || !fixtureEndpoint || !action || !expected) {
-            throw new Error("desktop acceptance input is incomplete");
-          }
-          if (![expected.seededRefresh, expected.rotatedRefresh, expected.device, expected.queue]
-            .every((value) => typeof value === "string" && value.length > 0)) {
-            throw new Error("desktop acceptance credential canaries are incomplete");
-          }
-          const { chromium } = await import(pathToFileURL(join(runtimeRoot, "node_modules", "playwright-core", "index.mjs")).href);
-          const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
-          try {
-            let page;
-            for (let attempt = 0; attempt < 100 && !page; attempt++) {
-              page = browser.contexts().flatMap((context) => context.pages())
-                .find((candidate) => candidate.url().startsWith("http://127.0.0.1:"));
-              if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
-            }
-            if (!page) throw new Error("installed AliasMode dashboard target was not found");
-            await page.waitForFunction(() => typeof window.__TAURI_INTERNALS__?.invoke === "function", undefined, { timeout: 30_000 });
-            const waitForText = (values) => page.waitForFunction(
-              (expectedText) => expectedText.every((value) => document.body?.innerText.includes(value)),
-              values,
-              { timeout: 30_000 },
-            );
-            const releaseRestore = async (count = 1) => {
-              for (let index = 0; index < count; index++) {
-                const deadline = Date.now() + 30_000;
-                while (true) {
-                  const response = await fetch(`${fixtureEndpoint}/control/release`, { method: "POST" });
-                  if (response.ok) break;
-                  if (response.status !== 409 || Date.now() >= deadline) {
-                    throw new Error("Cloud restore fixture could not be released");
-                  }
-                  await new Promise((resolve) => setTimeout(resolve, 25));
-                }
-              }
-            };
-            const credentialFlags = () => page.evaluate(async (credential) => {
-              const invoke = window.__TAURI_INTERNALS__.invoke;
-              const [refresh, device, queue] = await Promise.all([
-                invoke("credential_get", { key: "refresh_token" }),
-                invoke("credential_get", { key: "device_credential" }),
-                invoke("credential_get", { key: "queue_encryption_key" }),
-              ]);
-              return {
-                seededRefresh: refresh === credential.seededRefresh,
-                rotatedRefresh: refresh === credential.rotatedRefresh,
-                refreshMissing: refresh === null,
-                device: device === credential.device,
-                deviceMissing: device === null,
-                queue: queue === credential.queue,
-                queueMissing: queue === null,
-              };
-            }, expected);
-            const requireStored = async (refreshKind) => {
-              const flags = await credentialFlags();
-              if (!flags[refreshKind] || !flags.device || !flags.queue) {
-                throw new Error("installed Credential Manager persistence did not match the expected structure");
-              }
-            };
-            const openMemberSettings = async () => {
-              await page.getByRole("button", { name: "Open Account and Settings" }).click();
-              await waitForText(["Fixture workspace"]);
-              await page.getByRole("tab", { name: "Team", exact: true }).click();
-              const roleRow = page.locator(".settings-row").filter({ has: page.getByText("Role", { exact: true }) });
-              await roleRow.waitFor({ state: "visible", timeout: 30_000 });
-              if ((await roleRow.locator(":scope > strong").innerText()).trim() !== "member") {
-                throw new Error("restored Cloud workspace role was not member");
-              }
-            };
-
-            if (action === "seed") {
-              await page.evaluate(async (credential) => {
-                const invoke = window.__TAURI_INTERNALS__.invoke;
-                await invoke("credential_set", { key: "queue_encryption_key", secret: credential.queue });
-                await invoke("credential_set", { key: "device_credential", secret: credential.device });
-                await invoke("credential_set", { key: "refresh_token", secret: credential.seededRefresh });
-              }, expected);
-              await requireStored("seededRefresh");
-              await page.reload({ waitUntil: "domcontentloaded" });
-              await waitForText(["Restoring saved session"]);
-              await releaseRestore();
-              await waitForText(["No Cloud profiles yet"]);
-              await requireStored("rotatedRefresh");
-            } else if (action === "healthy") {
-              await waitForText(["Restoring saved session"]);
-              await releaseRestore();
-              await waitForText(["No Cloud profiles yet"]);
-              await openMemberSettings();
-              await requireStored("rotatedRefresh");
-            } else if (action === "offline") {
-              await page.getByRole("heading", { name: "Restoring saved session", exact: true })
-                .waitFor({ state: "visible", timeout: 30_000 });
-              await releaseRestore(2);
-              await page.getByRole("button", { name: "Try again", exact: true })
-                .waitFor({ state: "visible", timeout: 30_000 });
-              await page.getByRole("button", { name: "Sign in instead", exact: true })
-                .waitFor({ state: "visible", timeout: 30_000 });
-              await requireStored("rotatedRefresh");
-            } else if (action === "online") {
-              await page.evaluate(() => window.dispatchEvent(new Event("online")));
-              await waitForText(["Restoring saved session"]);
-              await releaseRestore();
-              await waitForText(["No Cloud profiles yet"]);
-              await openMemberSettings();
-              await requireStored("rotatedRefresh");
-            } else if (action === "revoked") {
-              await waitForText(["Restoring saved session"]);
-              await releaseRestore();
-              await waitForText(["Sign in to AliasMode Cloud", "Saved Cloud session is no longer valid"]);
-              const flags = await credentialFlags();
-              if (!flags.refreshMissing || !flags.deviceMissing || !flags.queue || flags.queueMissing) {
-                throw new Error("membership revocation did not preserve only the queue credential");
-              }
-            } else {
-              throw new Error("unknown desktop acceptance action");
-            }
-          } finally {
-            await browser.close();
-          }
-          '@
-          $desktopProbePath = Join-Path $cloudAcceptanceRoot "desktop-probe.mjs"
-          [IO.File]::WriteAllText($desktopProbePath, $desktopProbe, [Text.UTF8Encoding]::new($false))
-
-          function Invoke-InstalledDesktopProbe($record, [string]$action) {
-            $probeInput = @{
-              runtimeRoot = $playwrightRuntime
-              endpoint = "http://127.0.0.1:$($record.DebugPort)"
-              fixtureEndpoint = $fixtureUrl
-              action = $action
-              expected = $acceptanceCredentialCanaries
-            } | ConvertTo-Json -Compress -Depth 4
-            $probeStart = [Diagnostics.ProcessStartInfo]::new()
-            $probeStart.FileName = Join-Path $playwrightRuntime "node\node.exe"
-            $probeStart.ArgumentList.Add($desktopProbePath)
-            $probeStart.UseShellExecute = $false
-            $probeStart.RedirectStandardInput = $true
-            $probeStart.RedirectStandardOutput = $true
-            $probeStart.RedirectStandardError = $true
-            $probe = [Diagnostics.Process]::new()
-            $probe.StartInfo = $probeStart
-            if (-not $probe.Start()) { throw "installed desktop probe did not start" }
-            try {
-              $probeOutput = $probe.StandardOutput.ReadToEndAsync()
-              $probeError = $probe.StandardError.ReadToEndAsync()
-              $probe.StandardInput.Write($probeInput)
-              $probe.StandardInput.Close()
-              if (-not $probe.HasExited) {
-                $probeCommand = Get-CimInstance Win32_Process -Filter "ProcessId = $($probe.Id)" -ErrorAction Stop
-                if (-not $probeCommand -or [string]::IsNullOrEmpty($probeCommand.CommandLine) -or $probeCommand.CommandLine.Contains("--eval")) {
-                  throw "installed desktop probe used an unsafe process command"
-                }
-                foreach ($canary in $acceptanceCredentialCanaries.Values) {
-                  if ($probeCommand.CommandLine.Contains($canary, [StringComparison]::Ordinal)) {
-                    throw "installed desktop probe exposed a credential in its process command"
-                  }
-                }
-              }
-              if (-not $probe.WaitForExit(180000)) {
-                $probe.Kill($true)
-                $probe.WaitForExit()
-                throw "installed desktop $action probe timed out"
-              }
-              [void]$probeOutput.GetAwaiter().GetResult()
-              [void]$probeError.GetAwaiter().GetResult()
-              if ($probe.ExitCode -ne 0) {
-                throw "installed desktop $action probe exited with code $($probe.ExitCode)"
-              }
-            } finally {
-              if (-not $probe.HasExited) {
-                $probe.Kill($true)
-                $probe.WaitForExit()
-              }
-              $probe.Dispose()
-            }
-          }
-
-          $cloudAcceptanceFailure = $null
-          try {
-            Remove-AliasModeAcceptanceCredentials
-            Assert-AliasModeAcceptanceCredentialsAbsent
-
-            $fixtureProcess = Start-CloudRestoreFixture "healthy" "seeded"
-            $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
-            Invoke-InstalledDesktopProbe $activeAcceptanceApp "seed"
-            Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
-            $activeAcceptanceApp = $null
-            Write-Host "installed Cloud session acceptance stage credentials_seeded"
-
-            $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
-            Invoke-InstalledDesktopProbe $activeAcceptanceApp "healthy"
-            Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
-            $activeAcceptanceApp = $null
-            Stop-CloudRestoreFixture $fixtureProcess
-            $fixtureProcess = $null
-            Write-Host "installed Cloud session acceptance stage healthy_restart"
-
-            $fixtureProcess = Start-CloudRestoreFixture "offline" "rotated"
-            $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
-            Invoke-InstalledDesktopProbe $activeAcceptanceApp "offline"
-            Write-Host "installed Cloud session acceptance stage offline_recovery"
-            Stop-CloudRestoreFixture $fixtureProcess
-            $fixtureProcess = Start-CloudRestoreFixture "healthy" "rotated"
-            Invoke-InstalledDesktopProbe $activeAcceptanceApp "online"
-            Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
-            $activeAcceptanceApp = $null
-            Stop-CloudRestoreFixture $fixtureProcess
-            $fixtureProcess = $null
-            Write-Host "installed Cloud session acceptance stage online_recovery"
-
-            $fixtureProcess = Start-CloudRestoreFixture "membership-revoked" "rotated"
-            $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
-            Invoke-InstalledDesktopProbe $activeAcceptanceApp "revoked"
-            Stop-CloudRestoreFixture $fixtureProcess
-            $fixtureProcess = $null
-            Write-Host "installed Cloud session acceptance stage membership_revoked"
-
-            $fixtureProcess = Start-CloudRestoreFixture "cross-device" "seeded"
-            $crossDeviceRoot = Join-Path $cloudAcceptanceRoot "cross-device"
-            if (Test-Path $crossDeviceRoot) { throw "cross-device acceptance state root was not clean" }
-            & $sidecars[0].FullName __cloud-cross-device-acceptance `
-              --fixture-url $fixtureUrl `
-              --state-root $crossDeviceRoot
-            if ($LASTEXITCODE -ne 0) {
-              throw "installed cross-device Cloud acceptance exited with code $LASTEXITCODE"
-            }
-            $crossDeviceState = Invoke-RestMethod "$fixtureUrl/control/state" -TimeoutSec 5
-            if ($crossDeviceState.version -ne 42 -or $null -ne $crossDeviceState.activeDevice) {
-              throw "cross-device fixture ended in an unexpected profile state"
-            }
-            foreach ($device in @("a", "b")) {
-              $expectedClose = if ($device -eq "a") { 4 } else { 2 }
-              if ($crossDeviceState.counters.open.$device -ne 3 -or
-                  $crossDeviceState.counters.close.$device -ne $expectedClose -or
-                  $crossDeviceState.counters.heartbeat.$device -ne 0 -or
-                  $crossDeviceState.counters.abandon.$device -ne 0) {
-                throw "cross-device fixture request counters were not exact for device $device"
-              }
-            }
-            if ($crossDeviceState.counters.acceptedCloses -ne 4 -or
-                $crossDeviceState.counters.conflicts -ne 1 -or
-                $crossDeviceState.counters.profileOpen -ne 1 -or
-                $crossDeviceState.counters.droppedResponses -ne 2) {
-              throw "cross-device fixture outcome counters were not exact"
-            }
-            Stop-CloudRestoreFixture $fixtureProcess
-            $fixtureProcess = $null
-            Write-Host "installed Cloud session acceptance stage cross_device"
-          } catch {
-            $cloudAcceptanceFailure = $_
-          } finally {
-            foreach ($record in @($activeAcceptanceApp, $fixtureProcess)) {
-              if ($record) {
-                $process = if ($record.Process) { $record.Process } else { $record }
-                try { Stop-AcceptanceProcess $process } catch {}
-              }
-            }
-            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-              Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cloudAcceptanceRoot) } |
-              ForEach-Object {
-                $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
-                if ($process) {
-                  try {
-                    $process.Kill($true)
-                    [void]$process.WaitForExit(10000)
-                  } catch {}
-                }
-              }
-            foreach ($trackedPid in $trackedPids) {
-              $process = Get-Process -Id $trackedPid -ErrorAction SilentlyContinue
-              if ($process) {
-                try {
-                  $process.Kill($true)
-                  [void]$process.WaitForExit(10000)
-                } catch {}
-              }
-            }
-            for ($attempt = 0; $attempt -lt 120; $attempt++) {
-              $trackedRemaining = @($trackedPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-              $rootRemaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cloudAcceptanceRoot) })
-              if ($trackedRemaining.Count -eq 0 -and $rootRemaining.Count -eq 0) { break }
-              Start-Sleep -Milliseconds 250
-            }
-
-            $cleanupFailure = $null
-            try {
-              if ($trackedRemaining.Count -ne 0 -or $rootRemaining.Count -ne 0) {
-                throw "Cloud acceptance processes survived final cleanup"
-              }
-              Assert-AliasModeAcceptanceLogsExcludeCredentials
-            } catch {
-              $cleanupFailure = $_
-            }
-            try {
-              Remove-AliasModeAcceptanceCredentials
-              Assert-AliasModeAcceptanceCredentialsAbsent
-            } catch {
-              if (-not $cleanupFailure) { $cleanupFailure = $_ }
-            }
-            foreach ($name in $acceptanceEnvironmentNames) {
-              [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
-            }
-            foreach ($path in @($isolatedState, $cloudAcceptanceRoot)) {
-              for ($attempt = 0; $attempt -lt 120; $attempt++) {
-                try { [IO.Directory]::Delete($path, $true) } catch {}
-                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
-                if (-not (Test-Path -LiteralPath $path)) { break }
-                Start-Sleep -Milliseconds 250
-              }
-              if ((Test-Path -LiteralPath $path) -and -not $cleanupFailure) {
-                $cleanupFailure = "Cloud acceptance state survived final cleanup: $(Split-Path $path -Leaf)"
-              }
-            }
-            if ($cloudAcceptanceFailure -and $cleanupFailure) {
-              throw "$($cloudAcceptanceFailure.Exception.Message); cleanup also failed: $cleanupFailure"
-            }
-            if ($cloudAcceptanceFailure) { throw $cloudAcceptanceFailure }
-            if ($cleanupFailure) { throw $cleanupFailure }
-          }
-
-          & $sidecars[0].FullName __cloud-launcher-smoke --proxy-mismatch --state-root (Join-Path $env:RUNNER_TEMP "aliasmode-installed-proxy-mismatch")
-          if ($LASTEXITCODE -ne 0) {
-            throw "installed deterministic proxy mismatch smoke exited with code $LASTEXITCODE"
-          }
-          if (-not $automationPortBlocker.Server.IsBound) {
-            throw "fixed automation port conflict fixture released before installed acceptance completed"
-          }
-          $automationPortBlocker.Stop()
-
-          foreach ($name in $liveProxyEnvironmentNames) {
-            [Environment]::SetEnvironmentVariable($name, $savedLiveProxyEnvironment[$name], "Process")
-          }
-          if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
-            Write-Host "Installed headful Cloud proxy smoke skipped: no temporary test proxy configured"
-            exit 0
-          }
-          foreach ($proxyType in @("http", "socks5")) {
-            $stateRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed-cloud-$proxyType"
-            & $sidecars[0].FullName __cloud-launcher-smoke --proxy-type $proxyType --state-root $stateRoot
-            if ($LASTEXITCODE -ne 0) {
-              throw "installed headful Cloud proxy smoke exited with code $LASTEXITCODE"
-            }
-          }
-      - name: Stage unsigned compatibility installer
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $bundleVersion = (Get-Content ".\src-tauri\tauri.conf.json" | ConvertFrom-Json).version
-          $fullName = "AliasMode_$($bundleVersion)_x64-offline-setup.exe"
-          $source = Resolve-Path (Join-Path ".\candidate" $fullName)
-          $compatibility = ".\artifacts\windows-unsigned"
-          New-Item -ItemType Directory -Force $compatibility | Out-Null
-          $installer = Join-Path $compatibility $fullName
-          Copy-Item $source.Path $installer
-          "$((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant())  $fullName" |
-            Set-Content (Join-Path $compatibility "SHA256SUMS.txt")
-          $files = @(Get-ChildItem $compatibility -File)
-          if ($files.Count -ne 2 -or @($files | Where-Object Name -eq $fullName).Count -ne 1 -or
-              @($files | Where-Object Name -eq "SHA256SUMS.txt").Count -ne 1) {
-            throw "unsigned compatibility artifact must contain exactly one installer and checksum"
-          }
-      - uses: actions/upload-artifact@v4
+          & .\scripts\windows-installed-acceptance.ps1 `
+            -Shard browser `
+            -InstallerPath ".\package\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -ChecksumsPath ".\package\SHA256SUMS.txt" `
+            -BrowserMetadataPath ".\package\browser.json" `
+            -DiagnosticsPath ".\diagnostics\browser.json"
+      - name: Upload browser acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: aliasmode-windows-unsigned
-          path: artifacts/windows-unsigned
-          if-no-files-found: error
+          name: aliasmode-windows-browser-diagnostics-${{ github.run_attempt }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+  windows_accept_cloud:
+    name: Windows installed Cloud acceptance
+    needs: [windows_cache, windows_full]
+    if: >-
+      ${{
+        always() &&
+        needs.windows_cache.result == 'success' &&
+        (
+          needs.windows_cache.outputs.cache_hit == 'true' ||
+          (needs.windows_cache.outputs.cache_hit == 'false' && needs.windows_full.result == 'success')
+        )
+      }}
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - if: needs.windows_cache.outputs.cache_hit == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: package
+      - if: needs.windows_cache.outputs.cache_hit == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-full
+          path: package
+      - name: Run installed Cloud acceptance
+        shell: pwsh
+        env:
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & .\scripts\windows-installed-acceptance.ps1 `
+            -Shard cloud `
+            -InstallerPath ".\package\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -ChecksumsPath ".\package\SHA256SUMS.txt" `
+            -BrowserMetadataPath ".\package\browser.json" `
+            -DiagnosticsPath ".\diagnostics\cloud.json"
+      - name: Upload Cloud acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-cloud-diagnostics-${{ github.run_attempt }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+  windows_cache_save:
+    name: Save accepted Windows candidate cache
+    needs:
+      - windows_cache
+      - windows_source
+      - windows_candidate
+      - windows_accept_runtime
+      - windows_accept_browser
+      - windows_accept_cloud
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        needs.windows_cache.result == 'success' &&
+        needs.windows_cache.outputs.cache_hit == 'false' &&
+        needs.windows_source.result == 'success' &&
+        needs.windows_candidate.result == 'success' &&
+        needs.windows_accept_runtime.result == 'success' &&
+        needs.windows_accept_browser.result == 'success' &&
+        needs.windows_accept_cloud.result == 'success'
+      }}
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-candidate
+          path: artifacts/windows-candidate
+      - name: Verify accepted candidate before caching
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          $arguments = @(
+            ".\artifacts\windows-candidate",
+            "--role", "candidate",
+            "--source", $env:WINDOWS_SOURCE,
+            "--version", $env:WINDOWS_VERSION,
+            "--product-key", $env:WINDOWS_PRODUCT_KEY,
+            "--file", $fullName,
+            "--file", $slimName,
+            "--file", "browser.json",
+            "--file", "SHA256SUMS.txt",
+            "--file", "size-report.json"
+          )
+          & bun scripts/windows-artifact-manifest.ts verify @arguments
+          if ($LASTEXITCODE -ne 0) { throw "accepted candidate manifest verification failed" }
+      - name: Save exact Windows candidate cache
+        uses: actions/cache/save@v4
+        with:
+          path: artifacts/windows-candidate
+          key: aliasmode-windows-candidate-v2-${{ needs.windows_cache.outputs.product_key }}
+
+  windows:
+    name: Windows NSIS installer
+    needs:
+      - windows_cache
+      - windows_prepare
+      - windows_full
+      - windows_slim
+      - windows_source
+      - windows_candidate
+      - windows_accept_runtime
+      - windows_accept_browser
+      - windows_accept_cloud
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce Windows DAG result
+        env:
+          CACHE_HIT: ${{ needs.windows_cache.outputs.cache_hit }}
+          CACHE_RESULT: ${{ needs.windows_cache.result }}
+          PREPARE_RESULT: ${{ needs.windows_prepare.result }}
+          FULL_RESULT: ${{ needs.windows_full.result }}
+          SLIM_RESULT: ${{ needs.windows_slim.result }}
+          SOURCE_RESULT: ${{ needs.windows_source.result }}
+          CANDIDATE_RESULT: ${{ needs.windows_candidate.result }}
+          RUNTIME_RESULT: ${{ needs.windows_accept_runtime.result }}
+          BROWSER_RESULT: ${{ needs.windows_accept_browser.result }}
+          CLOUD_RESULT: ${{ needs.windows_accept_cloud.result }}
+        run: |
+          set -euo pipefail
+          require_result() {
+            local job="$1"
+            local actual="$2"
+            local expected="$3"
+            if [[ "$actual" != "$expected" ]]; then
+              printf '%s result was %s; expected %s\n' "$job" "$actual" "$expected" >&2
+              exit 1
+            fi
+          }
+
+          require_result windows_cache "$CACHE_RESULT" success
+          require_result windows_source "$SOURCE_RESULT" success
+          require_result windows_accept_runtime "$RUNTIME_RESULT" success
+          require_result windows_accept_browser "$BROWSER_RESULT" success
+          require_result windows_accept_cloud "$CLOUD_RESULT" success
+
+          case "$CACHE_HIT" in
+            true)
+              require_result windows_prepare "$PREPARE_RESULT" skipped
+              require_result windows_full "$FULL_RESULT" skipped
+              require_result windows_slim "$SLIM_RESULT" skipped
+              require_result windows_candidate "$CANDIDATE_RESULT" skipped
+              ;;
+            false)
+              require_result windows_prepare "$PREPARE_RESULT" success
+              require_result windows_full "$FULL_RESULT" success
+              require_result windows_slim "$SLIM_RESULT" success
+              require_result windows_candidate "$CANDIDATE_RESULT" success
+              ;;
+            *)
+              printf 'windows_cache returned invalid cache_hit value: %s\n' "$CACHE_HIT" >&2
+              exit 1
+              ;;
+          esac

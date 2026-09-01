@@ -1,8 +1,25 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
-const WRAPPER_VERSION = "0.4.11";
+export const CLOAKBROWSER_WRAPPER_VERSION = "0.4.11";
+export const CLOAKBROWSER_VERSION = "146.0.7680.177.5";
+export const CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256 = "b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe";
+export const CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256 = "03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80";
+const WINDOWS_ARCHIVE_NAME = "cloakbrowser-windows-x64.zip";
+const WINDOWS_ARCHIVE_URLS = [
+  `https://cloakbrowser.dev/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
+  `https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
+];
 const PATH_KEY = "CLOAKBROWSER_BINARY_PATH";
 const HASH_KEY = "CLOAKBROWSER_BINARY_SHA256";
 
@@ -25,15 +42,63 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
+async function preparePinnedWindowsArchive(cacheDir: string): Promise<void> {
+  mkdirSync(cacheDir, { recursive: true });
+  const archivePath = join(cacheDir, `${CLOAKBROWSER_VERSION}-${WINDOWS_ARCHIVE_NAME}`);
+  const archiveIsPinned = existsSync(archivePath) &&
+    await sha256File(archivePath) === CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256;
+  if (!archiveIsPinned) {
+    rmSync(archivePath, { force: true });
+    let downloaded = false;
+    for (const url of WINDOWS_ARCHIVE_URLS) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+        if (!response.ok) continue;
+        await Bun.write(archivePath, response);
+        if (await sha256File(archivePath) === CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256) {
+          downloaded = true;
+          break;
+        }
+      } catch {
+        // Try the signed release mirror.
+      }
+      rmSync(archivePath, { force: true });
+    }
+    if (!downloaded) throw new Error("official CloakBrowser archive did not match the pinned Windows x64 SHA-256");
+  }
+
+  const extractRoot = join(cacheDir, `_aliasmode_extract_${process.pid}`);
+  const binaryDir = join(cacheDir, `chromium-${CLOAKBROWSER_VERSION}`);
+  rmSync(extractRoot, { recursive: true, force: true });
+  mkdirSync(extractRoot, { recursive: true });
+  try {
+    const extraction = Bun.spawn(["tar.exe", "-xf", archivePath, "-C", extractRoot], {
+      stdout: "ignore",
+      stderr: "inherit",
+    });
+    if (await extraction.exited !== 0) throw new Error("pinned CloakBrowser archive extraction failed");
+    const executable = join(extractRoot, "chrome.exe");
+    if (!existsSync(executable) || await sha256File(executable) !== CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256) {
+      throw new Error("pinned CloakBrowser archive contained an unexpected Windows x64 executable");
+    }
+    rmSync(binaryDir, { recursive: true, force: true });
+    renameSync(extractRoot, binaryDir);
+  } finally {
+    rmSync(extractRoot, { recursive: true, force: true });
+  }
+}
+
 async function runOfficialInstaller(cwd: string, cacheDir?: string): Promise<{ code: number; output: string }> {
   // This command exists to repair a missing/stale deployment. Do not let the
   // wrapper treat a local CloakBrowser override as its install target.
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("CLOAKBROWSER_")),
   );
+  env.CLOAKBROWSER_VERSION = CLOAKBROWSER_VERSION;
+  env.CLOAKBROWSER_AUTO_UPDATE = "false";
   if (cacheDir) env.CLOAKBROWSER_CACHE_DIR = cacheDir;
   const child = Bun.spawn(
-    [process.execPath, "x", `cloakbrowser@${WRAPPER_VERSION}`, "install"],
+    [process.execPath, "x", `cloakbrowser@${CLOAKBROWSER_WRAPPER_VERSION}`, "install"],
     { cwd, env, stdout: "pipe", stderr: "inherit" },
   );
   const output = await new Response(child.stdout).text();
@@ -59,10 +124,12 @@ export function browserEnvText(current: string, binaryPath: string, sha256: stri
 /** Download the official signed binary, pin its exact path/hash, and return both. */
 export async function installCloakBrowser(opts: BrowserInstallOptions = {}): Promise<{ path: string; sha256: string }> {
   const cwd = resolve(opts.cwd ?? process.cwd());
-  const run = opts.runInstaller ?? (() => runOfficialInstaller(
-    cwd,
-    opts.cacheDir ? resolve(opts.cacheDir) : undefined,
-  ));
+  let cacheDir = opts.cacheDir ? resolve(opts.cacheDir) : undefined;
+  if (process.platform === "win32" && !opts.runInstaller) {
+    cacheDir ??= join(homedir(), ".cloakbrowser");
+    await preparePinnedWindowsArchive(cacheDir);
+  }
+  const run = opts.runInstaller ?? (() => runOfficialInstaller(cwd, cacheDir));
   const exists = opts.exists ?? existsSync;
   const result = await run();
   if (result.code !== 0) throw new Error(`official CloakBrowser installer exited with code ${result.code}`);
@@ -71,6 +138,9 @@ export async function installCloakBrowser(opts: BrowserInstallOptions = {}): Pro
 
   const sha256 = (await (opts.hashFile ?? sha256File)(path)).toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error("installed CloakBrowser returned an invalid SHA-256");
+  if (process.platform === "win32" && sha256 !== CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256) {
+    throw new Error("installed CloakBrowser did not match the pinned Windows x64 executable");
+  }
 
   const envPath = resolve(cwd, ".env");
   const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";

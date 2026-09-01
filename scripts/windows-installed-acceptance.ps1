@@ -1,0 +1,1661 @@
+#Requires -Version 7.0
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)]
+  [ValidateSet("runtime", "browser", "cloud")]
+  [string]$Shard,
+
+  [Parameter(Mandatory)]
+  [string]$InstallerPath,
+
+  [Parameter(Mandatory)]
+  [string]$ChecksumsPath,
+
+  [Parameter(Mandatory)]
+  [string]$BrowserMetadataPath,
+
+  [Parameter(Mandatory)]
+  [string]$DiagnosticsPath
+)
+
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+function Resolve-InputFile([string]$Path, [string]$Description) {
+  if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "$Description is missing"
+  }
+  return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Set-AcceptanceStage([string]$NextStage) {
+  $script:stage = $NextStage
+  Write-Host "AliasMode installed $Shard acceptance stage: $NextStage"
+}
+
+function Test-ProcessExited([Diagnostics.Process]$Process) {
+  if (-not $Process) { return $true }
+  try {
+    $Process.Refresh()
+    return $Process.HasExited
+  } catch {
+    return $true
+  }
+}
+
+function Stop-ProcessTree([Diagnostics.Process]$Process) {
+  if (-not $Process -or (Test-ProcessExited $Process)) { return }
+  $Process.Kill($true)
+  if (-not $Process.WaitForExit(15000)) {
+    throw "acceptance process tree did not exit"
+  }
+}
+
+function Test-PathWithin([string]$Path, [string]$Root) {
+  if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+  $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+  $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+  return $fullPath.Equals($fullRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    $fullPath.StartsWith("$fullRoot\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Read-ChecksumManifest([string]$Path) {
+  $checksums = @{}
+  foreach ($line in [IO.File]::ReadAllLines($Path)) {
+    if ($line -notmatch '^([a-fA-F0-9]{64})  (.+)$' -or $checksums.ContainsKey($Matches[2])) {
+      throw "candidate checksum manifest is malformed"
+    }
+    $checksums[$Matches[2]] = $Matches[1].ToLowerInvariant()
+  }
+  return $checksums
+}
+
+function Install-AcceptanceArtifact(
+  [string]$ResolvedInstallerPath,
+  [string]$ResolvedChecksumsPath,
+  [string]$ResolvedBrowserMetadataPath,
+  [string]$Destination
+) {
+  $installerName = Split-Path $ResolvedInstallerPath -Leaf
+  $nameMatch = [Text.RegularExpressions.Regex]::Match(
+    $installerName,
+    '^AliasMode_(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)_x64-offline-setup\.exe$'
+  )
+  if (-not $nameMatch.Success) { throw "full installer name is invalid" }
+  $version = $nameMatch.Groups["version"].Value
+  $semanticVersion = [Management.Automation.SemanticVersion]::Parse($version)
+  if ($semanticVersion.ToString() -ne $version) { throw "full installer version is not canonical" }
+
+  $checksums = Read-ChecksumManifest $ResolvedChecksumsPath
+  if (-not $checksums.ContainsKey($installerName)) {
+    throw "candidate checksum manifest is missing $installerName"
+  }
+  $actualInstallerHash = (Get-FileHash -LiteralPath $ResolvedInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualInstallerHash -ne $checksums[$installerName]) {
+    throw "candidate full installer SHA-256 mismatch"
+  }
+
+  try {
+    $metadata = [IO.File]::ReadAllText($ResolvedBrowserMetadataPath) | ConvertFrom-Json
+  } catch {
+    throw "candidate browser metadata is malformed"
+  }
+  if ($metadata.executable -ne "chrome.exe" -or [string]$metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
+    throw "candidate browser metadata is invalid"
+  }
+
+  Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $Destination) { throw "installed acceptance root was not clean" }
+  $install = Start-Process -PassThru $ResolvedInstallerPath -ArgumentList @(
+    "/S",
+    "/D=$Destination"
+  )
+  if (-not $install.WaitForExit(300000)) {
+    Stop-ProcessTree $install
+    throw "silent NSIS install timed out"
+  }
+  if ($install.ExitCode -ne 0) { throw "silent NSIS install exited with code $($install.ExitCode)" }
+
+  $appPath = Join-Path $Destination "AliasMode.exe"
+  if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
+    throw "installed AliasMode executable is missing"
+  }
+  $sidecars = @(Get-ChildItem $Destination -Recurse -File -Filter "aliasmode-sidecar*.exe")
+  if ($sidecars.Count -ne 1) { throw "expected exactly one installed sidecar, found $($sidecars.Count)" }
+
+  return [pscustomobject]@{
+    Version = $version
+    AppPath = $appPath
+    SidecarPath = $sidecars[0].FullName
+    BrowserMetadata = $metadata
+  }
+}
+
+function Set-BrowserRuntimeEnvironment($Installation, [string]$InstallRoot) {
+  $runtime = Join-Path $InstallRoot "playwright"
+  $browser = Join-Path $InstallRoot "cloakbrowser\chrome.exe"
+  if (-not (Test-Path -LiteralPath $browser -PathType Leaf)) {
+    throw "installed CloakBrowser executable is missing"
+  }
+  [Environment]::SetEnvironmentVariable("ALIASMODE_PLAYWRIGHT_RUNTIME", $runtime, "Process")
+  [Environment]::SetEnvironmentVariable("CLOAKBROWSER_BINARY_PATH", $browser, "Process")
+  [Environment]::SetEnvironmentVariable("CLOAKBROWSER_BINARY_SHA256", $Installation.BrowserMetadata.sha256, "Process")
+  [Environment]::SetEnvironmentVariable("ALIASMODE_SESSION_LAUNCH", "0", "Process")
+  return [pscustomobject]@{ PlaywrightRuntime = $runtime; BrowserPath = $browser }
+}
+
+function Remove-AcceptancePath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  for ($attempt = 0; $attempt -lt 120; $attempt++) {
+    try { [IO.Directory]::Delete($Path, $true) } catch {}
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "acceptance state survived cleanup: $(Split-Path $Path -Leaf)"
+}
+
+function Stop-AcceptanceProcesses([string]$InstallRoot, [string]$RunRoot, [string]$DataRoot) {
+  foreach ($record in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+    $belongsToAcceptance = $record.ExecutablePath -and (Test-PathWithin ([string]$record.ExecutablePath) $InstallRoot)
+    if (-not $belongsToAcceptance -and $record.CommandLine) {
+      $belongsToAcceptance = $record.CommandLine.Contains($RunRoot, [StringComparison]::OrdinalIgnoreCase)
+      if (-not $belongsToAcceptance -and -not [string]::IsNullOrWhiteSpace($DataRoot)) {
+        $belongsToAcceptance = $record.CommandLine.Contains($DataRoot, [StringComparison]::OrdinalIgnoreCase)
+      }
+    }
+    if (-not $belongsToAcceptance) { continue }
+    $process = Get-Process -Id $record.ProcessId -ErrorAction SilentlyContinue
+    if ($process) { Stop-ProcessTree $process }
+  }
+}
+
+function Write-AcceptanceDiagnostics(
+  [string]$Path,
+  [string]$RecordedStage,
+  [bool]$Success,
+  [string]$RecordedShard,
+  [string]$Version,
+  $Checks,
+  [int]$CleanupFailureCount
+) {
+  $parent = Split-Path $Path -Parent
+  if ($parent) { New-Item -ItemType Directory -Force $parent | Out-Null }
+  $diagnostics = [ordered]@{
+    version = 1
+    shard = $RecordedShard
+    candidateVersion = $Version
+    stage = $RecordedStage
+    success = $Success
+    checks = $Checks
+    cleanupFailureCount = $CleanupFailureCount
+  }
+  [IO.File]::WriteAllText(
+    $Path,
+    ($diagnostics | ConvertTo-Json -Depth 5),
+    [Text.UTF8Encoding]::new($false)
+  )
+}
+
+if (-not $IsWindows) { throw "Windows installed acceptance requires Windows" }
+
+$DiagnosticsPath = [IO.Path]::GetFullPath($DiagnosticsPath)
+$runId = [Guid]::NewGuid().ToString("N")
+$runRoot = Join-Path $env:RUNNER_TEMP "aliasmode-installed-$Shard-$runId"
+$installRoot = Join-Path $runRoot "aliasmode installed"
+$appDataRoot = Join-Path $env:APPDATA "com.aliasmode.desktop"
+$repoRoot = Split-Path $PSScriptRoot -Parent
+$workspaceRoot = if ([string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE)) { $repoRoot } else { $env:GITHUB_WORKSPACE }
+$registrationKeys = @(
+  "Registry::HKEY_CURRENT_USER\Software\aliasmode\AliasMode",
+  "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\AliasMode"
+)
+$liveProxyEnvironmentNames = @(
+  "ALIASMODE_LIVE_PROXY_HOST",
+  "ALIASMODE_LIVE_PROXY_PORT",
+  "ALIASMODE_LIVE_PROXY_USER",
+  "ALIASMODE_LIVE_PROXY_PASS",
+  "ALIASMODE_LIVE_PROXY_IP"
+)
+$changedEnvironmentNames = @(
+  $liveProxyEnvironmentNames
+  "ALIASMODE_PLAYWRIGHT_RUNTIME"
+  "CLOAKBROWSER_BINARY_PATH"
+  "CLOAKBROWSER_BINARY_SHA256"
+  "ALIASMODE_SESSION_LAUNCH"
+  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG"
+  "WEBVIEW2_USER_DATA_FOLDER"
+  "ALIASMODE_CLOUD_URL"
+  "ALIASMODE_SUPABASE_URL"
+  "ALIASMODE_SUPABASE_ANON_KEY"
+)
+$savedProcessEnvironment = @{}
+foreach ($name in $changedEnvironmentNames) {
+  $savedProcessEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+foreach ($name in $liveProxyEnvironmentNames) {
+  [Environment]::SetEnvironmentVariable($name, $null, "Process")
+}
+
+$stage = "validating-inputs"
+$recordedVersion = ""
+$installation = $null
+$automationPortBlocker = $null
+$primaryFailure = $null
+$acceptanceSucceeded = $false
+$acceptanceStateOwned = $false
+$cleanupFailures = [Collections.Generic.List[string]]::new()
+$checks = [ordered]@{
+  artifactVerified = $false
+  installed = $false
+  installedResourceIndependent = $false
+  helperMcpCliLifecycle = $false
+  ownershipCleanup = $false
+  backgroundSingleInstanceWindow = $false
+  sidecarTermination = $false
+  eofTermination = $false
+  degradedTermination = $false
+  playwrightWorkerProtocol = $false
+  browserMetadataHash = $false
+  nativeHeadfulLaunch = $false
+  proxyMismatch = $false
+  authenticatedHttpProxy = $false
+  authenticatedSocks5Proxy = $false
+  credentialManager = $false
+  cloudRestartRecovery = $false
+  cloudRevocation = $false
+  cloudRestore = $false
+  cloudCrossDeviceCounts = $false
+  automationPortConflict = $false
+}
+
+try {
+  Set-AcceptanceStage "validating-artifacts"
+  $resolvedInstaller = Resolve-InputFile $InstallerPath "full installer"
+  $resolvedChecksums = Resolve-InputFile $ChecksumsPath "checksum manifest"
+  $resolvedMetadata = Resolve-InputFile $BrowserMetadataPath "browser metadata"
+  New-Item -ItemType Directory -Force $runRoot | Out-Null
+  if (Test-Path -LiteralPath $appDataRoot) {
+    throw "runner has pre-existing AliasMode app-data state"
+  }
+  if (@(Get-Process -Name "AliasMode" -ErrorAction SilentlyContinue).Count -ne 0) {
+    throw "runner has a pre-existing AliasMode process"
+  }
+  foreach ($key in $registrationKeys) {
+    if (Test-Path -LiteralPath $key) {
+      throw "runner has pre-existing AliasMode registration"
+    }
+  }
+  $acceptanceStateOwned = $true
+
+  Set-AcceptanceStage "installing-artifact"
+  $installation = Install-AcceptanceArtifact $resolvedInstaller $resolvedChecksums $resolvedMetadata $installRoot
+  $recordedVersion = $installation.Version
+  $checks.artifactVerified = $true
+  $checks.installed = $true
+
+  $automationPortBlocker = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 50400)
+  $automationPortBlocker.Server.ExclusiveAddressUse = $true
+  $automationPortBlocker.Start()
+  if (-not $automationPortBlocker.Server.IsBound) {
+    throw "fixed automation port conflict fixture did not bind"
+  }
+
+  switch ($Shard) {
+    "runtime" {
+      Set-AcceptanceStage "runtime-resource-independence"
+      $appPath = $installation.AppPath
+      $sidecarPath = $installation.SidecarPath
+      $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
+      $sidecarText = [Text.Encoding]::UTF8.GetString($sidecarBytes) + [Text.Encoding]::Unicode.GetString($sidecarBytes)
+      foreach ($sourcePath in @($workspaceRoot, $workspaceRoot.Replace("\", "/"))) {
+        if ($sidecarText.IndexOf($sourcePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+          throw "installed sidecar embeds its source checkout path"
+        }
+      }
+      $checkoutNodeModules = Join-Path $workspaceRoot "node_modules"
+      if (Test-Path -LiteralPath $checkoutNodeModules) {
+        Remove-Item -LiteralPath $checkoutNodeModules -Recurse -Force
+      }
+      if (Test-Path -LiteralPath $checkoutNodeModules) {
+        throw "checkout node_modules remained available to installed acceptance"
+      }
+
+      New-Item -ItemType Directory -Force $appDataRoot | Out-Null
+      @{ version = 1; mode = "local"; localAnalytics = $false } |
+        ConvertTo-Json -Compress |
+        Set-Content (Join-Path $appDataRoot "config.json")
+      $descriptorPath = Join-Path $appDataRoot "agent-runtime.json"
+
+      $bundleVersion = $installation.Version
+      $helper = Join-Path $installRoot "aliasmode-mcp.exe"
+      $playwrightRuntime = Join-Path $installRoot "playwright"
+      $node = Join-Path $playwrightRuntime "node\node.exe"
+      $mcpHost = Join-Path $playwrightRuntime "agent\mcp-host.mjs"
+      foreach ($path in @(
+        $helper,
+        $node,
+        $mcpHost,
+        (Join-Path $playwrightRuntime "agent\playwright-proxy.mjs"),
+        (Join-Path $playwrightRuntime "agent\playwright-runner.mjs"),
+        (Join-Path $playwrightRuntime "agent\runtime-client.mjs")
+      )) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+          throw "installed agent runtime file is missing: $path"
+        }
+      }
+      if ((& $node --version).Trim() -ne "v22.23.2") {
+        throw "installed Node runtime version is incorrect"
+      }
+      foreach ($package in @{
+        "playwright-core" = "1.58.2"
+        "@modelcontextprotocol\sdk" = "1.30.0"
+        "@playwright\mcp" = "0.0.56"
+        "playwright" = "1.58.0-alpha-2026-01-16"
+      }.GetEnumerator()) {
+        $manifest = Join-Path $playwrightRuntime "node_modules\$($package.Key)\package.json"
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+          throw "installed agent package is missing: $($package.Key)"
+        }
+        if ((Get-Content $manifest | ConvertFrom-Json).version -ne $package.Value) {
+          throw "installed agent package version is incorrect: $($package.Key)"
+        }
+      }
+      $checks.installedResourceIndependent = $true
+
+      Set-AcceptanceStage "runtime-helper-setup"
+      $helperVersion = & $helper version | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $helperVersion.ok -or $helperVersion.result.version -ne $bundleVersion) {
+        throw "installed agent helper returned an incorrect version"
+      }
+      $setup = & $helper setup --client generic --yes | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $setup.ok -or $setup.result.clients.Count -ne 0) {
+        throw "installed generic MCP setup failed"
+      }
+      if (
+        $setup.result.mcp.command -ne $helper -or
+        $setup.result.mcp.args.Count -ne 1 -or
+        $setup.result.mcp.args[0] -ne "serve" -or
+        $setup.result.generic.mcpServers.aliasmode.command -ne $helper -or
+        $setup.result.generic.mcpServers.aliasmode.args[0] -ne "serve"
+      ) {
+        throw "installed generic MCP setup returned incorrect paths"
+      }
+
+      function Read-McpResponse([Diagnostics.Process]$Process, [int]$Id) {
+        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+          $response = $Process.StandardOutput.ReadLine() | ConvertFrom-Json
+          if ($response.id -eq $Id) { return $response }
+        }
+        throw "installed MCP host did not return response $Id"
+      }
+
+      Set-AcceptanceStage "runtime-mcp-lifecycle"
+      $mcpStart = [Diagnostics.ProcessStartInfo]::new()
+      $mcpStart.FileName = $helper
+      $mcpStart.ArgumentList.Add("serve")
+      $mcpStart.WorkingDirectory = $installRoot
+      $mcpStart.UseShellExecute = $false
+      $mcpStart.CreateNoWindow = $true
+      $mcpStart.RedirectStandardInput = $true
+      $mcpStart.RedirectStandardOutput = $true
+      $mcpStart.Environment["ALIASMODE_MCP_DIAGNOSTICS"] = "1"
+      $mcp = [Diagnostics.Process]::new()
+      $mcp.StartInfo = $mcpStart
+      if (-not $mcp.Start()) { throw "installed MCP host did not start" }
+      $mcpShutdownFailure = $null
+      $preexistingProfileId = $null
+      $ownedProfileId = $null
+      try {
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aliasmode-ci","version":"1"}}}')
+        $initialize = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
+        if ($initialize.id -ne 1 -or -not $initialize.result.serverInfo) {
+          throw "installed MCP host returned an invalid initialize response"
+        }
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}')
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+        $toolResponse = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
+        if ($toolResponse.id -ne 2) { throw "installed MCP host returned an invalid tools/list response" }
+        $toolNames = @($toolResponse.result.tools | ForEach-Object { $_.name })
+        foreach ($name in @(
+          "aliasmode_profiles_list",
+          "aliasmode_profile_create",
+          "aliasmode_profile_delete",
+          "aliasmode_browser_open",
+          "aliasmode_browser_select",
+          "aliasmode_browser_status",
+          "aliasmode_browser_close",
+          "browser_close",
+          "browser_evaluate",
+          "browser_press_key",
+          "browser_click",
+          "browser_run_code"
+        )) {
+          if ($toolNames -notcontains $name) { throw "installed MCP host did not expose $name" }
+        }
+        foreach ($tool in @($toolResponse.result.tools)) {
+          if (-not $tool.annotations -or [string]::IsNullOrWhiteSpace([string]$tool.annotations.title)) {
+            throw "installed MCP tool $($tool.name) has no title annotation"
+          }
+          foreach ($hint in @("readOnlyHint", "destructiveHint", "openWorldHint")) {
+            if ($tool.annotations.PSObject.Properties.Name -notcontains $hint) {
+              throw "installed MCP tool $($tool.name) has no $hint annotation"
+            }
+          }
+        }
+        $initialToolSchemas = ConvertTo-Json -InputObject @($toolResponse.result.tools) -Compress -Depth 100
+
+        if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) {
+          throw "background runtime descriptor is missing"
+        }
+        $descriptor = Get-Content $descriptorPath | ConvertFrom-Json
+        if (
+          $descriptor.protocol -ne "aliasmode-runtime-v1" -or
+          $descriptor.appVersion -ne $bundleVersion -or
+          $descriptor.readiness -ne "local" -or
+          $descriptor.generation -notmatch '^[a-f0-9]{64}$' -or
+          $descriptor.nonce -notmatch '^[a-f0-9]{64}$' -or
+          $descriptor.generation -eq $descriptor.nonce -or
+          $descriptor.port -le 0 -or
+          $descriptor.desktopPid -le 0 -or
+          $descriptor.sidecarPid -le 0
+        ) {
+          throw "background runtime descriptor is invalid"
+        }
+        $backgroundProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($descriptor.desktopPid)"
+        if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
+          throw "MCP host did not launch AliasMode in background mode"
+        }
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AliasModeWindow {
+  private delegate bool EnumWindowsProc(IntPtr handle, IntPtr parameter);
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Rect { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
+  [DllImport("user32.dll")]
+  private static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+  [DllImport("user32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool IsWindowVisible(IntPtr handle);
+
+  public static IntPtr FindAppWindow(uint processId, bool visibleOnly) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((handle, _) => {
+      GetWindowThreadProcessId(handle, out uint owner);
+      if (owner != processId || !GetWindowRect(handle, out Rect rect)) return true;
+      if (rect.Right - rect.Left < 200 || rect.Bottom - rect.Top < 200) return true;
+      if (visibleOnly && !IsWindowVisible(handle)) return true;
+      found = handle;
+      return false;
+    }, IntPtr.Zero);
+    return found;
+  }
+
+  public static bool CloseWindow(IntPtr handle) {
+    return PostMessage(handle, 0x0010, IntPtr.Zero, IntPtr.Zero);
+  }
+}
+'@
+        $backgroundVisible = $false
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+          $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
+          if ($mainWindow -ne [IntPtr]::Zero) {
+            $backgroundVisible = $true
+            break
+          }
+          Start-Sleep -Milliseconds 100
+        }
+        if ($backgroundVisible) { throw "background AliasMode exposed its main window" }
+
+        $preexisting = (& $helper profiles create --name ci-preexisting | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or -not $preexisting.ok -or -not $preexisting.result.id) {
+          throw "installed helper could not create the pre-existing profile"
+        }
+        $preexistingProfileId = $preexisting.result.id
+        $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
+          throw "installed helper could not open the pre-existing browser"
+        }
+
+        $selectRequest = @{
+          jsonrpc = "2.0"
+          id = 3
+          method = "tools/call"
+          params = @{
+            name = "aliasmode_browser_select"
+            arguments = @{ profileId = $preexistingProfileId }
+          }
+        } | ConvertTo-Json -Compress -Depth 8
+        $mcp.StandardInput.WriteLine($selectRequest)
+        $selected = Read-McpResponse $mcp 3
+        if ($selected.result.isError -eq $true) {
+          throw "installed MCP host could not select the pre-existing browser"
+        }
+
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":30,"method":"tools/list","params":{}}')
+        $selectedTools = Read-McpResponse $mcp 30
+        $selectedToolSchemas = ConvertTo-Json -InputObject @($selectedTools.result.tools) -Compress -Depth 100
+        if ($selectedToolSchemas -cne $initialToolSchemas) {
+          throw "installed MCP tool schemas changed after browser selection"
+        }
+
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"browser_close","arguments":{}}}')
+        $closed = Read-McpResponse $mcp 31
+        if ($closed.result.isError -eq $true) {
+          throw "installed MCP host could not close the selected browser"
+        }
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":32,"method":"tools/list","params":{}}')
+        $closedTools = Read-McpResponse $mcp 32
+        $closedToolSchemas = ConvertTo-Json -InputObject @($closedTools.result.tools) -Compress -Depth 100
+        if ($closedToolSchemas -cne $initialToolSchemas) {
+          throw "installed MCP tool schemas changed after browser close"
+        }
+
+        $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
+          throw "installed helper could not reopen the pre-existing browser"
+        }
+
+        $createRequest = @{
+          jsonrpc = "2.0"
+          id = 4
+          method = "tools/call"
+          params = @{
+            name = "aliasmode_profile_create"
+            arguments = @{ name = "ci-owned" }
+          }
+        } | ConvertTo-Json -Compress -Depth 8
+        $mcp.StandardInput.WriteLine($createRequest)
+        $created = Read-McpResponse $mcp 4
+        $ownedProfileId = $created.result.structuredContent.id
+        if ($created.result.isError -eq $true -or -not $ownedProfileId) {
+          throw "installed MCP host could not create its owned profile"
+        }
+
+        $openRequest = @{
+          jsonrpc = "2.0"
+          id = 5
+          method = "tools/call"
+          params = @{
+            name = "aliasmode_browser_open"
+            arguments = @{ profileId = $ownedProfileId; headless = $true }
+          }
+        } | ConvertTo-Json -Compress -Depth 8
+        $mcp.StandardInput.WriteLine($openRequest)
+        $ownedOpen = Read-McpResponse $mcp 5
+        if (
+          $ownedOpen.result.isError -eq $true -or
+          $ownedOpen.result.structuredContent.profileId -ne $ownedProfileId
+        ) {
+          throw "installed MCP host could not open its owned browser"
+        }
+      } finally {
+        $mcp.StandardInput.Close()
+        if (-not $mcp.WaitForExit(60000)) {
+          Stop-Process -Id $mcp.Id -Force
+          $mcp.WaitForExit()
+          $mcpShutdownFailure = "installed MCP host survived safe browser cleanup"
+        }
+      }
+      if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
+      if (-not (Get-Process -Id $descriptor.desktopPid -ErrorAction SilentlyContinue)) {
+        throw "background desktop did not survive MCP disconnect"
+      }
+      if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) {
+        throw "runtime descriptor did not survive MCP disconnect"
+      }
+
+      $ownedStopped = $false
+      for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        $ownedStatus = (& $helper browser status --profile $ownedProfileId | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or -not $ownedStatus.ok) {
+          throw "installed helper could not inspect the MCP-owned browser"
+        }
+        if (-not $ownedStatus.result.running) {
+          $ownedStopped = $true
+          break
+        }
+        Start-Sleep -Milliseconds 500
+      }
+      if (-not $ownedStopped) { throw "MCP-owned browser survived its connection" }
+      $preexistingStatus = (& $helper browser status --profile $preexistingProfileId | ConvertFrom-Json)
+      if ($LASTEXITCODE -ne 0 -or -not $preexistingStatus.ok -or -not $preexistingStatus.result.running) {
+        throw "pre-existing browser did not survive MCP disconnect"
+      }
+      $preexistingClosed = (& $helper browser close --profile $preexistingProfileId | ConvertFrom-Json)
+      if (
+        $LASTEXITCODE -ne 0 -or
+        -not $preexistingClosed.ok -or
+        -not $preexistingClosed.result.closed -or
+        $preexistingClosed.result.deleted
+      ) {
+        throw "installed helper could not close the preserved browser"
+      }
+      foreach ($persistentProfileId in @($preexistingProfileId, $ownedProfileId)) {
+        $deleted = (& $helper profiles delete --profile $persistentProfileId | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or -not $deleted.ok -or -not $deleted.result.deleted) {
+          throw "installed helper could not delete a lifecycle profile"
+        }
+      }
+      $checks.ownershipCleanup = $true
+
+      Set-AcceptanceStage "runtime-json-cli"
+      $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
+      if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
+        throw "installed JSON CLI could not create a temporary profile: $($profile.error)"
+      }
+      $profileId = $profile.result.id
+      $opened = & $helper browser open --profile $profileId --headless | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $opened.ok -or -not $opened.result.headless -or $opened.result.alreadyOpen) {
+        $sidecarLog = Get-ChildItem (Join-Path $appDataRoot "logs\aliasmode-*.log") -File -ErrorAction SilentlyContinue |
+          Sort-Object LastWriteTime -Descending |
+          Select-Object -First 1
+        if ($sidecarLog) {
+          Get-Content $sidecarLog.FullName |
+            Select-String -Pattern 'sidecar start|launching .* on port|launch stage' |
+            Select-Object -Last 12 |
+            ForEach-Object {
+              $safeTrace = $_.Line -replace 'pid=\d+', 'pid=<pid>'
+              $safeTrace = $safeTrace -replace 'launching [A-Za-z0-9_-]+ on port \d+.*', 'launching <profile> on port <port>'
+              $safeTrace = $safeTrace -replace '[A-Za-z0-9_-]+: launch stage', '<profile>: launch stage'
+              Write-Host "launch trace: $safeTrace"
+            }
+        }
+        throw "installed JSON CLI could not open a headless browser: $($opened.error)"
+      }
+      $status = & $helper browser status --profile $profileId | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $status.ok -or -not $status.result.running) {
+        throw "installed JSON CLI did not report its browser as running: $($status.error)"
+      }
+      $closed = & $helper browser close --profile $profileId | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $closed.ok -or -not $closed.result.closed -or -not $closed.result.deleted) {
+        throw "installed JSON CLI did not close and delete its temporary profile: $($closed.error)"
+      }
+      $checks.helperMcpCliLifecycle = $true
+
+      Set-AcceptanceStage "runtime-single-instance-window"
+      $app = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
+      $reveal = Start-Process -PassThru $appPath
+      if (-not $reveal.WaitForExit(15000)) {
+        Stop-Process -Id $reveal.Id -Force
+        throw "second normal AliasMode launch did not return to the background instance"
+      }
+      if ($reveal.ExitCode -ne 0) {
+        throw "second normal AliasMode launch exited with code $($reveal.ExitCode)"
+      }
+      $sidecarPid = $null
+      $shutdownFailure = $null
+      try {
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          $app.Refresh()
+          if ($app.HasExited) { throw "installed AliasMode exited before desktop readiness" }
+          $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($app.Id)" |
+            Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
+            Select-Object -First 1
+          if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
+          $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
+          if ($sidecarPid -and $mainWindow -ne [IntPtr]::Zero) { break }
+          Start-Sleep -Milliseconds 500
+        }
+        if (-not $sidecarPid) { throw "installed desktop did not start its packaged sidecar" }
+        if ($mainWindow -eq [IntPtr]::Zero) { throw "installed desktop did not show its main window" }
+        Start-Sleep -Seconds 2
+        $app.Refresh()
+        $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
+        if (
+          $app.HasExited -or
+          -not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) -or
+          $mainWindow -eq [IntPtr]::Zero
+        ) {
+          throw "installed desktop did not remain ready"
+        }
+      } finally {
+        $app.Refresh()
+        if (-not $app.HasExited) {
+          if (-not [AliasModeWindow]::CloseWindow($mainWindow)) {
+            $shutdownFailure = "installed desktop rejected its main-window close request"
+          } elseif (-not $app.WaitForExit(15000)) {
+            $shutdownFailure = "installed desktop did not exit after its main window closed"
+          }
+          $app.Refresh()
+          if (-not $app.HasExited) {
+            Stop-Process -Id $app.Id -Force
+            $app.WaitForExit()
+          }
+        }
+      }
+      if ($sidecarPid) {
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+          if (-not (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue)) { break }
+          Start-Sleep -Milliseconds 500
+        }
+        if (Get-Process -Id $sidecarPid -ErrorAction SilentlyContinue) {
+          Stop-Process -Id $sidecarPid -Force
+          if (-not $shutdownFailure) { $shutdownFailure = "packaged sidecar survived desktop shutdown" }
+        }
+      }
+      if ($shutdownFailure) { throw $shutdownFailure }
+      for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        if (-not (Test-Path -LiteralPath $descriptorPath)) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      if (Test-Path -LiteralPath $descriptorPath) { throw "runtime descriptor survived desktop shutdown" }
+      $checks.backgroundSingleInstanceWindow = $true
+      $checks.sidecarTermination = $true
+
+      Set-AcceptanceStage "runtime-eof-termination"
+      $eofApp = Start-Process -PassThru $appPath
+      $eofSidecarPid = $null
+      try {
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          $eofApp.Refresh()
+          if ($eofApp.HasExited) { throw "EOF acceptance desktop exited before readiness" }
+          if (Test-Path -LiteralPath $descriptorPath -PathType Leaf) {
+            $eofDescriptor = Get-Content $descriptorPath | ConvertFrom-Json
+            if ($eofDescriptor.desktopPid -eq $eofApp.Id) {
+              $eofSidecarPid = [int]$eofDescriptor.sidecarPid
+              break
+            }
+          }
+          Start-Sleep -Milliseconds 500
+        }
+        if (-not $eofSidecarPid) { throw "EOF acceptance desktop did not publish its sidecar" }
+
+        Stop-Process -Id $eofApp.Id -Force
+        $eofApp.WaitForExit()
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          if (-not (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue)) { break }
+          Start-Sleep -Milliseconds 500
+        }
+        if (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue) {
+          throw "packaged sidecar survived parent stdin EOF"
+        }
+      } finally {
+        $eofApp.Refresh()
+        if (-not $eofApp.HasExited) {
+          Stop-Process -Id $eofApp.Id -Force
+          $eofApp.WaitForExit()
+        }
+        if ($eofSidecarPid -and (Get-Process -Id $eofSidecarPid -ErrorAction SilentlyContinue)) {
+          Stop-Process -Id $eofSidecarPid -Force
+        }
+      }
+      $checks.eofTermination = $true
+
+      Set-AcceptanceStage "runtime-degraded-termination"
+      $degradedApp = Start-Process -PassThru $appPath
+      $degradedSidecarPid = $null
+      try {
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          $degradedApp.Refresh()
+          if ($degradedApp.HasExited) { throw "degraded desktop exited before readiness" }
+          if (Test-Path -LiteralPath $descriptorPath -PathType Leaf) {
+            $degradedDescriptor = Get-Content $descriptorPath | ConvertFrom-Json
+            if ($degradedDescriptor.desktopPid -eq $degradedApp.Id) {
+              $degradedSidecarPid = [int]$degradedDescriptor.sidecarPid
+              break
+            }
+          }
+          Start-Sleep -Milliseconds 500
+        }
+        if (-not $degradedSidecarPid) { throw "degraded desktop did not publish its runtime descriptor" }
+        Stop-Process -Id $degradedSidecarPid -Force
+        if (-not $degradedApp.WaitForExit(15000)) {
+          throw "degraded desktop did not exit after unexpected sidecar termination"
+        }
+        if ($degradedApp.ExitCode -eq 0) {
+          throw "degraded desktop reported success after unexpected sidecar termination"
+        }
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+          if (-not (Test-Path -LiteralPath $descriptorPath)) { break }
+          Start-Sleep -Milliseconds 500
+        }
+        if (Test-Path -LiteralPath $descriptorPath) {
+          throw "runtime descriptor survived unexpected sidecar termination"
+        }
+      } finally {
+        $degradedApp.Refresh()
+        if (-not $degradedApp.HasExited) {
+          Stop-Process -Id $degradedApp.Id -Force
+          $degradedApp.WaitForExit()
+        }
+      }
+      $checks.degradedTermination = $true
+
+      Set-AcceptanceStage "runtime-playwright-worker"
+      foreach ($path in @(
+        (Join-Path $playwrightRuntime "node\node.exe"),
+        (Join-Path $playwrightRuntime "worker.mjs"),
+        (Join-Path $playwrightRuntime "node_modules\playwright-core\package.json"),
+        (Join-Path $playwrightRuntime "node_modules\ws\package.json")
+      )) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+          throw "installed Playwright runtime file is missing: $path"
+        }
+      }
+
+      $workerStart = [Diagnostics.ProcessStartInfo]::new()
+      $workerStart.FileName = Join-Path $playwrightRuntime "node\node.exe"
+      $workerStart.ArgumentList.Add("--input-type=module")
+      $workerStart.ArgumentList.Add("--eval")
+      $workerStart.ArgumentList.Add(@'
+import { pathToFileURL } from "node:url";
+try {
+  await import(pathToFileURL(process.argv[1]).href);
+} catch {
+  process.stdout.write(JSON.stringify({
+    version: 1,
+    ok: false,
+    error: { code: "runtime_unavailable", message: "Playwright runtime is unavailable" },
+  }));
+  process.exitCode = 1;
+}
+'@)
+      $workerStart.ArgumentList.Add((Join-Path $playwrightRuntime "worker.mjs"))
+      $workerStart.UseShellExecute = $false
+      $workerStart.RedirectStandardInput = $true
+      $workerStart.RedirectStandardOutput = $true
+      $workerStart.RedirectStandardError = $true
+      foreach ($name in @($workerStart.Environment.Keys)) {
+        if ($name -match '^(ALIASMODE_|CLOAKBROWSER_)' -or $name -match '^(NODE_OPTIONS|NODE_PATH|HUB_PASSWORD)$') {
+          $workerStart.Environment.Remove($name)
+        }
+      }
+      $worker = [Diagnostics.Process]::new()
+      $worker.StartInfo = $workerStart
+      if (-not $worker.Start()) { throw "installed Playwright worker did not start" }
+      $worker.StandardInput.Write('{"version":1,"operation":"page","payload":{"endpoint":"not-a-url"}}')
+      $worker.StandardInput.Close()
+      $workerOutput = $worker.StandardOutput.ReadToEnd()
+      $workerError = $worker.StandardError.ReadToEnd()
+      $worker.WaitForExit()
+      if ($worker.ExitCode -ne 1) { throw "installed Playwright worker exited with code $($worker.ExitCode)" }
+      try { $workerResponse = $workerOutput | ConvertFrom-Json } catch {
+        throw "installed Playwright worker returned malformed JSON"
+      }
+      if ($workerResponse.version -ne 1 -or $workerResponse.ok -ne $false -or $workerResponse.error.code -ne "invalid_request") {
+        throw "installed Playwright worker returned an unexpected protocol response"
+      }
+      if (-not [string]::IsNullOrEmpty($workerError)) {
+        throw "installed Playwright worker wrote to stderr"
+      }
+      $checks.playwrightWorkerProtocol = $true
+    }
+    "browser" {
+      Set-AcceptanceStage "browser-metadata-hash"
+      if ($installation.BrowserMetadata.executable -ne "chrome.exe") {
+        throw "Windows browser metadata does not target chrome.exe"
+      }
+      $browserRuntime = Set-BrowserRuntimeEnvironment $installation $installRoot
+      if (-not (Test-Path -LiteralPath (Join-Path $browserRuntime.PlaywrightRuntime "node\node.exe") -PathType Leaf)) {
+        throw "installed official Node runtime is missing"
+      }
+      if (-not (Test-Path -LiteralPath (Join-Path $browserRuntime.PlaywrightRuntime "node_modules\playwright-core\package.json") -PathType Leaf)) {
+        throw "installed Playwright runtime is missing"
+      }
+      $actualBrowserHash = (Get-FileHash -LiteralPath $browserRuntime.BrowserPath -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($actualBrowserHash -ne $installation.BrowserMetadata.sha256) {
+        throw "installed CloakBrowser SHA-256 does not match browser metadata"
+      }
+      $checks.browserMetadataHash = $true
+
+      Set-AcceptanceStage "browser-native-headful-window"
+      $windowAcceptanceRoot = Join-Path $runRoot "native-window"
+      Remove-Item -LiteralPath $windowAcceptanceRoot -Recurse -Force -ErrorAction SilentlyContinue
+      $windowAcceptanceFailure = $null
+      $windowCleanupFailure = $null
+      try {
+        & $installation.SidecarPath __cloud-launcher-smoke --windows-window-acceptance --state-root $windowAcceptanceRoot
+        if ($LASTEXITCODE -ne 0) {
+          throw "installed native CloakBrowser window acceptance exited with code $LASTEXITCODE"
+        }
+      } catch {
+        $windowAcceptanceFailure = $_
+      } finally {
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          try {
+            $windowProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+              Where-Object { $_.CommandLine -and $_.CommandLine.Contains($windowAcceptanceRoot) })
+          } catch {
+            if (-not $windowCleanupFailure) { $windowCleanupFailure = $_ }
+            $windowProcesses = @()
+            break
+          }
+          if ($windowProcesses.Count -eq 0) { break }
+          foreach ($candidate in $windowProcesses) {
+            try {
+              $process = Get-Process -Id $candidate.ProcessId -ErrorAction Stop
+              $process.Kill($true)
+              [void]$process.WaitForExit(5000)
+            } catch {
+              if ((Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue) -and -not $windowCleanupFailure) {
+                $windowCleanupFailure = $_
+              }
+            }
+          }
+          Start-Sleep -Milliseconds 250
+        }
+        try {
+          $windowProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($windowAcceptanceRoot) })
+          if ($windowProcesses.Count -ne 0 -and -not $windowCleanupFailure) {
+            $windowCleanupFailure = "native CloakBrowser acceptance processes survived cleanup"
+          }
+        } catch {
+          if (-not $windowCleanupFailure) { $windowCleanupFailure = $_ }
+        }
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+          try { Remove-Item -LiteralPath $windowAcceptanceRoot -Recurse -Force -ErrorAction Stop } catch {}
+          if (-not (Test-Path -LiteralPath $windowAcceptanceRoot)) { break }
+          Start-Sleep -Milliseconds 250
+        }
+        if ((Test-Path -LiteralPath $windowAcceptanceRoot) -and -not $windowCleanupFailure) {
+          $windowCleanupFailure = "native CloakBrowser acceptance state survived cleanup"
+        }
+      }
+      if ($windowAcceptanceFailure -and $windowCleanupFailure) {
+        throw "$($windowAcceptanceFailure.Exception.Message); cleanup also failed: $windowCleanupFailure"
+      }
+      if ($windowAcceptanceFailure) { throw $windowAcceptanceFailure }
+      if ($windowCleanupFailure) { throw $windowCleanupFailure }
+      $checks.nativeHeadfulLaunch = $true
+
+      Set-AcceptanceStage "browser-proxy-mismatch"
+      $proxyMismatchRoot = Join-Path $runRoot "proxy-mismatch"
+      & $installation.SidecarPath __cloud-launcher-smoke --proxy-mismatch --state-root $proxyMismatchRoot
+      if ($LASTEXITCODE -ne 0) {
+        throw "installed deterministic proxy mismatch smoke exited with code $LASTEXITCODE"
+      }
+      $checks.proxyMismatch = $true
+
+      foreach ($name in $liveProxyEnvironmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $savedProcessEnvironment[$name], "Process")
+      }
+      if ([string]::IsNullOrWhiteSpace($env:ALIASMODE_LIVE_PROXY_HOST)) {
+        Write-Host "Installed headful Cloud proxy smoke skipped: no temporary test proxy configured"
+      } else {
+        foreach ($proxyType in @("http", "socks5")) {
+          Set-AcceptanceStage "browser-authenticated-$proxyType-proxy"
+          $stateRoot = Join-Path $runRoot "authenticated-$proxyType"
+          & $installation.SidecarPath __cloud-launcher-smoke --proxy-type $proxyType --state-root $stateRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw "installed headful Cloud proxy smoke exited with code $LASTEXITCODE"
+          }
+          if ($proxyType -eq "http") {
+            $checks.authenticatedHttpProxy = $true
+          } else {
+            $checks.authenticatedSocks5Proxy = $true
+          }
+        }
+      }
+    }
+    "cloud" {
+      Set-AcceptanceStage "cloud-preparing"
+      $browserRuntime = Set-BrowserRuntimeEnvironment $installation $installRoot
+      $playwrightRuntime = $browserRuntime.PlaywrightRuntime
+      $cloudAcceptanceRoot = Join-Path $runRoot "cloud-restore"
+      Remove-Item -LiteralPath $cloudAcceptanceRoot -Recurse -Force -ErrorAction SilentlyContinue
+      New-Item -ItemType Directory -Force $cloudAcceptanceRoot | Out-Null
+
+      Add-Type @'
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class AliasModeAcceptanceCredentials {
+  [DllImport("Advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool Delete(string target, uint type, uint flags);
+
+  [DllImport("Advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool Read(string target, uint type, uint flags, out System.IntPtr credential);
+
+  [DllImport("Advapi32.dll", EntryPoint = "CredFree")]
+  private static extern void Free(System.IntPtr credential);
+
+  public static bool Exists(string target) {
+    System.IntPtr credential;
+    if (Read(target, 1, 0, out credential)) {
+      Free(credential);
+      return true;
+    }
+    int error = Marshal.GetLastWin32Error();
+    if (error == 1168) return false;
+    throw new Win32Exception(error);
+  }
+}
+'@
+
+      $acceptanceCredentialTargets = @(
+        "AliasMode/refresh-token",
+        "AliasMode/device-credential",
+        "AliasMode/queue-encryption-key"
+      )
+
+      function Remove-AliasModeAcceptanceCredentials {
+        foreach ($target in $acceptanceCredentialTargets) {
+          [void][AliasModeAcceptanceCredentials]::Delete($target, 1, 0)
+        }
+      }
+
+      function Assert-AliasModeAcceptanceCredentialsAbsent {
+        foreach ($target in $acceptanceCredentialTargets) {
+          if ([AliasModeAcceptanceCredentials]::Exists($target)) {
+            throw "Cloud acceptance credential cleanup was not confirmed"
+          }
+        }
+      }
+
+      function Get-FreeLoopbackPort {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try { return ([Net.IPEndPoint]$listener.LocalEndpoint).Port }
+        finally { $listener.Stop() }
+      }
+
+      $trackedPids = [Collections.Generic.HashSet[int]]::new()
+      $fixtureProcess = $null
+      $activeAcceptanceApp = $null
+      $fixturePort = Get-FreeLoopbackPort
+      $fixtureUrl = "http://127.0.0.1:$fixturePort"
+      $isolatedState = $appDataRoot
+      Remove-Item -LiteralPath $isolatedState -Recurse -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $isolatedState) {
+        throw "installed Cloud acceptance state root was not clean"
+      }
+      New-Item -ItemType Directory -Force $isolatedState | Out-Null
+      $config = @{
+        version = 1
+        mode = "cloud"
+        cloudUrl = $fixtureUrl
+        localAnalytics = $false
+      } | ConvertTo-Json
+      [IO.File]::WriteAllText(
+        (Join-Path $isolatedState "config.json"),
+        $config,
+        [Text.UTF8Encoding]::new($false)
+      )
+
+      [Environment]::SetEnvironmentVariable("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "1", "Process")
+      [Environment]::SetEnvironmentVariable("ALIASMODE_CLOUD_URL", $fixtureUrl, "Process")
+      [Environment]::SetEnvironmentVariable("ALIASMODE_SUPABASE_URL", $fixtureUrl, "Process")
+      [Environment]::SetEnvironmentVariable("ALIASMODE_SUPABASE_ANON_KEY", "aliasmode-fixture-anon", "Process")
+
+      $acceptanceCredentialCanaries = @{
+        seededRefresh = "aliasmode-acceptance-refresh-seeded"
+        rotatedRefresh = "aliasmode-fixture-refresh-rotated"
+        access = "aliasmode-fixture-access"
+        device = "aliasmode-acceptance-device"
+        queue = "YWxpYXNtb2RlLWFjY2VwdGFuY2UtcXVldWUta2V5MDE="
+      }
+
+      function Assert-AliasModeAcceptanceLogsExcludeCredentials {
+        $logRoot = Join-Path $isolatedState "logs"
+        $logFiles = @(Get-ChildItem $logRoot -Recurse -File -ErrorAction SilentlyContinue)
+        if ($logFiles.Count -eq 0) { throw "installed Cloud acceptance sidecar log was not found" }
+        foreach ($file in $logFiles) {
+          $content = [IO.File]::ReadAllText($file.FullName)
+          foreach ($canary in $acceptanceCredentialCanaries.Values) {
+            if ($content.Contains($canary, [StringComparison]::Ordinal)) {
+              throw "Cloud acceptance log exposed a synthetic credential"
+            }
+          }
+        }
+      }
+
+      function Start-CloudRestoreFixture([string]$Mode, [string]$InitialRefresh) {
+        $process = Start-Process -PassThru $installation.SidecarPath -ArgumentList @(
+          "__cloud-restore-fixture",
+          "--port", "$fixturePort",
+          "--mode", $Mode,
+          "--initial-refresh", $InitialRefresh
+        )
+        [void]$trackedPids.Add([int]$process.Id)
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          $process.Refresh()
+          if ($process.HasExited) { throw "Cloud restore fixture $Mode exited before readiness" }
+          try {
+            $health = Invoke-RestMethod "$fixtureUrl/health" -TimeoutSec 1
+            if ($health.ok -eq $true -and $health.mode -eq $Mode) { return $process }
+          } catch {}
+          Start-Sleep -Milliseconds 100
+        }
+        throw "Cloud restore fixture $Mode did not become ready"
+      }
+
+      function Stop-AcceptanceProcess($Process) {
+        if (-not $Process) { return }
+        $Process.Refresh()
+        if (-not $Process.HasExited) {
+          $Process.Kill($true)
+          if (-not $Process.WaitForExit(10000)) {
+            throw "Cloud acceptance process tree did not exit"
+          }
+        }
+      }
+
+      function Stop-CloudRestoreFixture($Process) {
+        if (-not $Process) { return }
+        Stop-AcceptanceProcess $Process
+        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+          try {
+            Invoke-RestMethod "$fixtureUrl/health" -TimeoutSec 1 | Out-Null
+            Start-Sleep -Milliseconds 100
+          } catch { return }
+        }
+        throw "Cloud restore fixture did not release its loopback port"
+      }
+
+      function Start-InstalledCloudAcceptanceApp {
+        $webviewRoot = Join-Path $cloudAcceptanceRoot "webview-$([Guid]::NewGuid().ToString('N'))"
+        [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webviewRoot, "Process")
+        $process = Start-Process -PassThru $installation.AppPath
+        [void]$trackedPids.Add([int]$process.Id)
+        $sidecarPid = 0
+        $debugPort = 0
+        $debugReady = $false
+        for ($attempt = 0; $attempt -lt 120; $attempt++) {
+          $process.Refresh()
+          if ($process.HasExited) { throw "installed Cloud acceptance app exited before readiness" }
+          if ($sidecarPid -le 0) {
+            $sidecar = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($process.Id)" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like "aliasmode-sidecar*.exe" } |
+              Select-Object -First 1
+            if ($sidecar) { $sidecarPid = [int]$sidecar.ProcessId }
+          }
+          if ($debugPort -le 0) {
+            $activePortPath = Join-Path $webviewRoot "EBWebView\DevToolsActivePort"
+            if (Test-Path -LiteralPath $activePortPath -PathType Leaf) {
+              try {
+                $activePortLine = [IO.File]::ReadLines($activePortPath) | Select-Object -First 1
+                $parsedPort = 0
+                if ([int]::TryParse($activePortLine, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -le 65535) {
+                  $debugPort = $parsedPort
+                }
+              } catch {}
+            }
+          }
+          if ($debugPort -gt 0) {
+            try {
+              Invoke-RestMethod "http://127.0.0.1:$debugPort/json/version" -TimeoutSec 1 | Out-Null
+              $debugReady = $true
+            } catch {}
+          }
+          if ($sidecarPid -gt 0 -and $process.MainWindowHandle -ne 0 -and $debugReady) { break }
+          Start-Sleep -Milliseconds 250
+        }
+        if ($sidecarPid -le 0) { throw "installed Cloud acceptance app did not start its packaged sidecar" }
+        if ($process.MainWindowHandle -eq 0) { throw "installed Cloud acceptance app did not create its main window" }
+        if ($debugPort -le 0) { throw "installed Cloud acceptance WebView2 endpoint was not published" }
+        if (-not $debugReady) { throw "installed Cloud acceptance WebView2 endpoint did not become ready" }
+        [void]$trackedPids.Add($sidecarPid)
+        return [pscustomobject]@{
+          Process = $process
+          SidecarPid = $sidecarPid
+          DebugPort = $debugPort
+        }
+      }
+
+      function Stop-InstalledCloudAcceptanceApp($Record) {
+        if (-not $Record) { return }
+        $process = $Record.Process
+        $process.Refresh()
+        if (-not $process.HasExited) {
+          if (-not $process.CloseMainWindow()) {
+            throw "installed Cloud acceptance app rejected its close request"
+          }
+          if (-not $process.WaitForExit(30000)) {
+            throw "installed Cloud acceptance app did not exit during restart"
+          }
+        }
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          if (-not (Get-Process -Id $Record.SidecarPid -ErrorAction SilentlyContinue)) { return }
+          Start-Sleep -Milliseconds 250
+        }
+        throw "installed Cloud acceptance sidecar survived app restart"
+      }
+
+      $desktopProbe = @'
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const { runtimeRoot, endpoint, fixtureEndpoint, action, expected } = JSON.parse(input);
+if (!runtimeRoot || !endpoint || !fixtureEndpoint || !action || !expected) {
+  throw new Error("desktop acceptance input is incomplete");
+}
+if (![expected.seededRefresh, expected.rotatedRefresh, expected.device, expected.queue]
+  .every((value) => typeof value === "string" && value.length > 0)) {
+  throw new Error("desktop acceptance credential canaries are incomplete");
+}
+const { chromium } = await import(pathToFileURL(join(runtimeRoot, "node_modules", "playwright-core", "index.mjs")).href);
+const browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
+try {
+  let page;
+  for (let attempt = 0; attempt < 100 && !page; attempt++) {
+    page = browser.contexts().flatMap((context) => context.pages())
+      .find((candidate) => candidate.url().startsWith("http://127.0.0.1:"));
+    if (!page) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!page) throw new Error("installed AliasMode dashboard target was not found");
+  await page.waitForFunction(() => typeof window.__TAURI_INTERNALS__?.invoke === "function", undefined, { timeout: 30_000 });
+  const waitForText = (values) => page.waitForFunction(
+    (expectedText) => expectedText.every((value) => document.body?.innerText.includes(value)),
+    values,
+    { timeout: 30_000 },
+  );
+  const releaseRestore = async (count = 1) => {
+    for (let index = 0; index < count; index++) {
+      const deadline = Date.now() + 30_000;
+      while (true) {
+        const response = await fetch(`${fixtureEndpoint}/control/release`, { method: "POST" });
+        if (response.ok) break;
+        if (response.status !== 409 || Date.now() >= deadline) {
+          throw new Error("Cloud restore fixture could not be released");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  };
+  const credentialFlags = () => page.evaluate(async (credential) => {
+    const invoke = window.__TAURI_INTERNALS__.invoke;
+    const [refresh, device, queue] = await Promise.all([
+      invoke("credential_get", { key: "refresh_token" }),
+      invoke("credential_get", { key: "device_credential" }),
+      invoke("credential_get", { key: "queue_encryption_key" }),
+    ]);
+    return {
+      seededRefresh: refresh === credential.seededRefresh,
+      rotatedRefresh: refresh === credential.rotatedRefresh,
+      refreshMissing: refresh === null,
+      device: device === credential.device,
+      deviceMissing: device === null,
+      queue: queue === credential.queue,
+      queueMissing: queue === null,
+    };
+  }, expected);
+  const requireStored = async (refreshKind) => {
+    const flags = await credentialFlags();
+    if (!flags[refreshKind] || !flags.device || !flags.queue) {
+      throw new Error("installed Credential Manager persistence did not match the expected structure");
+    }
+  };
+  const openMemberSettings = async () => {
+    await page.getByRole("button", { name: "Open Account and Settings" }).click();
+    await waitForText(["Fixture workspace"]);
+    await page.getByRole("tab", { name: "Team", exact: true }).click();
+    const roleRow = page.locator(".settings-row").filter({ has: page.getByText("Role", { exact: true }) });
+    await roleRow.waitFor({ state: "visible", timeout: 30_000 });
+    if ((await roleRow.locator(":scope > strong").innerText()).trim() !== "member") {
+      throw new Error("restored Cloud workspace role was not member");
+    }
+  };
+
+  if (action === "seed") {
+    await page.evaluate(async (credential) => {
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      await invoke("credential_set", { key: "queue_encryption_key", secret: credential.queue });
+      await invoke("credential_set", { key: "device_credential", secret: credential.device });
+      await invoke("credential_set", { key: "refresh_token", secret: credential.seededRefresh });
+    }, expected);
+    await requireStored("seededRefresh");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForText(["Restoring saved session"]);
+    await releaseRestore();
+    await waitForText(["No Cloud profiles yet"]);
+    await requireStored("rotatedRefresh");
+  } else if (action === "healthy") {
+    await waitForText(["Restoring saved session"]);
+    await releaseRestore();
+    await waitForText(["No Cloud profiles yet"]);
+    await openMemberSettings();
+    await requireStored("rotatedRefresh");
+  } else if (action === "offline") {
+    await page.getByRole("heading", { name: "Restoring saved session", exact: true })
+      .waitFor({ state: "visible", timeout: 30_000 });
+    await releaseRestore(2);
+    await page.getByRole("button", { name: "Try again", exact: true })
+      .waitFor({ state: "visible", timeout: 30_000 });
+    await page.getByRole("button", { name: "Sign in instead", exact: true })
+      .waitFor({ state: "visible", timeout: 30_000 });
+    await requireStored("rotatedRefresh");
+  } else if (action === "online") {
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await waitForText(["Restoring saved session"]);
+    await releaseRestore();
+    await waitForText(["No Cloud profiles yet"]);
+    await openMemberSettings();
+    await requireStored("rotatedRefresh");
+  } else if (action === "revoked") {
+    await waitForText(["Restoring saved session"]);
+    await releaseRestore();
+    await waitForText(["Sign in to AliasMode Cloud", "Saved Cloud session is no longer valid"]);
+    const flags = await credentialFlags();
+    if (!flags.refreshMissing || !flags.deviceMissing || !flags.queue || flags.queueMissing) {
+      throw new Error("membership revocation did not preserve only the queue credential");
+    }
+  } else {
+    throw new Error("unknown desktop acceptance action");
+  }
+} finally {
+  await browser.close();
+}
+'@
+      $desktopProbePath = Join-Path $cloudAcceptanceRoot "desktop-probe.mjs"
+      [IO.File]::WriteAllText($desktopProbePath, $desktopProbe, [Text.UTF8Encoding]::new($false))
+
+      function Invoke-InstalledDesktopProbe($Record, [string]$Action) {
+        $probeInput = @{
+          runtimeRoot = $playwrightRuntime
+          endpoint = "http://127.0.0.1:$($Record.DebugPort)"
+          fixtureEndpoint = $fixtureUrl
+          action = $Action
+          expected = $acceptanceCredentialCanaries
+        } | ConvertTo-Json -Compress -Depth 4
+        $probeStart = [Diagnostics.ProcessStartInfo]::new()
+        $probeStart.FileName = Join-Path $playwrightRuntime "node\node.exe"
+        $probeStart.ArgumentList.Add($desktopProbePath)
+        $probeStart.UseShellExecute = $false
+        $probeStart.RedirectStandardInput = $true
+        $probeStart.RedirectStandardOutput = $true
+        $probeStart.RedirectStandardError = $true
+        $probe = [Diagnostics.Process]::new()
+        $probe.StartInfo = $probeStart
+        if (-not $probe.Start()) { throw "installed desktop probe did not start" }
+        try {
+          $probeOutput = $probe.StandardOutput.ReadToEndAsync()
+          $probeError = $probe.StandardError.ReadToEndAsync()
+          $probe.StandardInput.Write($probeInput)
+          $probe.StandardInput.Close()
+          if (-not $probe.HasExited) {
+            $probeCommand = Get-CimInstance Win32_Process -Filter "ProcessId = $($probe.Id)" -ErrorAction Stop
+            if (-not $probeCommand -or [string]::IsNullOrEmpty($probeCommand.CommandLine) -or $probeCommand.CommandLine.Contains("--eval")) {
+              throw "installed desktop probe used an unsafe process command"
+            }
+            foreach ($canary in $acceptanceCredentialCanaries.Values) {
+              if ($probeCommand.CommandLine.Contains($canary, [StringComparison]::Ordinal)) {
+                throw "installed desktop probe exposed a credential in its process command"
+              }
+            }
+          }
+          if (-not $probe.WaitForExit(180000)) {
+            $probe.Kill($true)
+            $probe.WaitForExit()
+            throw "installed desktop $Action probe timed out"
+          }
+          [void]$probeOutput.GetAwaiter().GetResult()
+          [void]$probeError.GetAwaiter().GetResult()
+          if ($probe.ExitCode -ne 0) {
+            throw "installed desktop $Action probe exited with code $($probe.ExitCode)"
+          }
+        } finally {
+          if (-not $probe.HasExited) {
+            $probe.Kill($true)
+            $probe.WaitForExit()
+          }
+          $probe.Dispose()
+        }
+      }
+
+      $cloudAcceptanceFailure = $null
+      try {
+        Set-AcceptanceStage "cloud-credentials-seed"
+        Remove-AliasModeAcceptanceCredentials
+        Assert-AliasModeAcceptanceCredentialsAbsent
+
+        $fixtureProcess = Start-CloudRestoreFixture "healthy" "seeded"
+        $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
+        Invoke-InstalledDesktopProbe $activeAcceptanceApp "seed"
+        Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
+        $activeAcceptanceApp = $null
+        $checks.credentialManager = $true
+        Write-Host "installed Cloud session acceptance stage credentials_seeded"
+
+        Set-AcceptanceStage "cloud-healthy-restart"
+        $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
+        Invoke-InstalledDesktopProbe $activeAcceptanceApp "healthy"
+        Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
+        $activeAcceptanceApp = $null
+        Stop-CloudRestoreFixture $fixtureProcess
+        $fixtureProcess = $null
+        $checks.cloudRestore = $true
+        Write-Host "installed Cloud session acceptance stage healthy_restart"
+
+        Set-AcceptanceStage "cloud-offline-online-recovery"
+        $fixtureProcess = Start-CloudRestoreFixture "offline" "rotated"
+        $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
+        Invoke-InstalledDesktopProbe $activeAcceptanceApp "offline"
+        Write-Host "installed Cloud session acceptance stage offline_recovery"
+        Stop-CloudRestoreFixture $fixtureProcess
+        $fixtureProcess = Start-CloudRestoreFixture "healthy" "rotated"
+        Invoke-InstalledDesktopProbe $activeAcceptanceApp "online"
+        Stop-InstalledCloudAcceptanceApp $activeAcceptanceApp
+        $activeAcceptanceApp = $null
+        Stop-CloudRestoreFixture $fixtureProcess
+        $fixtureProcess = $null
+        $checks.cloudRestartRecovery = $true
+        Write-Host "installed Cloud session acceptance stage online_recovery"
+
+        Set-AcceptanceStage "cloud-membership-revocation"
+        $fixtureProcess = Start-CloudRestoreFixture "membership-revoked" "rotated"
+        $activeAcceptanceApp = Start-InstalledCloudAcceptanceApp
+        Invoke-InstalledDesktopProbe $activeAcceptanceApp "revoked"
+        Stop-CloudRestoreFixture $fixtureProcess
+        $fixtureProcess = $null
+        $checks.cloudRevocation = $true
+        Write-Host "installed Cloud session acceptance stage membership_revoked"
+
+        Set-AcceptanceStage "cloud-cross-device"
+        $fixtureProcess = Start-CloudRestoreFixture "cross-device" "seeded"
+        $crossDeviceRoot = Join-Path $cloudAcceptanceRoot "cross-device"
+        if (Test-Path -LiteralPath $crossDeviceRoot) {
+          throw "cross-device acceptance state root was not clean"
+        }
+        & $installation.SidecarPath __cloud-cross-device-acceptance `
+          --fixture-url $fixtureUrl `
+          --state-root $crossDeviceRoot
+        if ($LASTEXITCODE -ne 0) {
+          throw "installed cross-device Cloud acceptance exited with code $LASTEXITCODE"
+        }
+        $crossDeviceState = Invoke-RestMethod "$fixtureUrl/control/state" -TimeoutSec 5
+        if ($crossDeviceState.version -ne 42 -or $null -ne $crossDeviceState.activeDevice) {
+          throw "cross-device fixture ended in an unexpected profile state"
+        }
+        foreach ($device in @("a", "b")) {
+          $expectedClose = if ($device -eq "a") { 4 } else { 2 }
+          if ($crossDeviceState.counters.open.$device -ne 3 -or
+              $crossDeviceState.counters.close.$device -ne $expectedClose -or
+              $crossDeviceState.counters.heartbeat.$device -ne 0 -or
+              $crossDeviceState.counters.abandon.$device -ne 0) {
+            throw "cross-device fixture request counters were not exact for device $device"
+          }
+        }
+        if ($crossDeviceState.counters.acceptedCloses -ne 4 -or
+            $crossDeviceState.counters.conflicts -ne 1 -or
+            $crossDeviceState.counters.profileOpen -ne 1 -or
+            $crossDeviceState.counters.droppedResponses -ne 2) {
+          throw "cross-device fixture outcome counters were not exact"
+        }
+        Stop-CloudRestoreFixture $fixtureProcess
+        $fixtureProcess = $null
+        $checks.cloudCrossDeviceCounts = $true
+        Write-Host "installed Cloud session acceptance stage cross_device"
+      } catch {
+        $cloudAcceptanceFailure = $_
+      } finally {
+        foreach ($record in @($activeAcceptanceApp, $fixtureProcess)) {
+          if ($record) {
+            $process = if ($record.Process) { $record.Process } else { $record }
+            try { Stop-AcceptanceProcess $process } catch {}
+          }
+        }
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+          Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cloudAcceptanceRoot) } |
+          ForEach-Object {
+            $process = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+            if ($process) {
+              try {
+                $process.Kill($true)
+                [void]$process.WaitForExit(10000)
+              } catch {}
+            }
+          }
+        foreach ($trackedPid in $trackedPids) {
+          $process = Get-Process -Id $trackedPid -ErrorAction SilentlyContinue
+          if ($process) {
+            try {
+              $process.Kill($true)
+              [void]$process.WaitForExit(10000)
+            } catch {}
+          }
+        }
+        $trackedRemaining = @()
+        $rootRemaining = @()
+        for ($attempt = 0; $attempt -lt 120; $attempt++) {
+          $trackedRemaining = @($trackedPids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+          $rootRemaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cloudAcceptanceRoot) })
+          if ($trackedRemaining.Count -eq 0 -and $rootRemaining.Count -eq 0) { break }
+          Start-Sleep -Milliseconds 250
+        }
+
+        $cloudCleanupFailure = $null
+        try {
+          if ($trackedRemaining.Count -ne 0 -or $rootRemaining.Count -ne 0) {
+            throw "Cloud acceptance processes survived final cleanup"
+          }
+          Assert-AliasModeAcceptanceLogsExcludeCredentials
+        } catch {
+          $cloudCleanupFailure = $_
+        }
+        try {
+          Remove-AliasModeAcceptanceCredentials
+          Assert-AliasModeAcceptanceCredentialsAbsent
+        } catch {
+          if (-not $cloudCleanupFailure) { $cloudCleanupFailure = $_ }
+        }
+        foreach ($name in @(
+          "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",
+          "WEBVIEW2_USER_DATA_FOLDER",
+          "ALIASMODE_CLOUD_URL",
+          "ALIASMODE_SUPABASE_URL",
+          "ALIASMODE_SUPABASE_ANON_KEY"
+        )) {
+          [Environment]::SetEnvironmentVariable($name, $savedProcessEnvironment[$name], "Process")
+        }
+        foreach ($path in @($isolatedState, $cloudAcceptanceRoot)) {
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            try { [IO.Directory]::Delete($path, $true) } catch {}
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $path)) { break }
+            Start-Sleep -Milliseconds 250
+          }
+          if ((Test-Path -LiteralPath $path) -and -not $cloudCleanupFailure) {
+            $cloudCleanupFailure = "Cloud acceptance state survived final cleanup: $(Split-Path $path -Leaf)"
+          }
+        }
+        if ($cloudAcceptanceFailure -and $cloudCleanupFailure) {
+          throw "$($cloudAcceptanceFailure.Exception.Message); cleanup also failed: $cloudCleanupFailure"
+        }
+        if ($cloudAcceptanceFailure) { throw $cloudAcceptanceFailure }
+        if ($cloudCleanupFailure) { throw $cloudCleanupFailure }
+      }
+    }
+  }
+
+  if (-not $automationPortBlocker.Server.IsBound) {
+    throw "fixed automation port conflict fixture released before installed acceptance completed"
+  }
+  $checks.automationPortConflict = $true
+  Set-AcceptanceStage "verified"
+  $acceptanceSucceeded = $true
+} catch {
+  $primaryFailure = $_
+} finally {
+  $stageBeforeCleanup = $stage
+  Set-AcceptanceStage "cleanup"
+
+  if ($automationPortBlocker) {
+    try { $automationPortBlocker.Stop() } catch { $cleanupFailures.Add("automation port fixture cleanup failed") }
+  }
+  $cleanupDataRoot = if ($acceptanceStateOwned) { $appDataRoot } else { "" }
+  try { Stop-AcceptanceProcesses $installRoot $runRoot $cleanupDataRoot } catch {
+    $cleanupFailures.Add("acceptance process cleanup failed")
+  }
+
+  $uninstaller = Join-Path $installRoot "uninstall.exe"
+  if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+    try {
+      $uninstall = Start-Process -PassThru $uninstaller -ArgumentList "/S"
+      if (-not $uninstall.WaitForExit(120000)) {
+        Stop-ProcessTree $uninstall
+        throw "uninstaller timed out"
+      }
+      if ($uninstall.ExitCode -ne 0) { throw "uninstaller exited nonzero" }
+    } catch {
+      $cleanupFailures.Add("installed app cleanup failed")
+    }
+  }
+
+  try { Stop-AcceptanceProcesses $installRoot $runRoot $cleanupDataRoot } catch {
+    $cleanupFailures.Add("final acceptance process cleanup failed")
+  }
+  if ($acceptanceStateOwned) {
+    foreach ($key in $registrationKeys) {
+      try {
+        if (Test-Path -LiteralPath $key) {
+          Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $key) { throw "installer registration survived cleanup" }
+      } catch {
+        $cleanupFailures.Add("installer registration cleanup failed")
+      }
+    }
+  }
+  $cleanupPaths = @($installRoot, $runRoot)
+  if ($acceptanceStateOwned) { $cleanupPaths = @($appDataRoot) + $cleanupPaths }
+  foreach ($path in @($cleanupPaths | Select-Object -Unique)) {
+    try { Remove-AcceptancePath $path } catch { $cleanupFailures.Add($_.Exception.Message) }
+  }
+  foreach ($name in $changedEnvironmentNames) {
+    try {
+      [Environment]::SetEnvironmentVariable($name, $savedProcessEnvironment[$name], "Process")
+    } catch {
+      $cleanupFailures.Add("process environment restoration failed")
+    }
+  }
+  $stage = $stageBeforeCleanup
+}
+
+$overallSuccess = $acceptanceSucceeded -and -not $primaryFailure -and $cleanupFailures.Count -eq 0
+try {
+  Write-AcceptanceDiagnostics `
+    $DiagnosticsPath `
+    $stage `
+    $overallSuccess `
+    $Shard `
+    $recordedVersion `
+    $checks `
+    $cleanupFailures.Count
+} catch {
+  $cleanupFailures.Add("diagnostics write failed")
+  $overallSuccess = $false
+}
+
+if ($primaryFailure) {
+  if ($cleanupFailures.Count -gt 0) {
+    throw "$($primaryFailure.Exception.Message); acceptance cleanup also failed in $($cleanupFailures.Count) area(s)"
+  }
+  throw $primaryFailure
+}
+if ($cleanupFailures.Count -gt 0) {
+  throw "Windows installed acceptance cleanup failed in $($cleanupFailures.Count) area(s)"
+}
+
+Write-Host "Windows installed $Shard acceptance passed for AliasMode $recordedVersion"

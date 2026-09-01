@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { installCloakBrowser } from "../browser-install.ts";
+import { CLOAKBROWSER_WRAPPER_VERSION, installCloakBrowser } from "../browser-install.ts";
 import { extractZipTo } from "../unzip.ts";
 import { ALIASMODE_VERSION } from "../version.ts";
 
@@ -20,7 +20,7 @@ export const NODE_WINDOWS_X64_URL = `https://nodejs.org/dist/v${NODE_WINDOWS_X64
 export interface PreparedBrowserMetadata {
   executable: string;
   sha256: string;
-  wrapperVersion: "0.4.11";
+  wrapperVersion: typeof CLOAKBROWSER_WRAPPER_VERSION;
 }
 
 export interface PrepareWindowsBundleOptions {
@@ -29,7 +29,7 @@ export interface PrepareWindowsBundleOptions {
   arch?: string;
   compileSidecar?: (output: string) => Promise<void>;
   compileAgent?: (output: string) => Promise<void>;
-  installBrowser?: (cwd: string) => Promise<{ path: string; sha256: string }>;
+  installBrowser?: (cwd: string, cacheDir: string) => Promise<{ path: string; sha256: string }>;
   hashFile?: (path: string) => Promise<string>;
   downloadNode?: () => Promise<Uint8Array>;
   installNode?: (playwrightRoot: string) => Promise<void>;
@@ -135,6 +135,7 @@ export async function prepareWindowsBundle(
   const binaries = join(tauri, "binaries");
   const resources = join(tauri, "resources");
   const staging = join(tauri, "target", "desktop-staging");
+  const browserCache = join(tauri, "target", "cloakbrowser-cache");
   const resourceRoot = join(resources, "cloakbrowser");
   const playwrightRoot = join(resources, "playwright");
   const sidecar = join(binaries, "aliasmode-sidecar-x86_64-pc-windows-msvc.exe");
@@ -144,6 +145,7 @@ export async function prepareWindowsBundle(
   rmSync(resourceRoot, { recursive: true, force: true });
   rmSync(playwrightRoot, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
+  mkdirSync(browserCache, { recursive: true });
   mkdirSync(generated, { recursive: true });
   mkdirSync(binaries, { recursive: true });
   mkdirSync(resources, { recursive: true });
@@ -194,11 +196,14 @@ export async function prepareWindowsBundle(
     copyRuntimePackage(cwd, playwrightRoot, dependency, copied);
   }
 
-  const installed = await (options.installBrowser ?? ((dir) => installCloakBrowser({ cwd: dir, cacheDir: dir })))(staging);
-  const stagingReal = realpathSync(staging);
+  const installed = await (options.installBrowser ?? ((dir, cacheDir) => installCloakBrowser({ cwd: dir, cacheDir })))(
+    staging,
+    browserCache,
+  );
+  const cacheReal = realpathSync(browserCache);
   const installedReal = realpathSync(installed.path);
-  if (!statSync(installedReal).isFile() || !isWithin(stagingReal, installedReal)) {
-    throw new Error("official CloakBrowser installer reported a path outside its staging directory");
+  if (!statSync(installedReal).isFile() || !isWithin(cacheReal, installedReal)) {
+    throw new Error("official CloakBrowser installer reported a path outside its cache directory");
   }
 
   const runtimeRoot = dirname(installedReal);
@@ -217,7 +222,7 @@ export async function prepareWindowsBundle(
   const metadata: PreparedBrowserMetadata = {
     executable: executableRelative,
     sha256: copiedHash,
-    wrapperVersion: "0.4.11",
+    wrapperVersion: CLOAKBROWSER_WRAPPER_VERSION,
   };
   writeFileSync(join(generated, "browser.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   writeFileSync(join(generated, "VERSION.txt"), `${ALIASMODE_VERSION}\n`, "utf8");
