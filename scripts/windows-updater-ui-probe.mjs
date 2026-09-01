@@ -73,6 +73,13 @@ async function main() {
   try {
     const page = await findDashboardPage(browser, input.dashboardOrigin);
     if (input.action === "verify-update-result") {
+      const visibility = await page.evaluate(() => ({
+        hidden: document.hidden,
+        state: document.visibilityState,
+      }));
+      if (visibility.hidden || visibility.state !== "visible") {
+        throw new Error("updated AliasMode window was not visible");
+      }
       const result = page.locator(".update-banner.update-result.success");
       await result.waitFor({ state: "visible", timeout: 60_000 });
       const title = (await result.locator("strong").innerText()).trim();

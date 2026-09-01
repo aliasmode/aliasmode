@@ -25,6 +25,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
     .replaceAll("\r\n", "\n");
   const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
   const updaterAcceptance = readFileSync(join(root, "scripts", "windows-in-app-update-acceptance.ps1"), "utf8");
+  const updaterUiProbe = readFileSync(join(root, "scripts", "windows-updater-ui-probe.mjs"), "utf8");
   const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
   const lockedVersion = cargoLock.match(/\[\[package\]\]\r?\nname = "aliasmode-desktop"\r?\nversion = "([^"]+)"/)?.[1];
@@ -62,6 +63,14 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance).toContain(
     '$opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"',
   );
+  expect(updaterAcceptance).toContain('foreach ($target in @("Process", "User"))');
+  expect(updaterAcceptance).toContain("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = $null");
+  expect(updaterAcceptance).toContain("$savedUserEnvironment[$name]");
+  expect(updaterAcceptance).toContain(
+    'SetEnvironmentVariable($name, $savedUserEnvironment[$name], "User")',
+  );
+  expect(updaterUiProbe).toContain("document.visibilityState");
+  expect(updaterUiProbe).toContain('visibility.state !== "visible"');
   expect(updaterAcceptance).not.toContain("CreateProcessAsUser");
   expect(updaterAcceptance).not.toContain("CreateProcessWithLogonW");
   expect(updaterAcceptance).not.toContain("SaferComputeTokenFromLevel");

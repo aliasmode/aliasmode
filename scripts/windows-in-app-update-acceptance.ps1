@@ -385,9 +385,10 @@ function Wait-CandidateRelaunch(
         }
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
+        $Observations.candidateWindowSeen = $true
         $debugPort = Get-WebViewDebugPort $WebViewRoot
         if ($debugPort -eq 0) { continue }
-        $Observations.candidateWindowSeen = $true
+        $Observations.candidateDebugSeen = $true
         $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
         if ($candidateRoutes.releaseList -lt 4) { continue }
         $Observations.candidateFrontendSeen = $true
@@ -421,6 +422,7 @@ function Wait-CandidateRelaunch(
         "candidateSidecarSeen=$($Observations.candidateSidecarSeen); " +
         "candidateHealthSeen=$($Observations.candidateHealthSeen); " +
         "candidateWindowSeen=$($Observations.candidateWindowSeen); " +
+        "candidateDebugSeen=$($Observations.candidateDebugSeen); " +
         "candidateFrontendSeen=$($Observations.candidateFrontendSeen); " +
         "releaseRequests=$($counts.releaseList); " +
         "manifestRequests=$($counts.manifest); " +
@@ -790,7 +792,12 @@ $routeCounts = [ordered]@{ releaseList = 0; manifest = 0; installer = 0; rejecte
 Set-AcceptanceStage "validating-inputs"
 $acceptanceSucceeded = $false
 $savedEnvironment = @{}
-$environmentNames = @("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "WEBVIEW2_USER_DATA_FOLDER")
+$savedUserEnvironment = @{}
+$environmentNames = @(
+  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",
+  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
+  "WEBVIEW2_USER_DATA_FOLDER"
+)
 $observations = [ordered]@{
   publicInstallerVerified = $false
   runnerUserProcessUsed = $false
@@ -808,6 +815,7 @@ $observations = [ordered]@{
   candidateSidecarSeen = $false
   candidateHealthSeen = $false
   candidateWindowSeen = $false
+  candidateDebugSeen = $false
   candidateFrontendSeen = $false
   candidateReady = $false
   candidateWindowReady = $false
@@ -940,9 +948,18 @@ try {
 
   foreach ($name in $environmentNames) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    $savedUserEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "User")
   }
-  [Environment]::SetEnvironmentVariable("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "1", "Process")
-  [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webViewRoot, "Process")
+  $acceptanceEnvironment = @{
+    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
+    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = $null
+    WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
+  }
+  foreach ($target in @("Process", "User")) {
+    foreach ($name in $environmentNames) {
+      [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], $target)
+    }
+  }
 
   Set-AcceptanceStage "starting-public-release"
   $publicDesktop = Start-RunnerUserProcess $appPath
@@ -1251,6 +1268,13 @@ try {
   foreach ($name in $environmentNames) {
     if ($savedEnvironment.ContainsKey($name)) {
       [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
+    }
+    if ($savedUserEnvironment.ContainsKey($name)) {
+      try {
+        [Environment]::SetEnvironmentVariable($name, $savedUserEnvironment[$name], "User")
+      } catch {
+        $cleanupFailures.Add("user environment restoration failed")
+      }
     }
   }
 
