@@ -1390,6 +1390,118 @@ function Assert-GithubResolvesToLoopback {
   }
 }
 
+function Read-SafeBrowserLogDiagnostics([string]$Path) {
+  $result = [ordered]@{
+    created = $false
+    parsed = $false
+    errorCount = 0
+    relevantErrorCount = 0
+    signatures = @()
+  }
+  if ([string]::IsNullOrWhiteSpace($Path) -or
+      -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return [pscustomobject]$result
+  }
+  $result.created = $true
+  $signatureMap = [Collections.Generic.Dictionary[string, object]]::new(
+    [StringComparer]::Ordinal
+  )
+  $signatureOrder = [Collections.Generic.List[string]]::new()
+  try {
+    $maxLogBytes = 4 * 1024 * 1024
+    $stream = [IO.FileStream]::new(
+      $Path,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    )
+    try {
+      $byteCount = [int][Math]::Min([long]$maxLogBytes, $stream.Length)
+      $startOffset = $stream.Length - $byteCount
+      [void]$stream.Seek($startOffset, [IO.SeekOrigin]::Begin)
+      $bytes = [byte[]]::new($byteCount)
+      $bytesRead = 0
+      while ($bytesRead -lt $byteCount) {
+        $nextRead = $stream.Read($bytes, $bytesRead, $byteCount - $bytesRead)
+        if ($nextRead -le 0) { break }
+        $bytesRead += $nextRead
+      }
+      $text = [Text.Encoding]::UTF8.GetString($bytes, 0, $bytesRead)
+    } finally {
+      $stream.Dispose()
+    }
+    $reader = [IO.StringReader]::new($text)
+    try {
+      if ($startOffset -gt 0) { [void]$reader.ReadLine() }
+      while ($null -ne ($line = $reader.ReadLine())) {
+        if ($line.Length -gt 16384) { continue }
+        $header = [Text.RegularExpressions.Regex]::Match(
+          $line,
+          '(?i)\b(?<severity>ERROR|FATAL):\s*(?<source>[a-z0-9_./\\-]+\.cc)(?::|\()(?<line>[0-9]+)\)?\]?'
+        )
+        if (-not $header.Success) { continue }
+        $result.errorCount++
+        $source = [IO.Path]::GetFileName($header.Groups["source"].Value).ToLowerInvariant()
+        if ($source -notmatch '(gpu|sandbox|container|job|process|broker|policy|desktop|window)') {
+          continue
+        }
+        $result.relevantErrorCount++
+        $sourceLine = 0
+        if (-not [int]::TryParse($header.Groups["line"].Value, [ref]$sourceLine)) {
+          continue
+        }
+        $message = $line.Substring($header.Index + $header.Length)
+        $codes = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($codeMatch in [Text.RegularExpressions.Regex]::Matches(
+          $message,
+          '(?i)\b0x[0-9a-f]{1,16}\b'
+        )) {
+          [void]$codes.Add($codeMatch.Value.ToLowerInvariant())
+        }
+        foreach ($codeMatch in [Text.RegularExpressions.Regex]::Matches(
+          $message,
+          '(?i)\b(?:exit_code|error_code|result(?:_code)?|status|code)\s*[=:]\s*(?<code>-?[0-9]+)\b'
+        )) {
+          [void]$codes.Add($codeMatch.Groups["code"].Value)
+        }
+        $sboxErrors = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($sboxMatch in [Text.RegularExpressions.Regex]::Matches(
+          $message,
+          '\bSBOX_ERROR_[A-Z0-9_]+\b'
+        )) {
+          [void]$sboxErrors.Add($sboxMatch.Value)
+        }
+        $severity = $header.Groups["severity"].Value.ToUpperInvariant()
+        [string[]]$safeCodes = @($codes | Sort-Object)
+        [string[]]$safeSboxErrors = @($sboxErrors | Sort-Object)
+        $key = "$severity|$source|$sourceLine|$($safeCodes -join ',')|$($safeSboxErrors -join ',')"
+        if ($signatureMap.ContainsKey($key)) {
+          $signatureMap[$key]["count"]++
+        } elseif ($signatureOrder.Count -lt 32) {
+          $signatureMap[$key] = [ordered]@{
+            severity = $severity
+            source = $source
+            line = $sourceLine
+            codes = $safeCodes
+            sboxErrors = $safeSboxErrors
+            count = 1
+          }
+          $signatureOrder.Add($key)
+        }
+      }
+    } finally {
+      $reader.Dispose()
+    }
+    $result.signatures = @($signatureOrder | ForEach-Object { $signatureMap[$_] })
+    $result.parsed = $true
+  } catch {
+    $result.errorCount = 0
+    $result.relevantErrorCount = 0
+    $result.signatures = @()
+  }
+  return [pscustomobject]$result
+}
+
 function Write-SafeDiagnostics(
   [string]$Path,
   [string]$Stage,
@@ -1508,6 +1620,7 @@ $acceptanceUserSid = $null
 $acceptanceProfilePath = $null
 $userRunRoot = $null
 $userTempRoot = $null
+$browserLogPath = $null
 $acceptanceDebugPort = 0
 $installRoot = $null
 $webViewRoot = $null
@@ -1528,6 +1641,8 @@ $fixtureProcess = $null
 $oldRecord = $null
 $candidateRecord = $null
 $oldBrowserProcesses = @()
+$browserOpenAttempted = $false
+$browserOpenSucceeded = $false
 $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
 $routeCounts = [ordered]@{ releaseList = 0; manifest = 0; installer = 0; rejected = 0 }
@@ -1546,6 +1661,11 @@ $observations = [ordered]@{
   gpuProcessSeenDuringOpen = $false
   gpuSandboxExceptionSeenDuringOpen = $false
   gpuSandboxExceptionUsed = $false
+  browserLogCreated = $false
+  browserLogParsed = $false
+  browserLogErrorCount = 0
+  browserLogRelevantErrorCount = 0
+  browserLogSignatures = @()
   rootMismatchRejected = $false
   browserStayedActiveAfterRejection = $false
   installerDidNotStartAfterRejection = $false
@@ -1656,6 +1776,12 @@ try {
   }
 
   $userRunRoot = Join-Path $userTempRoot "aliasmode-in-app-update-$runId"
+  $browserLogPath = [IO.Path]::GetFullPath(
+    (Join-Path $userRunRoot "cloakbrowser-debug.log")
+  )
+  if (-not (Test-PathWithin $browserLogPath $userRunRoot)) {
+    throw "browser diagnostic log escaped its disposable root"
+  }
   $installRoot = Join-Path $userLocalAppData "AliasMode"
   $webViewRoot = Join-Path $userRunRoot "webview"
   $appDataRoot = Join-Path $userAppData "com.aliasmode.desktop"
@@ -1784,6 +1910,7 @@ try {
       ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
       ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = "$acceptanceDebugPort"
       ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX = "1"
+      ALIASMODE_ACCEPTANCE_BROWSER_LOG = $browserLogPath
       ALIASMODE_SESSION_LAUNCH = "0"
       GITHUB_ACTIONS = "true"
       WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
@@ -1830,6 +1957,7 @@ try {
     "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"
   )
   $openResponse = $null
+  $browserOpenAttempted = $true
   try {
     $openTask = $openClient.SendAsync($openRequest)
     $browserRoot = Join-Path $installRoot "cloakbrowser"
@@ -1892,6 +2020,7 @@ try {
       }
       throw "public $publicVersion could not open the preservation browser$safeOpenError"
     }
+    $browserOpenSucceeded = $true
   } finally {
     if ($openResponse) { $openResponse.Dispose() }
     $openRequest.Dispose()
@@ -2154,6 +2283,17 @@ try {
     } catch {
       $cleanupFailures.Add("standard-user process sweep failed")
     }
+  }
+
+  if ($browserOpenAttempted -and -not $browserOpenSucceeded) {
+    try {
+      $browserLogDiagnostics = Read-SafeBrowserLogDiagnostics $browserLogPath
+      $observations.browserLogCreated = $browserLogDiagnostics.created
+      $observations.browserLogParsed = $browserLogDiagnostics.parsed
+      $observations.browserLogErrorCount = $browserLogDiagnostics.errorCount
+      $observations.browserLogRelevantErrorCount = $browserLogDiagnostics.relevantErrorCount
+      $observations.browserLogSignatures = @($browserLogDiagnostics.signatures)
+    } catch {}
   }
 
   if ($installRoot) {

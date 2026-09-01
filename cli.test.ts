@@ -868,10 +868,11 @@ test("CLI dispatches the session worker before normal command parsing", async ()
   ]);
 });
 
-test("Windows updater acceptance uses only its explicit GPU sandbox exception", () => {
+test("Windows updater acceptance gates its browser diagnostics", () => {
   const enabled = {
     GITHUB_ACTIONS: "true",
     ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX: "1",
+    ALIASMODE_ACCEPTANCE_BROWSER_LOG: "C:\\acceptance\\cloakbrowser.log",
   };
   expect(windowsUpdaterAcceptanceBrowserArgs({}, "win32")).toEqual([]);
   expect(windowsUpdaterAcceptanceBrowserArgs(enabled, "linux")).toEqual([]);
@@ -883,8 +884,15 @@ test("Windows updater acceptance uses only its explicit GPU sandbox exception", 
     ...enabled,
     ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX: "0",
   }, "win32")).toEqual([]);
+  expect(windowsUpdaterAcceptanceBrowserArgs({
+    ...enabled,
+    ALIASMODE_ACCEPTANCE_BROWSER_LOG: " ",
+  }, "win32")).toEqual(["--disable-gpu-sandbox"]);
   expect(windowsUpdaterAcceptanceBrowserArgs(enabled, "win32")).toEqual([
     "--disable-gpu-sandbox",
+    "--enable-logging",
+    "--v=1",
+    "--log-file=C:\\acceptance\\cloakbrowser.log",
   ]);
 });
 

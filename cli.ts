@@ -368,12 +368,20 @@ export function windowsUpdaterAcceptanceBrowserArgs(
   env: Record<string, string | undefined> = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string[] {
+  const logPath = env.ALIASMODE_ACCEPTANCE_BROWSER_LOG?.trim();
   if (
     platform !== "win32"
     || env.GITHUB_ACTIONS !== "true"
     || env.ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX !== "1"
   ) return [];
-  return ["--disable-gpu-sandbox"];
+  const args = ["--disable-gpu-sandbox"];
+  if (!logPath) return args;
+  return [
+    ...args,
+    "--enable-logging",
+    "--v=1",
+    `--log-file=${logPath}`,
+  ];
 }
 
 function makeLauncher(

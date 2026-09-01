@@ -71,6 +71,13 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance).toContain(
     'ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX = "1"',
   );
+  expect(updaterAcceptance).toContain(
+    "ALIASMODE_ACCEPTANCE_BROWSER_LOG = $browserLogPath",
+  );
+  expect(updaterAcceptance).toContain("Read-SafeBrowserLogDiagnostics");
+  expect(updaterAcceptance).toContain(
+    "$observations.browserLogSignatures = @($browserLogDiagnostics.signatures)",
+  );
   expect(updaterAcceptance).toContain('GITHUB_ACTIONS = "true"');
   expect(updaterAcceptance).toContain(
     "$openTask = $openClient.SendAsync($openRequest)",
@@ -91,6 +98,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
     "$observations.gpuSandboxExceptionUsed = $true",
   );
   expect(cliSource).toContain("windowsUpdaterAcceptanceBrowserArgs");
+  expect(cliSource).toContain("ALIASMODE_ACCEPTANCE_BROWSER_LOG");
+  expect(cliSource).toContain('"--enable-logging"');
+  expect(cliSource).toContain("`--log-file=${logPath}`");
   expect(updaterAcceptance).toContain("$acceptanceDebugPort");
   expect(updaterAcceptance).toContain('ALIASMODE_SESSION_LAUNCH = "0"');
   expect(updaterAcceptance).toContain("[void]$process.Handle");
