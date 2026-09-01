@@ -24,7 +24,8 @@ test("release version and updater trust stay aligned across the desktop bundle",
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release-candidate.yml"), "utf8")
     .replaceAll("\r\n", "\n");
   const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
-  const updaterAcceptance = readFileSync(join(root, "scripts", "windows-in-app-update-acceptance.ps1"), "utf8");
+  const updaterAcceptance = readFileSync(join(root, "scripts", "windows-in-app-update-acceptance.ps1"), "utf8")
+    .replaceAll("\r\n", "\n");
   const updaterUiProbe = readFileSync(join(root, "scripts", "windows-updater-ui-probe.mjs"), "utf8");
   const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
