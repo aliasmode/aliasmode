@@ -17,7 +17,6 @@ import {
   runCompiledSidecarSmoke,
   runCloakpitImportCommand,
   selectedCloudUrl,
-  windowsUpdaterAcceptanceBrowserArgs,
 } from "./cli.ts";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -865,34 +864,6 @@ test("CLI dispatches the session worker before normal command parsing", async ()
   expect(events).toEqual([
     JSON.stringify({ ok: true, bundle: "captured bundle" }),
     "exit:0",
-  ]);
-});
-
-test("Windows updater acceptance gates its browser diagnostics", () => {
-  const enabled = {
-    GITHUB_ACTIONS: "true",
-    ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX: "1",
-    ALIASMODE_ACCEPTANCE_BROWSER_LOG: "C:\\acceptance\\cloakbrowser.log",
-  };
-  expect(windowsUpdaterAcceptanceBrowserArgs({}, "win32")).toEqual([]);
-  expect(windowsUpdaterAcceptanceBrowserArgs(enabled, "linux")).toEqual([]);
-  expect(windowsUpdaterAcceptanceBrowserArgs({
-    ...enabled,
-    GITHUB_ACTIONS: "false",
-  }, "win32")).toEqual([]);
-  expect(windowsUpdaterAcceptanceBrowserArgs({
-    ...enabled,
-    ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX: "0",
-  }, "win32")).toEqual([]);
-  expect(windowsUpdaterAcceptanceBrowserArgs({
-    ...enabled,
-    ALIASMODE_ACCEPTANCE_BROWSER_LOG: " ",
-  }, "win32")).toEqual(["--disable-gpu-sandbox"]);
-  expect(windowsUpdaterAcceptanceBrowserArgs(enabled, "win32")).toEqual([
-    "--disable-gpu-sandbox",
-    "--enable-logging",
-    "--v=1",
-    "--log-file=C:\\acceptance\\cloakbrowser.log",
   ]);
 });
 

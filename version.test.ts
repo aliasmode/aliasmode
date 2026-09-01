@@ -24,7 +24,6 @@ test("release version and updater trust stay aligned across the desktop bundle",
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release-candidate.yml"), "utf8")
     .replaceAll("\r\n", "\n");
   const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
-  const cliSource = readFileSync(join(root, "cli.ts"), "utf8");
   const updaterAcceptance = readFileSync(join(root, "scripts", "windows-in-app-update-acceptance.ps1"), "utf8");
   const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
@@ -57,56 +56,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).toContain("Build full offline installer");
   expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
   expect(ciWorkflow).not.toContain("nsis-updater");
-  expect(updaterAcceptance).toContain("New-LocalUser");
-  expect(updaterAcceptance).toContain('EntryPoint = "CreateProcessWithLogonW"');
-  expect(updaterAcceptance).toContain("LoadUserProfile");
-  expect(updaterAcceptance).toContain('"Registry::HKEY_USERS\\$acceptanceUserSid');
-  expect(updaterAcceptance).toContain("AliasModeAcceptanceDesktopAccess");
-  expect(updaterAcceptance).toContain("GetProcessLogonSid");
-  expect(updaterAcceptance).toContain("TokenLogonSidClass = 28");
-  expect(updaterAcceptance).not.toContain("identity.Groups");
-  expect(updaterAcceptance).toContain(
-    "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
-  );
-  expect(updaterAcceptance).toContain(
-    'ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX = "1"',
-  );
-  expect(updaterAcceptance).toContain(
-    "ALIASMODE_ACCEPTANCE_BROWSER_LOG = $browserLogPath",
-  );
-  expect(updaterAcceptance).toContain("Read-SafeBrowserLogDiagnostics");
-  expect(updaterAcceptance).toContain(
-    "$observations.browserLogSignatures = @($browserLogDiagnostics.signatures)",
-  );
-  expect(updaterAcceptance).toContain('GITHUB_ACTIONS = "true"');
-  expect(updaterAcceptance).toContain(
-    "$openTask = $openClient.SendAsync($openRequest)",
-  );
-  expect(updaterAcceptance).not.toContain(
-    '$opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"',
-  );
-  expect(updaterAcceptance).toContain(
-    "$observations.browserRootSeenDuringOpen = $true",
-  );
-  expect(updaterAcceptance).toContain(
-    "$observations.gpuProcessSeenDuringOpen = $true",
-  );
-  expect(updaterAcceptance).toContain(
-    "$observations.gpuSandboxExceptionSeenDuringOpen = $true",
-  );
-  expect(updaterAcceptance).toContain(
-    "$observations.gpuSandboxExceptionUsed = $true",
-  );
-  expect(cliSource).toContain("windowsUpdaterAcceptanceBrowserArgs");
-  expect(cliSource).toContain("ALIASMODE_ACCEPTANCE_BROWSER_LOG");
-  expect(cliSource).toContain('"--enable-logging"');
-  expect(cliSource).toContain("`--log-file=${logPath}`");
-  expect(updaterAcceptance).toContain("$acceptanceDebugPort");
-  expect(updaterAcceptance).toContain('ALIASMODE_SESSION_LAUNCH = "0"');
-  expect(updaterAcceptance).toContain("[void]$process.Handle");
-  expect(updaterAcceptance).not.toContain("TokenLinkedToken");
-  expect(updaterAcceptance).not.toContain("DuplicateTokenEx");
-  expect(updaterAcceptance).not.toContain("CreateProcessAsUser");
+  expect(updaterAcceptance).toContain("TokenLinkedTokenClass = 19");
+  expect(updaterAcceptance).toContain("TokenElevationTypeLimited = 3");
+  expect(updaterAcceptance).toContain("DuplicateTokenEx(");
   expect(updaterAcceptance).not.toContain("SaferComputeTokenFromLevel");
   expect(releaseWorkflow).not.toContain('Join-Path $artifact "latest.json"');
   expect(releaseWorkflow).toContain("$updaterHeader[0] -ne 0x4d");
