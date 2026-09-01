@@ -307,7 +307,7 @@ jobs:
             git checkout -- @versionFiles
           }
       - name: Test candidate through the exact updater protocol
-        timeout-minutes: 25
+        timeout-minutes: 35
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"

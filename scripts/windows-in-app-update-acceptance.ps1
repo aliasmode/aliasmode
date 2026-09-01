@@ -1542,6 +1542,7 @@ $observations = [ordered]@{
   publicDesktopReady = $false
   profileCreated = $false
   activeBrowserStarted = $false
+  gpuSandboxExceptionUsed = $false
   rootMismatchRejected = $false
   browserStayedActiveAfterRejection = $false
   installerDidNotStartAfterRejection = $false
@@ -1779,7 +1780,9 @@ try {
     @{
       ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
       ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = "$acceptanceDebugPort"
+      ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX = "1"
       ALIASMODE_SESSION_LAUNCH = "0"
+      GITHUB_ACTIONS = "true"
       WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
     }
   $desktopLogonSid = [AliasModeAcceptanceUserSession]::GetProcessLogonSid(
@@ -1825,6 +1828,16 @@ try {
   $browserOwner = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$opened.port) -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)
   if ($browserOwner.Count -ne 1) { throw "preservation browser CDP owner was not unique" }
+  $browserCommandLine = [string](Get-CimInstance Win32_Process `
+    -Filter "ProcessId = $($browserOwner[0])" `
+    -ErrorAction Stop).CommandLine
+  if (-not $browserCommandLine.Contains(
+    "--disable-gpu-sandbox",
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    throw "preservation browser did not use the acceptance GPU sandbox exception"
+  }
+  $observations.gpuSandboxExceptionUsed = $true
   for ($attempt = 0; $attempt -lt 40; $attempt++) {
     $oldBrowserProcesses = @(Get-InstalledBrowserProcesses $installRoot)
     if ($oldBrowserProcesses.Count -gt 0 -and

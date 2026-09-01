@@ -1202,6 +1202,7 @@ test("buildArgs keeps AliasMode and forwarded Automation ownership markers disti
 test("CLI identifies the manager with the AliasMode marker, never the Automation marker", () => {
   const cli = readFileSync(join(import.meta.dir, "cli.ts"), "utf8");
   expect(cli).toContain('`--aliasmode-launcher-pid=${process.pid}`');
+  expect(cli).toContain("...windowsUpdaterAcceptanceBrowserArgs()");
   expect(cli).toContain('has(rest, "no-sandbox") ? ["--no-sandbox"] : []');
   expect(cli).toContain('const unsafeCanary = has(rest, "unsafe-disable-identity-gates")');
   expect(cli).toContain("unsafeDisableIdentityGates: unsafeCanary");

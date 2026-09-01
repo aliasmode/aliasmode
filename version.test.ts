@@ -21,8 +21,10 @@ test("release version and updater trust stay aligned across the desktop bundle",
   const cargoToml = readFileSync(join(root, "src-tauri", "Cargo.toml"), "utf8");
   const cargoLock = readFileSync(join(root, "src-tauri", "Cargo.lock"), "utf8");
   const releasesSource = readFileSync(join(root, "src-tauri", "src", "releases.rs"), "utf8");
-  const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release-candidate.yml"), "utf8");
+  const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release-candidate.yml"), "utf8")
+    .replaceAll("\r\n", "\n");
   const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const cliSource = readFileSync(join(root, "cli.ts"), "utf8");
   const updaterAcceptance = readFileSync(join(root, "scripts", "windows-in-app-update-acceptance.ps1"), "utf8");
   const updaterSource = readFileSync(join(root, "vendor", "tauri-plugin-updater", "src", "updater.rs"), "utf8");
   const cargoVersion = cargoToml.match(/^version = "([^"]+)"$/m)?.[1];
@@ -49,6 +51,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(releaseWorkflow).toContain("23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be");
   expect(releaseWorkflow).not.toContain("bun run desktop:prepare");
   expect(releaseWorkflow).not.toContain("nsis-updater");
+  expect(releaseWorkflow).toContain(
+    "- name: Test candidate through the exact updater protocol\n        timeout-minutes: 35",
+  );
   expect(ciWorkflow).toContain("Build full offline installer");
   expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
   expect(ciWorkflow).not.toContain("nsis-updater");
@@ -63,6 +68,14 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance).toContain(
     "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
   );
+  expect(updaterAcceptance).toContain(
+    'ALIASMODE_ACCEPTANCE_DISABLE_GPU_SANDBOX = "1"',
+  );
+  expect(updaterAcceptance).toContain('GITHUB_ACTIONS = "true"');
+  expect(updaterAcceptance).toContain(
+    "$observations.gpuSandboxExceptionUsed = $true",
+  );
+  expect(cliSource).toContain("windowsUpdaterAcceptanceBrowserArgs");
   expect(updaterAcceptance).toContain("$acceptanceDebugPort");
   expect(updaterAcceptance).toContain('ALIASMODE_SESSION_LAUNCH = "0"');
   expect(updaterAcceptance).toContain("[void]$process.Handle");
