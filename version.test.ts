@@ -59,6 +59,10 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).not.toContain("nsis-updater");
   expect(updaterAcceptance).toContain("function Start-RunnerUserProcess");
   expect(updaterAcceptance).toContain("Start-Process @start");
+  expect(updaterAcceptance).toContain("$start.Environment = $Environment");
+  expect(updaterAcceptance).toContain(
+    "Start-RunnerUserProcess $appPath -Environment $sourceEnvironment",
+  );
   expect(updaterAcceptance).toContain("Registry::HKEY_CURRENT_USER");
   expect(updaterAcceptance).toContain(
     '$opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"',

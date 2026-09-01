@@ -36,7 +36,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-function Start-RunnerUserProcess([string]$FilePath, [string]$Arguments = "") {
+function Start-RunnerUserProcess(
+  [string]$FilePath,
+  [string]$Arguments = "",
+  [hashtable]$Environment = @{}
+) {
   $start = @{
     FilePath = $FilePath
     PassThru = $true
@@ -44,6 +48,9 @@ function Start-RunnerUserProcess([string]$FilePath, [string]$Arguments = "") {
   }
   if (-not [string]::IsNullOrWhiteSpace($Arguments)) {
     $start.ArgumentList = $Arguments
+  }
+  if ($Environment.Count -gt 0) {
+    $start.Environment = $Environment
   }
   Start-Process @start
 }
@@ -1000,9 +1007,13 @@ try {
       [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], $target)
     }
   }
+  $sourceEnvironment = @{
+    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
+    WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
+  }
 
   Set-AcceptanceStage "starting-public-release"
-  $publicDesktop = Start-RunnerUserProcess $appPath
+  $publicDesktop = Start-RunnerUserProcess $appPath -Environment $sourceEnvironment
   $observations.runnerUserProcessUsed = $true
   $oldRecord = Wait-DesktopReady `
     $publicDesktop `
