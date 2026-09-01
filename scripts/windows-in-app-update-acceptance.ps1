@@ -1422,6 +1422,7 @@ function Read-SafeBrowserLogDiagnostics([string]$Path) {
       if ($discardFirstLine) {
         $startOffset--
         $byteCount++
+        $discardFirstLine = $startOffset -gt 0
       }
       [void]$stream.Seek($startOffset, [IO.SeekOrigin]::Begin)
       $bytes = [byte[]]::new($byteCount)
