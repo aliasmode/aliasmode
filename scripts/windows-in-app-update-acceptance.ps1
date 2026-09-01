@@ -999,7 +999,7 @@ try {
   }
   $acceptanceEnvironment = @{
     ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
-    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = $null
+    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = "0"
     WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
   }
   foreach ($name in $environmentNames) {
