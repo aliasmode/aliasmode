@@ -1052,15 +1052,23 @@ try {
   $browserOwner = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$opened.port) -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)
   if ($browserOwner.Count -ne 1) { throw "preservation browser CDP owner was not unique" }
+  $oldBrowserHandlesPinned = $false
   for ($attempt = 0; $attempt -lt 40; $attempt++) {
     $oldBrowserProcesses = @(Get-InstalledBrowserProcesses $installRoot)
     if ($oldBrowserProcesses.Count -gt 0 -and
         @($oldBrowserProcesses | Where-Object { $_.Id -eq $browserOwner[0] }).Count -eq 1) {
-      break
+      try {
+        foreach ($browserProcess in $oldBrowserProcesses) {
+          [void]$browserProcess.SafeHandle
+        }
+        $oldBrowserHandlesPinned = $true
+        break
+      } catch {}
     }
     Start-Sleep -Milliseconds 250
   }
-  if ($oldBrowserProcesses.Count -eq 0 -or
+  if (-not $oldBrowserHandlesPinned -or
+      $oldBrowserProcesses.Count -eq 0 -or
       @($oldBrowserProcesses | Where-Object { $_.Id -eq $browserOwner[0] }).Count -ne 1) {
     throw "installed preservation browser process tree was not found"
   }
