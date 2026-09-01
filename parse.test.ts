@@ -15,6 +15,7 @@ import {
   serializeAdsTxt,
   serializeCsv,
 } from "./parse.ts";
+import { deterministicSeed } from "./fingerprint.ts";
 
 const SAMPLE = `acc_id=476436
 id=k1d0cd11
@@ -298,4 +299,108 @@ test("an update file can renumber profiles in bulk through a custom_no column", 
     { customNo: "4421" },
     { customNo: "12" },
   ]);
+});
+
+// --- full-fidelity identity: restored fields ---
+
+test("an import honours an exported fingerprint seed", () => {
+  const out = recordToProfile({ id: "k1d0cd11", seed: "2847193055" })!;
+  expect(out.profile.fingerprintSeed).toBe(2847193055);
+});
+
+test("a profile whose seed was never id-derived survives a round trip", () => {
+  // marketplace.ts seeds from "marketplace:<username>", so deterministicSeed(id)
+  // is the WRONG answer for these — this is the bug the export closes.
+  const seed = deterministicSeed("marketplace:melaniecanlq");
+  const out = recordToProfile({ id: "k1d0cd11", seed: String(seed) })!;
+  expect(out.profile.fingerprintSeed).toBe(seed);
+  expect(out.profile.fingerprintSeed).not.toBe(deterministicSeed("k1d0cd11"));
+});
+
+test("a missing seed falls back to today's id-derived value", () => {
+  const out = recordToProfile({ id: "k1d0cd11" })!;
+  expect(out.profile.fingerprintSeed).toBe(deterministicSeed("k1d0cd11"));
+});
+
+test.each([["0"], ["-5"], ["4294967296"], ["1.5"], ["abc"], [""]])(
+  "a malformed seed %p falls back rather than failing the import",
+  (raw) => {
+    const out = recordToProfile({ id: "k1d0cd11", seed: raw })!;
+    expect(out.profile.fingerprintSeed).toBe(deterministicSeed("k1d0cd11"));
+    expect(out.validationErrors).toEqual([]);
+  },
+);
+
+test("an import honours an exported timezone", () => {
+  const out = recordToProfile({ id: "k1d0cd11", timezone: "America/New_York" })!;
+  expect(out.profile.timezone).toBe("America/New_York");
+});
+
+test("a missing timezone stays blank for geoip to resolve", () => {
+  expect(recordToProfile({ id: "k1d0cd11" })!.profile.timezone).toBe("");
+});
+
+test.each([["Not A Zone"], ["America/New_York; rm -rf"], ["--inject"], ["12345"]])(
+  "an unparseable timezone %p is treated as absent rather than launched with",
+  (raw) => {
+    const out = recordToProfile({ id: "k1d0cd11", timezone: raw })!;
+    expect(out.profile.timezone).toBe("");
+  },
+);
+
+test("real IANA zone shapes are accepted", () => {
+  for (const tz of ["UTC", "America/New_York", "Europe/London", "America/Argentina/Buenos_Aires"]) {
+    expect(recordToProfile({ id: "k1d0cd11", timezone: tz })!.profile.timezone).toBe(tz);
+  }
+});
+
+test("an import honours an explicit platform_os over the UA", () => {
+  const out = recordToProfile({
+    id: "k1d0cd11",
+    platform_os: "macos",
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/146.0.0.0",
+  })!;
+  expect(out.profile.platformOs).toBe("macos");
+});
+
+test("platform_os falls back to the UA, then to blank", () => {
+  const fromUa = recordToProfile({
+    id: "k1d0cd11",
+    ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/146.0.0.0",
+  })!;
+  expect(fromUa.profile.platformOs).toBe("windows");
+  expect(recordToProfile({ id: "k1d0cd11" })!.profile.platformOs).toBe("");
+});
+
+test("an unrecognized platform_os is ignored rather than stored", () => {
+  const out = recordToProfile({ id: "k1d0cd11", platform_os: "solaris" })!;
+  expect(out.profile.platformOs).toBe("");
+});
+
+test("an import restores extensions and tags", () => {
+  const out = recordToProfile({ id: "k1d0cd11", extensions: "ext1,ext2", tags: "warm, 30day" })!;
+  expect(out.profile.extensions).toEqual(["ext1", "ext2"]);
+  expect(out.profile.tags).toEqual(["warm", "30day"]);
+});
+
+test("an old export with none of the new keys imports exactly as before", () => {
+  const block = [
+    "acc_id=476436",
+    "id=k1d0cd11",
+    "group=g",
+    "name=sophiaskye852",
+    "password=pw",
+    "fakey=",
+    'cookie=[{"name":"auth_token","value":"v","domain":".x.com","path":"/"}]',
+    "proxytype=http",
+    "proxy=5.249.176.244:5432:user:pass",
+    "ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/143.0.0.0 Safari/537.36",
+    "resolution=1680*1050",
+  ].join("\n");
+  const out = recordToProfile(parseBlock(block))!;
+  expect(out.profile.fingerprintSeed).toBe(deterministicSeed("k1d0cd11"));
+  expect(out.profile.timezone).toBe("");
+  expect(out.profile.extensions).toEqual([]);
+  expect(out.profile.tags).toEqual([]);
+  expect(out.validationErrors).toEqual([]);
 });

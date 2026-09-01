@@ -10,7 +10,14 @@
  */
 
 import { Database } from "bun:sqlite";
-import type { CookieRecord, LaunchInfo, Profile, ProxySpec } from "./types.ts";
+import type {
+  CookieRecord,
+  FingerprintVerdict,
+  LaunchInfo,
+  ObservedFingerprint,
+  Profile,
+  ProxySpec,
+} from "./types.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { assertValidProfile } from "./profile-validation.ts";
@@ -39,6 +46,10 @@ export class ProfileStore {
         screen_width INTEGER NOT NULL DEFAULT 1920,
         screen_height INTEGER NOT NULL DEFAULT 1080,
         fingerprint_seed INTEGER NOT NULL,
+        platform_os TEXT NOT NULL DEFAULT '',
+        fp_observed_json TEXT NOT NULL DEFAULT '',
+        fp_expected_json TEXT NOT NULL DEFAULT '',
+        fp_verdict_json TEXT NOT NULL DEFAULT '',
         cookies_json TEXT NOT NULL DEFAULT '[]',
         seeded INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +170,24 @@ export class ProfileStore {
     } catch {
       /* column already exists */
     }
+    // Migrations for the full-fidelity identity export. platform_os makes the
+    // desktop platform an explicit stored value instead of one inferred from
+    // the UA (a blank UA previously meant no --fingerprint-platform flag at
+    // all, so the browser silently inherited the HOST os). The fp_* columns
+    // hold the measured fingerprint, the fingerprint an import claimed, and
+    // the comparison between them.
+    for (const col of [
+      "platform_os TEXT NOT NULL DEFAULT ''",
+      "fp_observed_json TEXT NOT NULL DEFAULT ''",
+      "fp_expected_json TEXT NOT NULL DEFAULT ''",
+      "fp_verdict_json TEXT NOT NULL DEFAULT ''",
+    ]) {
+      try {
+        this.db.exec(`ALTER TABLE profiles ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
     // Migrations for stores predating the AdsPower-parity bookkeeping columns
     // (created_at: profile creation; last_open_at: most recent launch). Both
     // surface through the AdsPower /api/v1/user/list facade.
@@ -191,8 +220,12 @@ export class ProfileStore {
       .query(
         `INSERT INTO profiles
            (id, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone,
-            screen_width, screen_height, fingerprint_seed, cookies_json, seeded, created_at)
-         VALUES ($id,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$w,$h,$seed,$cookies,$seeded,$created)
+            screen_width, screen_height, fingerprint_seed, platform_os, fp_observed_json, fp_expected_json, fp_verdict_json, cookies_json, seeded, created_at)
+         -- fp_verdict_json is literal '': a verdict is a COMPUTED fact, written
+         -- only by saveObservedFingerprint from a real measurement. If a caller
+         -- could supply one, an import could hand itself a "verified" badge and
+         -- the badge would mean nothing.
+         VALUES ($id,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
          ON CONFLICT(id) DO UPDATE SET
            acc_id=$acc, name=$name, "group"=$group, platform=$platform, username=$user, password=$pass,
            email=$email, email_password=$emailPass, twofa=$twofa,
@@ -218,7 +251,21 @@ export class ProfileStore {
              ELSE ''
            END,
            screen_width=$w, screen_height=$h,
-           fingerprint_seed=$seed, cookies_json=$cookies`,
+           fingerprint_seed=$seed, platform_os=$platformOs,
+           -- An ordinary profile edit carries no capture. Preserving the stored
+           -- one keeps a rename from erasing a measurement that is still true.
+           fp_observed_json = CASE WHEN $fpObserved <> '' THEN $fpObserved ELSE fp_observed_json END,
+           fp_expected_json = CASE WHEN $fpExpected <> '' THEN $fpExpected ELSE fp_expected_json END,
+           -- A CHANGED expectation invalidates the verdict: one computed
+           -- against the previous expectation must never be read as if it
+           -- applied to this one. An unrelated edit (a rename, a group move)
+           -- re-sends the same expectation and keeps its verdict. As everywhere
+           -- in this clause, the bare column is the OLD row value.
+           fp_verdict_json  = CASE
+             WHEN $fpExpected <> '' AND $fpExpected IS NOT fp_expected_json THEN ''
+             ELSE fp_verdict_json
+           END,
+           cookies_json=$cookies`,
       )
       .run({
         $id: p.id,
@@ -241,6 +288,9 @@ export class ProfileStore {
         $w: p.screenWidth,
         $h: p.screenHeight,
         $seed: p.fingerprintSeed,
+        $platformOs: p.platformOs ?? "",
+        $fpObserved: p.fpObserved ? JSON.stringify(p.fpObserved) : "",
+        $fpExpected: p.fpExpected ? JSON.stringify(p.fpExpected) : "",
         $cookies: JSON.stringify(p.cookies),
         $seeded: seeded,
         // Set on INSERT; preserved on re-import (the ON CONFLICT clause never
@@ -276,6 +326,21 @@ export class ProfileStore {
 
   markSeeded(id: string): void {
     this.db.query(`UPDATE profiles SET seeded = 1 WHERE id = ?`).run(id);
+  }
+
+  /**
+   * Record a capture and, when there was something to check it against, the
+   * verdict. Deliberately narrow: this is the launch path's only write, and it
+   * must not be able to touch identity, credentials or the expectation.
+   */
+  saveObservedFingerprint(
+    profileId: string,
+    observed: ObservedFingerprint,
+    verdict: FingerprintVerdict | null,
+  ): void {
+    this.db
+      .query(`UPDATE profiles SET fp_observed_json = ?, fp_verdict_json = ? WHERE id = ?`)
+      .run(JSON.stringify(observed), verdict ? JSON.stringify(verdict) : "", profileId);
   }
 
   /** Delete a profile and its launch row. Returns true if a row was removed. */
@@ -437,11 +502,33 @@ export class ProfileStore {
    * `serial` is the SQLite rowid (stable — upsert uses ON CONFLICT DO UPDATE,
    * not REPLACE), standing in for AdsPower's serial_number. Timestamps are ms.
    */
-  listUserRecords(): Array<{ id: string; name: string; group: string; createdAt: number; lastOpenAt: number; serial: number }> {
+  listUserRecords(): Array<{
+    id: string;
+    name: string;
+    group: string;
+    createdAt: number;
+    lastOpenAt: number;
+    serial: number;
+    fpVerdict: string;
+    fpCapturedAt: string;
+  }> {
     return this.db
-      .query<any, []>(`SELECT id, name, "group" AS grp, created_at AS c, last_open_at AS l, rowid AS s FROM profiles ORDER BY rowid`)
+      .query<any, []>(
+        `SELECT id, name, "group" AS grp, created_at AS c, last_open_at AS l, rowid AS s,
+                fp_verdict_json AS fpv, fp_observed_json AS fpo
+           FROM profiles ORDER BY rowid`,
+      )
       .all()
-      .map((r) => ({ id: r.id, name: r.name ?? "", group: r.grp ?? "", createdAt: r.c ?? 0, lastOpenAt: r.l ?? 0, serial: r.s }));
+      .map((r) => ({
+        id: r.id,
+        name: r.name ?? "",
+        group: r.grp ?? "",
+        createdAt: r.c ?? 0,
+        lastOpenAt: r.l ?? 0,
+        serial: r.s,
+        fpVerdict: safeParse<{ verdict?: string }>(r.fpv, {}).verdict ?? "",
+        fpCapturedAt: safeParse<{ capturedAt?: string }>(r.fpo, {}).capturedAt ?? "",
+      }));
   }
 
   /** This profile's serial (SQLite rowid) — AdsPower's serial_number stand-in. Null if unknown. */
@@ -535,6 +622,20 @@ function safeParse<T>(raw: unknown, fallback: T): T {
   }
 }
 
+/**
+ * Spread-friendly optional JSON column: absent (not `undefined`) when the
+ * column is blank, so a profile that has never been probed does not carry
+ * three explicit `undefined` keys into every comparison and serialization.
+ */
+function optionalJson<T>(key: string, raw: unknown): Record<string, T> {
+  if (typeof raw !== "string" || raw === "") return {};
+  try {
+    return { [key]: JSON.parse(raw) as T };
+  } catch {
+    return {};
+  }
+}
+
 function rowToProfile(row: any): Profile {
   const stored = readStoredProxy(row.proxy_json, row.proxy_error);
   return {
@@ -558,6 +659,10 @@ function rowToProfile(row: any): Profile {
     screenWidth: row.screen_width ?? 1920,
     screenHeight: row.screen_height ?? 1080,
     fingerprintSeed: row.fingerprint_seed,
+    platformOs: row.platform_os ?? "",
+    ...optionalJson<ObservedFingerprint>("fpObserved", row.fp_observed_json),
+    ...optionalJson<ObservedFingerprint>("fpExpected", row.fp_expected_json),
+    ...optionalJson<FingerprintVerdict>("fpVerdict", row.fp_verdict_json),
     cookies: safeParse<CookieRecord[]>(row.cookies_json, []),
     seeded: Boolean(row.seeded),
   };

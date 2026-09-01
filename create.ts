@@ -10,7 +10,7 @@
  */
 
 import type { Profile, ProxySpec } from "./types.ts";
-import { deterministicSeed } from "./fingerprint.ts";
+import { deterministicSeed, hostPlatformOs } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { parseStrictCustomNo, parseStrictResolution } from "./parse.ts";
 
@@ -82,6 +82,10 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     proxy,
     customNo: parseStrictCustomNo(input.customNo),
     ua: "", // CloakBrowser derives a coherent UA from the seed at launch
+    // ...but the platform must be pinned, or a blank UA means no
+    // --fingerprint-platform flag and the browser inherits whatever host it
+    // happens to run on — a silent identity change on a move between boxes.
+    platformOs: hostPlatformOs(),
     timezone: "", // resolved from the proxy's geoip by the caller
     screenWidth: selected.width,
     screenHeight: selected.height,

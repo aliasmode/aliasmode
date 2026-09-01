@@ -1566,3 +1566,15 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 :root[data-theme="dark"] .dropzone { background: rgba(94, 136, 240, .12); }
 :root[data-theme="dark"] .navitem:hover:not(:disabled),
 :root[data-theme="dark"] .folder:hover { background: var(--surface-hover); }
+
+/* Fingerprint attestation: whether a relaunched browser still measures the same
+   as the export it came from. Absent entirely when nothing was imported to
+   check against — "unknown" must not read as "verified". */
+.fpbadge {
+  display: inline-block; margin-left: 7px; padding: 1px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .2px; vertical-align: middle;
+  cursor: help;
+}
+.fpbadge.ok { background: var(--green-soft); color: var(--green); border: 1px solid #cbe9d5; }
+.fpbadge.warn { background: #fdf3e2; color: var(--amber); border: 1px solid #f0dcb8; }
+.hint-note { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-soft); color: var(--muted); }

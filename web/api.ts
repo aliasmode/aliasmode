@@ -43,6 +43,25 @@ export interface UiProfile {
   hasSession?: boolean;
   healthStatus?: HealthStatus;
   healthObservedAt?: number | null;
+  /**
+   * Whether the last launch's measured fingerprint still matches the one an
+   * import claimed. Null when nothing was imported to check against — that is
+   * "unknown", not "verified".
+   */
+  fpVerdict?: FingerprintVerdict | null;
+  /** ISO-8601 instant of the last measurement; "" if never launched. */
+  fpCapturedAt?: string;
+}
+
+export interface FingerprintDifference {
+  field: string;
+  expected: string;
+  observed: string;
+}
+
+export interface FingerprintVerdict {
+  verdict: "match" | "mismatch";
+  differences: FingerprintDifference[];
 }
 
 export interface HealthSource {

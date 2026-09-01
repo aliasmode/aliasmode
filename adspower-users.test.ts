@@ -436,3 +436,26 @@ test("remote mode: update reports missing profiles and rejects invalid names loc
   expect(calls.renamed).toEqual([["missing", "x"]]);
   expect(calls.saved).toEqual([]);
 });
+
+// --- the fingerprint verdict on user/list (aliasmode has no import route) ---
+
+test("user/list reports the fingerprint verdict", async () => {
+  const { store, launcher } = setup();
+  store.saveObservedFingerprint(
+    "k1d0cd11",
+    { canvas: "a3f19c8e", capturedAt: "2026-08-29T11:04:22Z" },
+    { verdict: "match", differences: [] },
+  );
+  const r = await handleUserApi(get("/api/v1/user/list"), launcher, store, null, geoip);
+  const row = (await r!.json()).data.list.find((x: any) => x.user_id === "k1d0cd11");
+  expect(row.fp_verdict).toBe("match");
+  expect(row.fp_captured_at).toBe("2026-08-29T11:04:22Z");
+});
+
+test("user/list reports an empty verdict for a profile with no expectation", async () => {
+  const { store, launcher } = setup();
+  const r = await handleUserApi(get("/api/v1/user/list"), launcher, store, null, geoip);
+  const row = (await r!.json()).data.list.find((x: any) => x.user_id === "k1d0cd11");
+  expect(row.fp_verdict).toBe("");
+  expect(row.fp_captured_at).toBe("");
+});

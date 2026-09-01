@@ -213,7 +213,7 @@ export function analyze(profiles: ProfileReport[], baselineRealIp?: string): Ana
 // In-browser probes (serialized to the page; must be self-contained).
 // ---------------------------------------------------------------------------
 
-async function fingerprintProbe(): Promise<FingerprintSample> {
+export async function fingerprintProbe(): Promise<FingerprintSample> {
   const out: FingerprintSample = { errors: {} };
   const err = (k: string, e: unknown) => {
     out.errors![k] = e instanceof Error ? e.message : String(e);

@@ -49,6 +49,13 @@ export function platformFromUA(ua: string): "windows" | "macos" | "linux" | null
   return null;
 }
 
+/** The platform this host would present, recorded once at profile creation. */
+export function hostPlatformOs(): "windows" | "macos" | "linux" {
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "darwin") return "macos";
+  return "linux";
+}
+
 /** Infer only architecture tokens that a desktop UA states explicitly. */
 export function architectureFromUA(ua: string): "x64" | "arm64" | null {
   const s = (ua ?? "").toLowerCase();
@@ -152,8 +159,14 @@ export function deriveFingerprintFlags(profile: Profile): string[] {
     `--fingerprint-screen-width=${profile.screenWidth}`,
     `--fingerprint-screen-height=${profile.screenHeight}`,
   ];
-  const importedPlatform = platformFromUA(profile.ua);
-  if (importedPlatform) flags.push(`--fingerprint-platform=${importedPlatform}`);
+  // An explicit stored platform beats inferring one from the UA. This matters
+  // because create.ts stores a BLANK ua on purpose (CloakBrowser derives a
+  // coherent one from the seed), which previously meant no platform flag at
+  // all — and a browser with no platform flag silently inherits the HOST os.
+  // Move that profile to a differently-OS'd box and navigator.platform, the
+  // UA-CH brand list and the font set all shift with nothing to explain it.
+  const platform = profile.platformOs || platformFromUA(profile.ua);
+  if (platform) flags.push(`--fingerprint-platform=${platform}`);
   // An imported account observing a normal browser upgrade is coherent. A
   // forced old version beside a newer kernel is not.
   // Match the browser clock to the proxy's geolocation (resolved at import).

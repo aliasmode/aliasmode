@@ -491,6 +491,31 @@ function displayNo(profile: UiProfile, fallbackIndex: number): { value: string; 
   return { value: String(fallbackIndex + 1), custom: false };
 }
 
+/**
+ * Whether this profile's last measured fingerprint still matches the one its
+ * import claimed. Renders nothing when there is no attestation to check
+ * against — "unknown" must not look like "verified".
+ */
+function FingerprintBadge({ p }: { p: UiProfile }) {
+  const v = p.fpVerdict;
+  if (!v) return null;
+  if (v.verdict === "match") {
+    return (
+      <span className="fpbadge ok" title={`Fingerprint verified against the import${p.fpCapturedAt ? ` — measured ${p.fpCapturedAt}` : ""}`}>
+        verified
+      </span>
+    );
+  }
+  const detail = v.differences
+    .map((d) => `${d.field}: ${d.expected || "(none)"} → ${d.observed || "(none)"}`)
+    .join("; ");
+  return (
+    <span className="fpbadge warn" title={`This browser no longer matches the imported fingerprint — ${detail}`}>
+      identity changed
+    </span>
+  );
+}
+
 function StatusDot({ running }: { running: boolean }) {
   return <span className={`dot ${running ? "on" : ""}`} title={running ? "running" : "stopped"} />;
 }
@@ -3064,7 +3089,7 @@ function App() {
                   {columnVisible("name") && (
                     <td className="col-name" title={`${p.name}\n${p.id}`}>
                       <span className="name-cell">
-                        <span className="n">{p.name}</span>
+                        <span className="n">{p.name}<FingerprintBadge p={p} /></span>
                         <span className="sub">
                           {p.id}
                           {p.running && <span className="live"><StatusDot running />running</span>}
@@ -3956,6 +3981,12 @@ function App() {
               <p className="formnote">
                 Anything chosen above overrides that field on every imported record, including
                 AdsPower TXT records that already carry a group.
+              </p>
+              <p className="formnote">
+                An AliasMode export also carries <code>seed</code>, <code>timezone</code> and{" "}
+                <code>platform_os</code>, which recreate the exact browser fingerprint. Its{" "}
+                <code>fp_*</code> columns are a <b>record</b> of the fingerprint that was measured,
+                not settings — they are checked after the browser opens, never applied to it.
               </p>
             </div>
             <div className="modal-foot">

@@ -153,7 +153,9 @@ export async function handleUserApi(
     const pageSize = intParam(searchParams.get("page_size"), 100);
     // Remote: map the hub roster (no timestamps → 0). Standalone: the local store.
     let rows = remote
-      ? (await remote.listProfiles()).map((p, i) => ({ id: p.id, name: p.name, group: p.group, createdAt: 0, lastOpenAt: 0, serial: i + 1 }))
+      // The hub roster carries no local measurement, so remote rows report no
+      // verdict rather than a misleading empty-means-verified one.
+      ? (await remote.listProfiles()).map((p, i) => ({ id: p.id, name: p.name, group: p.group, createdAt: 0, lastOpenAt: 0, serial: i + 1, fpVerdict: "", fpCapturedAt: "" }))
       : store.listUserRecords();
 
     const groupId = searchParams.get("group_id");
@@ -186,6 +188,10 @@ export async function handleUserApi(
       // AdsPower reports Unix SECONDS; our bookkeeping is ms. 0 stays 0 (unknown).
       created_time: r.createdAt ? Math.floor(r.createdAt / 1000) : 0,
       last_open_time: r.lastOpenAt ? Math.floor(r.lastOpenAt / 1000) : 0,
+      // Additive: existing AdsPower clients ignore unknown fields. "" means
+      // there was no imported attestation to check this profile against.
+      fp_verdict: r.fpVerdict,
+      fp_captured_at: r.fpCapturedAt,
     }));
     return ok({ list, page, page_size: pageSize });
   }

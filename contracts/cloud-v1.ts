@@ -243,6 +243,8 @@ export interface PortableProfileV1 {
     screenWidth: number;
     screenHeight: number;
     fingerprintSeed: number;
+    /** Explicit desktop platform; "" when the profile predates the field. */
+    platformOs?: string;
   };
   session: PortableSessionV1;
 }
