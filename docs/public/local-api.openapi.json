@@ -1,0 +1,1686 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AliasMode Local API",
+    "version": "0.1.0-beta.47",
+    "summary": "AdsPower-compatible loopback HTTP API served by a running AliasMode.",
+    "description": "AliasMode serves this API on the loopback interface only (http://127.0.0.1:50400). It has no authentication by design: any process on the same machine can call it. Never expose the listener beyond loopback with a reverse proxy, port forward, or tunnel. A CDP WebSocket URL returned by `browserStart` or `browserActive` grants full control of that browser and its logged-in sessions; treat it like a credential.\n\nThe API is a compatibility subset of the AdsPower local API, so an AdsPower REST client migrates by changing its base URL. Only the 13 operations in this document exist. Do not assume that any other AdsPower route is available. Two routes are AliasMode extensions: `browserCookies` and the `fp_verdict`/`fp_captured_at` fields of `userList`.\n\nEvery response uses HTTP status 200 and the JSON envelope `{ code, msg, data }`. `code` is `0` with `msg` `\"success\"` on success and `-1` with a reason in `msg` on failure, including unknown routes. Inspect `code`, not the HTTP status. The browser-control routes ignore the HTTP method; the group and user routes require the documented method and fall through to `unknown route` otherwise.\n\nEach operation carries `x-aliasmode-version-introduced`: the oldest AliasMode release these public contracts cover in which the route exists. All 13 routes exist in 0.1.0-beta.42 and in the current source; they may also exist in earlier builds.\n\nIn AliasMode Cloud mode the same routes are served, with `browserStart`, `browserStop`, and `browserActive` routed through the cloud coordinator and the group and user routes reading the shared workspace roster. The wire shapes do not change.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "contact": {
+      "name": "AliasMode support",
+      "url": "https://aliasmode.com/docs/local-api/",
+      "email": "support@aliasmode.com"
+    }
+  },
+  "externalDocs": {
+    "description": "Local API guide",
+    "url": "https://aliasmode.com/docs/local-api/"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:50400",
+      "description": "AliasMode loopback listener. Loopback only; unauthenticated; never expose beyond the local machine."
+    }
+  ],
+  "tags": [
+    {
+      "name": "status",
+      "description": "Health check."
+    },
+    {
+      "name": "browser",
+      "description": "Start, stop, and inspect a profile's browser."
+    },
+    {
+      "name": "group",
+      "description": "Profile groups. AliasMode has no group ids, so the id equals the name."
+    },
+    {
+      "name": "user",
+      "description": "Profile management in AdsPower's `user` vocabulary. A `user_id` is an AliasMode profile id."
+    }
+  ],
+  "paths": {
+    "/status": {
+      "get": {
+        "operationId": "localApiStatus",
+        "tags": [
+          "status"
+        ],
+        "summary": "Health check (AdsPower path)",
+        "description": "`/status` is the path AdsPower's own local API serves. Returns `code: 0` while AliasMode is running. When lifecycle admission control is configured, `data.admission` reports its counters.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "responses": {
+          "200": {
+            "description": "Always `code: 0`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "operationId": "localApiStatusV1",
+        "tags": [
+          "status"
+        ],
+        "summary": "Health check (versioned path)",
+        "description": "Same response as `/status`. May include `data.admission` statistics when admission control is configured.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "responses": {
+          "200": {
+            "description": "Always `code: 0`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "admission": {
+                          "limit": 4,
+                          "inFlight": 1,
+                          "queued": 0,
+                          "byKind": {
+                            "stop": {
+                              "inFlight": 0,
+                              "queued": 0
+                            },
+                            "cleanup": {
+                              "inFlight": 0,
+                              "queued": 0
+                            },
+                            "start": {
+                              "inFlight": 1,
+                              "queued": 0
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/browser/start": {
+      "get": {
+        "operationId": "browserStart",
+        "tags": [
+          "browser"
+        ],
+        "summary": "Start a profile's browser",
+        "description": "Launches the CloakBrowser process for the profile, or returns the running one. `data.ws.puppeteer` is the CDP WebSocket URL for automation clients. It grants full control of the browser; do not log or share it. Fails with `no such profile: <id>` for an unknown profile and with the launcher error otherwise.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UserId"
+          },
+          {
+            "name": "launch_args",
+            "in": "query",
+            "required": false,
+            "description": "URL-encoded JSON array of extra browser command-line arguments. Non-array or invalid JSON is ignored.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "[\"--window-size=1280,720\"]"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success envelope with the CDP endpoint, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/BrowserStartResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "ws": {
+                          "puppeteer": "ws://127.0.0.1:53211/devtools/browser/0f2c6d1e-example",
+                          "selenium": ""
+                        },
+                        "debug_port": "53211",
+                        "webdriver": ""
+                      }
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "no such profile: k1d0cd11",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/browser/stop": {
+      "get": {
+        "operationId": "browserStop",
+        "tags": [
+          "browser"
+        ],
+        "summary": "Stop a profile's browser",
+        "description": "Captures session state and closes the browser. Returns `code: 0` with empty `data` once teardown is confirmed. Fails with `browser teardown unconfirmed: <id>` when the process could not be confirmed stopped.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UserId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success envelope with empty `data`, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/EmptyDataResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {}
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "browser teardown unconfirmed: k1d0cd11",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/browser/active": {
+      "get": {
+        "operationId": "browserActive",
+        "tags": [
+          "browser"
+        ],
+        "summary": "Check whether a profile's browser is running",
+        "description": "`status` is `Active` or `Inactive`. `lifecycle` reports a transition (`starting`, `stopping`) or `uncertain` when ownership-safe teardown is unconfirmed; `running` accompanies a certified live browser. `ws` is present only for `lifecycle: running`.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UserId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success envelope with the browser state, or a failure envelope (missing `user_id`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/BrowserActiveResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "running": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "status": "Active",
+                        "lifecycle": "running",
+                        "ws": {
+                          "puppeteer": "ws://127.0.0.1:53211/devtools/browser/0f2c6d1e-example",
+                          "selenium": ""
+                        }
+                      }
+                    }
+                  },
+                  "inactive": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "status": "Inactive"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/browser-profile/delete-cache": {
+      "post": {
+        "operationId": "browserProfileDeleteCache",
+        "tags": [
+          "browser"
+        ],
+        "summary": "Clear a profile's disk caches",
+        "description": "Trims the on-disk browser caches of the given profiles so user-data directories do not grow without bound. Compatibility clients fire-and-forget this after each session with `type: [\"image_file\"]`; `type` is accepted and ignored. Always returns `code: 0`; a missing or malformed body clears nothing.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteCacheRequest"
+              },
+              "example": {
+                "profile_id": [
+                  "k1d0cd11"
+                ],
+                "type": [
+                  "image_file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Always `code: 0` with empty `data`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmptyDataResponse"
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/browser/cookies": {
+      "get": {
+        "operationId": "browserCookies",
+        "tags": [
+          "browser"
+        ],
+        "summary": "Read cookies from a running browser (AliasMode extension)",
+        "description": "AliasMode extension to the AdsPower API. Reads cookies through Playwright's `context.cookies()` for the given URLs. The profile's browser must be safely running; otherwise the call fails with `profile not safely running: <id>` or `profile not running: <id>`. Cookie values are session credentials; handle the response accordingly.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UserId"
+          },
+          {
+            "name": "urls",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated list of URLs whose cookies to return. Defaults to `https://x.com,https://twitter.com`.",
+            "schema": {
+              "type": "string",
+              "default": "https://x.com,https://twitter.com"
+            },
+            "example": "https://x.com,https://twitter.com"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success envelope with the cookie list, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/BrowserCookiesResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "cookies": [
+                          {
+                            "name": "auth_token",
+                            "value": "REDACTED_EXAMPLE_VALUE",
+                            "domain": ".x.com",
+                            "path": "/",
+                            "httpOnly": true,
+                            "secure": true,
+                            "expires": 4070908800,
+                            "sameSite": "None"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "profile not running: k1d0cd11",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/group/list": {
+      "get": {
+        "operationId": "groupList",
+        "tags": [
+          "group"
+        ],
+        "summary": "List profile groups",
+        "description": "Returns one page of group names. `group_id` equals `group_name` because AliasMode has no separate group ids. AdsPower's ungrouped id `\"0\"` maps to `\"\"` and is never listed. Empty groups registered with `groupCreate` are included.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PageSize"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Always `code: 0`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupListResponse"
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "list": [
+                          {
+                            "group_id": "research",
+                            "group_name": "research"
+                          }
+                        ],
+                        "page": 1,
+                        "page_size": 100
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/group/create": {
+      "post": {
+        "operationId": "groupCreate",
+        "tags": [
+          "group"
+        ],
+        "summary": "Create a profile group",
+        "description": "Registers a group so it lists before its first profile exists. Idempotent: the returned `group_id` equals the trimmed `group_name`. Fails with `invalid JSON body` or `missing group_name`.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupCreateRequest"
+              },
+              "example": {
+                "group_name": "research"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success envelope with the group id, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/GroupCreateResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "group_id": "research"
+                      }
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "missing group_name",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user/list": {
+      "get": {
+        "operationId": "userList",
+        "tags": [
+          "user"
+        ],
+        "summary": "List profiles",
+        "description": "Returns one page of profiles in AdsPower's row shape. Filter with `group_id` (`\"0\"` or `\"\"` selects ungrouped profiles). Sort with `user_sort`. Timestamps are Unix seconds; `0` means unknown or never opened. `fp_verdict` and `fp_captured_at` are AliasMode additions: the fingerprint attestation verdict and capture time, or `\"\"` when no attestation exists.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PageSize"
+          },
+          {
+            "name": "group_id",
+            "in": "query",
+            "required": false,
+            "description": "Only profiles in this group. `0` or an empty string selects ungrouped profiles.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "research"
+          },
+          {
+            "name": "user_sort",
+            "in": "query",
+            "required": false,
+            "description": "JSON object with one key, `created_time` or `last_open_time`, whose value is `asc` or `desc`. Malformed JSON keeps insertion order.",
+            "schema": {
+              "type": "string"
+            },
+            "examples": {
+              "createdAscending": {
+                "value": "{\"created_time\":\"asc\"}"
+              },
+              "lastOpenedDescending": {
+                "value": "{\"last_open_time\":\"desc\"}"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Always `code: 0`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserListResponse"
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "list": [
+                          {
+                            "user_id": "k1d0cd11",
+                            "name": "research-01",
+                            "group_id": "research",
+                            "serial_number": "1",
+                            "created_time": 1767225600,
+                            "last_open_time": 0,
+                            "fp_verdict": "",
+                            "fp_captured_at": ""
+                          }
+                        ],
+                        "page": 1,
+                        "page_size": 100
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user/create": {
+      "post": {
+        "operationId": "userCreate",
+        "tags": [
+          "user"
+        ],
+        "summary": "Create a profile",
+        "description": "Creates an AliasMode profile from an AdsPower-shaped payload. A blank `name` is replaced by the generated profile id. `group_id` `\"0\"` means ungrouped. `fingerprint_config.screen_resolution` uses AdsPower's `WIDTH_HEIGHT` form; omit it for a realistic random resolution. When a proxy is given, the browser timezone is matched to the proxy's location on a best-effort basis. Fails with `invalid JSON body` or the validation error.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreateRequest"
+              },
+              "example": {
+                "name": "research-01",
+                "group_id": "research",
+                "domain_name": "x.com",
+                "username": "example_user",
+                "password": "EXAMPLE_PASSWORD",
+                "email": "user@example.com",
+                "email_password": "EXAMPLE_EMAIL_PASSWORD",
+                "fakey": "EXAMPLE_TOTP_SECRET",
+                "user_proxy_config": {
+                  "proxy_type": "http",
+                  "proxy_host": "proxy.example.com",
+                  "proxy_port": "8080",
+                  "proxy_user": "proxy_user",
+                  "proxy_password": "EXAMPLE_PROXY_PASSWORD"
+                },
+                "fingerprint_config": {
+                  "screen_resolution": "1920_1080"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success envelope with the new profile id, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UserCreateResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "id": "k1d0cd11"
+                      }
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "invalid JSON body",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user/delete": {
+      "post": {
+        "operationId": "userDelete",
+        "tags": [
+          "user"
+        ],
+        "summary": "Delete profiles",
+        "description": "Stops each profile's browser, removes its browser data, and deletes the profile. Unknown ids are skipped. Profiles whose browser could not be stopped are left in place and returned in `locked`. Fails only with `invalid JSON body`.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserDeleteRequest"
+              },
+              "example": {
+                "user_ids": [
+                  "k1d0cd11",
+                  "k1d0cd12"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success envelope with counts, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/UserDeleteResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "deleted": 1,
+                        "locked": [
+                          "k1d0cd12"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/user/update": {
+      "post": {
+        "operationId": "userUpdate",
+        "tags": [
+          "user"
+        ],
+        "summary": "Rename a profile and update its saved credentials",
+        "description": "`name` is required and replaces the profile name. Credential fields are applied only when present as strings. Fails with `invalid JSON body`, `missing user_id`, `name must be a non-empty string`, `no such profile: <id>`, or `failed to persist profile update: <reason>`.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.42",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdateRequest"
+              },
+              "example": {
+                "user_id": "k1d0cd11",
+                "name": "research-01-renamed",
+                "username": "example_user"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success envelope with empty `data`, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/EmptyDataResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {}
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "no such profile: k1d0cd11",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "UserId": {
+        "name": "user_id",
+        "in": "query",
+        "required": true,
+        "description": "AliasMode profile id (AdsPower `user_id`). Missing values fail with `missing user_id`.",
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "example": "k1d0cd11"
+      },
+      "Page": {
+        "name": "page",
+        "in": "query",
+        "required": false,
+        "description": "1-based page number. Non-positive or non-numeric values fall back to 1.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        }
+      },
+      "PageSize": {
+        "name": "page_size",
+        "in": "query",
+        "required": false,
+        "description": "Rows per page. Non-positive or non-numeric values fall back to 100.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100
+        }
+      }
+    },
+    "schemas": {
+      "Envelope": {
+        "type": "object",
+        "description": "Every Local API response. HTTP status is always 200; `code` carries the outcome.",
+        "required": [
+          "code",
+          "msg",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer",
+            "enum": [
+              0,
+              -1
+            ],
+            "description": "`0` on success, `-1` on failure."
+          },
+          "msg": {
+            "type": "string",
+            "description": "`success` on success, otherwise the failure reason."
+          },
+          "data": {
+            "type": "object",
+            "description": "Operation payload. Always `{}` on failure."
+          }
+        },
+        "additionalProperties": false
+      },
+      "Failure": {
+        "description": "Failure envelope. `msg` explains the reason; `data` is always empty. Unknown routes return `unknown route: <path>`.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": -1
+              },
+              "data": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        ]
+      },
+      "EmptyData": {
+        "type": "object",
+        "description": "Always `{}`.",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "EmptyDataResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/EmptyData"
+              }
+            }
+          }
+        ]
+      },
+      "AdmissionKindStats": {
+        "type": "object",
+        "required": [
+          "inFlight",
+          "queued"
+        ],
+        "properties": {
+          "inFlight": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "AdmissionStats": {
+        "type": "object",
+        "description": "Lifecycle admission counters, present only when admission control is configured.",
+        "required": [
+          "limit",
+          "inFlight",
+          "queued",
+          "byKind"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "Maximum concurrent lifecycle transitions."
+          },
+          "inFlight": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byKind": {
+            "type": "object",
+            "required": [
+              "start",
+              "stop",
+              "cleanup"
+            ],
+            "properties": {
+              "start": {
+                "$ref": "#/components/schemas/AdmissionKindStats"
+              },
+              "stop": {
+                "$ref": "#/components/schemas/AdmissionKindStats"
+              },
+              "cleanup": {
+                "$ref": "#/components/schemas/AdmissionKindStats"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "StatusData": {
+        "type": "object",
+        "properties": {
+          "admission": {
+            "$ref": "#/components/schemas/AdmissionStats"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StatusResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/StatusData"
+              }
+            }
+          }
+        ]
+      },
+      "WsEndpoints": {
+        "type": "object",
+        "required": [
+          "puppeteer",
+          "selenium"
+        ],
+        "properties": {
+          "puppeteer": {
+            "type": "string",
+            "format": "uri",
+            "description": "CDP WebSocket URL (`ws://127.0.0.1:<port>/devtools/browser/<id>`). Grants full control of the browser; treat it as a secret."
+          },
+          "selenium": {
+            "type": "string",
+            "const": "",
+            "description": "Always empty. AliasMode exposes CDP only."
+          }
+        },
+        "additionalProperties": false
+      },
+      "BrowserStartData": {
+        "type": "object",
+        "required": [
+          "ws",
+          "debug_port",
+          "webdriver"
+        ],
+        "properties": {
+          "ws": {
+            "$ref": "#/components/schemas/WsEndpoints"
+          },
+          "debug_port": {
+            "type": "string",
+            "description": "Remote debugging port as a decimal string."
+          },
+          "webdriver": {
+            "type": "string",
+            "const": "",
+            "description": "Always empty. AliasMode ships no WebDriver binary."
+          },
+          "warning": {
+            "type": "string",
+            "description": "Present in AliasMode Cloud mode when the launch succeeded but another writer holds the profile lease, so this session will not be checkpointed."
+          }
+        },
+        "additionalProperties": false
+      },
+      "BrowserStartResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/BrowserStartData"
+              }
+            }
+          }
+        ]
+      },
+      "BrowserActiveData": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "Active",
+              "Inactive"
+            ]
+          },
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "starting",
+              "running",
+              "stopping",
+              "uncertain"
+            ],
+            "description": "Present with `Active`. `running` means a certified live browser; the other values describe a transition or unconfirmed teardown."
+          },
+          "ws": {
+            "$ref": "#/components/schemas/WsEndpoints"
+          }
+        },
+        "additionalProperties": false
+      },
+      "BrowserActiveResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/BrowserActiveData"
+              }
+            }
+          }
+        ]
+      },
+      "DeleteCacheRequest": {
+        "type": "object",
+        "required": [
+          "profile_id"
+        ],
+        "properties": {
+          "profile_id": {
+            "description": "One profile id or a list of ids.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "type": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "AdsPower cache categories such as `image_file`. Accepted for compatibility and ignored; AliasMode clears its disk caches."
+          }
+        }
+      },
+      "Cookie": {
+        "type": "object",
+        "description": "A cookie in Playwright shape.",
+        "required": [
+          "name",
+          "value",
+          "domain",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "httpOnly": {
+            "type": "boolean"
+          },
+          "secure": {
+            "type": "boolean"
+          },
+          "expires": {
+            "type": "number",
+            "description": "Unix seconds. `-1` or absent for session cookies."
+          },
+          "sameSite": {
+            "type": "string",
+            "enum": [
+              "Strict",
+              "Lax",
+              "None"
+            ]
+          },
+          "partitionKey": {
+            "type": "string"
+          }
+        }
+      },
+      "BrowserCookiesData": {
+        "type": "object",
+        "required": [
+          "cookies"
+        ],
+        "properties": {
+          "cookies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Cookie"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "BrowserCookiesResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/BrowserCookiesData"
+              }
+            }
+          }
+        ]
+      },
+      "Group": {
+        "type": "object",
+        "required": [
+          "group_id",
+          "group_name"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Equal to `group_name`."
+          },
+          "group_name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupListData": {
+        "type": "object",
+        "required": [
+          "list",
+          "page",
+          "page_size"
+        ],
+        "properties": {
+          "list": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupListResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/GroupListData"
+              }
+            }
+          }
+        ]
+      },
+      "GroupCreateRequest": {
+        "type": "object",
+        "required": [
+          "group_name"
+        ],
+        "properties": {
+          "group_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Group name; surrounding whitespace is trimmed."
+          }
+        }
+      },
+      "GroupCreateData": {
+        "type": "object",
+        "required": [
+          "group_id"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "description": "Equal to the trimmed `group_name`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupCreateResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/GroupCreateData"
+              }
+            }
+          }
+        ]
+      },
+      "UserRecord": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "name",
+          "group_id",
+          "serial_number",
+          "created_time",
+          "last_open_time",
+          "fp_verdict",
+          "fp_captured_at"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "AliasMode profile id."
+          },
+          "name": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string",
+            "description": "Group name, or `\"\"` when ungrouped."
+          },
+          "serial_number": {
+            "type": "string",
+            "description": "1-based position as a decimal string."
+          },
+          "created_time": {
+            "type": "integer",
+            "description": "Unix seconds; `0` when unknown."
+          },
+          "last_open_time": {
+            "type": "integer",
+            "description": "Unix seconds; `0` when never opened."
+          },
+          "fp_verdict": {
+            "type": "string",
+            "description": "AliasMode addition: fingerprint attestation verdict, or `\"\"` when no attestation exists."
+          },
+          "fp_captured_at": {
+            "type": "string",
+            "description": "AliasMode addition: attestation capture time as an ISO 8601 string, or `\"\"`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserListData": {
+        "type": "object",
+        "required": [
+          "list",
+          "page",
+          "page_size"
+        ],
+        "properties": {
+          "list": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserRecord"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserListResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/UserListData"
+              }
+            }
+          }
+        ]
+      },
+      "ProxyConfig": {
+        "type": "object",
+        "description": "AdsPower `user_proxy_config`. Ignored unless `proxy_host` is a non-empty string.",
+        "properties": {
+          "proxy_type": {
+            "type": "string",
+            "enum": [
+              "http",
+              "https",
+              "socks5"
+            ],
+            "default": "http"
+          },
+          "proxy_host": {
+            "type": "string"
+          },
+          "proxy_port": {
+            "type": "string",
+            "description": "Port as a string. Numbers are accepted and converted."
+          },
+          "proxy_user": {
+            "type": "string"
+          },
+          "proxy_password": {
+            "type": "string"
+          }
+        }
+      },
+      "FingerprintConfig": {
+        "type": "object",
+        "properties": {
+          "screen_resolution": {
+            "type": "string",
+            "pattern": "^[0-9]+_[0-9]+$",
+            "description": "AdsPower form `WIDTH_HEIGHT`, for example `1920_1080`."
+          }
+        }
+      },
+      "UserCreateRequest": {
+        "type": "object",
+        "description": "AdsPower-shaped profile payload. All fields are optional; unknown fields are ignored. Prefer the snake_case credential names; `emailPassword` and `twofa` are accepted aliases.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Profile name. Blank names become the generated id."
+          },
+          "group_id": {
+            "type": "string",
+            "description": "Group name. `0` or empty means ungrouped."
+          },
+          "domain_name": {
+            "type": "string",
+            "description": "Platform the account belongs to, for example `x.com`."
+          },
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "email_password": {
+            "type": "string"
+          },
+          "emailPassword": {
+            "type": "string",
+            "description": "Alias of `email_password`."
+          },
+          "fakey": {
+            "type": "string",
+            "description": "TOTP secret for two-factor login."
+          },
+          "twofa": {
+            "type": "string",
+            "description": "Alias of `fakey`."
+          },
+          "user_proxy_config": {
+            "$ref": "#/components/schemas/ProxyConfig"
+          },
+          "fingerprint_config": {
+            "$ref": "#/components/schemas/FingerprintConfig"
+          }
+        }
+      },
+      "UserCreateData": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "New profile id. Use it as `user_id` elsewhere."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserCreateResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/UserCreateData"
+              }
+            }
+          }
+        ]
+      },
+      "UserDeleteRequest": {
+        "type": "object",
+        "required": [
+          "user_ids"
+        ],
+        "properties": {
+          "user_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Profile ids to delete. A non-array value deletes nothing."
+          }
+        }
+      },
+      "UserDeleteData": {
+        "type": "object",
+        "required": [
+          "deleted",
+          "locked"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of profiles removed."
+          },
+          "locked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Profile ids kept because their browser could not be stopped."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserDeleteResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/UserDeleteData"
+              }
+            }
+          }
+        ]
+      },
+      "UserUpdateRequest": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "name"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "New profile name. Required and non-empty."
+          },
+          "username": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "email_password": {
+            "type": "string"
+          },
+          "emailPassword": {
+            "type": "string",
+            "description": "Alias of `email_password`."
+          },
+          "fakey": {
+            "type": "string",
+            "description": "TOTP secret for two-factor login."
+          },
+          "twofa": {
+            "type": "string",
+            "description": "Alias of `fakey`."
+          }
+        }
+      }
+    }
+  }
+}

@@ -114,6 +114,21 @@ $aliasmode = "$env:LOCALAPPDATA\AliasMode\aliasmode-mcp.exe"
 
 The versioned bootstrap script tries winget first. It falls back to an exact GitHub Release installer and verifies its published SHA-256 manifest before installation. Unsigned beta installers can still require Windows SmartScreen or antivirus approval.
 
+### Platform matrix
+
+- **Windows:** native installer, local dashboard, local stdio MCP, and Remote MCP host.
+- **macOS:** local dashboard from source with a supported, hash-pinned CloakBrowser binary. No installer.
+- **Linux:** no native app and no local dashboard. A Linux machine can drive a running Windows AliasMode through Remote MCP, with the Claude Code bearer path or OAuth web clients.
+
+### Public documentation contracts
+
+The website copies two contracts from this repository:
+
+- `docs/public/local-api.openapi.json`: OpenAPI 3.1 for the loopback Local API. See [aliasmode.com/docs/local-api](https://aliasmode.com/docs/local-api/).
+- `docs/public/mcp-tools/`: versioned MCP tool catalogs generated from the MCP host. See [aliasmode.com/docs/mcp](https://aliasmode.com/docs/mcp/).
+
+`bun run docs:public` regenerates them. `bun run docs:public:check` fails when the committed files drift from the source.
+
 ## Browser runtime
 
 AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The CloakBrowser binary is not part of this repository or the Apache-2.0 license.
