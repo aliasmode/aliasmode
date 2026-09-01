@@ -146,6 +146,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(compatibilityWorkflow).toContain('event -cne "push"');
   expect(compatibilityWorkflow).toContain("scripts/windows-artifact-manifest.ts verify");
   expect(compatibilityWorkflow).not.toContain("aliasmode-windows-unsigned");
+  expect(ciWorkflow).not.toContain("-cjoin");
+  expect(releaseWorkflow).not.toContain("-cjoin");
+  expect(compatibilityWorkflow).not.toContain("-cjoin");
   expect(installedAcceptance).toContain(`[ValidateSet("runtime", "browser", "cloud")]`);
   for (const shard of ["runtime", "browser", "cloud"]) {
     expect(ciWorkflow).toContain(`-Shard ${shard}`);

@@ -113,7 +113,7 @@ jobs:
             @($entries | Where-Object {
               $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
             }).Count -ne 0 -or
-            ($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")
+            ($actualNames -join "`n") -cne ($requiredNames -join "`n")
           ) {
             throw "candidate artifact must contain exactly six regular files"
           }
@@ -379,7 +379,7 @@ jobs:
             @($entries | Where-Object {
               $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
             }).Count -ne 0 -or
-            ($actualNames -cjoin "`n") -cne ($expectedNames -cjoin "`n")
+            ($actualNames -join "`n") -cne ($expectedNames -join "`n")
           ) {
             throw "release producer must contain exactly six regular assets"
           }
@@ -392,7 +392,7 @@ jobs:
             $releaseHashes[$Matches[2]] = $Matches[1]
           }
           $hashedNames = @($releaseNames | Where-Object { $_ -cne "SHA256SUMS.txt" } | Sort-Object)
-          if ((@($releaseHashes.Keys | Sort-Object) -cjoin "`n") -cne ($hashedNames -cjoin "`n")) {
+          if ((@($releaseHashes.Keys | Sort-Object) -join "`n") -cne ($hashedNames -join "`n")) {
             throw "release checksum manifest must hash exactly five assets"
           }
           foreach ($name in $hashedNames) {

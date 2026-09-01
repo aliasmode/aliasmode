@@ -100,7 +100,7 @@ jobs:
             @($entries | Where-Object {
               $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
             }).Count -ne 0 -or
-            ($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")
+            ($actualNames -join "`n") -cne ($requiredNames -join "`n")
           ) {
             throw "candidate artifact must contain exactly its six regular files"
           }
