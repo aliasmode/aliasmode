@@ -1418,6 +1418,11 @@ function Read-SafeBrowserLogDiagnostics([string]$Path) {
     try {
       $byteCount = [int][Math]::Min([long]$maxLogBytes, $stream.Length)
       $startOffset = $stream.Length - $byteCount
+      $discardFirstLine = $startOffset -gt 0
+      if ($discardFirstLine) {
+        $startOffset--
+        $byteCount++
+      }
       [void]$stream.Seek($startOffset, [IO.SeekOrigin]::Begin)
       $bytes = [byte[]]::new($byteCount)
       $bytesRead = 0
@@ -1432,12 +1437,15 @@ function Read-SafeBrowserLogDiagnostics([string]$Path) {
     }
     $reader = [IO.StringReader]::new($text)
     try {
-      if ($startOffset -gt 0) { [void]$reader.ReadLine() }
+      if ($discardFirstLine) { [void]$reader.ReadLine() }
       while ($null -ne ($line = $reader.ReadLine())) {
+        if ($line.Length -gt 0 -and $line[0] -eq [char]0xfeff) {
+          $line = $line.Substring(1)
+        }
         if ($line.Length -gt 16384) { continue }
         $header = [Text.RegularExpressions.Regex]::Match(
           $line,
-          '(?i)\b(?<severity>ERROR|FATAL):\s*(?<source>[a-z0-9_./\\-]+\.cc)(?::|\()(?<line>[0-9]+)\)?\]?'
+          '(?i)^\[[^\]\r\n]*:(?<severity>ERROR|FATAL):\s*(?<source>[a-z0-9_./\\-]+\.cc)(?::|\()(?<line>[0-9]+)\)?\]'
         )
         if (-not $header.Success) { continue }
         $result.errorCount++
@@ -1642,7 +1650,6 @@ $oldRecord = $null
 $candidateRecord = $null
 $oldBrowserProcesses = @()
 $browserOpenAttempted = $false
-$browserOpenSucceeded = $false
 $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
 $routeCounts = [ordered]@{ releaseList = 0; manifest = 0; installer = 0; rejected = 0 }
@@ -2020,7 +2027,6 @@ try {
       }
       throw "public $publicVersion could not open the preservation browser$safeOpenError"
     }
-    $browserOpenSucceeded = $true
   } finally {
     if ($openResponse) { $openResponse.Dispose() }
     $openRequest.Dispose()
@@ -2285,7 +2291,7 @@ try {
     }
   }
 
-  if ($browserOpenAttempted -and -not $browserOpenSucceeded) {
+  if ($browserOpenAttempted -and -not $acceptanceSucceeded) {
     try {
       $browserLogDiagnostics = Read-SafeBrowserLogDiagnostics $browserLogPath
       $observations.browserLogCreated = $browserLogDiagnostics.created
