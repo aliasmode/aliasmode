@@ -61,6 +61,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
     "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
   );
   expect(updaterAcceptance).toContain("$acceptanceDebugPort");
+  expect(updaterAcceptance).toContain('ALIASMODE_SESSION_LAUNCH = "0"');
   expect(updaterAcceptance).toContain("[void]$process.Handle");
   expect(updaterAcceptance).not.toContain("TokenLinkedToken");
   expect(updaterAcceptance).not.toContain("DuplicateTokenEx");
