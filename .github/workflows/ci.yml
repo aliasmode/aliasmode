@@ -278,6 +278,11 @@ jobs:
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+      - name: Cache pinned CloakBrowser
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target/cloakbrowser-cache
+          key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21

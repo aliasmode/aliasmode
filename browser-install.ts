@@ -17,8 +17,8 @@ export const CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256 = "b213795cb32c3169f766c74c
 export const CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256 = "03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80";
 const WINDOWS_ARCHIVE_NAME = "cloakbrowser-windows-x64.zip";
 const WINDOWS_ARCHIVE_URLS = [
-  `https://cloakbrowser.dev/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
   `https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
+  `https://cloakbrowser.dev/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
 ];
 const PATH_KEY = "CLOAKBROWSER_BINARY_PATH";
 const HASH_KEY = "CLOAKBROWSER_BINARY_SHA256";
@@ -52,15 +52,24 @@ async function preparePinnedWindowsArchive(cacheDir: string): Promise<void> {
     let downloaded = false;
     for (const url of WINDOWS_ARCHIVE_URLS) {
       try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-        if (!response.ok) continue;
-        await Bun.write(archivePath, response);
-        if (await sha256File(archivePath) === CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256) {
+        const download = Bun.spawn([
+          "curl.exe",
+          "--fail",
+          "--location",
+          "--retry",
+          "2",
+          "--retry-all-errors",
+          "--output",
+          archivePath,
+          url,
+        ], { stdout: "inherit", stderr: "inherit" });
+        if (await download.exited === 0 &&
+          await sha256File(archivePath) === CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256) {
           downloaded = true;
           break;
         }
       } catch {
-        // Try the signed release mirror.
+        // Try the signed release origin.
       }
       rmSync(archivePath, { force: true });
     }

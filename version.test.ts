@@ -72,6 +72,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterConfig.bundle.windows.webviewInstallMode.type).toBe("downloadBootstrapper");
   expect(browserInstallSource).toContain('CLOAKBROWSER_VERSION = "146.0.7680.177.5"');
   expect(browserInstallSource).toContain('env.CLOAKBROWSER_AUTO_UPDATE = "false"');
+  expect(ciWorkflow).toContain("name: Cache pinned CloakBrowser");
+  expect(ciWorkflow).toContain("path: src-tauri/target/cloakbrowser-cache");
+  expect(releaseWorkflow).toContain("name: Cache pinned CloakBrowser");
   expect(ciWorkflow).toContain("cloakbrowser-version=146.0.7680.177.5");
   expect(ciWorkflow).toContain(
     "cloakbrowser-archive-sha256=b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe",
