@@ -230,12 +230,11 @@ export async function prepareWindowsBundle(
 }
 
 if (import.meta.main) {
-  prepareWindowsBundle()
-    .then((metadata) => {
-      console.log(`prepared AliasMode Windows bundle with CloakBrowser SHA-256 ${metadata.sha256}`);
-    })
-    .catch((error) => {
-      console.error(error instanceof Error ? error.message : String(error));
-      process.exit(1);
-    });
+  try {
+    const metadata = await prepareWindowsBundle();
+    console.log(`prepared AliasMode Windows bundle with CloakBrowser SHA-256 ${metadata.sha256}`);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 }
