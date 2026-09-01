@@ -392,6 +392,30 @@ public sealed class AliasModeAcceptanceUserSession : IDisposable {
     }
   }
 
+  public static string GetProcessLogonSid(int processId) {
+    IntPtr process = IntPtr.Zero;
+    IntPtr token = IntPtr.Zero;
+    try {
+      process = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+      if (process == IntPtr.Zero || !OpenProcessToken(process, TokenQuery, out token)) return null;
+      using (WindowsIdentity identity = new WindowsIdentity(token)) {
+        if (identity.Groups == null) return null;
+        foreach (IdentityReference group in identity.Groups) {
+          SecurityIdentifier sid = group as SecurityIdentifier;
+          if (sid != null && sid.IsWellKnown(WellKnownSidType.LogonIdsSid)) {
+            return sid.Value;
+          }
+        }
+        return null;
+      }
+    } catch {
+      return null;
+    } finally {
+      if (token != IntPtr.Zero) CloseHandle(token);
+      if (process != IntPtr.Zero) CloseHandle(process);
+    }
+  }
+
   public static void DeleteProfileDirectory(string sid, string profilePath) {
     if (!DeleteProfile(sid, profilePath, null)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user profile deletion failed");
@@ -1457,6 +1481,7 @@ $acceptancePassword = "Aa1!$runId"
 $acceptanceUserCreated = $false
 $acceptanceUserSession = $null
 $desktopAccess = $null
+$desktopLogonAccess = $null
 $acceptanceUserSid = $null
 $acceptanceProfilePath = $null
 $userRunRoot = $null
@@ -1735,6 +1760,15 @@ try {
       ALIASMODE_SESSION_LAUNCH = "0"
       WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
     }
+  $desktopLogonSid = [AliasModeAcceptanceUserSession]::GetProcessLogonSid(
+    $publicDesktop.Id
+  )
+  if ([string]::IsNullOrWhiteSpace($desktopLogonSid)) {
+    throw "standard-user desktop logon SID is unavailable"
+  }
+  $desktopLogonAccess = [AliasModeAcceptanceDesktopAccess]::Open(
+    $desktopLogonSid
+  )
   $observations.standardUserTokenUsed = $true
   $oldRecord = Wait-DesktopReady `
     $publicDesktop `
@@ -2101,6 +2135,12 @@ try {
     } catch {
       $cleanupFailures.Add("final standard-user process cleanup failed")
     }
+  }
+  if ($desktopLogonAccess) {
+    try { $desktopLogonAccess.Dispose() } catch {
+      $cleanupFailures.Add("interactive logon desktop ACL restoration failed")
+    }
+    $desktopLogonAccess = $null
   }
   if ($desktopAccess) {
     try { $desktopAccess.Dispose() } catch {
