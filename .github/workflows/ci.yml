@@ -270,6 +270,156 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  windows_synthetic_successor:
+    name: Windows unsigned synthetic successor
+    needs: windows_cache
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.89
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows_full
+          workspaces: src-tauri -> target
+          cache-on-failure: true
+      - name: Cache pinned CloakBrowser
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target/cloakbrowser-cache
+          key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
+      - run: bun install --frozen-lockfile
+      - name: Build and verify unsigned synthetic successor
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          try {
+            $sourceSemantic = [Management.Automation.SemanticVersion]::Parse($env:WINDOWS_VERSION)
+            $successorVersion = if ($env:WINDOWS_VERSION.Contains("-")) {
+              "$($env:WINDOWS_VERSION).acceptance.1"
+            } else {
+              "$($sourceSemantic.Major).$($sourceSemantic.Minor).$($sourceSemantic.Patch + 1)-acceptance.1"
+            }
+            $successorSemantic = [Management.Automation.SemanticVersion]::Parse($successorVersion)
+            if ($successorSemantic -le $sourceSemantic -or $successorSemantic.ToString() -cne $successorVersion) {
+              throw "synthetic successor version is not canonical and newer"
+            }
+
+            $versionFiles = @(
+              ".\package.json",
+              ".\version.ts",
+              ".\src-tauri\tauri.conf.json",
+              ".\src-tauri\Cargo.toml",
+              ".\src-tauri\Cargo.lock"
+            )
+            foreach ($path in $versionFiles) {
+              $text = [IO.File]::ReadAllText($path)
+              if ([regex]::Matches($text, [regex]::Escape($env:WINDOWS_VERSION)).Count -ne 1) {
+                throw "synthetic successor version replacement is ambiguous: $path"
+              }
+              [IO.File]::WriteAllText(
+                $path,
+                $text.Replace($env:WINDOWS_VERSION, $successorVersion),
+                [Text.UTF8Encoding]::new($false)
+              )
+            }
+
+            $bunZip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+            $bunRoot = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
+            Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $bunZip
+            $expectedBunSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
+            if ((Get-FileHash -LiteralPath $bunZip -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedBunSha) {
+              throw "official baseline Bun archive SHA-256 mismatch"
+            }
+            Expand-Archive $bunZip $bunRoot -Force
+            $bunCandidates = @(Get-ChildItem $bunRoot -Recurse -File -Filter "bun.exe")
+            if ($bunCandidates.Count -ne 1) { throw "official baseline Bun archive must contain exactly one bun.exe" }
+            $baselineBun = $bunCandidates[0].FullName
+            $baselineVersion = (& $baselineBun --version).Trim()
+            if ($LASTEXITCODE -ne 0 -or $baselineVersion -cne "1.2.21") {
+              throw "official baseline Bun version is incorrect"
+            }
+
+            & $baselineBun scripts/prepare-windows-bundle.ts
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor bundle preparation failed" }
+            $artifact = Join-Path $env:RUNNER_TEMP "windows-unsigned-synthetic-successor"
+            & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory $artifact
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor build failed" }
+
+            $name = "AliasMode_${successorVersion}_x64-setup.exe"
+            $installer = Join-Path $artifact $name
+            if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+              throw "synthetic successor installer is missing"
+            }
+            $stream = [IO.File]::OpenRead($installer)
+            try {
+              if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+                throw "synthetic successor installer must be a Windows PE file"
+              }
+            } finally {
+              $stream.Dispose()
+            }
+            if ([string](Get-AuthenticodeSignature -LiteralPath $installer).Status -cne "NotSigned") {
+              throw "synthetic successor installer must be unsigned"
+            }
+
+            $arguments = @(
+              $artifact,
+              "--role", "unsigned-synthetic-successor",
+              "--source", $env:WINDOWS_SOURCE,
+              "--version", $successorVersion,
+              "--product-key", $env:WINDOWS_PRODUCT_KEY,
+              "--file", $name
+            )
+            & bun scripts/windows-artifact-manifest.ts create @arguments
+            if ($LASTEXITCODE -ne 0) { throw "unsigned synthetic successor manifest creation failed" }
+            & bun scripts/windows-artifact-manifest.ts verify @arguments
+            if ($LASTEXITCODE -ne 0) { throw "unsigned synthetic successor manifest verification failed" }
+
+            $requiredNames = @($name, "artifact-manifest.json") | Sort-Object
+            $entries = @(Get-ChildItem -LiteralPath $artifact -Force)
+            $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+            if (
+              $entries.Count -ne 2 -or
+              @($entries | Where-Object {
+                $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+              }).Count -ne 0 -or
+              ($actualNames -join "`n") -cne ($requiredNames -join "`n")
+            ) {
+              throw "unsigned synthetic successor must contain exactly two regular files"
+            }
+          } finally {
+            & git checkout -- .
+            if ($LASTEXITCODE -ne 0) { throw "synthetic successor source restoration failed" }
+            $checkedOut = (& git rev-parse HEAD).Trim()
+            if ($LASTEXITCODE -ne 0 -or $checkedOut -cne $env:WINDOWS_SOURCE) {
+              throw "synthetic successor checkout source is not exact"
+            }
+            $status = @(& git status --porcelain --untracked-files=all)
+            if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+              throw "synthetic successor checkout is not exact and clean"
+            }
+          }
+      - name: Upload unsigned synthetic successor
+        uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-windows-unsigned-synthetic-successor
+          path: ${{ runner.temp }}/windows-unsigned-synthetic-successor
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   windows_prepare:
     name: Windows prepared bundle inputs
     needs: windows_cache
@@ -993,6 +1143,7 @@ jobs:
     name: Windows NSIS installer
     needs:
       - windows_cache
+      - windows_synthetic_successor
       - windows_prepare
       - windows_full
       - windows_slim
@@ -1008,6 +1159,7 @@ jobs:
         env:
           CACHE_HIT: ${{ needs.windows_cache.outputs.cache_hit }}
           CACHE_RESULT: ${{ needs.windows_cache.result }}
+          SUCCESSOR_RESULT: ${{ needs.windows_synthetic_successor.result }}
           PREPARE_RESULT: ${{ needs.windows_prepare.result }}
           FULL_RESULT: ${{ needs.windows_full.result }}
           SLIM_RESULT: ${{ needs.windows_slim.result }}
@@ -1029,6 +1181,7 @@ jobs:
           }
 
           require_result windows_cache "$CACHE_RESULT" success
+          require_result windows_synthetic_successor "$SUCCESSOR_RESULT" success
           require_result windows_source "$SOURCE_RESULT" success
           require_result windows_accept_runtime "$RUNTIME_RESULT" success
           require_result windows_accept_browser "$BROWSER_RESULT" success
