@@ -57,6 +57,38 @@ test("release version and updater trust stay aligned across the desktop bundle",
     releaseWorkflow.indexOf("\n  exact_updater_acceptance:"),
     releaseWorkflow.indexOf("\n  publish_release:"),
   );
+  const windowsPrepareJob = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  windows_prepare:"),
+    ciWorkflow.indexOf("\n  windows_full:"),
+  );
+  const windowsFullJob = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  windows_full:"),
+    ciWorkflow.indexOf("\n  windows_slim:"),
+  );
+  const windowsRuntimeJob = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  windows_accept_runtime:"),
+    ciWorkflow.indexOf("\n  windows_accept_browser:"),
+  );
+  const runtimeProtocolShard = installedAcceptance.slice(
+    installedAcceptance.indexOf('    "runtime-protocol" {'),
+    installedAcceptance.indexOf('    "runtime-ownership" {'),
+  );
+  const runtimeOwnershipShard = installedAcceptance.slice(
+    installedAcceptance.indexOf('    "runtime-ownership" {'),
+    installedAcceptance.indexOf('    "runtime-desktop" {'),
+  );
+  const runtimeDesktopShard = installedAcceptance.slice(
+    installedAcceptance.indexOf('    "runtime-desktop" {'),
+    installedAcceptance.indexOf('    "browser" {'),
+  );
+  const cacheStep = (job: string) => {
+    const start = job.indexOf("      - name: Cache pinned CloakBrowser");
+    return job.slice(start, job.indexOf("\n      - ", start + 1));
+  };
+  const baselineStep = (job: string, nextStep: string) => job.slice(
+    job.indexOf("      - name: Prepare bundle with verified official baseline Bun"),
+    job.indexOf(nextStep),
+  );
 
   expect(ALIASMODE_VERSION).toBe("0.1.0-beta.47");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
@@ -119,6 +151,41 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).toContain("name: Ubuntu tests and checks");
   expect(ciWorkflow).toContain("name: Windows NSIS installer");
   expect(ciWorkflow).toContain("node-version: 22.23.2");
+  expect(windowsFullJob).toContain("\n    needs: windows_cache\n");
+  expect(windowsFullJob).not.toContain("windows_prepare");
+  expect(cacheStep(windowsFullJob)).toBe(cacheStep(windowsPrepareJob));
+  expect(windowsFullJob.indexOf("uses: Swatinem/rust-cache@v2")).toBeLessThan(
+    windowsFullJob.indexOf("name: Cache pinned CloakBrowser"),
+  );
+  expect(cacheStep(windowsFullJob)).toContain(
+    "key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80",
+  );
+  const fullBaselineStep = baselineStep(
+    windowsFullJob,
+    "      - name: Build full offline installer",
+  );
+  expect(fullBaselineStep).toBe(
+    baselineStep(windowsPrepareJob, "      - name: Archive prepared bundle inputs"),
+  );
+  expect(fullBaselineStep).toContain(
+    '$pinnedSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"',
+  );
+  expect(fullBaselineStep).toContain('$baselineVersion -ne "1.2.21"');
+  expect(fullBaselineStep).toContain("& $baselineBun scripts/prepare-windows-bundle.ts");
+  expect(windowsFullJob).not.toContain("actions/download-artifact");
+  expect(windowsFullJob).not.toContain("aliasmode-windows-prepared");
+  expect(windowsFullJob).not.toContain("prepared-input manifest");
+  expect(windowsFullJob).not.toContain("tar.exe -xf");
+  expect(windowsRuntimeJob).toContain("name: Windows installed ${{ matrix.shard }} acceptance");
+  expect(windowsRuntimeJob).toContain("fail-fast: false");
+  expect(windowsRuntimeJob).toContain(
+    "shard: [runtime-protocol, runtime-ownership, runtime-desktop]",
+  );
+  expect(windowsRuntimeJob).toContain("-Shard ${{ matrix.shard }}");
+  expect(windowsRuntimeJob).toContain('DiagnosticsPath ".\\diagnostics\\${{ matrix.shard }}.json"');
+  expect(windowsRuntimeJob).toContain(
+    "name: aliasmode-windows-${{ matrix.shard }}-diagnostics-${{ github.run_attempt }}",
+  );
   expect(windowsGateNeeds).toEqual([
     "windows_cache",
     "windows_prepare",
@@ -149,9 +216,74 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).not.toContain("-cjoin");
   expect(releaseWorkflow).not.toContain("-cjoin");
   expect(compatibilityWorkflow).not.toContain("-cjoin");
-  expect(installedAcceptance).toContain(`[ValidateSet("runtime", "browser", "cloud")]`);
-  for (const shard of ["runtime", "browser", "cloud"]) {
+  expect(installedAcceptance).toContain(
+    `[ValidateSet("runtime-protocol", "runtime-ownership", "runtime-desktop", "browser", "cloud")]`,
+  );
+  for (const shard of ["runtime-protocol", "runtime-ownership", "runtime-desktop"]) {
+    expect(installedAcceptance).toContain(`    "${shard}" {`);
+  }
+  for (const shard of ["browser", "cloud"]) {
     expect(ciWorkflow).toContain(`-Shard ${shard}`);
+  }
+  for (const contract of [
+    "runtime-protocol-resource-independence",
+    "installed sidecar embeds its source checkout path",
+    "installed Node runtime version is incorrect",
+    "installed generic MCP setup returned incorrect paths",
+    "installed MCP host did not expose $name",
+    "installed MCP tool $($tool.name) has no $hint annotation",
+    "Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion",
+    "MCP host did not launch AliasMode in background mode",
+    "background AliasMode exposed its main window",
+    "installed MCP tool schemas changed after browser selection",
+    "installed MCP tool schemas changed after browser close",
+    "installed helper could not reopen the pre-existing browser",
+    "installed helper could not close the preserved browser",
+    "Remove-PersistentProfile $helper $preexistingProfileId",
+  ]) {
+    expect(runtimeProtocolShard).toContain(contract);
+  }
+  for (const contract of [
+    "runtime-ownership-preexisting",
+    "New-OpenPersistentProfile $helper",
+    "Select-McpBrowser $mcp $preexistingProfileId",
+    'name = "aliasmode_profile_create"',
+    'name = "aliasmode_browser_open"',
+    "Disconnect-McpHost $mcp",
+    "background desktop did not survive MCP disconnect",
+    "runtime descriptor did not survive MCP disconnect",
+    "MCP-owned browser survived its connection",
+    "pre-existing browser did not survive MCP disconnect",
+    "Remove-PersistentProfile $helper $ownedProfileId",
+  ]) {
+    expect(runtimeOwnershipShard).toContain(contract);
+  }
+  expect(runtimeOwnershipShard).not.toContain("browser close --profile $preexistingProfileId");
+  expect(runtimeOwnershipShard).not.toContain("Remove-PersistentProfile $helper $preexistingProfileId");
+  for (const contract of [
+    "runtime-desktop-json-cli",
+    "installed JSON CLI could not create a temporary profile",
+    "installed JSON CLI could not open a headless browser",
+    "installed JSON CLI did not report its browser as running",
+    "installed JSON CLI did not close and delete its temporary profile",
+    "runtime-desktop-descriptor",
+    "runtime-desktop-single-instance-window",
+    "runtime-desktop-eof-termination",
+    "packaged sidecar survived parent stdin EOF",
+    "runtime-desktop-degraded-termination",
+    "runtime descriptor survived unexpected sidecar termination",
+    "runtime-desktop-playwright-worker",
+    "installed Playwright worker returned an unexpected protocol response",
+  ]) {
+    expect(runtimeDesktopShard).toContain(contract);
+  }
+  for (const contract of [
+    "installed MCP host returned an invalid initialize response",
+    "background runtime descriptor is invalid",
+    "installed helper could not delete a lifecycle profile",
+    "WaitForExit(60000)",
+  ]) {
+    expect(installedAcceptance).toContain(contract);
   }
   expect(previousUpgradeAcceptance).toContain('Set-AcceptanceStage "applying-passive-update"');
   expect(previousUpgradeAcceptance).toContain('@("/P", "/R", "/UPDATE", "/ARGS")');

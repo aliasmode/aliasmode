@@ -358,7 +358,7 @@ jobs:
 
   windows_full:
     name: Windows full offline package
-    needs: [windows_cache, windows_prepare]
+    needs: windows_cache
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
     steps:
@@ -374,28 +374,33 @@ jobs:
         with:
           workspaces: src-tauri -> target
           cache-on-failure: true
-      - run: bun install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - name: Cache pinned CloakBrowser
+        uses: actions/cache@v4
         with:
-          name: aliasmode-windows-prepared
-          path: artifacts/windows-prepared
-      - name: Verify and extract prepared inputs
+          path: src-tauri/target/cloakbrowser-cache
+          key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
+      - run: bun install --frozen-lockfile
+      - name: Prepare bundle with verified official baseline Bun
         shell: pwsh
         env:
-          WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
-          WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
-          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+          EXPECTED_BASELINE_SHA: ${{ needs.windows_cache.outputs.baseline_bun_sha }}
         run: |
           $ErrorActionPreference = "Stop"
-          & bun scripts/windows-artifact-manifest.ts verify ".\artifacts\windows-prepared" `
-            --role prepared `
-            --source $env:WINDOWS_SOURCE `
-            --version $env:WINDOWS_VERSION `
-            --product-key $env:WINDOWS_PRODUCT_KEY `
-            --file windows-prepared.zip
-          if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
-          & tar.exe -xf ".\artifacts\windows-prepared\windows-prepared.zip" -C ".\src-tauri"
-          if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
+          $pinnedSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
+          if ($env:EXPECTED_BASELINE_SHA -ne $pinnedSha) { throw "baseline Bun provenance is inconsistent" }
+          $zip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
+          $root = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
+          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $zip
+          $actualSha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -ne $env:EXPECTED_BASELINE_SHA) { throw "official baseline Bun archive SHA-256 mismatch" }
+          Expand-Archive $zip $root -Force
+          $baselineCandidates = @(Get-ChildItem $root -Recurse -File -Filter "bun.exe")
+          if ($baselineCandidates.Count -ne 1) { throw "official baseline Bun archive must contain exactly one bun.exe" }
+          $baselineBun = $baselineCandidates[0].FullName
+          $baselineVersion = (& $baselineBun --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $baselineVersion -ne "1.2.21") { throw "official baseline Bun version is incorrect" }
+          & $baselineBun scripts/prepare-windows-bundle.ts
+          if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
       - name: Build full offline installer with zlib
         shell: pwsh
         run: |
@@ -769,7 +774,7 @@ jobs:
           compression-level: 0
 
   windows_accept_runtime:
-    name: Windows installed runtime acceptance
+    name: Windows installed ${{ matrix.shard }} acceptance
     needs: [windows_cache, windows_full]
     if: >-
       ${{
@@ -780,6 +785,10 @@ jobs:
           (needs.windows_cache.outputs.cache_hit == 'false' && needs.windows_full.result == 'success')
         )
       }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [runtime-protocol, runtime-ownership, runtime-desktop]
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -794,23 +803,23 @@ jobs:
         with:
           name: aliasmode-windows-full
           path: package
-      - name: Run installed runtime acceptance
+      - name: Run installed ${{ matrix.shard }} acceptance
         shell: pwsh
         env:
           WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\windows-installed-acceptance.ps1 `
-            -Shard runtime `
+            -Shard ${{ matrix.shard }} `
             -InstallerPath ".\package\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
             -ChecksumsPath ".\package\SHA256SUMS.txt" `
             -BrowserMetadataPath ".\package\browser.json" `
-            -DiagnosticsPath ".\diagnostics\runtime.json"
-      - name: Upload runtime acceptance diagnostics
+            -DiagnosticsPath ".\diagnostics\${{ matrix.shard }}.json"
+      - name: Upload ${{ matrix.shard }} acceptance diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: aliasmode-windows-runtime-diagnostics-${{ github.run_attempt }}
+          name: aliasmode-windows-${{ matrix.shard }}-diagnostics-${{ github.run_attempt }}
           path: diagnostics
           if-no-files-found: warn
           retention-days: 7
