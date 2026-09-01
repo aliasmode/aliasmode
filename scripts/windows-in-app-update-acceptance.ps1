@@ -1542,6 +1542,9 @@ $observations = [ordered]@{
   publicDesktopReady = $false
   profileCreated = $false
   activeBrowserStarted = $false
+  browserRootSeenDuringOpen = $false
+  gpuProcessSeenDuringOpen = $false
+  gpuSandboxExceptionSeenDuringOpen = $false
   gpuSandboxExceptionUsed = $false
   rootMismatchRejected = $false
   browserStayedActiveAfterRejection = $false
@@ -1818,12 +1821,81 @@ try {
   $profileName = "in-app-update-preservation-sentinel"
   $observations.profileCreated = $true
   $encodedProfileId = [Uri]::EscapeDataString($profileId)
-  $opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open" `
-    -Method Post `
-    -TimeoutSec 190 `
-    -NoProxy
-  if ($opened.ok -ne $true -or [int]$opened.port -le 0) {
-    throw "public $publicVersion could not open the preservation browser"
+  $openHandler = [Net.Http.HttpClientHandler]::new()
+  $openHandler.UseProxy = $false
+  $openClient = [Net.Http.HttpClient]::new($openHandler)
+  $openClient.Timeout = [TimeSpan]::FromSeconds(190)
+  $openRequest = [Net.Http.HttpRequestMessage]::new(
+    [Net.Http.HttpMethod]::Post,
+    "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"
+  )
+  $openResponse = $null
+  try {
+    $openTask = $openClient.SendAsync($openRequest)
+    $browserRoot = Join-Path $installRoot "cloakbrowser"
+    $browserObservationDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not $openTask.IsCompleted) {
+      if ([DateTime]::UtcNow -lt $browserObservationDeadline) {
+        try {
+          foreach ($browserRecord in @(Get-CimInstance Win32_Process `
+            -Filter "Name = 'chrome.exe'" `
+            -ErrorAction SilentlyContinue)) {
+            if (-not $browserRecord.ExecutablePath -or
+                -not (Test-PathWithin ([string]$browserRecord.ExecutablePath) $browserRoot) -or
+                [string]::IsNullOrWhiteSpace([string]$browserRecord.CommandLine)) {
+              continue
+            }
+            $browserOwnerSid = [AliasModeAcceptanceUserSession]::GetProcessOwnerSid(
+              [int]$browserRecord.ProcessId
+            )
+            if (-not $browserOwnerSid -or -not $browserOwnerSid.Equals(
+              $acceptanceUserSid,
+              [StringComparison]::OrdinalIgnoreCase
+            )) {
+              continue
+            }
+            $browserCommandLine = [string]$browserRecord.CommandLine
+            if ($browserCommandLine.Contains("--remote-debugging-port=", [StringComparison]::OrdinalIgnoreCase)) {
+              $observations.browserRootSeenDuringOpen = $true
+            }
+            if ($browserCommandLine.Contains("--type=gpu-process", [StringComparison]::OrdinalIgnoreCase)) {
+              $observations.gpuProcessSeenDuringOpen = $true
+            }
+            if ($browserCommandLine.Contains("--disable-gpu-sandbox", [StringComparison]::OrdinalIgnoreCase)) {
+              $observations.gpuSandboxExceptionSeenDuringOpen = $true
+            }
+          }
+        } catch {}
+      }
+      Start-Sleep -Milliseconds 250
+    }
+    $openResponse = $openTask.GetAwaiter().GetResult()
+    $openBody = $openResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    try { $opened = $openBody | ConvertFrom-Json } catch {
+      throw "public $publicVersion browser open returned invalid output"
+    }
+    if (-not $openResponse.IsSuccessStatusCode -or
+        $opened.ok -ne $true -or
+        [int]$opened.port -le 0) {
+      $openError = if ($opened.PSObject.Properties.Name -contains "error") {
+        [string]$opened.error
+      } else {
+        ""
+      }
+      $safeOpenError = if ([Text.RegularExpressions.Regex]::IsMatch(
+        $openError,
+        '^[a-z0-9_]+/[a-z0-9_]+ \([a-z0-9_]+\)$'
+      )) {
+        ": $openError"
+      } else {
+        ""
+      }
+      throw "public $publicVersion could not open the preservation browser$safeOpenError"
+    }
+  } finally {
+    if ($openResponse) { $openResponse.Dispose() }
+    $openRequest.Dispose()
+    $openClient.Dispose()
   }
   $browserOwner = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$opened.port) -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)

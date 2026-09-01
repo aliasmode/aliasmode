@@ -73,6 +73,21 @@ test("release version and updater trust stay aligned across the desktop bundle",
   );
   expect(updaterAcceptance).toContain('GITHUB_ACTIONS = "true"');
   expect(updaterAcceptance).toContain(
+    "$openTask = $openClient.SendAsync($openRequest)",
+  );
+  expect(updaterAcceptance).not.toContain(
+    '$opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"',
+  );
+  expect(updaterAcceptance).toContain(
+    "$observations.browserRootSeenDuringOpen = $true",
+  );
+  expect(updaterAcceptance).toContain(
+    "$observations.gpuProcessSeenDuringOpen = $true",
+  );
+  expect(updaterAcceptance).toContain(
+    "$observations.gpuSandboxExceptionSeenDuringOpen = $true",
+  );
+  expect(updaterAcceptance).toContain(
     "$observations.gpuSandboxExceptionUsed = $true",
   );
   expect(cliSource).toContain("windowsUpdaterAcceptanceBrowserArgs");
