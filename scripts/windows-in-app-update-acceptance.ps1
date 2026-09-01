@@ -1052,25 +1052,24 @@ try {
   $browserOwner = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$opened.port) -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)
   if ($browserOwner.Count -ne 1) { throw "preservation browser CDP owner was not unique" }
-  $oldBrowserHandlesPinned = $false
   for ($attempt = 0; $attempt -lt 40; $attempt++) {
     $oldBrowserProcesses = @(Get-InstalledBrowserProcesses $installRoot)
     if ($oldBrowserProcesses.Count -gt 0 -and
         @($oldBrowserProcesses | Where-Object { $_.Id -eq $browserOwner[0] }).Count -eq 1) {
-      try {
-        foreach ($browserProcess in $oldBrowserProcesses) {
-          [void]$browserProcess.SafeHandle
-        }
-        $oldBrowserHandlesPinned = $true
-        break
-      } catch {}
+      break
     }
     Start-Sleep -Milliseconds 250
   }
-  if (-not $oldBrowserHandlesPinned -or
-      $oldBrowserProcesses.Count -eq 0 -or
+  if ($oldBrowserProcesses.Count -eq 0 -or
       @($oldBrowserProcesses | Where-Object { $_.Id -eq $browserOwner[0] }).Count -ne 1) {
     throw "installed preservation browser process tree was not found"
+  }
+  try {
+    foreach ($browserProcess in $oldBrowserProcesses) {
+      [void]$browserProcess.Handle
+    }
+  } catch {
+    throw "installed preservation browser process identity could not be pinned"
   }
   $oldRoster = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" -TimeoutSec 30 -NoProxy
   $oldProfile = @($oldRoster.profiles | Where-Object { $_.id -eq $profileId -and $_.name -eq $profileName })

@@ -74,7 +74,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
     updaterAcceptance.indexOf("$observations.publicDesktopReady = $true"),
   );
   expect(updaterAcceptance).toContain('ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = "0"');
-  expect(updaterAcceptance).toContain('[void]$browserProcess.SafeHandle');
+  expect(updaterAcceptance).toContain('[void]$browserProcess.Handle');
   expect(updaterAcceptance).toContain("$deadline = [TimeSpan]::FromMinutes(5)");
   expect(updaterAcceptance).toContain("sourceDebugArgumentSeen");
   expect(updaterAcceptance).toContain("$savedUserEnvironment[$name]");
