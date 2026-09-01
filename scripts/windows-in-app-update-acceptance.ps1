@@ -169,16 +169,27 @@ function Wait-DesktopReady(
   [Diagnostics.Process]$DesktopProcess,
   [string]$ExpectedVersion,
   [string]$ExpectedRoot,
-  [string]$WebViewRoot
+  [string]$WebViewRoot,
+  $Observations
 ) {
-  for ($attempt = 0; $attempt -lt 240; $attempt++) {
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  $deadline = [TimeSpan]::FromMinutes(5)
+  $nextReportSeconds = 0.0
+  while ($timer.Elapsed -lt $deadline) {
     if (Test-ProcessExited $DesktopProcess) {
       throw "installed public desktop exited before readiness"
     }
     $sidecars = @(Get-ChildSidecars $DesktopProcess.Id)
+    if ($sidecars.Count -gt 0) { $Observations.sourceSidecarSeen = $true }
+    $debugPort = Get-WebViewDebugPort $WebViewRoot
+    if ($debugPort -gt 0) { $Observations.sourceDebugSeen = $true }
+    $DesktopProcess.Refresh()
+    $windowSeen = $DesktopProcess.MainWindowHandle -ne 0
+    if ($windowSeen) { $Observations.sourceWindowSeen = $true }
     foreach ($sidecar in $sidecars) {
       $healthRecord = Get-SidecarHealth $sidecar.Id
       if (-not $healthRecord) { continue }
+      $Observations.sourceHealthSeen = $true
       if ($healthRecord.Health.version -ne $ExpectedVersion) {
         throw "installed public desktop reported an unexpected version"
       }
@@ -188,9 +199,7 @@ function Wait-DesktopReady(
       )) {
         throw "installed public desktop used an unexpected app-data root"
       }
-      $debugPort = Get-WebViewDebugPort $WebViewRoot
-      $DesktopProcess.Refresh()
-      if ($debugPort -gt 0 -and $DesktopProcess.MainWindowHandle -ne 0) {
+      if ($debugPort -gt 0 -and $windowSeen) {
         return [pscustomobject]@{
           App = $DesktopProcess
           Sidecar = $sidecar
@@ -199,6 +208,31 @@ function Wait-DesktopReady(
           DebugPort = $debugPort
         }
       }
+    }
+    if ($timer.Elapsed.TotalSeconds -ge $nextReportSeconds) {
+      $webViewSeen = $false
+      $debugArgumentSeen = $false
+      foreach ($record in @(Get-CimInstance Win32_Process -Filter 'Name = "msedgewebview2.exe"' -ErrorAction SilentlyContinue)) {
+        if ($record.CommandLine -and
+            $record.CommandLine.Contains($WebViewRoot, [StringComparison]::OrdinalIgnoreCase)) {
+          $webViewSeen = $true
+          if ($record.CommandLine.Contains("--remote-debugging-port=", [StringComparison]::OrdinalIgnoreCase)) {
+            $debugArgumentSeen = $true
+          }
+        }
+      }
+      if ($webViewSeen) { $Observations.sourceWebViewSeen = $true }
+      if ($debugArgumentSeen) { $Observations.sourceDebugArgumentSeen = $true }
+      Write-Host (
+        "AliasMode source readiness state: " +
+        "sidecarSeen=$($Observations.sourceSidecarSeen); " +
+        "healthSeen=$($Observations.sourceHealthSeen); " +
+        "windowSeen=$($Observations.sourceWindowSeen); " +
+        "webViewSeen=$($Observations.sourceWebViewSeen); " +
+        "debugArgumentSeen=$($Observations.sourceDebugArgumentSeen); " +
+        "debugSeen=$($Observations.sourceDebugSeen)"
+      )
+      $nextReportSeconds = $timer.Elapsed.TotalSeconds + 30
     }
     Start-Sleep -Milliseconds 250
   }
@@ -801,6 +835,12 @@ $environmentNames = @(
 $observations = [ordered]@{
   publicInstallerVerified = $false
   runnerUserProcessUsed = $false
+  sourceSidecarSeen = $false
+  sourceHealthSeen = $false
+  sourceWindowSeen = $false
+  sourceWebViewSeen = $false
+  sourceDebugArgumentSeen = $false
+  sourceDebugSeen = $false
   publicDesktopReady = $false
   profileCreated = $false
   activeBrowserStarted = $false
@@ -964,7 +1004,12 @@ try {
   Set-AcceptanceStage "starting-public-release"
   $publicDesktop = Start-RunnerUserProcess $appPath
   $observations.runnerUserProcessUsed = $true
-  $oldRecord = Wait-DesktopReady $publicDesktop $publicVersion $appDataRoot $webViewRoot
+  $oldRecord = Wait-DesktopReady `
+    $publicDesktop `
+    $publicVersion `
+    $appDataRoot `
+    $webViewRoot `
+    $observations
   $observations.publicDesktopReady = $true
 
   Set-AcceptanceStage "creating-active-profile"

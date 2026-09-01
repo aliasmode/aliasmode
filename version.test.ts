@@ -65,6 +65,8 @@ test("release version and updater trust stay aligned across the desktop bundle",
   );
   expect(updaterAcceptance).toContain('foreach ($target in @("Process", "User"))');
   expect(updaterAcceptance).toContain("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = $null");
+  expect(updaterAcceptance).toContain("$deadline = [TimeSpan]::FromMinutes(5)");
+  expect(updaterAcceptance).toContain("sourceDebugArgumentSeen");
   expect(updaterAcceptance).toContain("$savedUserEnvironment[$name]");
   expect(updaterAcceptance).toContain(
     'SetEnvironmentVariable($name, $savedUserEnvironment[$name], "User")',
