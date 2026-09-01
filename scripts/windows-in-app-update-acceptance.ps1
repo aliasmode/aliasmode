@@ -1760,7 +1760,7 @@ try {
   $encodedProfileId = [Uri]::EscapeDataString($profileId)
   $opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open" `
     -Method Post `
-    -TimeoutSec 120 `
+    -TimeoutSec 190 `
     -NoProxy
   if ($opened.ok -ne $true -or [int]$opened.port -le 0) {
     throw "public $publicVersion could not open the preservation browser"
