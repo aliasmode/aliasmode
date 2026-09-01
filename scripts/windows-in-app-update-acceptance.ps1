@@ -1002,10 +1002,8 @@ try {
     ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = $null
     WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
   }
-  foreach ($target in @("Process", "User")) {
-    foreach ($name in $environmentNames) {
-      [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], $target)
-    }
+  foreach ($name in $environmentNames) {
+    [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "Process")
   }
   $sourceEnvironment = @{
     ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
@@ -1022,6 +1020,13 @@ try {
     $webViewRoot `
     $observations
   $observations.publicDesktopReady = $true
+
+  # The source WebView must own this folder before the user-scoped values are
+  # exposed to the installer relaunch. Otherwise, another WebView2 host can
+  # claim the folder first without the acceptance debugging argument.
+  foreach ($name in $environmentNames) {
+    [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "User")
+  }
 
   Set-AcceptanceStage "creating-active-profile"
   $profile = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" `

@@ -67,7 +67,12 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance).toContain(
     '$opened = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles/$encodedProfileId/open"',
   );
-  expect(updaterAcceptance).toContain('foreach ($target in @("Process", "User"))');
+  expect(updaterAcceptance.indexOf('SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "Process")')).toBeLessThan(
+    updaterAcceptance.indexOf("$observations.publicDesktopReady = $true"),
+  );
+  expect(updaterAcceptance.indexOf('SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "User")')).toBeGreaterThan(
+    updaterAcceptance.indexOf("$observations.publicDesktopReady = $true"),
+  );
   expect(updaterAcceptance).toContain("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = $null");
   expect(updaterAcceptance).toContain("$deadline = [TimeSpan]::FromMinutes(5)");
   expect(updaterAcceptance).toContain("sourceDebugArgumentSeen");
