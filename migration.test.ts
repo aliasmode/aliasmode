@@ -70,7 +70,7 @@ function treeHash(root: string): string {
 }
 
 async function leaveHotJournal(path: string, statement: string): Promise<void> {
-  const script = `import { Database } from "bun:sqlite"; const db=new Database(${JSON.stringify(path)}); db.exec("PRAGMA journal_mode=DELETE; BEGIN IMMEDIATE;"+${JSON.stringify(statement)}); process.stdout.write("ready"); await new Promise(()=>{});`;
+  const script = `import { Database } from "bun:sqlite"; const db=new Database(${JSON.stringify(path)}); db.exec("PRAGMA journal_mode=DELETE; BEGIN IMMEDIATE;"+${JSON.stringify(statement)}); process.stdout.write("ready"); setInterval(()=>{},1_000_000);`;
   const child = Bun.spawn([process.execPath, "-e", script], { stdout: "pipe", stderr: "pipe" });
   const reader = child.stdout.getReader();
   await reader.read();
