@@ -118,6 +118,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).toContain("--config src-tauri/tauri.updater.conf.json");
   expect(ciWorkflow).toContain("name: Ubuntu tests and checks");
   expect(ciWorkflow).toContain("name: Windows NSIS installer");
+  expect(ciWorkflow).toContain("node-version: 22.23.2");
   expect(windowsGateNeeds).toEqual([
     "windows_cache",
     "windows_prepare",

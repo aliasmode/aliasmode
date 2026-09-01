@@ -531,6 +531,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.89
@@ -539,6 +542,7 @@ jobs:
           workspaces: src-tauri -> target
           cache-on-failure: true
       - run: bun install --frozen-lockfile
+      - run: bun test
       - if: needs.windows_cache.outputs.cache_hit == 'false'
         uses: actions/download-artifact@v4
         with:
@@ -562,7 +566,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
           & tar.exe -xf ".\artifacts\windows-prepared\windows-prepared.zip" -C ".\src-tauri"
           if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
-      - run: bun test
       - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
         if: needs.windows_cache.outputs.cache_hit == 'false'
