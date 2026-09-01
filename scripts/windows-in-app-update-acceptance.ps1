@@ -36,241 +36,16 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class AliasModeStandardUserProcess {
-  private const uint TokenAssignPrimary = 0x0001;
-  private const uint TokenDuplicate = 0x0002;
-  private const uint TokenQuery = 0x0008;
-  private const int TokenTypeClass = 8;
-  private const int TokenElevationTypeClass = 18;
-  private const int TokenLinkedTokenClass = 19;
-  private const int TokenElevationClass = 20;
-  private const int TokenPrimary = 1;
-  private const int SecurityImpersonation = 2;
-  private const int TokenElevationTypeFull = 2;
-  private const int TokenElevationTypeLimited = 3;
-
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  private struct StartupInfo {
-    public int cb;
-    public string reserved;
-    public string desktop;
-    public string title;
-    public int x;
-    public int y;
-    public int xSize;
-    public int ySize;
-    public int xCountChars;
-    public int yCountChars;
-    public int fillAttribute;
-    public int flags;
-    public short showWindow;
-    public short reserved2;
-    public IntPtr reserved2Pointer;
-    public IntPtr standardInput;
-    public IntPtr standardOutput;
-    public IntPtr standardError;
+function Start-RunnerUserProcess([string]$FilePath, [string]$Arguments = "") {
+  $start = @{
+    FilePath = $FilePath
+    PassThru = $true
+    WorkingDirectory = [IO.Path]::GetDirectoryName($FilePath)
   }
-
-  [StructLayout(LayoutKind.Sequential)]
-  private struct ProcessInformation {
-    public IntPtr process;
-    public IntPtr thread;
-    public int processId;
-    public int threadId;
+  if (-not [string]::IsNullOrWhiteSpace($Arguments)) {
+    $start.ArgumentList = $Arguments
   }
-
-  [StructLayout(LayoutKind.Sequential)]
-  private struct TokenElevation {
-    public int isElevated;
-  }
-
-  [StructLayout(LayoutKind.Sequential)]
-  private struct TokenLinkedToken {
-    public IntPtr linkedToken;
-  }
-
-  [DllImport("kernel32.dll")]
-  private static extern IntPtr GetCurrentProcess();
-
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool OpenProcessToken(
-    IntPtr process,
-    uint desiredAccess,
-    out IntPtr token
-  );
-
-  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
-  private static extern bool GetTokenElevation(
-    IntPtr token,
-    int informationClass,
-    ref TokenElevation information,
-    int informationLength,
-    out int returnLength
-  );
-
-  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
-  private static extern bool GetTokenInteger(
-    IntPtr token,
-    int informationClass,
-    ref int information,
-    int informationLength,
-    out int returnLength
-  );
-
-  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
-  private static extern bool GetLinkedToken(
-    IntPtr token,
-    int informationClass,
-    ref TokenLinkedToken information,
-    int informationLength,
-    out int returnLength
-  );
-
-  [DllImport("advapi32.dll", SetLastError = true)]
-  private static extern bool DuplicateTokenEx(
-    IntPtr existingToken,
-    uint desiredAccess,
-    IntPtr tokenAttributes,
-    int impersonationLevel,
-    int tokenType,
-    out IntPtr newToken
-  );
-
-  [DllImport("advapi32.dll", EntryPoint = "CreateProcessAsUserW", CharSet = CharSet.Unicode, SetLastError = true)]
-  private static extern bool CreateProcessAsUser(
-    IntPtr token,
-    string applicationName,
-    StringBuilder commandLine,
-    IntPtr processAttributes,
-    IntPtr threadAttributes,
-    bool inheritHandles,
-    uint creationFlags,
-    IntPtr environment,
-    string currentDirectory,
-    ref StartupInfo startupInfo,
-    out ProcessInformation processInformation
-  );
-
-  [DllImport("kernel32.dll", SetLastError = true)]
-  private static extern bool CloseHandle(IntPtr handle);
-
-  private static int ReadTokenInteger(IntPtr token, int informationClass, string failure) {
-    int value = 0;
-    int returned;
-    if (!GetTokenInteger(token, informationClass, ref value, sizeof(int), out returned)) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), failure);
-    }
-    return value;
-  }
-
-  private static int ReadTokenElevation(IntPtr token, string failure) {
-    TokenElevation elevation = new TokenElevation();
-    int returned;
-    if (!GetTokenElevation(
-      token,
-      TokenElevationClass,
-      ref elevation,
-      Marshal.SizeOf<TokenElevation>(),
-      out returned
-    )) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), failure);
-    }
-    return elevation.isElevated;
-  }
-
-  public static int Start(string fileName, string arguments, string currentDirectory) {
-    IntPtr currentToken = IntPtr.Zero;
-    IntPtr linkedToken = IntPtr.Zero;
-    IntPtr token = IntPtr.Zero;
-    ProcessInformation process = new ProcessInformation();
-    try {
-      if (!OpenProcessToken(GetCurrentProcess(), TokenQuery, out currentToken)) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "release runner token open failed");
-      }
-      if (ReadTokenElevation(currentToken, "release runner elevation query failed") == 0 ||
-          ReadTokenInteger(currentToken, TokenElevationTypeClass, "release runner elevation type query failed") != TokenElevationTypeFull) {
-        throw new InvalidOperationException("release runner must provide an elevated split token");
-      }
-
-      TokenLinkedToken linked = new TokenLinkedToken();
-      int returned;
-      if (!GetLinkedToken(
-        currentToken,
-        TokenLinkedTokenClass,
-        ref linked,
-        Marshal.SizeOf<TokenLinkedToken>(),
-        out returned
-      ) || linked.linkedToken == IntPtr.Zero) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user linked token query failed");
-      }
-      linkedToken = linked.linkedToken;
-      if (ReadTokenElevation(linkedToken, "standard-user linked token elevation query failed") != 0 ||
-          ReadTokenInteger(linkedToken, TokenElevationTypeClass, "standard-user linked token type query failed") != TokenElevationTypeLimited) {
-        throw new InvalidOperationException("linked token is not a limited standard-user token");
-      }
-
-      if (!DuplicateTokenEx(
-        linkedToken,
-        TokenAssignPrimary | TokenDuplicate | TokenQuery,
-        IntPtr.Zero,
-        SecurityImpersonation,
-        TokenPrimary,
-        out token
-      )) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user primary token creation failed");
-      }
-      if (ReadTokenElevation(token, "standard-user token elevation query failed") != 0 ||
-          ReadTokenInteger(token, TokenElevationTypeClass, "standard-user token type query failed") != TokenElevationTypeLimited ||
-          ReadTokenInteger(token, TokenTypeClass, "standard-user primary token query failed") != TokenPrimary) {
-        throw new InvalidOperationException("standard-user token verification failed");
-      }
-
-      StartupInfo startup = new StartupInfo();
-      startup.cb = Marshal.SizeOf<StartupInfo>();
-      string escapedFileName = "\"" + fileName.Replace("\"", "\"\"") + "\"";
-      StringBuilder command = new StringBuilder(
-        string.IsNullOrWhiteSpace(arguments) ? escapedFileName : escapedFileName + " " + arguments
-      );
-      if (!CreateProcessAsUser(
-        token,
-        fileName,
-        command,
-        IntPtr.Zero,
-        IntPtr.Zero,
-        false,
-        0,
-        IntPtr.Zero,
-        currentDirectory,
-        ref startup,
-        out process
-      )) {
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "standard-user process launch failed");
-      }
-      return process.processId;
-    } finally {
-      if (process.thread != IntPtr.Zero) CloseHandle(process.thread);
-      if (process.process != IntPtr.Zero) CloseHandle(process.process);
-      if (token != IntPtr.Zero) CloseHandle(token);
-      if (linkedToken != IntPtr.Zero) CloseHandle(linkedToken);
-      if (currentToken != IntPtr.Zero) CloseHandle(currentToken);
-    }
-  }
-}
-'@
-
-function Start-StandardUserProcess([string]$FilePath, [string]$Arguments = "") {
-  $processId = [AliasModeStandardUserProcess]::Start(
-    $FilePath,
-    $Arguments,
-    [IO.Path]::GetDirectoryName($FilePath)
-  )
-  return [Diagnostics.Process]::GetProcessById($processId)
+  Start-Process @start
 }
 
 $publicVersion = $SourceVersion
@@ -1018,7 +793,7 @@ $savedEnvironment = @{}
 $environmentNames = @("ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG", "WEBVIEW2_USER_DATA_FOLDER")
 $observations = [ordered]@{
   publicInstallerVerified = $false
-  standardUserTokenUsed = $false
+  runnerUserProcessUsed = $false
   publicDesktopReady = $false
   profileCreated = $false
   activeBrowserStarted = $false
@@ -1093,7 +868,7 @@ try {
   $observations.publicInstallerVerified = $true
 
   Set-AcceptanceStage "installing-source-release"
-  $install = Start-StandardUserProcess $SourceInstallerPath "/S"
+  $install = Start-RunnerUserProcess $SourceInstallerPath "/S"
   if (-not $install.WaitForExit(300000)) {
     Stop-ProcessTree $install
     throw "public $publicVersion installer timed out"
@@ -1170,8 +945,8 @@ try {
   [Environment]::SetEnvironmentVariable("WEBVIEW2_USER_DATA_FOLDER", $webViewRoot, "Process")
 
   Set-AcceptanceStage "starting-public-release"
-  $publicDesktop = Start-StandardUserProcess $appPath
-  $observations.standardUserTokenUsed = $true
+  $publicDesktop = Start-RunnerUserProcess $appPath
+  $observations.runnerUserProcessUsed = $true
   $oldRecord = Wait-DesktopReady $publicDesktop $publicVersion $appDataRoot $webViewRoot
   $observations.publicDesktopReady = $true
 
