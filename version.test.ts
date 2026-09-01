@@ -58,6 +58,8 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance).toContain('"Registry::HKEY_USERS\\$acceptanceUserSid');
   expect(updaterAcceptance).toContain("AliasModeAcceptanceDesktopAccess");
   expect(updaterAcceptance).toContain("GetProcessLogonSid");
+  expect(updaterAcceptance).toContain("TokenLogonSidClass = 28");
+  expect(updaterAcceptance).not.toContain("identity.Groups");
   expect(updaterAcceptance).toContain(
     "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
   );

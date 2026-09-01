@@ -55,6 +55,7 @@ public sealed class AliasModeAcceptanceUserSession : IDisposable {
   private const int TokenTypeClass = 8;
   private const int TokenElevationTypeClass = 18;
   private const int TokenElevationClass = 20;
+  private const int TokenLogonSidClass = 28;
   private const int TokenPrimary = 1;
   private const int TokenElevationTypeDefault = 1;
 
@@ -100,6 +101,12 @@ public sealed class AliasModeAcceptanceUserSession : IDisposable {
     public int threadId;
   }
 
+  [StructLayout(LayoutKind.Sequential)]
+  private struct SidAndAttributes {
+    public IntPtr sid;
+    public uint attributes;
+  }
+
   [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   private static extern bool LogonUser(
     string userName,
@@ -133,6 +140,15 @@ public sealed class AliasModeAcceptanceUserSession : IDisposable {
     IntPtr token,
     int informationClass,
     ref int information,
+    int informationLength,
+    out int returnLength
+  );
+
+  [DllImport("advapi32.dll", EntryPoint = "GetTokenInformation", SetLastError = true)]
+  private static extern bool GetTokenBuffer(
+    IntPtr token,
+    int informationClass,
+    IntPtr information,
     int informationLength,
     out int returnLength
   );
@@ -395,22 +411,28 @@ public sealed class AliasModeAcceptanceUserSession : IDisposable {
   public static string GetProcessLogonSid(int processId) {
     IntPtr process = IntPtr.Zero;
     IntPtr token = IntPtr.Zero;
+    IntPtr buffer = IntPtr.Zero;
     try {
       process = OpenProcess(ProcessQueryLimitedInformation, false, processId);
       if (process == IntPtr.Zero || !OpenProcessToken(process, TokenQuery, out token)) return null;
-      using (WindowsIdentity identity = new WindowsIdentity(token)) {
-        if (identity.Groups == null) return null;
-        foreach (IdentityReference group in identity.Groups) {
-          SecurityIdentifier sid = group as SecurityIdentifier;
-          if (sid != null && sid.IsWellKnown(WellKnownSidType.LogonIdsSid)) {
-            return sid.Value;
-          }
-        }
+      int size = 0;
+      GetTokenBuffer(token, TokenLogonSidClass, IntPtr.Zero, 0, out size);
+      if (size <= 0) return null;
+      buffer = Marshal.AllocHGlobal(size);
+      if (!GetTokenBuffer(token, TokenLogonSidClass, buffer, size, out size) ||
+          Marshal.ReadInt32(buffer) != 1) {
         return null;
       }
+      SidAndAttributes entry = Marshal.PtrToStructure<SidAndAttributes>(
+        IntPtr.Add(buffer, IntPtr.Size)
+      );
+      if (entry.sid == IntPtr.Zero) return null;
+      SecurityIdentifier sid = new SecurityIdentifier(entry.sid);
+      return sid.IsWellKnown(WellKnownSidType.LogonIdsSid) ? sid.Value : null;
     } catch {
       return null;
     } finally {
+      if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
       if (token != IntPtr.Zero) CloseHandle(token);
       if (process != IntPtr.Zero) CloseHandle(process);
     }
