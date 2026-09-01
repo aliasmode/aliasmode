@@ -98,6 +98,10 @@ test("release version and updater trust stay aligned across the desktop bundle",
     ciWorkflow.indexOf("\n  windows_full:"),
     ciWorkflow.indexOf("\n  windows_slim:"),
   );
+  const windowsSourceJob = ciWorkflow.slice(
+    ciWorkflow.indexOf("\n  windows_source:"),
+    ciWorkflow.indexOf("\n  windows_candidate:"),
+  );
   const windowsRuntimeJob = ciWorkflow.slice(
     ciWorkflow.indexOf("\n  windows_accept_runtime:"),
     ciWorkflow.indexOf("\n  windows_accept_browser:"),
@@ -327,6 +331,13 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(windowsFullJob).not.toContain("aliasmode-windows-prepared");
   expect(windowsFullJob).not.toContain("prepared-input manifest");
   expect(windowsFullJob).not.toContain("tar.exe -xf");
+  expect(windowsPrepareJob).not.toContain("if: needs.windows_cache.outputs.cache_hit == 'false'");
+  expect(windowsSourceJob).toContain(
+    "name: Windows source tests and checks\n    needs: [windows_cache, windows_prepare]\n    runs-on: windows-latest",
+  );
+  expect(windowsSourceJob).not.toContain("if: needs.windows_cache.outputs.cache_hit == 'false'");
+  expect(windowsSourceJob).toContain("name: aliasmode-windows-prepared");
+  expect(windowsSourceJob).toContain("Smoke-test compiled sidecar CDP runtime");
   expect(windowsRuntimeJob).toContain("name: Windows installed ${{ matrix.shard }} acceptance");
   expect(windowsRuntimeJob).toContain("fail-fast: false");
   expect(windowsRuntimeJob).toContain(
@@ -356,6 +367,8 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(windowsCacheSaveJob).not.toContain("windows_synthetic_successor");
   expect(ciWorkflow).toContain("SUCCESSOR_RESULT: ${{ needs.windows_synthetic_successor.result }}");
   expect(ciWorkflow).toContain('require_result windows_synthetic_successor "$SUCCESSOR_RESULT" success');
+  expect(ciWorkflow.match(/require_result windows_prepare "\$PREPARE_RESULT" success/g)).toHaveLength(1);
+  expect(ciWorkflow).not.toContain('require_result windows_prepare "$PREPARE_RESULT" skipped');
   expect(ciWorkflow).toContain("scripts\\windows-installed-acceptance.ps1");
   expect(ciWorkflow).toContain("- windows_accept_runtime");
   expect(ciWorkflow).toContain("- windows_accept_browser");

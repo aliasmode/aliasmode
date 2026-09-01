@@ -423,7 +423,6 @@ jobs:
   windows_prepare:
     name: Windows prepared bundle inputs
     needs: windows_cache
-    if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -670,15 +669,6 @@ jobs:
   windows_source:
     name: Windows source tests and checks
     needs: [windows_cache, windows_prepare]
-    if: >-
-      ${{
-        always() &&
-        needs.windows_cache.result == 'success' &&
-        (
-          needs.windows_cache.outputs.cache_hit == 'true' ||
-          (needs.windows_cache.outputs.cache_hit == 'false' && needs.windows_prepare.result == 'success')
-        )
-      }}
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -698,13 +688,11 @@ jobs:
           cache-on-failure: true
       - run: bun install --frozen-lockfile
       - run: bun test
-      - if: needs.windows_cache.outputs.cache_hit == 'false'
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: aliasmode-windows-prepared
           path: artifacts/windows-prepared
       - name: Verify and extract prepared inputs
-        if: needs.windows_cache.outputs.cache_hit == 'false'
         shell: pwsh
         env:
           WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
@@ -723,7 +711,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
       - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
-        if: needs.windows_cache.outputs.cache_hit == 'false'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -778,11 +765,7 @@ jobs:
             Pop-Location
           }
       - name: Smoke-test authenticated Cloud proxies
-        if: >-
-          ${{
-            needs.windows_cache.outputs.cache_hit == 'false' &&
-            github.repository != 'aliasmode/aliasmode'
-          }}
+        if: github.repository != 'aliasmode/aliasmode'
         shell: pwsh
         env:
           ALIASMODE_LIVE_PROXY_HOST: ${{ secrets.ALIASMODE_LIVE_PROXY_HOST }}
@@ -1182,6 +1165,7 @@ jobs:
 
           require_result windows_cache "$CACHE_RESULT" success
           require_result windows_synthetic_successor "$SUCCESSOR_RESULT" success
+          require_result windows_prepare "$PREPARE_RESULT" success
           require_result windows_source "$SOURCE_RESULT" success
           require_result windows_accept_runtime "$RUNTIME_RESULT" success
           require_result windows_accept_browser "$BROWSER_RESULT" success
@@ -1189,13 +1173,11 @@ jobs:
 
           case "$CACHE_HIT" in
             true)
-              require_result windows_prepare "$PREPARE_RESULT" skipped
               require_result windows_full "$FULL_RESULT" skipped
               require_result windows_slim "$SLIM_RESULT" skipped
               require_result windows_candidate "$CANDIDATE_RESULT" skipped
               ;;
             false)
-              require_result windows_prepare "$PREPARE_RESULT" success
               require_result windows_full "$FULL_RESULT" success
               require_result windows_slim "$SLIM_RESULT" success
               require_result windows_candidate "$CANDIDATE_RESULT" success
