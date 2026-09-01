@@ -158,7 +158,15 @@ function Get-SidecarHealth([int]$SidecarProcessId) {
   return $null
 }
 
-function Get-WebViewDebugPort([string]$WebViewRoot) {
+function Get-WebViewDebugPort([string]$WebViewRoot, [int]$ExpectedPort = 0) {
+  if ($ExpectedPort -gt 0) {
+    try {
+      Invoke-RestMethod "http://127.0.0.1:$ExpectedPort/json/version" -TimeoutSec 1 -NoProxy | Out-Null
+      return $ExpectedPort
+    } catch {
+      return 0
+    }
+  }
   $activePortPath = Join-Path $WebViewRoot "EBWebView\DevToolsActivePort"
   if (-not (Test-Path -LiteralPath $activePortPath -PathType Leaf)) { return 0 }
   try {
@@ -384,6 +392,7 @@ function Wait-CandidateRelaunch(
   $OldRecord,
   [Diagnostics.Process[]]$OldBrowserProcesses,
   [string]$WebViewRoot,
+  [int]$ExpectedDebugPort,
   [string]$FixtureStatePath,
   $Observations
 ) {
@@ -427,7 +436,7 @@ function Wait-CandidateRelaunch(
         $desktop.Refresh()
         if ($desktop.MainWindowHandle -eq 0) { continue }
         $Observations.candidateWindowSeen = $true
-        $debugPort = Get-WebViewDebugPort $WebViewRoot
+        $debugPort = Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort
         if ($debugPort -eq 0) { continue }
         $Observations.candidateDebugSeen = $true
         $candidateRoutes = Get-SafeRouteCounts $FixtureStatePath
@@ -826,6 +835,7 @@ $caTrusted = $false
 $fixtureProcess = $null
 $oldRecord = $null
 $candidateRecord = $null
+$candidateDebugPort = 0
 $oldBrowserProcesses = @()
 $primaryFailure = $null
 $cleanupFailures = [Collections.Generic.List[string]]::new()
@@ -834,10 +844,14 @@ Set-AcceptanceStage "validating-inputs"
 $acceptanceSucceeded = $false
 $savedEnvironment = @{}
 $savedUserEnvironment = @{}
-$environmentNames = @(
+$processEnvironmentNames = @(
   "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",
   "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT",
   "WEBVIEW2_USER_DATA_FOLDER"
+)
+$userEnvironmentNames = @(
+  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",
+  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT"
 )
 $observations = [ordered]@{
   publicInstallerVerified = $false
@@ -993,8 +1007,10 @@ try {
   Flush-DnsCache
   Assert-GithubResolvesToLoopback
 
-  foreach ($name in $environmentNames) {
+  foreach ($name in $processEnvironmentNames) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+  }
+  foreach ($name in $userEnvironmentNames) {
     $savedUserEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "User")
   }
   $acceptanceEnvironment = @{
@@ -1002,7 +1018,7 @@ try {
     ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = "0"
     WEBVIEW2_USER_DATA_FOLDER = $webViewRoot
   }
-  foreach ($name in $environmentNames) {
+  foreach ($name in $processEnvironmentNames) {
     [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "Process")
   }
   $sourceEnvironment = @{
@@ -1020,13 +1036,6 @@ try {
     $webViewRoot `
     $observations
   $observations.publicDesktopReady = $true
-
-  # The source WebView must own this folder before the user-scoped values are
-  # exposed to the installer relaunch. Otherwise, another WebView2 host can
-  # claim the folder first without the acceptance debugging argument.
-  foreach ($name in $environmentNames) {
-    [Environment]::SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "User")
-  }
 
   Set-AcceptanceStage "creating-active-profile"
   $profile = Invoke-RestMethod "$($oldRecord.Origin)/ui/api/profiles" `
@@ -1139,6 +1148,23 @@ try {
   Set-ItemProperty -LiteralPath $uninstallKey -Name "UninstallString" -Value $registrationBackup.UninstallString
   $registrationChanged = $false
 
+  $candidateDebugPortProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+  try {
+    $candidateDebugPortProbe.Server.ExclusiveAddressUse = $true
+    $candidateDebugPortProbe.Start()
+    $candidateDebugPort = ([Net.IPEndPoint]$candidateDebugPortProbe.LocalEndpoint).Port
+  } finally {
+    $candidateDebugPortProbe.Stop()
+  }
+  if ($candidateDebugPort -le 0) { throw "candidate WebView debug port allocation failed" }
+  $candidateEnvironment = @{
+    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG = "1"
+    ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = [string]$candidateDebugPort
+  }
+  foreach ($name in $userEnvironmentNames) {
+    [Environment]::SetEnvironmentVariable($name, $candidateEnvironment[$name], "User")
+  }
+
   Set-AcceptanceStage "clicking-visible-update"
   Invoke-DesktopUiProbe `
     $runtime `
@@ -1156,6 +1182,7 @@ try {
     $oldRecord `
     $oldBrowserProcesses `
     $webViewRoot `
+    $candidateDebugPort `
     $fixtureStatePath `
     $observations
   $observations.oldDesktopExited = Test-ProcessExited $oldRecord.App
@@ -1333,10 +1360,12 @@ try {
   }
   if ($trustedCa) { $trustedCa.Dispose() }
 
-  foreach ($name in $environmentNames) {
+  foreach ($name in $processEnvironmentNames) {
     if ($savedEnvironment.ContainsKey($name)) {
       [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
     }
+  }
+  foreach ($name in $userEnvironmentNames) {
     if ($savedUserEnvironment.ContainsKey($name)) {
       try {
         [Environment]::SetEnvironmentVariable($name, $savedUserEnvironment[$name], "User")

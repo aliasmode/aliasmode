@@ -70,10 +70,15 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(updaterAcceptance.indexOf('SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "Process")')).toBeLessThan(
     updaterAcceptance.indexOf("$observations.publicDesktopReady = $true"),
   );
-  expect(updaterAcceptance.indexOf('SetEnvironmentVariable($name, $acceptanceEnvironment[$name], "User")')).toBeGreaterThan(
+  expect(updaterAcceptance.indexOf('SetEnvironmentVariable($name, $candidateEnvironment[$name], "User")')).toBeGreaterThan(
     updaterAcceptance.indexOf("$observations.publicDesktopReady = $true"),
   );
+  expect(updaterAcceptance).toContain(
+    '$userEnvironmentNames = @(\n  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG",\n  "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT"\n)',
+  );
   expect(updaterAcceptance).toContain('ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG_PORT = "0"');
+  expect(updaterAcceptance).toContain("Get-WebViewDebugPort $WebViewRoot $ExpectedDebugPort");
+  expect(updaterAcceptance).toContain("$candidateDebugPortProbe.Server.ExclusiveAddressUse = $true");
   expect(updaterAcceptance).toContain('[void]$browserProcess.Handle');
   expect(updaterAcceptance).toContain("$deadline = [TimeSpan]::FromMinutes(5)");
   expect(updaterAcceptance).toContain("sourceDebugArgumentSeen");
