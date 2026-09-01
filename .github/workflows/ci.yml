@@ -180,7 +180,7 @@ jobs:
             throw "cached candidate must contain exactly six regular files"
           }
           $actualNames = @($entries | ForEach-Object Name | Sort-Object)
-          if (($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")) {
+          if (($actualNames -join "`n") -cne ($requiredNames -join "`n")) {
             throw "cached candidate files did not match the required installer set"
           }
 
@@ -743,7 +743,7 @@ jobs:
           $actualNames = @($entries | ForEach-Object Name | Sort-Object)
           if ($entries.Count -ne 5 -or @($entries | Where-Object {
             $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
-          }).Count -ne 0 -or ($actualNames -cjoin "`n") -cne ($requiredNames -cjoin "`n")) {
+          }).Count -ne 0 -or ($actualNames -join "`n") -cne ($requiredNames -join "`n")) {
             throw "candidate must contain exactly the five required regular files"
           }
 
