@@ -1454,6 +1454,7 @@ test("host policy still blocks mobile and unrecognized personas before spawn", a
   const store = seeded();
   const base = store.getProfile("k1d0cd11")!;
   const spawned: string[] = [];
+  const logs: string[] = [];
   const make = (hostPlatform: NodeJS.Platform, hostArch: string) => new Launcher({
     store,
     binaryPath: "/fake",
@@ -1461,6 +1462,7 @@ test("host policy still blocks mobile and unrecognized personas before spawn", a
     enforceHostCompatibility: true,
     hostPlatform,
     hostArch,
+    log: (message) => logs.push(message),
   });
 
   // Cross-OS desktop spoofing is allowed now, but a desktop browser still can't
@@ -1471,6 +1473,9 @@ test("host policy still blocks mobile and unrecognized personas before spawn", a
   store.upsertProfile({ ...base, proxy: null, ua: "not-a-real-user-agent" });
   await expect(make("darwin", "arm64").start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
   expect(spawned).toEqual([]);
+  // The public error stays closed, but the local log names the real reason.
+  expect(logs.some((m) => m.includes("rejected before launch: unsupported mobile persona"))).toBe(true);
+  expect(logs.some((m) => m.includes("rejected before launch: unsupported imported user agent"))).toBe(true);
   store.close();
 });
 

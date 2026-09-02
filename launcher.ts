@@ -1138,6 +1138,7 @@ export class Launcher {
       })
       .catch((error) => {
         if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) throw error;
+        this.log(`start ${profileId} rejected before launch: ${error instanceof Error ? error.message : String(error)}`);
         const normalized = new BrowserLaunchError("preflight");
         const retained = this.failedStartGeneration(error);
         if (retained) this.rememberFailedStartGeneration(normalized, retained);
