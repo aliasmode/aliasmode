@@ -1253,6 +1253,21 @@ test("buildArgs accepts the fixed Automation runtime flag bundle", () => {
   store.close();
 });
 
+test("buildArgs forwards any client-named launcher-pid ownership marker verbatim", () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  const f = fleet();
+  const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn });
+
+  expect(launcher.buildArgs(profile, 9333, "/data", ["--xactions-launcher-pid=4242"]))
+    .toContain("--xactions-launcher-pid=4242");
+  expect(() => launcher.buildArgs(profile, 9333, "/data", ["--xactions-launcher-pid=0"]))
+    .toThrow("unsafe launch_args rejected");
+  expect(() => launcher.buildArgs(profile, 9333, "/data", ["--launcher-pid=4242"]))
+    .toThrow("unsafe launch_args rejected");
+  store.close();
+});
+
 test("buildArgs loads the exact extension assigned through the registry", () => {
   const store = seeded();
   store.addExtension({ id: "aapbdbdomjkkjkaonfhkkikfgjllcleb", name: "Fixture", loadDir: "/data/extensions/store-fixture" });

@@ -215,13 +215,15 @@ export function validateForwardedLaunchArgs(args: string[]): string[] {
   const accepted: string[] = [];
   const rejected: string[] = [];
   for (const arg of args) {
-    if (AUTOMATION_RUNTIME_LAUNCH_ARGS.has(arg) || /^--automation-launcher-pid=[1-9]\d*$/.test(arg)) accepted.push(arg);
+    // Any `--<client>-launcher-pid=<pid>` is an inert ownership marker the
+    // calling automation reads back from the chrome command line.
+    if (AUTOMATION_RUNTIME_LAUNCH_ARGS.has(arg) || /^--[a-z0-9-]+-launcher-pid=[1-9]\d*$/.test(arg)) accepted.push(arg);
     else rejected.push(arg);
   }
   if (rejected.length) {
     throw new Error(
       `unsafe launch_args rejected: ${rejected.join(", ")}. ` +
-      "Only http(s) startup URLs, approved Automation runtime flags, and --automation-launcher-pid=<pid> are accepted.",
+      "Only http(s) startup URLs, approved Automation runtime flags, and --<client>-launcher-pid=<pid> are accepted.",
     );
   }
   return accepted;
