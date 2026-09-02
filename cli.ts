@@ -416,6 +416,7 @@ function makeCloudBrowser(
     readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
     applySession: (endpoint, bundle, urls) =>
       applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
+    log: (m) => console.log(`[aliasmode] ${m}`),
   });
 }
 
