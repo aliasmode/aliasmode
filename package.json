@@ -11,6 +11,8 @@
     "serve": "bun cli.ts serve",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "docs:public": "bun scripts/generate-public-docs.mjs",
+    "docs:public:check": "bun scripts/generate-public-docs.mjs --check",
     "desktop:prepare": "bun scripts/prepare-windows-bundle.ts",
     "desktop:build:nsis": "bun run desktop:prepare && tauri build --bundles nsis --no-sign",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc",
