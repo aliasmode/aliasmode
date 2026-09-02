@@ -23,6 +23,7 @@ jobs:
     outputs:
       product_key: ${{ steps.verify.outputs.product_key }}
       source: ${{ steps.verify.outputs.source }}
+      successor_version: ${{ steps.successor.outputs.version }}
       version: ${{ steps.verify.outputs.version }}
     steps:
       - run: git config --global core.autocrlf false
@@ -85,6 +86,13 @@ jobs:
         with:
           name: aliasmode-windows-candidate
           path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-unsigned-synthetic-successor
+          path: unsigned-successor
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.run_id }}
@@ -195,6 +203,78 @@ jobs:
           "product_key=$productKey" | Add-Content $env:GITHUB_OUTPUT
           "source=$env:WINDOWS_SOURCE" | Add-Content $env:GITHUB_OUTPUT
           "version=$version" | Add-Content $env:GITHUB_OUTPUT
+      - name: Verify unsigned synthetic successor artifact
+        id: successor
+        shell: pwsh
+        env:
+          WINDOWS_PRODUCT_KEY: ${{ steps.verify.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ steps.verify.outputs.source }}
+          WINDOWS_VERSION: ${{ steps.verify.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sourceSemantic = [Management.Automation.SemanticVersion]::Parse($env:WINDOWS_VERSION)
+          $successorVersion = if ($env:WINDOWS_VERSION.Contains("-")) {
+            "$($env:WINDOWS_VERSION).acceptance.1"
+          } else {
+            "$($sourceSemantic.Major).$($sourceSemantic.Minor).$($sourceSemantic.Patch + 1)-acceptance.1"
+          }
+          $successorSemantic = [Management.Automation.SemanticVersion]::Parse($successorVersion)
+          if ($successorSemantic -le $sourceSemantic -or $successorSemantic.ToString() -cne $successorVersion) {
+            throw "synthetic successor version is not canonical and newer"
+          }
+
+          $name = "AliasMode_${successorVersion}_x64-setup.exe"
+          $requiredNames = @($name, "artifact-manifest.json") | Sort-Object
+          $entries = @(Get-ChildItem -LiteralPath ".\unsigned-successor" -Force)
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          if (
+            $entries.Count -ne 2 -or
+            @($entries | Where-Object {
+              $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            }).Count -ne 0 -or
+            ($actualNames -join "`n") -cne ($requiredNames -join "`n")
+          ) {
+            throw "unsigned synthetic successor artifact must contain exactly two regular files"
+          }
+
+          $installer = Join-Path ".\unsigned-successor" $name
+          $manifest = Get-Content ".\unsigned-successor\artifact-manifest.json" -Raw | ConvertFrom-Json
+          $fileIdentity = @($manifest.files)
+          $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $actualSize = (Get-Item -LiteralPath $installer).Length
+          if (
+            $manifest.schema -ne 1 -or
+            $manifest.role -cne "unsigned-synthetic-successor" -or
+            $manifest.source -cne $env:WINDOWS_SOURCE -or
+            $manifest.version -cne $successorVersion -or
+            $manifest.productKey -cne $env:WINDOWS_PRODUCT_KEY -or
+            $fileIdentity.Count -ne 1 -or
+            $fileIdentity[0].name -cne $name -or
+            $fileIdentity[0].sha256 -cne $actualHash -or
+            $fileIdentity[0].bytes -ne $actualSize
+          ) {
+            throw "unsigned synthetic successor provenance is invalid"
+          }
+          & bun scripts/windows-artifact-manifest.ts verify ".\unsigned-successor" `
+            --role unsigned-synthetic-successor `
+            --source $env:WINDOWS_SOURCE `
+            --version $successorVersion `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file $name
+          if ($LASTEXITCODE -ne 0) { throw "unsigned synthetic successor manifest verification failed" }
+
+          $stream = [IO.File]::OpenRead($installer)
+          try {
+            if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+              throw "unsigned synthetic successor must be a Windows PE file"
+            }
+          } finally {
+            $stream.Dispose()
+          }
+          if ([string](Get-AuthenticodeSignature -LiteralPath $installer).Status -cne "NotSigned") {
+            throw "synthetic successor source artifact must be unsigned"
+          }
+          "version=$successorVersion" | Add-Content $env:GITHUB_OUTPUT
       - name: Upload verified release provenance
         uses: actions/upload-artifact@v4
         with:
@@ -280,6 +360,10 @@ jobs:
           $slimInstaller = Join-Path $artifact $slimName
           Copy-Item (Join-Path ".\candidate" $fullName) $fullInstaller
           Copy-Item (Join-Path ".\candidate" $slimName) $slimInstaller
+          $sourceFullHash = (Get-FileHash -LiteralPath (Join-Path ".\candidate" $fullName) -Algorithm SHA256).Hash
+          if ((Get-FileHash -LiteralPath $fullInstaller -Algorithm SHA256).Hash -cne $sourceFullHash) {
+            throw "copied full installer SHA-256 mismatch"
+          }
 
           $updaterHeader = [IO.File]::ReadAllBytes($slimInstaller)[0..1]
           if ($updaterHeader[0] -ne 0x4d -or $updaterHeader[1] -ne 0x5a) {
@@ -421,24 +505,17 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  synthetic_successor:
-    name: Build protected synthetic successor
+  sign_successor:
+    name: Sign synthetic successor
     needs: provenance
     runs-on: windows-latest
     environment: windows-release
     timeout-minutes: 35
-    outputs:
-      version: ${{ steps.build.outputs.version }}
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.provenance.outputs.source }}
-      - name: Cache pinned CloakBrowser
-        uses: actions/cache@v4
-        with:
-          path: src-tauri/target/cloakbrowser-cache
-          key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
@@ -447,87 +524,92 @@ jobs:
           toolchain: 1.89
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            src-tauri -> target
-            scripts/updater-signature-check -> target
+          workspaces: scripts/updater-signature-check -> target
           cache-on-failure: true
       - run: bun install --frozen-lockfile
-      - name: Build unsigned synthetic successor
-        id: build
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-windows-unsigned-synthetic-successor
+          path: unsigned-successor
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+      - name: Verify unsigned synthetic successor source
         shell: pwsh
         env:
-          WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
+          SUCCESSOR_VERSION: ${{ needs.provenance.outputs.successor_version }}
+          WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
+          WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
         run: |
           $ErrorActionPreference = "Stop"
-
-          $bunZip = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline.zip"
-          $bunRoot = Join-Path $env:RUNNER_TEMP "bun-windows-x64-baseline"
-          Invoke-WebRequest "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip" -OutFile $bunZip
-          $expectedBunSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
-          if ((Get-FileHash -LiteralPath $bunZip -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedBunSha) {
-            throw "official baseline Bun archive SHA-256 mismatch"
-          }
-          Expand-Archive $bunZip $bunRoot -Force
-          $bunCandidates = @(Get-ChildItem $bunRoot -Recurse -File -Filter "bun.exe")
-          if ($bunCandidates.Count -ne 1) { throw "official baseline Bun archive must contain exactly one bun.exe" }
-          $baselineBun = $bunCandidates[0].FullName
-          if ((& $baselineBun --version).Trim() -cne "1.2.21") {
-            throw "official baseline Bun version is incorrect"
+          $name = "AliasMode_$($env:SUCCESSOR_VERSION)_x64-setup.exe"
+          $requiredNames = @($name, "artifact-manifest.json") | Sort-Object
+          $entries = @(Get-ChildItem -LiteralPath ".\unsigned-successor" -Force)
+          $actualNames = @($entries | ForEach-Object Name | Sort-Object)
+          if (
+            $entries.Count -ne 2 -or
+            @($entries | Where-Object {
+              $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+            }).Count -ne 0 -or
+            ($actualNames -join "`n") -cne ($requiredNames -join "`n")
+          ) {
+            throw "unsigned synthetic successor source must contain exactly two regular files"
           }
 
-          $sourceSemantic = [Management.Automation.SemanticVersion]::Parse($env:WINDOWS_VERSION)
-          $successorVersion = if ($env:WINDOWS_VERSION.Contains("-")) {
-            "$($env:WINDOWS_VERSION).acceptance.1"
-          } else {
-            "$($sourceSemantic.Major).$($sourceSemantic.Minor).$($sourceSemantic.Patch + 1)-acceptance.1"
+          $installer = Join-Path ".\unsigned-successor" $name
+          $manifest = Get-Content ".\unsigned-successor\artifact-manifest.json" -Raw | ConvertFrom-Json
+          $fileIdentity = @($manifest.files)
+          $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $actualSize = (Get-Item -LiteralPath $installer).Length
+          if (
+            $manifest.schema -ne 1 -or
+            $manifest.role -cne "unsigned-synthetic-successor" -or
+            $manifest.source -cne $env:WINDOWS_SOURCE -or
+            $manifest.version -cne $env:SUCCESSOR_VERSION -or
+            $manifest.productKey -cne $env:WINDOWS_PRODUCT_KEY -or
+            $fileIdentity.Count -ne 1 -or
+            $fileIdentity[0].name -cne $name -or
+            $fileIdentity[0].sha256 -cne $actualHash -or
+            $fileIdentity[0].bytes -ne $actualSize
+          ) {
+            throw "unsigned synthetic successor source provenance is invalid"
           }
-          $successorSemantic = [Management.Automation.SemanticVersion]::Parse($successorVersion)
-          if ($successorSemantic -le $sourceSemantic -or $successorSemantic.ToString() -cne $successorVersion) {
-            throw "synthetic successor version is not canonical and newer"
-          }
+          & bun scripts/windows-artifact-manifest.ts verify ".\unsigned-successor" `
+            --role unsigned-synthetic-successor `
+            --source $env:WINDOWS_SOURCE `
+            --version $env:SUCCESSOR_VERSION `
+            --product-key $env:WINDOWS_PRODUCT_KEY `
+            --file $name
+          if ($LASTEXITCODE -ne 0) { throw "unsigned synthetic successor source verification failed" }
 
-          $versionFiles = @(
-            ".\package.json",
-            ".\version.ts",
-            ".\src-tauri\tauri.conf.json",
-            ".\src-tauri\Cargo.toml",
-            ".\src-tauri\Cargo.lock"
-          )
-          foreach ($path in $versionFiles) {
-            $text = [IO.File]::ReadAllText($path)
-            if ([regex]::Matches($text, [regex]::Escape($env:WINDOWS_VERSION)).Count -ne 1) {
-              throw "synthetic successor version replacement is ambiguous: $path"
-            }
-            [IO.File]::WriteAllText(
-              $path,
-              $text.Replace($env:WINDOWS_VERSION, $successorVersion),
-              [Text.UTF8Encoding]::new($false)
-            )
-          }
-
+          $stream = [IO.File]::OpenRead($installer)
           try {
-            & $baselineBun scripts/prepare-windows-bundle.ts
-            if ($LASTEXITCODE -ne 0) { throw "synthetic successor bundle preparation failed" }
-            $artifact = ".\artifacts\synthetic-successor"
-            & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory $artifact
-            if ($LASTEXITCODE -ne 0) { throw "synthetic successor build failed" }
-
-            $name = "AliasMode_${successorVersion}_x64-setup.exe"
-            $installer = Join-Path $artifact $name
-            if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
-              throw "synthetic successor installer is missing"
+            if ($stream.ReadByte() -ne 0x4d -or $stream.ReadByte() -ne 0x5a) {
+              throw "unsigned synthetic successor source must be a Windows PE file"
             }
-            "version=$successorVersion" | Add-Content $env:GITHUB_OUTPUT
           } finally {
-            & git checkout -- @versionFiles
-            if ($LASTEXITCODE -ne 0) { throw "synthetic successor source restoration failed" }
+            $stream.Dispose()
+          }
+          if ([string](Get-AuthenticodeSignature -LiteralPath $installer).Status -cne "NotSigned") {
+            throw "synthetic successor source must be unsigned"
+          }
+
+          $artifact = ".\artifacts\synthetic-successor"
+          New-Item -ItemType Directory -Force $artifact | Out-Null
+          $signedInstaller = Join-Path $artifact $name
+          Copy-Item $installer $signedInstaller
+          if ((Get-FileHash -LiteralPath $signedInstaller -Algorithm SHA256).Hash.ToLowerInvariant() -cne $actualHash) {
+            throw "copied synthetic successor SHA-256 mismatch"
+          }
+          if ([string](Get-AuthenticodeSignature -LiteralPath $signedInstaller).Status -cne "NotSigned") {
+            throw "copied synthetic successor must be unsigned"
           }
       - name: Sign and verify synthetic successor
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          SUCCESSOR_VERSION: ${{ steps.build.outputs.version }}
+          SUCCESSOR_VERSION: ${{ needs.provenance.outputs.successor_version }}
           WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
           WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
         run: |
@@ -568,6 +650,7 @@ jobs:
           $global:LASTEXITCODE = 0
 
           $signature = [IO.File]::ReadAllText($signaturePath).Trim()
+          if ([string]::IsNullOrWhiteSpace($signature)) { throw "synthetic successor signature is blank" }
           $tag = "v$($env:SUCCESSOR_VERSION)"
           $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$name"
           $manifestPath = Join-Path $artifact "latest-v2.json"
@@ -615,7 +698,7 @@ jobs:
 
   previous_upgrade_acceptance:
     name: Previous-version upgrade acceptance
-    needs: [provenance, sign_current]
+    needs: provenance
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -627,9 +710,9 @@ jobs:
           bun-version: 1.2.21
       - uses: actions/download-artifact@v4
         with:
-          name: aliasmode-signed-current
-          path: signed-current
-      - name: Verify signed current producer
+          name: aliasmode-release-provenance
+          path: candidate
+      - name: Verify candidate producer
         shell: pwsh
         env:
           WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
@@ -640,20 +723,19 @@ jobs:
           $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
           $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
           $arguments = @(
-            ".\signed-current",
-            "--role", "signed-current",
+            ".\candidate",
+            "--role", "candidate",
             "--source", $env:WINDOWS_SOURCE,
             "--version", $env:WINDOWS_VERSION,
             "--product-key", $env:WINDOWS_PRODUCT_KEY,
             "--file", $fullName,
             "--file", $slimName,
-            "--file", "$slimName.sig",
-            "--file", "latest-v2.json",
-            "--file", "aliasmode-agent-bootstrap.json",
-            "--file", "SHA256SUMS.txt"
+            "--file", "browser.json",
+            "--file", "SHA256SUMS.txt",
+            "--file", "size-report.json"
           )
           & bun scripts/windows-artifact-manifest.ts verify @arguments
-          if ($LASTEXITCODE -ne 0) { throw "signed current producer verification failed" }
+          if ($LASTEXITCODE -ne 0) { throw "candidate producer verification failed" }
       - name: Test previous-version upgrade and data preservation
         timeout-minutes: 35
         shell: pwsh
@@ -665,8 +747,8 @@ jobs:
           $diagnostics = ".\diagnostics\previous-upgrade.json"
           & .\scripts\windows-previous-upgrade-acceptance.ps1 `
             -CandidateVersion $env:WINDOWS_VERSION `
-            -FullInstallerPath ".\signed-current\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
-            -ChecksumsPath ".\signed-current\SHA256SUMS.txt" `
+            -FullInstallerPath ".\candidate\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -ChecksumsPath ".\candidate\SHA256SUMS.txt" `
             -Repository $env:GITHUB_REPOSITORY `
             -GitHubToken $env:GITHUB_TOKEN `
             -DiagnosticsPath $diagnostics
@@ -682,7 +764,7 @@ jobs:
 
   exact_updater_acceptance:
     name: Exact in-app updater acceptance
-    needs: [provenance, sign_current, synthetic_successor]
+    needs: [provenance, sign_successor]
     runs-on: windows-latest
     steps:
       - run: git config --global core.autocrlf false
@@ -692,18 +774,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.89
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: scripts/updater-signature-check -> target
-          cache-on-failure: true
       - run: bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
-          name: aliasmode-signed-current
-          path: signed-current
+          name: aliasmode-release-provenance
+          path: candidate
       - uses: actions/download-artifact@v4
         with:
           name: aliasmode-synthetic-successor
@@ -711,7 +786,7 @@ jobs:
       - name: Verify acceptance producer artifacts
         shell: pwsh
         env:
-          SUCCESSOR_VERSION: ${{ needs.synthetic_successor.outputs.version }}
+          SUCCESSOR_VERSION: ${{ needs.provenance.outputs.successor_version }}
           WINDOWS_PRODUCT_KEY: ${{ needs.provenance.outputs.product_key }}
           WINDOWS_SOURCE: ${{ needs.provenance.outputs.source }}
           WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
@@ -720,20 +795,19 @@ jobs:
           $fullName = "AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
           $slimName = "AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
           $currentArguments = @(
-            ".\signed-current",
-            "--role", "signed-current",
+            ".\candidate",
+            "--role", "candidate",
             "--source", $env:WINDOWS_SOURCE,
             "--version", $env:WINDOWS_VERSION,
             "--product-key", $env:WINDOWS_PRODUCT_KEY,
             "--file", $fullName,
             "--file", $slimName,
-            "--file", "$slimName.sig",
-            "--file", "latest-v2.json",
-            "--file", "aliasmode-agent-bootstrap.json",
-            "--file", "SHA256SUMS.txt"
+            "--file", "browser.json",
+            "--file", "SHA256SUMS.txt",
+            "--file", "size-report.json"
           )
           & bun scripts/windows-artifact-manifest.ts verify @currentArguments
-          if ($LASTEXITCODE -ne 0) { throw "signed current producer verification failed" }
+          if ($LASTEXITCODE -ne 0) { throw "candidate producer verification failed" }
 
           $successorName = "AliasMode_$($env:SUCCESSOR_VERSION)_x64-setup.exe"
           $successorArguments = @(
@@ -748,31 +822,19 @@ jobs:
           )
           & bun scripts/windows-artifact-manifest.ts verify @successorArguments
           if ($LASTEXITCODE -ne 0) { throw "synthetic successor producer verification failed" }
-
-          $publicKey = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).plugins.updater.pubkey
-          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- `
-            ".\signed-current\$slimName" `
-            ".\signed-current\$slimName.sig" `
-            $publicKey
-          if ($LASTEXITCODE -ne 0) { throw "current updater signature verification failed" }
-          cargo run --quiet --locked --manifest-path ".\scripts\updater-signature-check\Cargo.toml" -- `
-            ".\synthetic-successor\$successorName" `
-            ".\synthetic-successor\$successorName.sig" `
-            $publicKey
-          if ($LASTEXITCODE -ne 0) { throw "successor updater signature verification failed" }
       - name: Test candidate through the exact updater protocol
         timeout-minutes: 35
         shell: pwsh
         env:
-          SUCCESSOR_VERSION: ${{ needs.synthetic_successor.outputs.version }}
+          SUCCESSOR_VERSION: ${{ needs.provenance.outputs.successor_version }}
           WINDOWS_VERSION: ${{ needs.provenance.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           $successorName = "AliasMode_$($env:SUCCESSOR_VERSION)_x64-setup.exe"
           & .\scripts\windows-in-app-update-acceptance.ps1 `
             -SourceVersion $env:WINDOWS_VERSION `
-            -SourceInstallerPath ".\signed-current\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
-            -SourceChecksumsPath ".\signed-current\SHA256SUMS.txt" `
+            -SourceInstallerPath ".\candidate\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe" `
+            -SourceChecksumsPath ".\candidate\SHA256SUMS.txt" `
             -CandidateVersion $env:SUCCESSOR_VERSION `
             -CandidateInstallerPath ".\synthetic-successor\$successorName" `
             -CandidateSignaturePath ".\synthetic-successor\$successorName.sig" `

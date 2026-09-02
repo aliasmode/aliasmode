@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)]
-  [ValidateSet("runtime", "browser", "cloud")]
+  [ValidateSet("runtime-protocol", "runtime-ownership", "runtime-desktop", "browser", "cloud")]
   [string]$Shard,
 
   [Parameter(Mandatory)]
@@ -198,6 +198,107 @@ function Write-AcceptanceDiagnostics(
   )
 }
 
+function Read-McpResponse([Diagnostics.Process]$Process, [int]$Id) {
+  for ($attempt = 0; $attempt -lt 50; $attempt++) {
+    $response = $Process.StandardOutput.ReadLine() | ConvertFrom-Json
+    if ($response.id -eq $Id) { return $response }
+  }
+  throw "installed MCP host did not return response $Id"
+}
+
+function Start-McpHost([string]$Helper, [string]$WorkingDirectory) {
+  $start = [Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = $Helper
+  $start.ArgumentList.Add("serve")
+  $start.WorkingDirectory = $WorkingDirectory
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardInput = $true
+  $start.RedirectStandardOutput = $true
+  $start.Environment["ALIASMODE_MCP_DIAGNOSTICS"] = "1"
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $start
+  if (-not $process.Start()) { throw "installed MCP host did not start" }
+  return $process
+}
+
+function Initialize-McpHost([Diagnostics.Process]$Process, [switch]$ValidateResponse) {
+  $Process.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aliasmode-ci","version":"1"}}}')
+  $initialize = $Process.StandardOutput.ReadLine() | ConvertFrom-Json
+  if ($ValidateResponse -and ($initialize.id -ne 1 -or -not $initialize.result.serverInfo)) {
+    throw "installed MCP host returned an invalid initialize response"
+  }
+  $Process.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}')
+}
+
+function New-OpenPersistentProfile([string]$Helper, [string]$Name) {
+  $profile = (& $Helper profiles create --name $Name | ConvertFrom-Json)
+  if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
+    throw "installed helper could not create the pre-existing profile"
+  }
+  $profileId = $profile.result.id
+  $opened = (& $Helper browser open --profile $profileId --headless | ConvertFrom-Json)
+  if ($LASTEXITCODE -ne 0 -or -not $opened.ok -or $opened.result.alreadyOpen) {
+    throw "installed helper could not open the pre-existing browser"
+  }
+  return $profileId
+}
+
+function Select-McpBrowser([Diagnostics.Process]$Process, [string]$ProfileId, [int]$Id) {
+  $request = @{
+    jsonrpc = "2.0"
+    id = $Id
+    method = "tools/call"
+    params = @{
+      name = "aliasmode_browser_select"
+      arguments = @{ profileId = $ProfileId }
+    }
+  } | ConvertTo-Json -Compress -Depth 8
+  $Process.StandardInput.WriteLine($request)
+  $selected = Read-McpResponse $Process $Id
+  if ($selected.result.isError -eq $true) {
+    throw "installed MCP host could not select the pre-existing browser"
+  }
+}
+
+function Remove-PersistentProfile([string]$Helper, [string]$ProfileId) {
+  $deleted = (& $Helper profiles delete --profile $ProfileId | ConvertFrom-Json)
+  if ($LASTEXITCODE -ne 0 -or -not $deleted.ok -or -not $deleted.result.deleted) {
+    throw "installed helper could not delete a lifecycle profile"
+  }
+}
+
+function Disconnect-McpHost([Diagnostics.Process]$Process) {
+  $Process.StandardInput.Close()
+  if (-not $Process.WaitForExit(60000)) {
+    Stop-Process -Id $Process.Id -Force
+    $Process.WaitForExit()
+    return "installed MCP host survived safe browser cleanup"
+  }
+  return $null
+}
+
+function Read-ValidRuntimeDescriptor([string]$Path, [string]$BundleVersion) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "background runtime descriptor is missing"
+  }
+  $descriptor = Get-Content $Path | ConvertFrom-Json
+  if (
+    $descriptor.protocol -ne "aliasmode-runtime-v1" -or
+    $descriptor.appVersion -ne $BundleVersion -or
+    $descriptor.readiness -ne "local" -or
+    $descriptor.generation -notmatch '^[a-f0-9]{64}$' -or
+    $descriptor.nonce -notmatch '^[a-f0-9]{64}$' -or
+    $descriptor.generation -eq $descriptor.nonce -or
+    $descriptor.port -le 0 -or
+    $descriptor.desktopPid -le 0 -or
+    $descriptor.sidecarPid -le 0
+  ) {
+    throw "background runtime descriptor is invalid"
+  }
+  return $descriptor
+}
+
 if (-not $IsWindows) { throw "Windows installed acceptance requires Windows" }
 
 $DiagnosticsPath = [IO.Path]::GetFullPath($DiagnosticsPath)
@@ -302,172 +403,22 @@ try {
     throw "fixed automation port conflict fixture did not bind"
   }
 
-  switch ($Shard) {
-    "runtime" {
-      Set-AcceptanceStage "runtime-resource-independence"
-      $appPath = $installation.AppPath
-      $sidecarPath = $installation.SidecarPath
-      $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
-      $sidecarText = [Text.Encoding]::UTF8.GetString($sidecarBytes) + [Text.Encoding]::Unicode.GetString($sidecarBytes)
-      foreach ($sourcePath in @($workspaceRoot, $workspaceRoot.Replace("\", "/"))) {
-        if ($sidecarText.IndexOf($sourcePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-          throw "installed sidecar embeds its source checkout path"
-        }
-      }
-      $checkoutNodeModules = Join-Path $workspaceRoot "node_modules"
-      if (Test-Path -LiteralPath $checkoutNodeModules) {
-        Remove-Item -LiteralPath $checkoutNodeModules -Recurse -Force
-      }
-      if (Test-Path -LiteralPath $checkoutNodeModules) {
-        throw "checkout node_modules remained available to installed acceptance"
-      }
+  $runtimeShards = @("runtime-protocol", "runtime-ownership", "runtime-desktop")
+  if ($runtimeShards -contains $Shard) {
+    New-Item -ItemType Directory -Force $appDataRoot | Out-Null
+    @{ version = 1; mode = "local"; localAnalytics = $false } |
+      ConvertTo-Json -Compress |
+      Set-Content (Join-Path $appDataRoot "config.json")
+    $descriptorPath = Join-Path $appDataRoot "agent-runtime.json"
+    $bundleVersion = $installation.Version
+    $appPath = $installation.AppPath
+    $sidecarPath = $installation.SidecarPath
+    $helper = Join-Path $installRoot "aliasmode-mcp.exe"
+    $playwrightRuntime = Join-Path $installRoot "playwright"
+  }
 
-      New-Item -ItemType Directory -Force $appDataRoot | Out-Null
-      @{ version = 1; mode = "local"; localAnalytics = $false } |
-        ConvertTo-Json -Compress |
-        Set-Content (Join-Path $appDataRoot "config.json")
-      $descriptorPath = Join-Path $appDataRoot "agent-runtime.json"
-
-      $bundleVersion = $installation.Version
-      $helper = Join-Path $installRoot "aliasmode-mcp.exe"
-      $playwrightRuntime = Join-Path $installRoot "playwright"
-      $node = Join-Path $playwrightRuntime "node\node.exe"
-      $mcpHost = Join-Path $playwrightRuntime "agent\mcp-host.mjs"
-      foreach ($path in @(
-        $helper,
-        $node,
-        $mcpHost,
-        (Join-Path $playwrightRuntime "agent\playwright-proxy.mjs"),
-        (Join-Path $playwrightRuntime "agent\playwright-runner.mjs"),
-        (Join-Path $playwrightRuntime "agent\runtime-client.mjs")
-      )) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-          throw "installed agent runtime file is missing: $path"
-        }
-      }
-      if ((& $node --version).Trim() -ne "v22.23.2") {
-        throw "installed Node runtime version is incorrect"
-      }
-      foreach ($package in @{
-        "playwright-core" = "1.58.2"
-        "@modelcontextprotocol\sdk" = "1.30.0"
-        "@playwright\mcp" = "0.0.56"
-        "playwright" = "1.58.0-alpha-2026-01-16"
-      }.GetEnumerator()) {
-        $manifest = Join-Path $playwrightRuntime "node_modules\$($package.Key)\package.json"
-        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
-          throw "installed agent package is missing: $($package.Key)"
-        }
-        if ((Get-Content $manifest | ConvertFrom-Json).version -ne $package.Value) {
-          throw "installed agent package version is incorrect: $($package.Key)"
-        }
-      }
-      $checks.installedResourceIndependent = $true
-
-      Set-AcceptanceStage "runtime-helper-setup"
-      $helperVersion = & $helper version | ConvertFrom-Json
-      if ($LASTEXITCODE -ne 0 -or -not $helperVersion.ok -or $helperVersion.result.version -ne $bundleVersion) {
-        throw "installed agent helper returned an incorrect version"
-      }
-      $setup = & $helper setup --client generic --yes | ConvertFrom-Json
-      if ($LASTEXITCODE -ne 0 -or -not $setup.ok -or $setup.result.clients.Count -ne 0) {
-        throw "installed generic MCP setup failed"
-      }
-      if (
-        $setup.result.mcp.command -ne $helper -or
-        $setup.result.mcp.args.Count -ne 1 -or
-        $setup.result.mcp.args[0] -ne "serve" -or
-        $setup.result.generic.mcpServers.aliasmode.command -ne $helper -or
-        $setup.result.generic.mcpServers.aliasmode.args[0] -ne "serve"
-      ) {
-        throw "installed generic MCP setup returned incorrect paths"
-      }
-
-      function Read-McpResponse([Diagnostics.Process]$Process, [int]$Id) {
-        for ($attempt = 0; $attempt -lt 50; $attempt++) {
-          $response = $Process.StandardOutput.ReadLine() | ConvertFrom-Json
-          if ($response.id -eq $Id) { return $response }
-        }
-        throw "installed MCP host did not return response $Id"
-      }
-
-      Set-AcceptanceStage "runtime-mcp-lifecycle"
-      $mcpStart = [Diagnostics.ProcessStartInfo]::new()
-      $mcpStart.FileName = $helper
-      $mcpStart.ArgumentList.Add("serve")
-      $mcpStart.WorkingDirectory = $installRoot
-      $mcpStart.UseShellExecute = $false
-      $mcpStart.CreateNoWindow = $true
-      $mcpStart.RedirectStandardInput = $true
-      $mcpStart.RedirectStandardOutput = $true
-      $mcpStart.Environment["ALIASMODE_MCP_DIAGNOSTICS"] = "1"
-      $mcp = [Diagnostics.Process]::new()
-      $mcp.StartInfo = $mcpStart
-      if (-not $mcp.Start()) { throw "installed MCP host did not start" }
-      $mcpShutdownFailure = $null
-      $preexistingProfileId = $null
-      $ownedProfileId = $null
-      try {
-        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"aliasmode-ci","version":"1"}}}')
-        $initialize = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
-        if ($initialize.id -ne 1 -or -not $initialize.result.serverInfo) {
-          throw "installed MCP host returned an invalid initialize response"
-        }
-        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}')
-        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
-        $toolResponse = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
-        if ($toolResponse.id -ne 2) { throw "installed MCP host returned an invalid tools/list response" }
-        $toolNames = @($toolResponse.result.tools | ForEach-Object { $_.name })
-        foreach ($name in @(
-          "aliasmode_profiles_list",
-          "aliasmode_profile_create",
-          "aliasmode_profile_delete",
-          "aliasmode_browser_open",
-          "aliasmode_browser_select",
-          "aliasmode_browser_status",
-          "aliasmode_browser_close",
-          "browser_close",
-          "browser_evaluate",
-          "browser_press_key",
-          "browser_click",
-          "browser_run_code"
-        )) {
-          if ($toolNames -notcontains $name) { throw "installed MCP host did not expose $name" }
-        }
-        foreach ($tool in @($toolResponse.result.tools)) {
-          if (-not $tool.annotations -or [string]::IsNullOrWhiteSpace([string]$tool.annotations.title)) {
-            throw "installed MCP tool $($tool.name) has no title annotation"
-          }
-          foreach ($hint in @("readOnlyHint", "destructiveHint", "openWorldHint")) {
-            if ($tool.annotations.PSObject.Properties.Name -notcontains $hint) {
-              throw "installed MCP tool $($tool.name) has no $hint annotation"
-            }
-          }
-        }
-        $initialToolSchemas = ConvertTo-Json -InputObject @($toolResponse.result.tools) -Compress -Depth 100
-
-        if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) {
-          throw "background runtime descriptor is missing"
-        }
-        $descriptor = Get-Content $descriptorPath | ConvertFrom-Json
-        if (
-          $descriptor.protocol -ne "aliasmode-runtime-v1" -or
-          $descriptor.appVersion -ne $bundleVersion -or
-          $descriptor.readiness -ne "local" -or
-          $descriptor.generation -notmatch '^[a-f0-9]{64}$' -or
-          $descriptor.nonce -notmatch '^[a-f0-9]{64}$' -or
-          $descriptor.generation -eq $descriptor.nonce -or
-          $descriptor.port -le 0 -or
-          $descriptor.desktopPid -le 0 -or
-          $descriptor.sidecarPid -le 0
-        ) {
-          throw "background runtime descriptor is invalid"
-        }
-        $backgroundProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($descriptor.desktopPid)"
-        if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
-          throw "MCP host did not launch AliasMode in background mode"
-        }
-        Add-Type -TypeDefinition @'
+  if ($Shard -in @("runtime-protocol", "runtime-desktop")) {
+    Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class AliasModeWindow {
@@ -504,6 +455,121 @@ public static class AliasModeWindow {
   }
 }
 '@
+  }
+
+  switch ($Shard) {
+    "runtime-protocol" {
+      Set-AcceptanceStage "runtime-protocol-resource-independence"
+      $sidecarBytes = [IO.File]::ReadAllBytes($sidecarPath)
+      $sidecarText = [Text.Encoding]::UTF8.GetString($sidecarBytes) + [Text.Encoding]::Unicode.GetString($sidecarBytes)
+      foreach ($sourcePath in @($workspaceRoot, $workspaceRoot.Replace("\", "/"))) {
+        if ($sidecarText.IndexOf($sourcePath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+          throw "installed sidecar embeds its source checkout path"
+        }
+      }
+      $checkoutNodeModules = Join-Path $workspaceRoot "node_modules"
+      if (Test-Path -LiteralPath $checkoutNodeModules) {
+        Remove-Item -LiteralPath $checkoutNodeModules -Recurse -Force
+      }
+      if (Test-Path -LiteralPath $checkoutNodeModules) {
+        throw "checkout node_modules remained available to installed acceptance"
+      }
+
+      $node = Join-Path $playwrightRuntime "node\node.exe"
+      $mcpHost = Join-Path $playwrightRuntime "agent\mcp-host.mjs"
+      foreach ($path in @(
+        $helper,
+        $node,
+        $mcpHost,
+        (Join-Path $playwrightRuntime "agent\playwright-proxy.mjs"),
+        (Join-Path $playwrightRuntime "agent\playwright-runner.mjs"),
+        (Join-Path $playwrightRuntime "agent\runtime-client.mjs")
+      )) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+          throw "installed agent runtime file is missing: $path"
+        }
+      }
+      if ((& $node --version).Trim() -ne "v22.23.2") {
+        throw "installed Node runtime version is incorrect"
+      }
+      foreach ($package in @{
+        "playwright-core" = "1.58.2"
+        "@modelcontextprotocol\sdk" = "1.30.0"
+        "@playwright\mcp" = "0.0.56"
+        "playwright" = "1.58.0-alpha-2026-01-16"
+      }.GetEnumerator()) {
+        $manifest = Join-Path $playwrightRuntime "node_modules\$($package.Key)\package.json"
+        if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+          throw "installed agent package is missing: $($package.Key)"
+        }
+        if ((Get-Content $manifest | ConvertFrom-Json).version -ne $package.Value) {
+          throw "installed agent package version is incorrect: $($package.Key)"
+        }
+      }
+      $checks.installedResourceIndependent = $true
+
+      Set-AcceptanceStage "runtime-protocol-helper-setup"
+      $helperVersion = & $helper version | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $helperVersion.ok -or $helperVersion.result.version -ne $bundleVersion) {
+        throw "installed agent helper returned an incorrect version"
+      }
+      $setup = & $helper setup --client generic --yes | ConvertFrom-Json
+      if ($LASTEXITCODE -ne 0 -or -not $setup.ok -or $setup.result.clients.Count -ne 0) {
+        throw "installed generic MCP setup failed"
+      }
+      if (
+        $setup.result.mcp.command -ne $helper -or
+        $setup.result.mcp.args.Count -ne 1 -or
+        $setup.result.mcp.args[0] -ne "serve" -or
+        $setup.result.generic.mcpServers.aliasmode.command -ne $helper -or
+        $setup.result.generic.mcpServers.aliasmode.args[0] -ne "serve"
+      ) {
+        throw "installed generic MCP setup returned incorrect paths"
+      }
+
+      Set-AcceptanceStage "runtime-protocol-mcp-lifecycle"
+      $mcp = Start-McpHost $helper $installRoot
+      $mcpShutdownFailure = $null
+      $preexistingProfileId = $null
+      try {
+        Initialize-McpHost $mcp -ValidateResponse
+        $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+        $toolResponse = $mcp.StandardOutput.ReadLine() | ConvertFrom-Json
+        if ($toolResponse.id -ne 2) { throw "installed MCP host returned an invalid tools/list response" }
+        $toolNames = @($toolResponse.result.tools | ForEach-Object { $_.name })
+        foreach ($name in @(
+          "aliasmode_profiles_list",
+          "aliasmode_profile_create",
+          "aliasmode_profile_delete",
+          "aliasmode_browser_open",
+          "aliasmode_browser_select",
+          "aliasmode_browser_status",
+          "aliasmode_browser_close",
+          "browser_close",
+          "browser_evaluate",
+          "browser_press_key",
+          "browser_click",
+          "browser_run_code"
+        )) {
+          if ($toolNames -notcontains $name) { throw "installed MCP host did not expose $name" }
+        }
+        foreach ($tool in @($toolResponse.result.tools)) {
+          if (-not $tool.annotations -or [string]::IsNullOrWhiteSpace([string]$tool.annotations.title)) {
+            throw "installed MCP tool $($tool.name) has no title annotation"
+          }
+          foreach ($hint in @("readOnlyHint", "destructiveHint", "openWorldHint")) {
+            if ($tool.annotations.PSObject.Properties.Name -notcontains $hint) {
+              throw "installed MCP tool $($tool.name) has no $hint annotation"
+            }
+          }
+        }
+        $initialToolSchemas = ConvertTo-Json -InputObject @($toolResponse.result.tools) -Compress -Depth 100
+
+        $descriptor = Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion
+        $backgroundProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($descriptor.desktopPid)"
+        if (-not $backgroundProcess -or $backgroundProcess.CommandLine -notmatch '(?:^|\s)--background(?:\s|$)') {
+          throw "MCP host did not launch AliasMode in background mode"
+        }
         $backgroundVisible = $false
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
           $mainWindow = [AliasModeWindow]::FindAppWindow([uint32]$descriptor.desktopPid, $true)
@@ -515,30 +581,8 @@ public static class AliasModeWindow {
         }
         if ($backgroundVisible) { throw "background AliasMode exposed its main window" }
 
-        $preexisting = (& $helper profiles create --name ci-preexisting | ConvertFrom-Json)
-        if ($LASTEXITCODE -ne 0 -or -not $preexisting.ok -or -not $preexisting.result.id) {
-          throw "installed helper could not create the pre-existing profile"
-        }
-        $preexistingProfileId = $preexisting.result.id
-        $preexistingOpen = (& $helper browser open --profile $preexistingProfileId --headless | ConvertFrom-Json)
-        if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
-          throw "installed helper could not open the pre-existing browser"
-        }
-
-        $selectRequest = @{
-          jsonrpc = "2.0"
-          id = 3
-          method = "tools/call"
-          params = @{
-            name = "aliasmode_browser_select"
-            arguments = @{ profileId = $preexistingProfileId }
-          }
-        } | ConvertTo-Json -Compress -Depth 8
-        $mcp.StandardInput.WriteLine($selectRequest)
-        $selected = Read-McpResponse $mcp 3
-        if ($selected.result.isError -eq $true) {
-          throw "installed MCP host could not select the pre-existing browser"
-        }
+        $preexistingProfileId = New-OpenPersistentProfile $helper "ci-preexisting"
+        Select-McpBrowser $mcp $preexistingProfileId 3
 
         $mcp.StandardInput.WriteLine('{"jsonrpc":"2.0","id":30,"method":"tools/list","params":{}}')
         $selectedTools = Read-McpResponse $mcp 30
@@ -563,6 +607,35 @@ public static class AliasModeWindow {
         if ($LASTEXITCODE -ne 0 -or -not $preexistingOpen.ok -or $preexistingOpen.result.alreadyOpen) {
           throw "installed helper could not reopen the pre-existing browser"
         }
+
+      } finally {
+        $mcpShutdownFailure = Disconnect-McpHost $mcp
+      }
+      if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
+
+      $preexistingClosed = (& $helper browser close --profile $preexistingProfileId | ConvertFrom-Json)
+      if (
+        $LASTEXITCODE -ne 0 -or
+        -not $preexistingClosed.ok -or
+        -not $preexistingClosed.result.closed -or
+        $preexistingClosed.result.deleted
+      ) {
+        throw "installed helper could not close the preserved browser"
+      }
+      Remove-PersistentProfile $helper $preexistingProfileId
+      $checks.helperMcpCliLifecycle = $true
+    }
+    "runtime-ownership" {
+      Set-AcceptanceStage "runtime-ownership-preexisting"
+      $preexistingProfileId = New-OpenPersistentProfile $helper "ci-preexisting"
+
+      Set-AcceptanceStage "runtime-ownership-mcp-lifecycle"
+      $mcp = Start-McpHost $helper $installRoot
+      $mcpShutdownFailure = $null
+      $ownedProfileId = $null
+      try {
+        Initialize-McpHost $mcp
+        Select-McpBrowser $mcp $preexistingProfileId 3
 
         $createRequest = @{
           jsonrpc = "2.0"
@@ -597,13 +670,9 @@ public static class AliasModeWindow {
         ) {
           throw "installed MCP host could not open its owned browser"
         }
+        $descriptor = Get-Content $descriptorPath | ConvertFrom-Json
       } finally {
-        $mcp.StandardInput.Close()
-        if (-not $mcp.WaitForExit(60000)) {
-          Stop-Process -Id $mcp.Id -Force
-          $mcp.WaitForExit()
-          $mcpShutdownFailure = "installed MCP host survived safe browser cleanup"
-        }
+        $mcpShutdownFailure = Disconnect-McpHost $mcp
       }
       if ($mcpShutdownFailure) { throw $mcpShutdownFailure }
       if (-not (Get-Process -Id $descriptor.desktopPid -ErrorAction SilentlyContinue)) {
@@ -630,24 +699,11 @@ public static class AliasModeWindow {
       if ($LASTEXITCODE -ne 0 -or -not $preexistingStatus.ok -or -not $preexistingStatus.result.running) {
         throw "pre-existing browser did not survive MCP disconnect"
       }
-      $preexistingClosed = (& $helper browser close --profile $preexistingProfileId | ConvertFrom-Json)
-      if (
-        $LASTEXITCODE -ne 0 -or
-        -not $preexistingClosed.ok -or
-        -not $preexistingClosed.result.closed -or
-        $preexistingClosed.result.deleted
-      ) {
-        throw "installed helper could not close the preserved browser"
-      }
-      foreach ($persistentProfileId in @($preexistingProfileId, $ownedProfileId)) {
-        $deleted = (& $helper profiles delete --profile $persistentProfileId | ConvertFrom-Json)
-        if ($LASTEXITCODE -ne 0 -or -not $deleted.ok -or -not $deleted.result.deleted) {
-          throw "installed helper could not delete a lifecycle profile"
-        }
-      }
+      Remove-PersistentProfile $helper $ownedProfileId
       $checks.ownershipCleanup = $true
-
-      Set-AcceptanceStage "runtime-json-cli"
+    }
+    "runtime-desktop" {
+      Set-AcceptanceStage "runtime-desktop-json-cli"
       $profile = (& $helper profiles create --name ci-agent --temporary | ConvertFrom-Json)
       if ($LASTEXITCODE -ne 0 -or -not $profile.ok -or -not $profile.result.id) {
         throw "installed JSON CLI could not create a temporary profile: $($profile.error)"
@@ -679,9 +735,11 @@ public static class AliasModeWindow {
       if ($LASTEXITCODE -ne 0 -or -not $closed.ok -or -not $closed.result.closed -or -not $closed.result.deleted) {
         throw "installed JSON CLI did not close and delete its temporary profile: $($closed.error)"
       }
+      Set-AcceptanceStage "runtime-desktop-descriptor"
+      $descriptor = Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion
       $checks.helperMcpCliLifecycle = $true
 
-      Set-AcceptanceStage "runtime-single-instance-window"
+      Set-AcceptanceStage "runtime-desktop-single-instance-window"
       $app = Get-Process -Id $descriptor.desktopPid -ErrorAction Stop
       $reveal = Start-Process -PassThru $appPath
       if (-not $reveal.WaitForExit(15000)) {
@@ -751,7 +809,7 @@ public static class AliasModeWindow {
       $checks.backgroundSingleInstanceWindow = $true
       $checks.sidecarTermination = $true
 
-      Set-AcceptanceStage "runtime-eof-termination"
+      Set-AcceptanceStage "runtime-desktop-eof-termination"
       $eofApp = Start-Process -PassThru $appPath
       $eofSidecarPid = $null
       try {
@@ -790,7 +848,7 @@ public static class AliasModeWindow {
       }
       $checks.eofTermination = $true
 
-      Set-AcceptanceStage "runtime-degraded-termination"
+      Set-AcceptanceStage "runtime-desktop-degraded-termination"
       $degradedApp = Start-Process -PassThru $appPath
       $degradedSidecarPid = $null
       try {
@@ -830,7 +888,7 @@ public static class AliasModeWindow {
       }
       $checks.degradedTermination = $true
 
-      Set-AcceptanceStage "runtime-playwright-worker"
+      Set-AcceptanceStage "runtime-desktop-playwright-worker"
       foreach ($path in @(
         (Join-Path $playwrightRuntime "node\node.exe"),
         (Join-Path $playwrightRuntime "worker.mjs"),
