@@ -165,3 +165,72 @@ test("desktop automation API owns 127.0.0.1:50400 and desktop startup survives c
     store.close();
   }
 });
+
+test("Cloud automation API routes browser control through the Cloud lifecycle", async () => {
+  const store = new ProfileStore(":memory:");
+  const calls: string[] = [];
+  let localStarts = 0;
+  const server = serveAutomationApi({
+    port: 0,
+    launcher: {
+      start: async () => { localStarts++; throw new Error("local start must not run"); },
+      certifiedActive: async () => false,
+    } as any,
+    store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudBrowser: {
+      open: async (id: string, args: string[]) => {
+        calls.push(`open:${id}:${JSON.stringify(args)}`);
+        return { ok: true, ws: "ws://x/cloud", port: 9444 };
+      },
+      close: async (id: string) => {
+        calls.push(`close:${id}`);
+        return { closed: true, sync: "complete" };
+      },
+    } as any,
+    log: () => {},
+  });
+
+  try {
+    const origin = `http://127.0.0.1:${server.port}`;
+    const status = await fetch(`${origin}/api/v1/status`).then((response) => response.json());
+    expect(status.code).toBe(0);
+
+    const start = await fetch(`${origin}/api/v1/browser/start?user_id=k1&launch_args=%5B%22--flag%22%5D`)
+      .then((response) => response.json());
+    expect(start).toMatchObject({
+      code: 0,
+      data: { ws: { puppeteer: "ws://x/cloud" }, debug_port: "9444" },
+    });
+
+    const stop = await fetch(`${origin}/api/v1/browser/stop?user_id=k1`).then((response) => response.json());
+    expect(stop.code).toBe(0);
+    expect(calls).toEqual(['open:k1:["--flag"]', "close:k1"]);
+    expect(localStarts).toBe(0);
+
+    const blocked = await fetch(`${origin}/api/v1/user/create`, { method: "POST" });
+    expect(blocked.status).toBe(503);
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});
+
+test("Cloud automation API stays closed when the Cloud lifecycle is unavailable", async () => {
+  const store = new ProfileStore(":memory:");
+  const server = serveAutomationApi({
+    port: 0,
+    launcher: {} as any,
+    store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    log: () => {},
+  });
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/browser/start?user_id=k1`);
+    expect(response.status).toBe(503);
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});

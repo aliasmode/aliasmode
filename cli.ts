@@ -2760,6 +2760,7 @@ async function main() {
           ? serveDesktopAutomationApi({
               launcher,
               store,
+              cloudBrowser,
               lifecycleAdmission: lifecycleAdmission!,
               appConfig,
             })

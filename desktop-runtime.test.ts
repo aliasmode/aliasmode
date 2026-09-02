@@ -66,6 +66,15 @@ test("desktop control gracefully shuts down when the parent stdin pipe closes", 
   expect(source).toContain('process.stdin.once("close", shutdown);');
 });
 
+test("desktop Cloud automation API receives the shared Cloud browser lifecycle", () => {
+  const source = readFileSync(join(import.meta.dir, "cli.ts"), "utf8");
+  const cloudStart = source.indexOf('if (configuredMode.mode === "cloud")');
+  const automationStart = source.indexOf("serveDesktopAutomationApi({", cloudStart);
+  const automationEnd = source.indexOf("})", automationStart);
+  const automationSetup = source.slice(automationStart, automationEnd);
+  expect(automationSetup).toContain("cloudBrowser,");
+});
+
 test("desktop credential bridge waits for a nonce-bound parent acknowledgement", async () => {
   const output: string[] = [];
   const bridge = new DesktopCredentialBridge(NONCE, (line) => { output.push(line); });

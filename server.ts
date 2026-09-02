@@ -11,6 +11,7 @@
  */
 
 import type { Launcher } from "./launcher.ts";
+import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
 import {
@@ -297,6 +298,41 @@ export async function handleRemoteBrowserControl(
       ...lifecycle,
       remote: coord,
     });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** Cloud-mode AdsPower control backed by the same lifecycle used by the dashboard. */
+export async function handleCloudBrowserControl(
+  req: Request,
+  cloudBrowser: CloudBrowserLifecycle,
+  launcher: Launcher,
+  store: ProfileStore,
+  lifecycle?: BrowserLifecycleContext,
+): Promise<Response> {
+  const { pathname, searchParams } = new URL(req.url);
+  const userId = searchParams.get("user_id") ?? "";
+  if (!userId) return fail("missing user_id");
+
+  try {
+    if (pathname === "/api/v1/browser/start") {
+      const result = await cloudBrowser.open(userId, parseLaunchArgs(searchParams.get("launch_args")));
+      if (!result.ok) return fail(result.error ?? "open failed");
+      if (!result.ws || result.port === undefined) return fail("open returned no browser connection");
+      return ok({
+        ws: { puppeteer: result.ws, selenium: "" },
+        debug_port: String(result.port),
+        webdriver: "",
+        ...(result.warning ? { warning: result.warning } : {}),
+      });
+    }
+    if (pathname === "/api/v1/browser/stop") {
+      return (await cloudBrowser.close(userId)).closed
+        ? ok()
+        : fail(`browser teardown unconfirmed: ${userId}`);
+    }
+    return activeResponse(userId, launcher, store, lifecycle);
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   }

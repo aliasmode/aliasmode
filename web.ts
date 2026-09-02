@@ -20,6 +20,7 @@ import type { StatePaths } from "./paths.ts";
 import {
   handleRequest,
   handleRemoteBrowserControl,
+  handleCloudBrowserControl,
   handleAutomationHealthSnapshot,
   isAdsPowerBrowserControl,
   isLoopbackAddress,
@@ -124,10 +125,17 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
   return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 }
 
-function cloudAuthenticationError(opts: DashboardServerOptions): Response | null {
+function cloudAutomationError(req: Request, opts: DashboardServerOptions): Response | null {
   if (opts.appConfig?.read().mode !== "cloud" || opts.remote) return null;
+  const pathname = new URL(req.url).pathname;
+  if (
+    opts.cloudBrowser &&
+    (pathname === "/api/v1/status" || pathname === "/status" || isAdsPowerBrowserControl(pathname))
+  ) {
+    return null;
+  }
   return Response.json(
-    { ok: false, error: "AliasMode Cloud authentication is required" },
+    { ok: false, error: "AliasMode Cloud does not expose this local API route" },
     { status: 503 },
   );
 }
@@ -155,8 +163,12 @@ async function handleAutomationRequest(
   const { launcher, store } = opts;
   const users = await handleUserApi(req, launcher, store, opts.remote);
   if (users) return users;
-  if (opts.remote && isAdsPowerBrowserControl(new URL(req.url).pathname)) {
+  const pathname = new URL(req.url).pathname;
+  if (opts.remote && isAdsPowerBrowserControl(pathname)) {
     return handleRemoteBrowserControl(req, opts.remote, launcher, store, lifecycle);
+  }
+  if (opts.cloudBrowser && isAdsPowerBrowserControl(pathname)) {
+    return handleCloudBrowserControl(req, opts.cloudBrowser, launcher, store, lifecycle);
   }
   return handleRequest(req, launcher, store, lifecycle);
 }
@@ -176,8 +188,8 @@ export function serveAutomationApi(opts: Omit<DashboardServerOptions, "hostname"
         const health = automationHealthResponse(req, server.requestIP(req)?.address, opts.remote);
         if (health) return health;
         return dispatchWithLifecycleAdmission(req, admission, async () => {
-          const authentication = cloudAuthenticationError(opts);
-          if (authentication) return authentication;
+          const cloudError = cloudAutomationError(req, opts);
+          if (cloudError) return cloudError;
           return handleAutomationRequest(req, opts, lifecycle);
         });
       },
@@ -282,8 +294,8 @@ export function serveDashboard(opts: DashboardServerOptions) {
           runtimeMode,
         });
         if (ui) return ui;
-        const authentication = cloudAuthenticationError(opts);
-        if (authentication) return authentication;
+        const cloudError = cloudAutomationError(req, opts);
+        if (cloudError) return cloudError;
         // Per-profile identity "card" (AdsPower-style landing page). Opened as a tab and
         // pointed to by the bookmark, so an operator can always see which account a window is.
         if (reqUrl.pathname === "/card") return renderProfileCard(store, reqUrl.searchParams.get("id") ?? "");
