@@ -2885,6 +2885,21 @@ test("Cloud browser reports the exact safe session restore operation", async () 
   state.store.close();
 });
 
+test("Cloud browser logs the local queue error behind a pending_sync open failure", async () => {
+  const state = setup();
+  const queue = (state.coordinator as any).options.queue();
+  queue.list = () => { throw new Error("Unsupported state or unable to authenticate data"); };
+  const result = await state.coordinator.open("profile1", []);
+  expect(result).toMatchObject({
+    ok: false,
+    error: "Cloud profile open failed at pending_sync (transport_error)",
+  });
+  expect(state.logs.filter((l) => l.includes("Cloud open failed"))).toEqual([
+    "profile1: Cloud open failed at pending_sync (transport_error, Error): Unsupported state or unable to authenticate data",
+  ]);
+  state.store.close();
+});
+
 test("Cloud browser reports a safe restore stage and retains the verified browser", async () => {
   const state = setup();
   (state.coordinator as any).options.applySession = async () => { throw new Error("secret restore detail"); };

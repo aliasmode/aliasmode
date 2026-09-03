@@ -788,7 +788,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         : error instanceof BrowserLaunchError
           ? `browser_launch/${error.failure}`
           : stage;
-      this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})`);
+      // Before registration only the local pending-sync queue is touched, so a
+      // failure there is a local queue/database error whose message holds no
+      // session material and is the only clue an operator gets.
+      const localDetail = stage === "pending_sync" && error instanceof Error ? `: ${error.message}` : "";
+      this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})${localDetail}`);
       const currentLaunch = retainAfterSessionFailure && retainedGeneration
         ? this.options.store.getLaunch(profileId)
         : undefined;
