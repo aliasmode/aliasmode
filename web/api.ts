@@ -573,12 +573,16 @@ export type ExportFormat = "csv" | "txt" | "xlsx";
 
 // ---- Export selected → download a CSV / .txt / Excel workbook ----------------
 export async function exportProfiles(ids: string[], format: ExportFormat): Promise<void> {
-  const r = await fetch("/ui/api/profiles/export", {
+  const path = "/ui/api/profiles/export";
+  const r = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ids, format }),
   });
-  if (!r.ok) throw new Error("export failed");
+  if (!r.ok) {
+    const body = await apiJson(r, path);
+    throw new Error(body.error || "export failed");
+  }
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

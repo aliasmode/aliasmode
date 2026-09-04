@@ -25,7 +25,7 @@ import type { CookieRecord, Profile, ProxySpec } from "./types.ts";
 import { deterministicSeed, parseResolution, platformFromUA } from "./fingerprint.ts";
 import { normalizeProxyType, parseProxySpec, proxyLegacyString } from "./proxy.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
-import { attestationFields, FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
+import { attestationFields, expectationFromRecord, FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
 
 /** Cookies on these domains belong to AdsPower's browser extension, not the account. */
 const EXTENSION_COOKIE_DOMAINS = ["adspower.net", "browserext.adspower.net"];
@@ -115,14 +115,14 @@ export function normalizeCookies(raw: unknown): { cookies: CookieRecord[]; strip
       stripped++;
       continue;
     }
-    const sameSite = normalizeSameSite((c as any).sameSite);
+    const sameSite = normalizeSameSite((c as any).sameSite ?? (c as any).same_site);
     const secureRaw = Boolean((c as any).secure);
     const rec: CookieRecord = {
       name,
       value: String((c as any).value ?? ""),
       domain,
       path: String((c as any).path ?? "/"),
-      httpOnly: Boolean((c as any).httpOnly),
+      httpOnly: Boolean((c as any).httpOnly ?? (c as any).http_only),
       secure: sameSite === "None" ? true : secureRaw,
     };
     if (sameSite) rec.sameSite = sameSite;
@@ -130,7 +130,7 @@ export function normalizeCookies(raw: unknown): { cookies: CookieRecord[]; strip
     if (typeof (c as any)._crHasCrossSiteAncestor === "boolean") rec._crHasCrossSiteAncestor = (c as any)._crHasCrossSiteAncestor;
     // Session cookies carry no expiry; persisted cookies keep their unix-seconds expiry.
     const isSession = (c as any).session === true;
-    const expires = Number((c as any).expires);
+    const expires = Number((c as any).expires ?? (c as any).expirationDate);
     if (!isSession && Number.isFinite(expires) && expires > 0) rec.expires = expires;
     cookies.push(rec);
   }
@@ -309,6 +309,7 @@ export function recordToProfile(
     validationErrors.push(proxyError);
   }
 
+  const fpExpected = expectationFromRecord(rec);
   const profile: Profile = {
     id,
     accId: (rec.acc_id ?? "").trim(),
@@ -337,6 +338,7 @@ export function recordToProfile(
     fingerprintSeed: parseSeed(rec.seed) ?? deterministicSeed(id),
     extensions: splitList(rec.extensions),
     tags: splitList(rec.tags),
+    ...(fpExpected ? { fpExpected } : {}),
     cookies,
     seeded: false,
   };
@@ -360,9 +362,8 @@ export interface ImportSummary {
   errors: Array<{ id: string; error: string; quarantined?: boolean }>;
 }
 
-/** Parse a full export into profiles plus an import summary. Pure; no I/O. */
-export function parseExport(text: string): ImportSummary {
-  const records = splitRecords(text);
+/** Convert normalized flat records into profiles plus an import summary. Pure; no I/O. */
+export function recordsToImportSummary(records: Record<string, string>[]): ImportSummary {
   const profiles: Profile[] = [];
   const imports: ParsedProfileImport[] = [];
   let cookiesStripped = 0;
@@ -392,6 +393,11 @@ export function parseExport(text: string): ImportSummary {
     cookiesStripped += out.cookiesStripped;
   }
   return { profiles, imports, recordCount: records.length, cookiesStripped, skipped, errors };
+}
+
+/** Parse a full AdsPower export into profiles plus an import summary. Pure; no I/O. */
+export function parseExport(text: string): ImportSummary {
+  return recordsToImportSummary(splitRecords(text));
 }
 
 // ===========================================================================
@@ -593,7 +599,7 @@ function profileFields(p: Profile): Record<string, string> {
     extensions: (p.extensions ?? []).join(","),
     tags: (p.tags ?? []).join(","),
     // Attested fields: a photograph of the identity, never an input to one.
-    ...attestationFields(p.fpObserved),
+    ...attestationFields(p.fpObserved ?? p.fpExpected),
   };
 }
 

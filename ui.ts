@@ -32,7 +32,7 @@ import {
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import type { FingerprintVerdict, Profile, CookieRecord } from "./types.ts";
-import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
+import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictCustomNo, decodeText } from "./parse.ts";
@@ -45,6 +45,7 @@ import {
   removeExtensionFiles,
   type ExtensionFetch,
 } from "./extensions.ts";
+import { decodePortableProfile } from "./portable-profile.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
@@ -868,6 +869,7 @@ export async function handleUiRequest(
     (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
     (pathname === "/ui/api/profiles/move" && req.method === "POST") ||
     (pathname === "/ui/api/profiles/delete" && req.method === "POST") ||
+    (pathname === "/ui/api/profiles/export" && req.method === "POST") ||
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies)$/.test(pathname));
@@ -1061,10 +1063,24 @@ export async function handleUiRequest(
         await options.cloudBrowser.importProfiles(override.group!, prepared.profiles);
         return Response.json({ ok: true, ...prepared.result });
       }
-      const r = remote ? await remote.importToHub(uploads, override) : await importBuffers(store, uploads, console.log, override);
-      return Response.json({ ok: true, ...r });
-    } catch (e) {
-      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+      if (remote) {
+        const result = await remote.importToHub(uploads, override);
+        if (result.profiles === 0) {
+          return Response.json(
+            { ok: false, error: "the hub found no profiles in the uploaded export" },
+            { status: 400 },
+          );
+        }
+        return Response.json({ ok: true, ...result });
+      }
+      return Response.json({ ok: true, ...await importBuffers(store, uploads, console.log, override) });
+    } catch (error) {
+      const status = error instanceof ProfileImportError
+        ? error.status
+        : error instanceof CloudApiError ? error.status
+        : error instanceof CloudRequestError ? 502
+        : 500;
+      return Response.json({ ok: false, error: msg(error) }, { status });
     }
   }
 
@@ -1083,21 +1099,54 @@ export async function handleUiRequest(
     // Export selected profiles for offline editing. Returns the file directly
     // (not JSON) so the browser saves it. Both formats carry `id` so the file
     // can be re-uploaded through /ui/api/profiles/update-file.
+    let body: { ids?: unknown; format?: unknown };
     try {
-      const body = (await req.json()) as { ids?: unknown; format?: unknown };
-      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
-      const format = body.format === "txt" ? "txt" : body.format === "xlsx" ? "xlsx" : "csv";
-      // .txt and .xlsx are the full-fidelity forms: they carry cookies and the
-      // user-agent, so they need the profile's secrets. .csv is the trimmed
-      // credential view.
-      const full = format !== "csv";
-      // Remote mode: the roster (and the secrets export needs) live on the hub —
-      // the local store is just a launch cache, so reading it here would silently
-      // drop every selected account that wasn't opened on this machine. Pull each
-      // from the hub instead, the same full-fidelity fetch Open/Edit already use.
-      const profiles = remote
-        ? await remote.getProfiles(ids, full)
-        : ids.map((id) => store.getProfile(id)).filter((p): p is Profile => !!p);
+      body = (await req.json()) as { ids?: unknown; format?: unknown };
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+    }
+    const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+    if (ids.length === 0) {
+      return Response.json({ ok: false, error: "select at least one profile to export" }, { status: 400 });
+    }
+    if (ids.some((id) => !isSafeProfileId(id))) {
+      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    }
+    if (body.format !== "txt" && body.format !== "xlsx" && body.format !== "csv") {
+      return Response.json({ ok: false, error: "format must be csv, txt, or xlsx" }, { status: 400 });
+    }
+    const format = body.format;
+    // .txt and .xlsx are the full-fidelity forms: they carry cookies and the
+    // user-agent, so they need the profile's secrets. .csv is the trimmed
+    // credential view.
+    const full = format !== "csv";
+    try {
+      let profiles: Profile[];
+      if (remote) {
+        // The local store is only a launch cache in remote mode.
+        profiles = await remote.getProfiles(ids, full);
+      } else if (options.cloudBrowser) {
+        if (!options.cloudConnection) {
+          return Response.json(
+            { ok: false, error: "AliasMode Cloud connection is unavailable" },
+            { status: 503 },
+          );
+        }
+        profiles = [];
+        for (let i = 0; i < ids.length; i += 8) {
+          const batch = await Promise.all(ids.slice(i, i + 8).map(async (id) => {
+            const authoritative = await options.cloudConnection!.client.getProfile(id);
+            const { profile } = decodePortableProfile(authoritative.payload);
+            if (profile.id !== id) throw new Error("Cloud returned a mismatched profile payload");
+            const local = store.getProfile(id);
+            if (local?.fpObserved) profile.fpObserved = { ...local.fpObserved };
+            return profile;
+          }));
+          profiles.push(...batch);
+        }
+      } else {
+        profiles = ids.map((id) => store.getProfile(id)).filter((p): p is Profile => !!p);
+      }
 
       if (format === "xlsx") {
         const { headers, rows } = serializeXlsxRows(profiles);
@@ -1106,6 +1155,7 @@ export async function handleUiRequest(
           headers: {
             "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "content-disposition": "attachment; filename=aliasmode-export.xlsx",
+            "cache-control": "no-store",
           },
         });
       }
@@ -1115,10 +1165,14 @@ export async function handleUiRequest(
         headers: {
           "content-type": `${format === "txt" ? "text/plain" : "text/csv"}; charset=utf-8`,
           "content-disposition": `attachment; filename=aliasmode-export.${format}`,
+          "cache-control": "no-store",
         },
       });
-    } catch (e) {
-      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    } catch (error) {
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError || options.cloudBrowser ? 502 : 500;
+      return Response.json({ ok: false, error: msg(error) }, { status });
     }
   }
 

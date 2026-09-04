@@ -274,6 +274,17 @@ test("bulk import accepts pasted AdsPower text in Local and Cloud mode", () => {
   expect(app).not.toContain('max 1000');
 });
 
+test("bulk import uploads provider files unchanged", () => {
+  expect(app).toContain('const list = Array.from(files);');
+  expect(app).toContain('const uploads = [...bulkFiles];');
+  expect(app).not.toContain("prepUploads");
+  expect(app).not.toContain("csvToBlocks");
+  expect(app).toContain('accept=".csv,.txt,.json,.xlsx,text/plain,text/csv,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"');
+  for (const provider of ["AdsPower", "GoLogin", "Multilogin", "Dolphin Anty", "HideMyAcc", "Incogniton", "Donut"]) {
+    expect(app).toContain(provider);
+  }
+});
+
 test("Cloud workspace loads independently and refreshes with Account Settings", () => {
   expect(app).toContain("if (!isCloudMode || !workspaceReady || restartRequired) return;\n    void loadTeam();");
   expect(app).toContain("void loadCloudEvents();\n    void loadTeam();");

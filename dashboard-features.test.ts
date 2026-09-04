@@ -255,6 +255,7 @@ test("a full export -> import round trip reproduces the identity exactly", () =>
     screenHeight: 1050,
     extensions: ["ext1"],
     tags: ["warm"],
+    fpObserved: { canvas: "canvas-one", hardwareConcurrency: 8 },
   });
   const restored = parseExport(serializeAdsTxt([original])).profiles[0]!;
   expect(restored.fingerprintSeed).toBe(original.fingerprintSeed);
@@ -263,6 +264,9 @@ test("a full export -> import round trip reproduces the identity exactly", () =>
   expect(restored.screenWidth).toBe(1680);
   expect(restored.extensions).toEqual(["ext1"]);
   expect(restored.tags).toEqual(["warm"]);
+  expect(restored.fpExpected).toEqual({ canvas: "canvas-one", hardwareConcurrency: 8 });
+  expect(restored.fpObserved).toBeUndefined();
+  expect(parseExport(serializeAdsTxt([restored])).profiles[0]!.fpExpected).toEqual(restored.fpExpected);
   expect(deriveFingerprintFlags(restored)).toEqual(deriveFingerprintFlags(original));
 });
 
@@ -272,6 +276,7 @@ test("the same round trip survives the spreadsheet, which is what operators edit
     fingerprintSeed: deterministicSeed("marketplace:melaniecanlq"),
     timezone: "Europe/London",
     platformOs: "windows",
+    fpObserved: { webglRenderer: "ANGLE (NVIDIA)", deviceMemory: 8 },
   });
   const { headers, rows } = serializeXlsxRows([original]);
   const back = await readXlsx(await writeXlsx(headers, rows));
@@ -279,4 +284,6 @@ test("the same round trip survives the spreadsheet, which is what operators edit
   expect(restored.fingerprintSeed).toBe(original.fingerprintSeed);
   expect(restored.timezone).toBe("Europe/London");
   expect(restored.platformOs).toBe("windows");
+  expect(restored.fpExpected).toEqual({ webglRenderer: "ANGLE (NVIDIA)", deviceMemory: 8 });
+  expect(restored.fpObserved).toBeUndefined();
 });

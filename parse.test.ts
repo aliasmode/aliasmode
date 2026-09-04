@@ -303,6 +303,21 @@ test("an update file can renumber profiles in bulk through a custom_no column", 
 
 // --- full-fidelity identity: restored fields ---
 
+test("an import restores fingerprint observations as expectations", () => {
+  const out = recordToProfile({
+    id: "k1d0cd11",
+    fp_canvas: "a3f19c8e",
+    fp_hw_concurrency: "8",
+    fp_captured_at: "2026-09-04T10:00:00.000Z",
+  })!;
+  expect(out.profile.fpExpected).toEqual({
+    canvas: "a3f19c8e",
+    hardwareConcurrency: 8,
+    capturedAt: "2026-09-04T10:00:00.000Z",
+  });
+  expect(out.profile.fpObserved).toBeUndefined();
+});
+
 test("an import honours an exported fingerprint seed", () => {
   const out = recordToProfile({ id: "k1d0cd11", seed: "2847193055" })!;
   expect(out.profile.fingerprintSeed).toBe(2847193055);

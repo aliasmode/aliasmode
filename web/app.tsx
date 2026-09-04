@@ -75,89 +75,6 @@ async function runPool<T>(items: T[], n: number, fn: (item: T) => Promise<void>)
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
 }
 
-// ---- CSV / AdsPower-txt import helpers (ported from the old dashboard) -------
-const genId = () => "cp" + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
-const oneLine = (s: unknown) => String(s ?? "").replace(/[\r\n]+/g, " ").trim();
-
-/** Build one AdsPower `key=value` record block — the format the importer reads. */
-function adsBlock(f: Record<string, string>): string {
-  return [
-    `id=${f.id || genId()}`,
-    `group=${oneLine(f.group)}`,
-    `platform=${oneLine(f.platform)}`,
-    `name=${oneLine(f.name)}`,
-    `username=${oneLine(f.username)}`,
-    `password=${oneLine(f.password)}`,
-    `email=${oneLine(f.email)}`,
-    `emailpassword=${oneLine(f.emailPassword)}`,
-    `fakey=${oneLine(f.twofa)}`,
-    `cookie=${f.cookie && f.cookie.trim() ? oneLine(f.cookie) : "[]"}`,
-    `proxytype=${f.proxyType || "http"}`,
-    `proxy=${oneLine(f.proxy)}`,
-    `ua=${oneLine(f.ua)}`,
-    `resolution=${f.resolution || "1920*1080"}`,
-    "******************",
-  ].join("\n");
-}
-
-/**
- * CSV → AdsPower record blocks. Columns map onto AdsPower fields (header aliases
- * tolerated); group/platform fall back to the dialog pickers when a row leaves
- * them blank. A header-less file is read positionally as name,proxy,user,pass,2fa.
- */
-function csvToBlocks(text: string, defaultGroup: string, defaultPlatform: string): string[] {
-  const rows = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (!rows.length) return [];
-  const cells = (l: string) => l.split(",").map((c) => c.trim());
-  const headerish = /\b(name|group|platform|user(name)?|email|proxy|pass(word)?|2fa|twofa|fakey|ua|resolution|screen)\b/i.test(rows[0]!);
-  let cols: string[] | null = null, start = 0;
-  if (headerish) { cols = cells(rows[0]!).map((c) => c.toLowerCase()); start = 1; }
-  const find = (...names: string[]) => (cols ? cols.findIndex((c) => names.includes(c)) : -1);
-  const ix = cols ? {
-    name: find("name", "profile", "profile name"), group: find("group"),
-    platform: find("platform", "site"), proxy: find("proxy"), proxyType: find("proxytype", "proxy type"),
-    username: find("username", "user", "login"), password: find("password", "pass", "pwd"),
-    email: find("email", "mail"), emailPassword: find("emailpassword", "email_password", "mailpassword", "mail_password"),
-    twofa: find("twofa", "2fa", "fakey", "otp"), ua: find("ua", "user-agent", "useragent"),
-    resolution: find("resolution", "screen"),
-  } : null;
-  const get = (c: string[], k: keyof NonNullable<typeof ix>) => (ix && ix[k] >= 0 ? (c[ix[k]] || "") : "");
-  const blocks: string[] = [];
-  for (let i = start; i < rows.length; i++) {
-    const c = cells(rows[i]!);
-    const f = cols
-      ? {
-          name: get(c, "name"), proxy: get(c, "proxy"), proxyType: get(c, "proxyType") || "http",
-          username: get(c, "username") || get(c, "email"), password: get(c, "password"),
-          email: get(c, "email"), emailPassword: get(c, "emailPassword"), twofa: get(c, "twofa"),
-          ua: get(c, "ua"), resolution: get(c, "resolution"),
-          group: get(c, "group") || defaultGroup, platform: get(c, "platform") || defaultPlatform,
-        }
-      : {
-          name: c[0] || "", proxy: c[1] || "", proxyType: "http",
-          username: c[2] || "", password: c[3] || "", email: "", emailPassword: "", twofa: c[4] || "", ua: "", resolution: "",
-          group: defaultGroup, platform: defaultPlatform,
-        };
-    (f as any).id = genId();
-    blocks.push(adsBlock(f as any));
-  }
-  return blocks;
-}
-
-/** Turn a picked file list into upload-ready Files (CSV → AdsPower .txt; .txt passthrough). */
-async function prepUploads(files: FileList | File[], defaultGroup = "", defaultPlatform = ""): Promise<File[]> {
-  const out: File[] = [];
-  for (const f of Array.from(files)) {
-    if (/\.csv$/i.test(f.name)) {
-      const blocks = csvToBlocks(await f.text(), defaultGroup, defaultPlatform);
-      if (blocks.length) out.push(new File([blocks.join("\n")], f.name.replace(/\.csv$/i, ".txt"), { type: "text/plain" }));
-    } else {
-      out.push(f);
-    }
-  }
-  return out;
-}
-
 const CSV_TEMPLATE =
   "name,group,platform,proxy,username,password,email,emailpassword,twofa\n" +
   "alice_warmup,Warmup,x.com,1.2.3.4:8080:proxyuser:proxypass,alice_user,SuperSecret1,alice@example.com,MailboxSecret1,JBSWY3DPEHPK3PXP\n" +
@@ -1087,7 +1004,7 @@ function App() {
   const [renameVal, setRenameVal] = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
   const [sidebarGroupName, setSidebarGroupName] = useState("");
-  // Bulk add accounts (CSV / AdsPower .txt with group + platform assignment)
+  // Bulk add accounts from provider files or pasted AdsPower text.
   const [showBulk, setShowBulk] = useState(false);
   const [bulkFiles, setBulkFiles] = useState<File[]>([]);
   const [bulkText, setBulkText] = useState("");
@@ -2063,7 +1980,7 @@ function App() {
   const doUpload = async (files: FileList | File[]) => {
     setActionErr(null);
     try {
-      const list = await prepUploads(files); // CSV → AdsPower .txt; .txt passthrough
+      const list = Array.from(files);
       if (list.length === 0) return;
       const r = await uploadExports(list);
       await load();
@@ -2077,7 +1994,7 @@ function App() {
     }
   };
 
-  // ---- Bulk add accounts (CSV / .txt with group + platform assignment) ----
+  // ---- Bulk add accounts from provider export files or AdsPower text ----
   const openBulk = () => {
     setBulkFiles([]);
     setBulkText("");
@@ -2100,9 +2017,8 @@ function App() {
     try {
       const uploads = [...bulkFiles];
       if (bulkText.trim()) uploads.push(new File([bulkText], "pasted-adspower.txt", { type: "text/plain" }));
-      const list = await prepUploads(uploads, bulkGroup.trim(), bulkPlatform);
-      if (!list.length) throw new Error("no rows found in the file(s)");
-      const r = await uploadExports(list, { group: bulkGroup.trim(), platform: bulkPlatform });
+      if (!uploads.length) throw new Error("no rows found in the file(s)");
+      const r = await uploadExports(uploads, { group: bulkGroup.trim(), platform: bulkPlatform });
       if (r.ok) {
         closeBulk();
         await load();
@@ -2663,7 +2579,7 @@ function App() {
       {!isCloudMode && dragging && (
         <div className="dropzone">
           <Icon name="fileImport" />
-          <span>Drop AdsPower <code>.txt</code> or <code>.csv</code> files to import</span>
+          <span>Drop TXT, CSV, JSON, or XLSX profile exports to import</span>
         </div>
       )}
 
@@ -2693,7 +2609,7 @@ function App() {
             className="btn importbtn tip"
             data-tip="Import from file"
             disabled={!canEditCloud}
-            title="Import / bulk-add accounts from CSV or AdsPower .txt"
+            title="Import profiles from TXT, CSV, JSON, or XLSX"
             onClick={openBulk}
           ><Icon name="fileImport" /></button>
         </div>
@@ -3230,7 +3146,7 @@ function App() {
                           <p>
                             {isCloudMode
                               ? "No Cloud profiles yet — click New Profile to create one."
-                              : "No profiles yet — click New Profile, or drop an AdsPower .txt / .csv export anywhere in this window to import it."}
+                              : "No profiles yet — click New Profile, or drop a TXT, CSV, JSON, or XLSX profile export anywhere in this window."}
                           </p>
                           <button className="btn primary" disabled={!canEditCloud} onClick={openCreate}><Icon name="plus" className="sm" />New Profile</button>
                         </>
@@ -4015,7 +3931,7 @@ function App() {
                   >
                     <Icon name="fileImport" />
                     <b>Drag &amp; drop files, or click to choose</b>
-                    <div className="sub">CSV using the template columns, or an AdsPower <code>.txt</code> export</div>
+                    <div className="sub">Readable TXT, CSV, JSON, or XLSX exports from AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut, and similar browsers</div>
                   </div>
                   {bulkFiles.length > 0 && (
                     <div className="filelist">
@@ -4053,7 +3969,7 @@ function App() {
                 ref={bulkFileRef}
                 type="file"
                 multiple
-                accept=".csv,.txt,text/plain,text/csv"
+                accept=".csv,.txt,.json,.xlsx,text/plain,text/csv,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 style={{ display: "none" }}
                 onChange={(e) => { if (e.target.files) setBulkFiles(Array.from(e.target.files)); e.target.value = ""; }}
               />
@@ -4072,7 +3988,7 @@ function App() {
               </div>
               <p className="formnote">
                 Anything chosen above overrides that field on every imported record, including
-                AdsPower TXT records that already carry a group.
+                provider exports that already carry a group.
               </p>
               <p className="formnote">
                 An AliasMode export also carries <code>seed</code>, <code>timezone</code> and{" "}

@@ -592,7 +592,7 @@ test("upload route rejects a malformed AdsPower record without partial writes", 
     {} as any,
     s,
   );
-  expect(res!.status).toBe(500);
+  expect(res!.status).toBe(400);
   expect((await res!.json()).error).toContain("invalid resolution");
   expect(s.count()).toBe(beforeCount);
   expect(s.getProfile("k1up0002")).toBeNull();
@@ -616,6 +616,33 @@ test("upload route applies group override in local mode", async () => {
   s.close();
 });
 
+test("upload route imports JSON and XLSX provider files in Local mode", async () => {
+  const s = new ProfileStore(":memory:");
+  const form = new FormData();
+  form.append("files", new File([JSON.stringify({ profiles: [{
+    _id: "localjson1",
+    name: "GoLogin JSON",
+    navigator: { resolution: "1600x900", platform: "Win32" },
+  }] })], "gologin.json", { type: "application/json" }));
+  const workbook = await writeXlsx(
+    ["Profile ID", "Profile Name", "Operating System"],
+    [["localxlsx1", "HideMyAcc sheet", "mac"]],
+  );
+  form.append("files", new File([workbook as unknown as BlobPart], "hidemyacc.xlsx"));
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+
+  expect(response!.status).toBe(200);
+  expect(await response!.json()).toMatchObject({ ok: true, files: 2, profiles: 2 });
+  expect(s.getProfile("localjson1")).toMatchObject({ name: "GoLogin JSON", platformOs: "windows" });
+  expect(s.getProfile("localxlsx1")).toMatchObject({ name: "HideMyAcc sheet", platformOs: "macos" });
+  s.close();
+});
+
 test("upload route sends one parsed batch to Cloud without writing the Local store", async () => {
   const s = new ProfileStore(":memory:");
   const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-import-")), "config.json"));
@@ -634,6 +661,16 @@ test("upload route sends one parsed batch to Cloud without writing the Local sto
     `id=cloudimp1\nname=First\ngroup=from-file\ncookie=[]\nresolution=1280*720\n******************\n` +
     `id=cloudimp2\nname=Second\ngroup=from-file\ncookie=[]\nresolution=1280*720\n******************`,
   ], "export.txt", { type: "text/plain" }));
+  form.append("files", new File([JSON.stringify({ profiles: [{
+    profileId: "cloudjson1",
+    profileName: "GoLogin JSON",
+    folderName: "from-json",
+  }] })], "gologin.json", { type: "application/json" }));
+  const workbook = await writeXlsx(
+    ["Profile ID", "Profile Name", "Folder Name"],
+    [["cloudxlsx1", "Dolphin sheet", "from-sheet"]],
+  );
+  form.append("files", new File([workbook as unknown as BlobPart], "dolphin.xlsx"));
 
   const res = await handleUiRequest(
     new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
@@ -644,15 +681,19 @@ test("upload route sends one parsed batch to Cloud without writing the Local sto
   );
 
   expect(res!.status).toBe(200);
-  expect(await res!.json()).toMatchObject({ ok: true, files: 1, profiles: 2 });
+  expect(await res!.json()).toMatchObject({ ok: true, files: 3, profiles: 4 });
   expect(batches).toHaveLength(1);
   expect(batches[0]!.destination).toBe("Sales");
   expect(batches[0]!.profiles.map((profile) => ({ id: profile.id, group: profile.group, platform: profile.platform }))).toEqual([
     { id: "cloudimp1", group: "Sales", platform: "telegram.org" },
     { id: "cloudimp2", group: "Sales", platform: "telegram.org" },
+    { id: "cloudjson1", group: "Sales", platform: "telegram.org" },
+    { id: "cloudxlsx1", group: "Sales", platform: "telegram.org" },
   ]);
   expect(s.getProfile("cloudimp1")).toBeNull();
   expect(s.getProfile("cloudimp2")).toBeNull();
+  expect(s.getProfile("cloudjson1")).toBeNull();
+  expect(s.getProfile("cloudxlsx1")).toBeNull();
   s.close();
 });
 
@@ -674,17 +715,20 @@ test("Cloud upload requires an explicit destination before parsing files", async
   s.close();
 });
 
-test("upload route forwards overrides in remote mode", async () => {
+test("upload route forwards raw files and overrides in remote mode", async () => {
   const s = new ProfileStore(":memory:");
   const form = new FormData();
   form.append("group", "hubgrp");
   form.append("platform", "telegram.org");
-  form.append("files", new File(["x"], "export.txt", { type: "text/plain" }));
+  const rawFile = "raw,unchanged\ncontent";
+  form.append("files", new File([rawFile], "export.json", { type: "application/json" }));
   let gotOverride: any = null;
+  let gotUploads: any[] = [];
   const remote = {
-    importToHub: async (_uploads: any, override: any) => {
+    importToHub: async (uploads: any[], override: any) => {
+      gotUploads = uploads.map((upload) => ({ name: upload.name, bytes: new Uint8Array(upload.bytes) }));
       gotOverride = override;
-      return { files: 1, profiles: 0 };
+      return { files: 1, profiles: 1 };
     },
   } as any;
   const res = await handleUiRequest(
@@ -695,6 +739,25 @@ test("upload route forwards overrides in remote mode", async () => {
   );
   expect((await res!.json()).ok).toBe(true);
   expect(gotOverride).toEqual({ group: "hubgrp", platform: "telegram.org" });
+  expect(gotUploads).toEqual([{ name: "export.json", bytes: new TextEncoder().encode(rawFile) }]);
+  s.close();
+});
+
+test("upload route rejects a zero-profile hub result", async () => {
+  const s = new ProfileStore(":memory:");
+  const form = new FormData();
+  form.append("files", new File(["unrecognized"], "export.txt", { type: "text/plain" }));
+  const remote = {
+    importToHub: async () => ({ files: 1, profiles: 0 }),
+  } as any;
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+    remote,
+  );
+  expect(res!.status).toBe(400);
+  expect(await res!.json()).toMatchObject({ ok: false, error: expect.stringContaining("no profiles") });
   s.close();
 });
 
@@ -706,6 +769,42 @@ test("upload route with no files is a 400", async () => {
     s,
   );
   expect(res!.status).toBe(400);
+  s.close();
+});
+
+test("upload route reports unsupported archives as bad input", async () => {
+  const s = new ProfileStore(":memory:");
+  const form = new FormData();
+  form.append("files", new File(["PKencrypted-profile"], "multilogin.zip", { type: "application/zip" }));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(response!.status).toBe(400);
+  expect((await response!.json()).error).toContain("encrypted or proprietary");
+  expect(s.count()).toBe(0);
+  s.close();
+});
+
+test("upload route reports an open-profile import conflict as 409", async () => {
+  const s = store();
+  s.recordLaunch({
+    profileId: "k1d0cd11",
+    pid: 123,
+    debugPort: 9333,
+    ws: "ws://127.0.0.1:9333/devtools/browser/live",
+    startedAt: Date.now(),
+  });
+  const form = new FormData();
+  form.append("files", new File(["id=k1d0cd11\nname=changed\n******************"], "profile.txt"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/import/upload", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(response!.status).toBe(409);
+  expect((await response!.json()).error).toContain("currently open");
   s.close();
 });
 
@@ -1313,6 +1412,128 @@ test("export in remote mode pulls every selected profile from the hub, not the l
   expect(text).toContain("hub0001");
   expect(text).toContain("hub0002");
   expect(text).not.toContain("k1d0cd11"); // the local-cache fallback is gone
+  s.close();
+});
+
+test("Cloud export uses the authoritative portable profile", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-export-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const local = s.getProfile("k1d0cd11")!;
+  local.fpObserved = { canvas: "local-canvas-attestation" };
+  s.upsertProfile(local);
+  const cloudProfile = {
+    ...local,
+    name: "Authoritative Cloud name",
+    cookies: [{ name: "auth_token", value: "CLOUD_COOKIE", domain: ".x.com", path: "/" }],
+  };
+  const fetched: string[] = [];
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        fetched.push(id);
+        return {
+          profile: { id, version: 3, activeOpens: [{ accountId: "other-device" }] },
+          payload: encodePortableProfile(cloudProfile),
+        };
+      },
+    },
+  } as any;
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11"], format: "txt" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+
+  expect(response!.status).toBe(200);
+  expect(response!.headers.get("cache-control")).toBe("no-store");
+  expect(fetched).toEqual(["k1d0cd11"]);
+  const text = await response!.text();
+  expect(text).toContain("name=Authoritative Cloud name");
+  expect(text).toContain("CLOUD_COOKIE");
+  expect(text).toContain("fp_canvas=local-canvas-attestation");
+  s.close();
+});
+
+test("Cloud export preserves selection order in every format", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-export-formats-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const base = s.getProfile("k1d0cd11")!;
+  const profiles: Record<string, Profile> = {
+    cloud0001: { ...base, id: "cloud0001", name: "First Cloud" },
+    cloud0002: { ...base, id: "cloud0002", name: "Second Cloud" },
+  };
+  const fetched: string[] = [];
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        fetched.push(id);
+        return { profile: { id, version: 1, activeOpens: [] }, payload: encodePortableProfile(profiles[id]!) };
+      },
+    },
+  } as any;
+  const requested = ["cloud0002", "cloud0001"];
+
+  for (const format of ["csv", "txt", "xlsx"] as const) {
+    const response = await handleUiRequest(
+      new Request("http://x/ui/api/profiles/export", {
+        method: "POST",
+        body: JSON.stringify({ ids: requested, format }),
+      }),
+      {} as any,
+      s,
+      null,
+      { appConfig, cloudBrowser: {} as any, cloudConnection },
+    );
+    expect(response!.status).toBe(200);
+    expect(response!.headers.get("cache-control")).toBe("no-store");
+    const ids = format === "xlsx"
+      ? (await readXlsx(new Uint8Array(await response!.arrayBuffer()))).map((row) => row.id)
+      : format === "txt"
+        ? parseExport(await response!.text()).profiles.map((profile) => profile.id)
+        : (await response!.text()).trim().split("\n").slice(1).map((row) => row.split(",")[0]);
+    expect(ids).toEqual(requested);
+  }
+  expect(fetched).toEqual([...requested, ...requested, ...requested]);
+  s.close();
+});
+
+test("Cloud export fails the whole download when one profile cannot be fetched", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-export-failure-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        if (id === "missing001") throw new CloudApiError("Cloud profile was not found", "profile_not_found", 404);
+        const profile = { ...s.getProfile("k1d0cd11")!, id };
+        return { profile: { id, version: 1, activeOpens: [] }, payload: encodePortableProfile(profile) };
+      },
+    },
+  } as any;
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11", "missing001"], format: "txt" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(response!.status).toBe(404);
+  expect(await response!.json()).toEqual({ ok: false, error: "Cloud profile was not found" });
   s.close();
 });
 

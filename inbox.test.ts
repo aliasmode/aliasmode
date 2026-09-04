@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ProfileStore } from "./store.ts";
-import { importBuffers, importInbox } from "./inbox.ts";
+import { importBuffers, importInbox, prepareImportBuffers } from "./inbox.ts";
 import { parseExport } from "./parse.ts";
 
 const REC = (id: string) => `id=${id}
@@ -97,7 +97,7 @@ test("sparse same-id re-import updates only present fields and preserves identit
   store.upsertProfile(original);
   store.markSeeded(original.id);
 
-  const sparse = new TextEncoder().encode(`id=${original.id}\nname=renamed\ntags=stale-export-tag\nextensions=stale-extension\n******************`);
+  const sparse = new TextEncoder().encode(`id=${original.id}\nname=renamed\n******************`);
   await importBuffers(store, [{ name: "sparse.txt", bytes: sparse }], () => {});
 
   const got = store.getProfile(original.id)!;
@@ -116,6 +116,63 @@ test("sparse same-id re-import updates only present fields and preserves identit
   expect(got.tags).toEqual(["returning-account"]);
   expect(got.seeded).toBe(true);
   store.close();
+});
+
+test("same-id re-import updates explicit portable identity fields", async () => {
+  const store = new ProfileStore(":memory:");
+  const original = {
+    ...parseExport(REC("k1a0001")).profiles[0]!,
+    fingerprintSeed: 11,
+    timezone: "UTC",
+    platformOs: "windows" as const,
+    extensions: ["old-extension"],
+    tags: ["old-tag"],
+    fpObserved: { canvas: "local-observation" },
+    fpExpected: { canvas: "old-expectation" },
+    fpVerdict: { verdict: "mismatch" as const, differences: [] },
+  };
+  store.upsertProfile(original);
+  const upload = new TextEncoder().encode([
+    `id=${original.id}`,
+    "seed=99",
+    "timezone=Europe/Paris",
+    "platform_os=macos",
+    "extensions=ext-one,ext-two",
+    "tags=warm,priority",
+    "fp_canvas=new-expectation",
+    "fp_hw_concurrency=12",
+    "******************",
+  ].join("\n"));
+
+  await importBuffers(store, [{ name: "identity.txt", bytes: upload }], () => {});
+
+  expect(store.getProfile(original.id)).toMatchObject({
+    fingerprintSeed: 99,
+    timezone: "Europe/Paris",
+    platformOs: "macos",
+    extensions: ["ext-one", "ext-two"],
+    tags: ["warm", "priority"],
+    fpObserved: { canvas: "local-observation" },
+    fpExpected: { canvas: "new-expectation", hardwareConcurrency: 12 },
+  });
+  expect(store.getProfile(original.id)!.fpVerdict).toBeUndefined();
+  store.close();
+});
+
+test("an explicit imported timezone skips proxy GeoIP enrichment", async () => {
+  const logs: string[] = [];
+  const batch = await prepareImportBuffers(
+    [{
+      name: "timezone.txt",
+      bytes: new TextEncoder().encode(
+        "id=timezone1\ntimezone=Europe/London\nproxytype=http\nproxy=1.2.3.4:8080\n******************",
+      ),
+    }],
+    (message) => logs.push(message),
+  );
+
+  expect(batch.profiles[0]!.timezone).toBe("Europe/London");
+  expect(logs.some((message) => message.includes("resolved timezone"))).toBe(false);
 });
 
 test("sparse re-import preserves a quarantined legacy proxy for later repair", async () => {
@@ -271,6 +328,20 @@ test("duplicate ids across an import batch reject deterministically instead of l
   store.close();
 });
 
+test("an unsafe provider ID re-imports the same generated profile", async () => {
+  const store = new ProfileStore(":memory:");
+  const first = "Profile ID,Profile Name\nunsafe/profile-id,First name\n";
+  const second = "Profile ID,Profile Name\nunsafe/profile-id,Updated name\n";
+
+  await importBuffers(store, [{ name: "first.csv", bytes: new TextEncoder().encode(first) }], () => {});
+  const id = store.listProfiles()[0]!.id;
+  await importBuffers(store, [{ name: "second.csv", bytes: new TextEncoder().encode(second) }], () => {});
+
+  expect(store.count()).toBe(1);
+  expect(store.getProfile(id)).toMatchObject({ accId: "unsafe/profile-id", name: "Updated name" });
+  store.close();
+});
+
 test("the pre-commit guard can abort an import without writing any prepared rows", async () => {
   const store = new ProfileStore(":memory:");
   const upload = "id=guarded\nname=must-not-land\n******************";
@@ -287,6 +358,20 @@ test("the pre-commit guard can abort an import without writing any prepared rows
   )).rejects.toThrow("became locked");
   expect(guardedIds).toEqual(["guarded"]);
   expect(store.getProfile("guarded")).toBeNull();
+  store.close();
+});
+
+test("an empty file rejects a mixed provider batch before any profile is written", async () => {
+  const store = new ProfileStore(":memory:");
+  await expect(importBuffers(
+    store,
+    [
+      { name: "valid.json", bytes: new TextEncoder().encode('{"id":"valid-json","name":"Valid"}') },
+      { name: "empty.csv", bytes: new TextEncoder().encode("\r\n") },
+    ],
+    () => {},
+  )).rejects.toThrow("empty.csv: export file is empty");
+  expect(store.count()).toBe(0);
   store.close();
 });
 

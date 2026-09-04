@@ -13,6 +13,7 @@ import {
   fetchCloudEvents,
   fetchCloudTeam,
   cloudWorkspaceAction,
+  exportProfiles,
   fetchProfiles,
   openProfile,
   restoreCloudSession,
@@ -47,6 +48,17 @@ test("dashboard API distinguishes an HTML server crash from a version mismatch",
 test("dashboard profile roster rejects malformed JSON shape explicitly", async () => {
   globalThis.fetch = (async () => Response.json({ ok: true })) as unknown as typeof fetch;
   await expect(fetchProfiles()).rejects.toThrow("no profile roster");
+});
+
+test("profile export reports the server error", async () => {
+  globalThis.fetch = (async () => Response.json(
+    { ok: false, error: "Cloud profile could not be downloaded" },
+    { status: 502 },
+  )) as unknown as typeof fetch;
+
+  await expect(exportProfiles(["profile1"], "txt")).rejects.toThrow(
+    "Cloud profile could not be downloaded",
+  );
 });
 
 test("dashboard roster carries health and group metadata while tolerating an older local server", async () => {

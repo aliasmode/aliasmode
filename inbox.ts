@@ -9,7 +9,9 @@
 
 import { readdirSync, existsSync, mkdirSync, watch, statSync } from "node:fs";
 import { join } from "node:path";
-import { parseExport, decodeText, type ParsedProfileImport } from "./parse.ts";
+import type { ParsedProfileImport } from "./parse.ts";
+import { parseImportFile } from "./import-formats.ts";
+import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
 import { attachTimezones } from "./geoip.ts";
 import type { Profile } from "./types.ts";
 import type { ProfileStore } from "./store.ts";
@@ -76,8 +78,15 @@ interface SourcedImport extends ParsedProfileImport {
   source: string;
 }
 
-function unsafeImportError(problems: string[]): Error {
-  return new Error(`unsafe import rejected; no profiles were changed: ${problems.join("; ")}`);
+export class ProfileImportError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = "ProfileImportError";
+  }
+}
+
+function unsafeImportError(problems: string[], status = 400): ProfileImportError {
+  return new ProfileImportError(`unsafe import rejected; no profiles were changed: ${problems.join("; ")}`, status);
 }
 
 /** Merge only fields actually present in an AdsPower re-export. */
@@ -101,6 +110,19 @@ function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
     out.screenHeight = p.screenHeight;
   }
   if (present.has("cookie")) out.cookies = p.cookies;
+  if (present.has("seed")) {
+    const seed = Number(incoming.sourceFields.seed?.trim());
+    if (Number.isInteger(seed) && seed >= 1 && seed <= 0xffff_ffff) out.fingerprintSeed = p.fingerprintSeed;
+  }
+  if (present.has("timezone") && p.timezone) out.timezone = p.timezone;
+  if (present.has("platform_os") && p.platformOs) out.platformOs = p.platformOs;
+  if (present.has("extensions")) out.extensions = [...(p.extensions ?? [])];
+  if (present.has("tags")) out.tags = [...(p.tags ?? [])];
+  if (FP_BLOCK_KEYS.some((key) => present.has(key))) {
+    if (p.fpExpected) out.fpExpected = { ...p.fpExpected };
+    else delete out.fpExpected;
+    delete out.fpVerdict;
+  }
   if (present.has("proxy")) {
     const proxyHasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(incoming.sourceFields.proxy?.trim() ?? "");
     out.proxy = p.proxy && !incoming.sourceFields.proxytype?.trim() && !proxyHasScheme && existing.proxy
@@ -125,15 +147,19 @@ export async function prepareImportBuffers(
   files: { name: string; bytes: Uint8Array }[],
   log: (msg: string) => void = console.log,
   overrides: ImportOverrides = {},
+  exists: (id: string) => boolean = () => false,
 ): Promise<PreparedImportBatch> {
   let cookiesStripped = 0;
   let skipped = 0;
   const errors: InboxResult["errors"] = [];
   const collected: SourcedImport[] = [];
   for (const { name, bytes } of files) {
-    const summary = parseExport(decodeText(bytes));
-    if (summary.profiles.length === 0) {
-      log(`import: ${name} parsed to 0 profiles — check it's a complete AdsPower "Export accounts" file`);
+    let summary;
+    try {
+      summary = await parseImportFile(name, bytes, exists);
+    } catch (error) {
+      if (error instanceof ProfileImportError) throw error;
+      throw new ProfileImportError(error instanceof Error ? error.message : String(error));
     }
     collected.push(...summary.imports.map((entry) => ({ ...applyOverrides(entry, overrides), source: name })));
     cookiesStripped += summary.cookiesStripped;
@@ -151,7 +177,7 @@ export async function prepareImportBuffers(
   if (problems.length) throw unsafeImportError(problems);
 
   const toResolve = collected
-    .filter((entry) => entry.presentFields.includes("proxy") && entry.profile.proxy)
+    .filter((entry) => entry.presentFields.includes("proxy") && entry.profile.proxy && !entry.profile.timezone)
     .map((entry) => entry.profile);
   const { resolved } = await attachTimezones(toResolve);
   if (toResolve.length) log(`import: resolved timezone for ${resolved}/${toResolve.length} supplied proxy/proxies`);
@@ -176,7 +202,7 @@ export async function importBuffers(
   /** Optional hub-side lock/CAS guard, called synchronously immediately before the atomic write. */
   beforeCommit?: (profiles: readonly Profile[]) => void,
 ): Promise<InboxResult> {
-  const batch = await prepareImportBuffers(files, log, overrides);
+  const batch = await prepareImportBuffers(files, log, overrides, (id) => !!store.getProfile(id));
   const collected = batch.imports;
   const problems: string[] = [];
 
@@ -217,7 +243,7 @@ export async function importBuffers(
   if (liveIds.length > 0) {
     throw unsafeImportError([
       `profile(s) ${[...new Set(liveIds)].join(", ")} are currently open; close them before importing identity changes`,
-    ]);
+    ], 409);
   }
   // Keep these checks adjacent to the single batch write: the hub guard closes
   // the claim-vs-import race after all parsing/timezone I/O has completed.
