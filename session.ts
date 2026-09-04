@@ -962,6 +962,15 @@ export async function runReadSessionWorker(
   }
 }
 
+/** Add one cookie to an already-running browser without replacing its cookie jar. */
+export async function addBrowserCookie(ws: string, cookie: CookieRecord): Promise<void> {
+  await runPlaywrightWorker("cookie-add", {
+    endpoint: ws,
+    cookies: [cookie],
+    connectTimeoutMs: 30_000,
+  });
+}
+
 /**
  * Read a running browser's cookies for the given URLs over CDP — via Playwright's `context.cookies()`.
  *

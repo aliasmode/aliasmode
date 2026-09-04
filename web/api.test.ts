@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   acceptCloudLegal,
+  addProfileCookie,
   CloudSessionRestoreError,
   cloudSessionContextReady,
   createCloudConnector,
@@ -64,6 +65,23 @@ test("dashboard roster carries health and group metadata while tolerating an old
   expect(legacy.profiles[0]).toMatchObject({ id: "legacy" });
   expect(legacy.healthSources).toEqual([]);
   expect(legacy.groups).toEqual([]);
+});
+
+test("dashboard adds one cookie through a same-origin JSON request", async () => {
+  let input: RequestInfo | URL | undefined;
+  let init: RequestInit | undefined;
+  globalThis.fetch = (async (nextInput: RequestInfo | URL, nextInit?: RequestInit) => {
+    input = nextInput;
+    init = nextInit;
+    return Response.json({ ok: true });
+  }) as unknown as typeof fetch;
+
+  const cookie = { name: "session", value: "private", domain: "example.com", path: "/" };
+  await expect(addProfileCookie("profile/id", cookie)).resolves.toEqual({ ok: true });
+  expect(input).toBe("/ui/api/profiles/profile%2Fid/cookies");
+  expect(init?.method).toBe("POST");
+  expect(init?.headers).toEqual({ "Content-Type": "application/json" });
+  expect(JSON.parse(String(init?.body))).toEqual(cookie);
 });
 
 test("app mode client reads first-launch state", async () => {

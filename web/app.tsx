@@ -3,6 +3,7 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { parsePastedProxy } from "./proxy-input.ts";
+import { THEME_KEY, readThemeChoice, themeCookie, type ThemeChoice } from "./theme.ts";
 import {
   describeDesktopUpdateResult,
   parseDesktopUpdateResult,
@@ -42,6 +43,7 @@ import {
   fetchHealth,
   fetchLogs,
   fetchDiagnose,
+  addProfileCookie,
   openProfile,
   closeProfile,
   raiseProfile,
@@ -226,7 +228,7 @@ const COLUMNS = [
   { key: "tags", label: "Tags", sort: false, width: 140 },
   { key: "proxy", label: "Proxy", sort: true, width: 160 },
   /* Every row action lives here, beside Open/Close — no hover reveal. */
-  { key: "action", label: "Action", sort: false, width: 190 },
+  { key: "action", label: "Action", sort: false, width: 230 },
 ] as const;
 
 /** Width of the always-present select-all checkbox column. */
@@ -235,23 +237,18 @@ const CHECKBOX_COLUMN_WIDTH = 44;
 type ColumnKey = (typeof COLUMNS)[number]["key"];
 type SortKey = ColumnKey | "status";
 
-const THEME_KEY = "aliasmode.shell.theme";
-
 const THEMES = [
   { key: "system", label: "System", icon: "laptop" },
   { key: "light", label: "Light", icon: "sun" },
   { key: "dark", label: "Dark", icon: "moon" },
 ] as const;
 
-type ThemeChoice = (typeof THEMES)[number]["key"];
-
 function readTheme(): ThemeChoice {
-  try {
-    const stored = localStorage.getItem(THEME_KEY);
-    // Light is the out-of-the-box look; Dark and follow-the-OS System are
-    // opt-in from Settings, and whatever is chosen there sticks.
-    return stored === "dark" || stored === "system" ? stored : "light";
-  } catch { return "light"; }
+  let cookies = "";
+  let stored: string | null = null;
+  try { cookies = document.cookie; } catch {}
+  try { stored = localStorage.getItem(THEME_KEY); } catch {}
+  return readThemeChoice(cookies, stored);
 }
 
 const SIDEBAR_KEY = "aliasmode.shell.sidebarCollapsed";
@@ -395,6 +392,7 @@ const ICONS = {
   move: <><path d="M4 20h13a3 3 0 003-3v-6a2 2 0 00-2-2h-7.5a2 2 0 01-1.6-.8L7.6 5.8A2 2 0 006 5H4a2 2 0 00-2 2v11a2 2 0 002 2z" /><path d="M9 14h6M13 11.5l2.5 2.5L13 16.5" /></>,
   raise: <><rect x="8" y="3" width="13" height="13" rx="2" /><path d="M16 16v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-9a2 2 0 012-2h3" /></>,
   key: <><circle cx="8" cy="12" r="4" /><path d="M12 12h9M18 12v3M15.5 12v2.5" /></>,
+  cookie: <><circle cx="12" cy="12" r="9" /><circle cx="8.5" cy="10" r="1" /><circle cx="13.5" cy="15" r="1" /><circle cx="16" cy="9" r="1" /></>,
   more: <><circle cx="6" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="18" cy="12" r="1.4" /></>,
   alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5M12 16.2v.3" /></>,
   warning: <><path d="M10.3 4.2L2.8 17a2 2 0 001.7 3h15a2 2 0 001.7-3L13.7 4.2a2 2 0 00-3.4 0z" /><path d="M12 9.5v4M12 17v.3" /></>,
@@ -966,6 +964,8 @@ const BLANK_FORM = {
   screen: "", customNo: "", username: "", password: "", email: "", emailPassword: "", twofa: "",
 };
 
+const BLANK_COOKIE_FORM = { name: "", value: "", domain: "", path: "/" };
+
 function App() {
   const [profiles, setProfiles] = useState<UiProfile[]>([]);
   const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);
@@ -1045,6 +1045,10 @@ function App() {
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<string | null>(null);
   const [form, setForm] = useState(BLANK_FORM);
+  const [cookieProfile, setCookieProfile] = useState<UiProfile | null>(null);
+  const [cookieForm, setCookieForm] = useState(BLANK_COOKIE_FORM);
+  const [cookieErr, setCookieErr] = useState<string | null>(null);
+  const [cookieSaving, setCookieSaving] = useState(false);
   const [proxyPaste, setProxyPaste] = useState("");
   const [proxyPasteOk, setProxyPasteOk] = useState<string | null>(null);
   // Edit modal + bulk export/update + group rename
@@ -1141,6 +1145,7 @@ function App() {
       if (logView || logErr) { setLogView(null); setLogErr(null); return; }
       if (showUpdate) { setShowUpdate(false); return; }
       if (showBulk) { closeBulk(); return; }
+      if (cookieProfile) { if (!cookieSaving) closeCookie(); return; }
       if (editId) { closeEdit(); return; }
       if (showCreate) closeCreate();
     };
@@ -1917,6 +1922,7 @@ function App() {
   const chooseTheme = (choice: ThemeChoice) => {
     setTheme(choice);
     writeSetting(THEME_KEY, choice);
+    try { document.cookie = themeCookie(choice); } catch {}
   };
   const toggleSidebar = () =>
     setSidebarCollapsed((collapsed) => {
@@ -2020,6 +2026,37 @@ function App() {
       setActionErr(String(e));
     } finally {
       setBusy((b) => ({ ...b, [id]: false }));
+    }
+  };
+
+  const openCookie = (profile: UiProfile) => {
+    setCookieProfile(profile);
+    setCookieForm({ ...BLANK_COOKIE_FORM, domain: profile.platform });
+    setCookieErr(null);
+  };
+  const closeCookie = () => {
+    setCookieProfile(null);
+    setCookieForm(BLANK_COOKIE_FORM);
+    setCookieErr(null);
+  };
+  const setCookieField = (key: keyof typeof BLANK_COOKIE_FORM, value: string) =>
+    setCookieForm((current) => ({ ...current, [key]: value }));
+  const submitCookie = async () => {
+    if (!cookieProfile) return;
+    setCookieSaving(true);
+    setCookieErr(null);
+    try {
+      const result = await addProfileCookie(cookieProfile.id, cookieForm);
+      if (result.ok !== true) {
+        setCookieErr(result.error || "Cookie could not be added.");
+        return;
+      }
+      closeCookie();
+      flash("Cookie added to the open browser.");
+    } catch (error) {
+      setCookieErr(error instanceof Error ? error.message : "Cookie could not be added.");
+    } finally {
+      setCookieSaving(false);
     }
   };
 
@@ -3144,6 +3181,12 @@ function App() {
                           <>
                             <button
                               className="iconbtn tip"
+                              data-tip="Add cookie"
+                              aria-label={`Add a cookie to ${p.name}`}
+                              onClick={() => openCookie(p)}
+                            ><Icon name="cookie" className="sm" /></button>
+                            <button
+                              className="iconbtn tip"
                               data-tip="Bring to front"
                               aria-label="Bring this browser window to the front"
                               disabled={busy[p.id]}
@@ -3641,6 +3684,53 @@ function App() {
           onConfirm={() => void confirmModeSwitch()}
           onCancel={() => { if (!modeBusy) setPendingMode(null); }}
         />
+      )}
+
+      {cookieProfile && (
+        <div className="modal-backdrop">
+          <form
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-cookie-title"
+            onSubmit={(event) => { event.preventDefault(); void submitCookie(); }}
+          >
+            <div className="modal-head" id="add-cookie-title">
+              <Icon name="cookie" />Add cookie<span className="mono muted">{cookieProfile.name}</span>
+              <button type="button" className="modal-close" aria-label="Close" disabled={cookieSaving} onClick={closeCookie}><Icon name="close" className="sm" /></button>
+            </div>
+            <div className="modal-body">
+              {cookieErr && <div className="modal-err"><Icon name="alert" className="sm" />{cookieErr}</div>}
+              <p className="hint">Add one cookie directly to this open browser.</p>
+              <div className="fld-row">
+                <label className="fld grow">
+                  <span>Name</span>
+                  <input autoFocus value={cookieForm.name} onChange={(event) => setCookieField("name", event.target.value)} />
+                </label>
+                <label className="fld grow">
+                  <span>Value</span>
+                  <input type="password" autoComplete="off" value={cookieForm.value} onChange={(event) => setCookieField("value", event.target.value)} />
+                </label>
+              </div>
+              <div className="fld-row">
+                <label className="fld grow">
+                  <span>Domain</span>
+                  <input value={cookieForm.domain} placeholder="example.com" onChange={(event) => setCookieField("domain", event.target.value)} />
+                </label>
+                <label className="fld port">
+                  <span>Path</span>
+                  <input value={cookieForm.path} onChange={(event) => setCookieField("path", event.target.value)} />
+                </label>
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" type="button" disabled={cookieSaving} onClick={closeCookie}>Cancel</button>
+              <button className="btn primary" type="submit" disabled={cookieSaving || !cookieForm.name || !cookieForm.domain.trim() || !cookieForm.path.startsWith("/")}>
+                {cookieSaving ? "Adding…" : "Add cookie"}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {showCreate && (

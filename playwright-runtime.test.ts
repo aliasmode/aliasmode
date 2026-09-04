@@ -220,6 +220,62 @@ test("source worker loads pinned dependencies under Node from PATH", async () =>
   expect(error).toMatchObject({ code: "invalid_request" });
 });
 
+bunAsNodeTest("worker adds exactly one cookie without clearing the live jar", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-cookie-add-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      let added = false;
+      const expected = ${JSON.stringify({
+        name: "session",
+        value: "private-cookie-value",
+        domain: "example.com",
+        path: "/",
+        expires: 4_070_908_800,
+        secure: true,
+        sameSite: "Lax",
+      })};
+      const context = {
+        pages: () => [],
+        async clearCookies() { throw new Error("must not clear existing cookies"); },
+        async addCookies(cookies) {
+          if (cookies.length !== 1 || JSON.stringify(cookies[0]) !== JSON.stringify(expected)) {
+            throw new Error("wrong cookie payload");
+          }
+          added = true;
+        },
+      };
+      export const chromium = { async connectOverCDP() {
+        return {
+          contexts: () => [context],
+          async close() { if (!added) throw new Error("cookie was not added before detach"); },
+        };
+      } };
+    `);
+    await chmod(join(root, "node", "node.exe"), 0o755);
+
+    await expect(runPlaywrightWorker("cookie-add", {
+      endpoint: "ws://browser",
+      cookies: [{
+        name: "session",
+        value: "private-cookie-value",
+        domain: "example.com",
+        path: "/",
+        expires: 4_070_908_800,
+        secure: true,
+        sameSite: "Lax",
+      }],
+      connectTimeoutMs: 2_000,
+    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("installed Playwright storage source uses the supported direct export shape", async () => {
   const module = await import(pathToFileURL(join(import.meta.dir, "node_modules", "playwright-core", "lib", "generated", "storageScriptSource.js")).href);
   expect(typeof module.source).toBe("string");

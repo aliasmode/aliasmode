@@ -31,7 +31,7 @@ import {
 } from "./cloud-profile-editor.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
-import type { FingerprintVerdict, Profile } from "./types.ts";
+import type { FingerprintVerdict, Profile, CookieRecord } from "./types.ts";
 import { importInbox, importBuffers, prepareImportBuffers, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
@@ -48,6 +48,7 @@ import {
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
+import { addBrowserCookie } from "./session.ts";
 import { join, resolve } from "node:path";
 import { readdirSync, readFileSync } from "node:fs";
 
@@ -261,6 +262,23 @@ function rejectUntrustedJsonMutation(req: Request): Response | null {
   return null;
 }
 
+function normalizeCookieDomain(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const input = value.trim().toLowerCase();
+  if (!input || /[\x00-\x20\x7f]/.test(input)) return null;
+  const includeSubdomains = input.startsWith(".");
+  const candidate = includeSubdomains ? input.slice(1) : input;
+  try {
+    const parsed = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate) ? candidate : `https://${candidate}`);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    const hostname = parsed.hostname.toLowerCase();
+    if (!hostname) return null;
+    return includeSubdomains ? `.${hostname}` : hostname;
+  } catch {
+    return null;
+  }
+}
+
 function cloudCloseResponse(result: CloudBrowserCloseResult): Response {
   if (!result.closed) {
     return Response.json(
@@ -405,6 +423,7 @@ export interface UiRuntimeOptions {
   health?: UiHealthMetadata | null;
   timezoneFetch?: FetchLike;
   extensionFetch?: ExtensionFetch;
+  addCookie?: (ws: string, cookie: CookieRecord) => Promise<void>;
   /** Mode whose runtimes were wired when this process started. */
   runtimeMode?: "unconfigured" | "local" | "cloud";
 }
@@ -851,7 +870,7 @@ export async function handleUiRequest(
     (pathname === "/ui/api/profiles/delete" && req.method === "POST") ||
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
-    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise)$/.test(pathname));
+    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies)$/.test(pathname));
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
@@ -1322,6 +1341,72 @@ export async function handleUiRequest(
       return Response.json({ ok: true, updated: store.assignExtension(ids, extId, add) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  const cookieRoute = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/cookies$/);
+  if (cookieRoute && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+
+    let id: string;
+    try {
+      id = decodeURIComponent(cookieRoute[1]!);
+    } catch {
+      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    }
+    if (!isSafeProfileId(id)) {
+      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      const parsed = await req.json();
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return Response.json({ ok: false, error: "invalid cookie request" }, { status: 400 });
+    }
+
+    const name = body.name;
+    const value = body.value;
+    const domain = normalizeCookieDomain(body.domain);
+    const path = body.path === undefined ? "/" : body.path;
+    if (typeof name !== "string" || !name || /[\s\x00-\x1f\x7f;=]/.test(name)) {
+      return Response.json({ ok: false, error: "cookie name is invalid" }, { status: 400 });
+    }
+    if (typeof value !== "string" || /[\x00-\x1f\x7f;]/.test(value)) {
+      return Response.json({ ok: false, error: "cookie value is invalid" }, { status: 400 });
+    }
+    if (!domain) {
+      return Response.json({ ok: false, error: "cookie domain is invalid" }, { status: 400 });
+    }
+    if (typeof path !== "string" || !path.startsWith("/")) {
+      return Response.json({ ok: false, error: "cookie path must start with /" }, { status: 400 });
+    }
+
+    if (!await launcher.certifiedActive(id).catch(() => false)) {
+      return Response.json({ ok: false, error: "profile browser is not open" }, { status: 409 });
+    }
+    const launch = store.getLaunch(id);
+    if (!launch?.ws) {
+      return Response.json({ ok: false, error: "profile browser is not open" }, { status: 409 });
+    }
+
+    const cookie: CookieRecord = {
+      name,
+      value,
+      domain,
+      path,
+      expires: Math.floor(Date.now() / 1_000) + 31_536_000,
+      secure: true,
+      sameSite: "Lax",
+    };
+    try {
+      await (options.addCookie ?? addBrowserCookie)(launch.ws, cookie);
+      return Response.json({ ok: true });
+    } catch {
+      return Response.json({ ok: false, error: "cookie could not be added" }, { status: 500 });
     }
   }
 

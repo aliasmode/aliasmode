@@ -224,6 +224,26 @@ test("running profile rows expose Bring to front in Local and Cloud mode", () =>
   expect(runningBranch).not.toContain("isCloudMode");
 });
 
+test("running profile rows expose live cookie addition in every mode", () => {
+  expect(app).toContain('data-tip="Add cookie"');
+  expect(app).toContain('aria-label={`Add a cookie to ${p.name}`}');
+  expect(app).toContain('onClick={() => openCookie(p)}');
+
+  const runningBranch = app.slice(app.indexOf("{p.running ? ("), app.indexOf(") : p.mobilePersona ? ("));
+  expect(runningBranch).toContain("Add cookie");
+  expect(runningBranch).not.toContain("isCloudMode");
+
+  expect(app).toContain('aria-labelledby="add-cookie-title"');
+  expect(app).toContain('<span>Name</span>');
+  expect(app).toContain('<span>Value</span>');
+  expect(app).toContain('<span>Domain</span>');
+  expect(app).toContain('<span>Path</span>');
+  expect(app).toContain('type="password" autoComplete="off"');
+  expect(app).toContain("await addProfileCookie(cookieProfile.id, cookieForm);");
+  expect(app).toContain('flash("Cookie added to the open browser.");');
+  expect(app).not.toContain('className="modal-backdrop" onClick={closeCookie}');
+});
+
 test("Cloud rows expose Edit and Convert device only with effective Edit permission", () => {
   // Running rows are editable (live edit through the local cache); only rows
   // locked by ANOTHER session stay read-only.
@@ -448,7 +468,7 @@ test("the roster keeps only the columns that matter and stays compact", () => {
     expect(app).not.toContain(`key: "${key}"`);
   }
   expect(app).toContain('{ key: "proxy", label: "Proxy", sort: true, width: 160 }');
-  expect(app).toContain('{ key: "action", label: "Action", sort: false, width: 190 }');
+  expect(app).toContain('{ key: "action", label: "Action", sort: false, width: 230 }');
   expect(app).not.toContain("healthFilter");
 });
 
@@ -578,8 +598,10 @@ test("the dark theme is a token swap, and native controls follow it", () => {
   // Two near-black brand tiles would vanish on a dark row.
   expect(styles).toContain(':root[data-theme="dark"] .platform-pill .glyph.pm-x');
   // Light is the out-of-the-box default; Dark and follow-the-OS System are
-  // opt-in from Settings and persist once chosen.
-  expect(app).toContain('return stored === "dark" || stored === "system" ? stored : "light";');
+  // opt-in from Settings. A host-only cookie survives the desktop app's changing port.
+  expect(app).toContain('import { THEME_KEY, readThemeChoice, themeCookie, type ThemeChoice } from "./theme.ts";');
+  expect(app).toContain("return readThemeChoice(cookies, stored);");
+  expect(app).toContain("document.cookie = themeCookie(choice);");
   // The app resolves "system" itself rather than duplicating the palette.
   expect(app).toContain('window.matchMedia("(prefers-color-scheme: dark)")');
   expect(app).toContain("document.documentElement.dataset.theme =");

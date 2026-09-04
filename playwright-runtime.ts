@@ -26,6 +26,7 @@ export type PlaywrightWorkerOperation =
   | "ensure-cookies"
   | "session-capture"
   | "session-restore"
+  | "cookie-add"
   | "cookie-harvest"
   | "diagnostics";
 

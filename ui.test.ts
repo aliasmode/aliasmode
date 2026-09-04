@@ -186,6 +186,125 @@ test("open/close routes call the launcher", async () => {
   s.close();
 });
 
+test("cookie route adds one persistent cookie to an active Cloud browser without changing imports", async () => {
+  const s = store();
+  const importedCookies = structuredClone(s.getProfile("k1d0cd11")!.cookies);
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://live-browser", startedAt: 123 });
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cookie-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const calls: Array<{ ws: string; cookie: any }> = [];
+  const startedAt = Math.floor(Date.now() / 1_000);
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://x" },
+      body: JSON.stringify({
+        name: "session",
+        value: "private-cookie-value",
+        domain: "https://Example.com/account",
+        path: "/account",
+      }),
+    }),
+    { certifiedActive: async () => true } as any,
+    s,
+    null,
+    {
+      appConfig,
+      cloudBrowser: {} as any,
+      addCookie: async (ws: string, cookie: any) => { calls.push({ ws, cookie }); },
+    } as any,
+  );
+
+  expect(response!.status).toBe(200);
+  expect(await response!.json()).toEqual({ ok: true });
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({
+    ws: "ws://live-browser",
+    cookie: {
+      name: "session",
+      value: "private-cookie-value",
+      domain: "example.com",
+      path: "/account",
+      secure: true,
+      sameSite: "Lax",
+    },
+  });
+  expect(calls[0]!.cookie.expires).toBeGreaterThanOrEqual(startedAt + 31_536_000);
+  expect(calls[0]!.cookie.expires).toBeLessThanOrEqual(Math.floor(Date.now() / 1_000) + 31_536_000);
+  expect(s.getProfile("k1d0cd11")!.cookies).toEqual(importedCookies);
+  s.close();
+});
+
+test("cookie route rejects untrusted, malformed, and closed-browser requests", async () => {
+  const s = store();
+  let certifications = 0;
+  let writes = 0;
+  const launcher = { certifiedActive: async () => { certifications++; return false; } } as any;
+  const options = { addCookie: async () => { writes++; } } as any;
+
+  const untrusted = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+    method: "POST",
+    headers: { "content-type": "text/plain", origin: "https://outside.invalid" },
+    body: "{}",
+  }), launcher, s, null, options);
+  expect(untrusted!.status).toBe(415);
+
+  const crossOrigin = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://outside.invalid" },
+    body: JSON.stringify({ name: "session", value: "value", domain: "example.com", path: "/" }),
+  }), launcher, s, null, options);
+  expect(crossOrigin!.status).toBe(403);
+
+  for (const body of [
+    { name: "", value: "value", domain: "example.com", path: "/" },
+    { name: "bad name", value: "value", domain: "example.com", path: "/" },
+    { name: "bad=name", value: "value", domain: "example.com", path: "/" },
+    { name: "name", value: "bad;value", domain: "example.com", path: "/" },
+    { name: "name", value: "value", domain: "", path: "/" },
+    { name: "name", value: "value", domain: "example.com", path: "account" },
+  ]) {
+    const malformed = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }), launcher, s, null, options);
+    expect(malformed!.status).toBe(400);
+  }
+
+  const closed = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "session", value: "value", domain: "example.com", path: "/" }),
+  }), launcher, s, null, options);
+  expect(closed!.status).toBe(409);
+  expect(await closed!.json()).toEqual({ ok: false, error: "profile browser is not open" });
+  expect(certifications).toBe(1);
+  expect(writes).toBe(0);
+  s.close();
+});
+
+test("cookie route never returns the cookie value or a raw worker error", async () => {
+  const s = store();
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://live-browser", startedAt: 123 });
+  const secret = "private-cookie-value";
+  const response = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "session", value: secret, domain: "example.com", path: "/" }),
+  }), { certifiedActive: async () => true } as any, s, null, {
+    addCookie: async () => { throw new Error(`worker rejected ${secret}`); },
+  } as any);
+  const body = await response!.text();
+
+  expect(response!.status).toBe(500);
+  expect(body).toContain("cookie could not be added");
+  expect(body).not.toContain(secret);
+  expect(body).not.toContain("worker rejected");
+  s.close();
+});
+
 test("raise route brings Local and Cloud browsers to the front", async () => {
   const s = store();
   const calls: string[] = [];

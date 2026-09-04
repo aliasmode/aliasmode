@@ -372,6 +372,23 @@ export async function fetchProfiles(): Promise<UiRoster> {
   };
 }
 
+export interface ProfileCookieInput {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+}
+
+export async function addProfileCookie(id: string, cookie: ProfileCookieInput): Promise<any> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/cookies`;
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cookie),
+  });
+  return apiJson(response, path);
+}
+
 export const openProfile = (id: string, force = false) =>
   post(`/ui/api/profiles/${encodeURIComponent(id)}/open${force ? "?force=1" : ""}`);
 export const closeProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/close`);

@@ -967,6 +967,10 @@ async function operate(chromium, operation, payload) {
   return withBrowser(chromium, endpoint, timeout, operation, async (browser, context) => {
     if (operation === "session-capture") return captureSession(browser, payload);
     if (operation === "session-restore") return restoreSession(browser, context, payload);
+    if (operation === "cookie-add") {
+      await context.addCookies(payload.cookies);
+      return null;
+    }
     if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
     if (operation === "navigate") {
       await navigatePages(context, payload.urls, !!payload.replacePages);

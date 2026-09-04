@@ -30,6 +30,7 @@
       "nsis": {
         "compression": "zlib",
         "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
         "installerHooks": "windows/installer-hooks.nsh"
       }
     }

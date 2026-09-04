@@ -16,7 +16,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
       createUpdaterArtifacts: boolean | string;
       windows: {
         webviewInstallMode: { type: string };
-        nsis: { compression: string; installMode: string };
+        nsis: { compression: string; installMode: string; installerIcon: string };
       };
     };
     plugins: { updater: { pubkey: string; windows: { installMode: string } } };
@@ -136,6 +136,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(tauriConfig.bundle.windows.webviewInstallMode.type).toBe("offlineInstaller");
   expect(tauriConfig.bundle.windows.nsis.compression).toBe("zlib");
   expect(tauriConfig.bundle.windows.nsis.installMode).toBe("currentUser");
+  expect(tauriConfig.bundle.windows.nsis.installerIcon).toBe("icons/icon.ico");
   expect(tauriConfig.bundle.createUpdaterArtifacts).toBe(true);
   expect(updaterConfig.bundle.createUpdaterArtifacts).toBe(true);
   expect(updaterConfig.bundle.windows.webviewInstallMode.type).toBe("downloadBootstrapper");
