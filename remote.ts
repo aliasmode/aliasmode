@@ -85,7 +85,7 @@ export interface RemoteDeps {
   log?: (msg: string) => void;
   /** Heartbeat interval; 0 disables the auto timer (tests drive heartbeatOnce). */
   heartbeatMs?: number;
-  /** Fast ordered-tab and Telegram auth checkpoint interval. Defaults to 3s; 0 disables it. */
+  /** Optional fast ordered-tab and Telegram auth checkpoint interval; 0 disables it. */
   sessionSyncMs?: number;
   /** Lease length the hub enforces; a wall-clock gap beyond this between heartbeats means a suspend
    *  (laptop sleep) during which our lock likely lapsed. Defaults to the hub's 5-min lease. */
@@ -197,9 +197,7 @@ export class RemoteCoordinator {
     this.retainedCleanupRetryMs = Math.max(1, d.retainedCleanupRetryMs ?? DEFAULT_RETAINED_CLEANUP_RETRY_MS);
     this.retainedCleanupRenewMs = Math.max(1, d.retainedCleanupRenewMs ?? DEFAULT_RETAINED_CLEANUP_RENEW_MS);
     this.retainedCleanupAttemptMs = Math.max(1, d.retainedCleanupAttemptMs ?? DEFAULT_RETAINED_CLEANUP_ATTEMPT_MS);
-    // Test harnesses conventionally set heartbeatMs=0 to disable background work; preserve that
-    // behavior unless they explicitly opt into the fast checkpoint.
-    this.sessionSyncMs = d.sessionSyncMs ?? (d.heartbeatMs === 0 ? 0 : 3_000);
+    this.sessionSyncMs = d.sessionSyncMs ?? 0;
     this.nowMs = d.nowMs ?? (() => Date.now());
   }
 

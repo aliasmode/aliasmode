@@ -1067,6 +1067,29 @@ test("Cloud target observer reports page creates, navigations, and destruction",
   }
 });
 
+test("Cloud production timers do not arm the fast dirty monitor", async () => {
+  const state = setup();
+  const intervals: number[] = [];
+  const options = {
+    ...(state.coordinator as any).options,
+    heartbeatMs: 60_000,
+    dirtyMonitorMs: undefined,
+    setIntervalFn: (_fn: () => void, ms: number) => {
+      intervals.push(ms);
+      return intervals.length;
+    },
+    clearIntervalFn: () => {},
+  };
+  const coordinator = new CloudBrowserCoordinator(options);
+
+  expect((await coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(intervals).toEqual([60_000]);
+
+  await coordinator.close("profile1");
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud dirty monitor coalesces storage changes and captures target changes without Cloud calls", async () => {
   const state = setup();
   const storageDirty: Array<() => void> = [];

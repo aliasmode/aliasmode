@@ -124,6 +124,7 @@ test("Cloud editor save forwards the version once and preserves session and uned
   (authoritative.payload as any).futureTopLevel = { retained: true };
   (authoritative.payload.profile as any).futureProfileField = "retained";
   (authoritative.payload.profile as any).proxyError = "legacy proxy error";
+  (authoritative.payload.profile as any).platformOs = "";
   (authoritative.payload.session as any).futureSessionField = "retained";
   let updateCalls = 0;
   let updateRequest: any;
@@ -170,6 +171,7 @@ test("Cloud editor save forwards the version once and preserves session and uned
     futureProfileField: "retained",
   });
   expect(updateRequest.payload.profile.proxyError).toBeUndefined();
+  expect("platformOs" in updateRequest.payload.profile).toBe(false);
   expect(updateRequest.payload.futureTopLevel).toEqual({ retained: true });
   expect(updateRequest.payload.session).toEqual(authoritative.payload.session);
   expect(updateRequest.payload.session.futureSessionField).toBe("retained");

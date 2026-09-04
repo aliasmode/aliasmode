@@ -38,6 +38,10 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain('invoke("restart_after_mode_change")');
 });
 
+test("dashboard offers HTTPS proxies in both profile forms", () => {
+  expect(app.match(/<option value="https">https<\/option>/g)).toHaveLength(2);
+});
+
 test("dashboard shows curated desktop update notes and live progress", () => {
   expect(app).toContain('import { Channel } from "@tauri-apps/api/core"');
   expect(app).toContain('type DesktopUpdateStatus =');

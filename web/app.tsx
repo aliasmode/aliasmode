@@ -3706,6 +3706,7 @@ function App() {
                   <span>Proxy type</span>
                   <select value={form.proxyType} onChange={(e) => setF("proxyType", e.target.value)}>
                     <option value="http">http</option>
+                    <option value="https">https</option>
                     <option value="socks5">socks5</option>
                   </select>
                 </label>
@@ -3822,6 +3823,7 @@ function App() {
                       <span>Proxy type</span>
                       <select value={editForm.proxyType ?? "http"} onChange={(e) => setEF("proxyType", e.target.value)}>
                         <option value="http">http</option>
+                        <option value="https">https</option>
                         <option value="socks5">socks5</option>
                       </select>
                     </label>

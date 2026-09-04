@@ -120,7 +120,7 @@ export interface CloudBrowserOptions {
   /** Restore the bundle and open startup pages over ONE CDP attach, then detach. */
   applySession: (endpoint: string, bundle: string, urls: readonly string[]) => Promise<void>;
   heartbeatMs?: number;
-  /** Target/storage dirty polling interval; 0 disables event-driven checkpoints. */
+  /** Target/storage dirty polling interval; disabled by default, and 0 keeps it disabled. */
   dirtyMonitorMs?: number;
   checkpointDebounceMs?: number;
   checkpointMinIntervalMs?: number;
@@ -136,7 +136,6 @@ const PENDING_SESSION_BASE_VERSION = -1;
 const PROXY_BACKFILL_BATCH = 8;
 /** How long a failed backfill fetch stays quiet before it is retried. */
 const PROXY_BACKFILL_RETRY_MS = 300_000;
-const DEFAULT_DIRTY_MONITOR_MS = 2_500;
 const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 1_200;
 const DEFAULT_CHECKPOINT_MIN_INTERVAL_MS = 3_000;
 const CLOUD_PROFILE_OPEN_ERROR =
@@ -321,7 +320,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
   constructor(private readonly options: CloudBrowserOptions) {
     this.heartbeatMs = Math.max(0, options.heartbeatMs ?? 60_000);
-    this.dirtyMonitorMs = Math.max(0, options.dirtyMonitorMs ?? DEFAULT_DIRTY_MONITOR_MS);
+    this.dirtyMonitorMs = Math.max(0, options.dirtyMonitorMs ?? 0);
     this.checkpointDebounceMs = Math.max(0, options.checkpointDebounceMs ?? DEFAULT_CHECKPOINT_DEBOUNCE_MS);
     this.checkpointMinIntervalMs = Math.max(0, options.checkpointMinIntervalMs ?? DEFAULT_CHECKPOINT_MIN_INTERVAL_MS);
     this.log = options.log ?? (() => {});

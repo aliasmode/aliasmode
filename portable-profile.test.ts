@@ -63,6 +63,24 @@ test("portable profile codec round-trips profile secrets and normalized session 
   expect(JSON.parse(decoded.sessionBundle)).toEqual(encoded.session);
 });
 
+test("portable profile codec omits an unknown legacy platform from the wire payload", () => {
+  for (const platformOs of [undefined, ""]) {
+    const source = profile();
+    source.platformOs = platformOs;
+    const encoded = encodePortableProfile(source);
+    expect("platformOs" in encoded.profile).toBe(false);
+    expect(decodePortableProfile(encoded).profile.platformOs).toBe("");
+  }
+});
+
+test("portable profile codec preserves an explicit platform", () => {
+  const source = profile();
+  source.platformOs = "windows";
+  const encoded = encodePortableProfile(source);
+  expect(encoded.profile.platformOs).toBe("windows");
+  expect(decodePortableProfile(encoded).profile.platformOs).toBe("windows");
+});
+
 test("portable profile codec keeps legacy sessions without a tabs field compatible", () => {
   const encoded = encodePortableProfile(profile(), JSON.stringify({ cookies: [], origins: [] }));
   expect("tabs" in encoded.session).toBe(false);

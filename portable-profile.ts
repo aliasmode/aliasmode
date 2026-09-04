@@ -53,7 +53,7 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string):
       screenWidth: profile.screenWidth,
       screenHeight: profile.screenHeight,
       fingerprintSeed: profile.fingerprintSeed,
-      platformOs: profile.platformOs ?? "",
+      ...(profile.platformOs ? { platformOs: profile.platformOs } : {}),
     },
     session,
   };

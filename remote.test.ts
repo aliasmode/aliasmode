@@ -935,8 +935,8 @@ test("managed Close completes on a version conflict because the hub already has 
   expect(hub.locks.has("k1d0cd11")).toBe(false);
 });
 
-test("fast session checkpoint timer is armed for every writer-owned profile", async () => {
-  const openWithPlatform = async (platform: string, bundle?: string) => {
+test("fast session checkpoint timer is opt-in for every writer-owned profile", async () => {
+  const openWithPlatform = async (platform: string, bundle?: string, sessionSyncMs?: number) => {
     const hub = fakeHub();
     const getProfile = hub.getProfile;
     hub.getProfile = async (id: string) => ({ ...(await getProfile(id)), platform });
@@ -959,7 +959,7 @@ test("fast session checkpoint timer is armed for every writer-owned profile", as
       readSession: async () => '{"cookies":[],"origins":[]}',
       writeSession: async () => {},
       heartbeatMs: 120_000,
-      sessionSyncMs: 3_000,
+      ...(sessionSyncMs === undefined ? {} : { sessionSyncMs }),
       setIntervalFn: (_fn, ms) => { intervals.push(ms); return intervals.length; },
       clearIntervalFn: () => {},
     });
@@ -968,12 +968,13 @@ test("fast session checkpoint timer is armed for every writer-owned profile", as
     return intervals;
   };
 
-  expect(await openWithPlatform("x.com")).toEqual([3_000, 120_000]);
-  expect(await openWithPlatform("linkedin.com")).toEqual([3_000, 120_000]);
-  expect(await openWithPlatform("web.telegram.org")).toEqual([3_000, 120_000]);
+  expect(await openWithPlatform("x.com")).toEqual([120_000]);
+  expect(await openWithPlatform("x.com", undefined, 3_000)).toEqual([3_000, 120_000]);
+  expect(await openWithPlatform("linkedin.com", undefined, 3_000)).toEqual([3_000, 120_000]);
+  expect(await openWithPlatform("web.telegram.org", undefined, 3_000)).toEqual([3_000, 120_000]);
   expect(await openWithPlatform("", JSON.stringify({
     cookies: [], origins: [{ origin: "https://web.telegram.org", localStorage: [{ name: "theme", value: "dark" }] }],
-  }))).toEqual([3_000, 120_000]);
+  }), 3_000)).toEqual([3_000, 120_000]);
 });
 
 test("a failed launch attempts stop even without a durable row before releasing", async () => {

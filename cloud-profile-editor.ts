@@ -182,6 +182,7 @@ export class CloudProfileEditor {
       ...encoded.profile,
     };
     if (!("proxyError" in encoded.profile)) delete encodedProfile.proxyError;
+    if (!("platformOs" in encoded.profile)) delete encodedProfile.platformOs;
     const payload = {
       ...authoritative.payload,
       ...encoded,
