@@ -766,7 +766,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         origins: new Set(captureSeed.origins),
         ...(captureSeed.telegramClient ? { telegramClient: captureSeed.telegramClient } : {}),
       });
-      if (!navigationWarning) this.options.launcher.recordCloudSession(profileId, signature);
+      if (!navigationWarning) this.recordCloudSessionSignature(profileId, signature);
 
       // Startup navigation already happened inside the single restore attach above.
       this.diagnosticEvents.record("open_running");
@@ -1226,6 +1226,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
   }
 
+  private recordCloudSessionSignature(profileId: string, signature: string): void {
+    try {
+      this.options.launcher.recordCloudSession(profileId, signature);
+    } catch {
+      // The durable Cloud checkpoint still owns recovery if this optional stamp fails.
+      this.log(`${profileId}: native session marker unavailable; keeping Cloud lifecycle active`);
+    }
+  }
+
   private checkpointOpen(
     open: PendingOpenSession,
     queue: PendingSyncQueue,
@@ -1243,7 +1252,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const signature = sessionBundleSignature(sessionBundle);
     const prior = this.checkpointSignatures.get(open.profileId);
     if (prior?.registrationId === open.registrationId && prior.signature === signature) {
-      this.options.launcher.recordCloudSession(open.profileId, signature);
+      this.recordCloudSessionSignature(open.profileId, signature);
       this.diagnosticEvents.record("checkpoint_unchanged");
       return "unchanged";
     }
@@ -1258,7 +1267,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const state = this.checkpointState(open, queue);
     state.signature = signature;
     this.checkpointSignatures.set(open.profileId, state);
-    this.options.launcher.recordCloudSession(open.profileId, signature);
+    this.recordCloudSessionSignature(open.profileId, signature);
     this.diagnosticEvents.record("checkpoint_saved");
     return "saved";
   }

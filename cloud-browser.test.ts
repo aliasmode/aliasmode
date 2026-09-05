@@ -554,6 +554,31 @@ test("Cloud failed portable restore cannot leave a trusted native-session stamp"
   state.store.close();
 });
 
+test("Cloud marker write failures do not stop a restored browser or prevent close", async () => {
+  const state = setup();
+  const options = (state.coordinator as any).options;
+  options.launcher.recordCloudSession = (_profileId: string, signature: string | null) => {
+    if (signature !== null) throw new Error("marker is locked");
+  };
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.events).not.toContain("stop");
+  expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud refuses to replace disk state when its old marker cannot be invalidated", async () => {
+  const state = setup();
+  const options = (state.coordinator as any).options;
+  options.launcher.recordCloudSession = () => { throw new Error("marker is locked"); };
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(false);
+  expect(state.startCalls()).toBe(0);
+  expect(state.restoreEndpoints).toEqual([]);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud browser uses the endpoint from exact identity verification", async () => {
   const state = setup({
     verifyWebSockets: ["ws://verified-before-restore", "ws://verified-before-restore"],
