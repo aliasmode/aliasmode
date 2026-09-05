@@ -1301,9 +1301,11 @@ test("applySessionToEndpoint replaces stale pages and attempts every ordered dup
   const extraBlank = page("about:blank");
   const firstRun = page("chrome://ungoogled-first-run/");
   const newTab = page("chrome://newtab/");
+  const newTabPage = page("chrome://new-tab-page/");
+  const thirdPartyNewTabPage = page("chrome://new-tab-page-third-party/");
   const settings = page("chrome://settings/privacy");
   const card = page("http://127.0.0.1:50400/card?id=profile1");
-  const pages = [stale, reusableBlank, extraBlank, firstRun, newTab, settings, card];
+  const pages = [stale, reusableBlank, extraBlank, firstRun, newTab, newTabPage, thirdPartyNewTabPage, settings, card];
   const context = {
     pages: () => pages,
     async newPage() {
@@ -1329,6 +1331,8 @@ test("applySessionToEndpoint replaces stale pages and attempts every ordered dup
   expect(closed.filter((url) => url === "about:blank")).toHaveLength(1);
   expect(closed).toContain("chrome://ungoogled-first-run/");
   expect(closed).toContain("chrome://newtab/");
+  expect(closed).toContain("chrome://new-tab-page/");
+  expect(closed).toContain("chrome://new-tab-page-third-party/");
   expect(closed).not.toContain("chrome://settings/privacy");
   expect(closed).not.toContain("http://127.0.0.1:50400/card?id=profile1");
   expect(closed.at(-1)).toBe("browser");
@@ -1406,3 +1410,30 @@ test("applySessionToEndpoint with an empty bundle navigates without cookie work"
   });
   expect(events).toEqual(["connect", "goto:https://x.com/home", "close"]);
 });
+
+for (const startupTabUrl of [
+  "chrome://newtab/",
+  "chrome://new-tab-page/",
+  "chrome://new-tab-page-third-party/",
+]) {
+  test(`applySessionToEndpoint reuses ${startupTabUrl}`, async () => {
+    const events: string[] = [];
+    const context = {
+      pages: () => [{
+        url: () => startupTabUrl,
+        async goto(url: string) { events.push(`goto:${url}`); },
+      }],
+      async newPage() { events.push("newPage"); throw new Error("startup page was not reused"); },
+    };
+
+    await applySessionToEndpoint("ws://verified-browser", JSON.stringify({ cookies: [], origins: [] }), ["https://x.com/home"], {
+      sleep: async () => {},
+      async connect() {
+        events.push("connect");
+        return { contexts: () => [context], async close() { events.push("close"); } };
+      },
+    });
+
+    expect(events).toEqual(["connect", "goto:https://x.com/home", "close"]);
+  });
+}

@@ -118,7 +118,11 @@ const SESSION_URLS = [
 ];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
-const CHROME_NEW_TAB_URL = "chrome://newtab/";
+const INTERNAL_NEW_TAB_URLS = new Set([
+  "chrome://newtab/",
+  "chrome://new-tab-page/",
+  "chrome://new-tab-page-third-party/",
+]);
 const LINKEDIN_DEVICE_COOKIES = new Set(["bcookie", "bscookie", "li_rm"]);
 const TELEGRAM_AUTH_INDEXEDDB_RULES = [
   { databaseName: "tt-passcode", stores: ["store"], presence: [{ stores: ["store"], allKeys: ["sessionEncrypted", "globalEncrypted"] }] },
@@ -675,6 +679,10 @@ async function captureSession(browser, payload) {
   }
 }
 
+function isInternalNewTabUrl(url) {
+  return INTERNAL_NEW_TAB_URLS.has(url);
+}
+
 async function navigatePages(context, urls, replacePages = false) {
   const targets = (Array.isArray(urls) ? urls : []).map(canonicalUserPageUrl).filter(Boolean);
   const existing = [...context.pages()];
@@ -684,7 +692,7 @@ async function navigatePages(context, urls, replacePages = false) {
   let blank = existing.find((page) => {
     try { return page.url() === "about:blank"; } catch { return false; }
   }) || existing.find((page) => {
-    try { return page.url() === CHROME_NEW_TAB_URL; } catch { return false; }
+    try { return isInternalNewTabUrl(page.url()); } catch { return false; }
   }) || existing.find((page) => {
     try { return page.url() === UNGOOGLED_FIRST_RUN_URL; } catch { return false; }
   });
@@ -698,7 +706,7 @@ async function navigatePages(context, urls, replacePages = false) {
       try { url = page.url(); } catch {}
       const disposable = canonicalUserPageUrl(url) !== undefined
         || (url === UNGOOGLED_FIRST_RUN_URL && page !== blank)
-        || (url === CHROME_NEW_TAB_URL && page !== blank)
+        || (isInternalNewTabUrl(url) && page !== blank)
         || (url === "about:blank" && page !== blank);
       if (!disposable) continue;
       try { await page.close(); } catch (error) { firstError ??= error; }

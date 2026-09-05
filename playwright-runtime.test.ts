@@ -776,9 +776,11 @@ bunAsNodeTest("worker replaces stale pages and attempts every restored tab after
       const extraBlank = makePage("about:blank", "extra-blank");
       const firstRun = makePage("chrome://ungoogled-first-run/", "first-run");
       const newTab = makePage("chrome://newtab/", "new-tab");
+      const newTabPage = makePage("chrome://new-tab-page/", "new-tab-page");
+      const thirdPartyNewTabPage = makePage("chrome://new-tab-page-third-party/", "new-tab-page-third-party");
       const settings = makePage("chrome://settings/privacy", "settings");
       const card = makePage("http://127.0.0.1:50400/card?id=profile1", "card");
-      const pages = [stale, blank, extraBlank, firstRun, newTab, settings, card];
+      const pages = [stale, blank, extraBlank, firstRun, newTab, newTabPage, thirdPartyNewTabPage, settings, card];
       const context = {
         pages: () => pages,
         async newPage() { const page = makePage("about:blank", "created"); pages.push(page); return page; },
@@ -808,6 +810,8 @@ bunAsNodeTest("worker replaces stale pages and attempts every restored tab after
     expect(events).toContain("close:extra-blank");
     expect(events).toContain("close:first-run");
     expect(events).toContain("close:new-tab");
+    expect(events).toContain("close:new-tab-page");
+    expect(events).toContain("close:new-tab-page-third-party");
     expect(events).not.toContain("close:settings");
     expect(events).not.toContain("close:card");
     expect(events.at(-1)).toBe("detach");
@@ -842,17 +846,23 @@ bunAsNodeTest("worker reuses startup pages and removes only the exact first-run 
         async goto(url) { await log("goto:restored:" + url); },
         async close() { await log("close:restored"); },
       };
-      const newTab = {
-        url: () => "chrome://newtab/",
-        async goto(url) { await log("goto:new-tab:" + url); },
-        async close() { await log("close:new-tab"); },
-      };
       export const chromium = { async connectOverCDP(endpoint) {
+        const newTabUrls = {
+          "ws://new-tab": "chrome://newtab/",
+          "ws://new-tab-page": "chrome://new-tab-page/",
+          "ws://new-tab-page-third-party": "chrome://new-tab-page-third-party/",
+        };
+        const newTabUrl = newTabUrls[endpoint];
+        const newTab = newTabUrl && {
+          url: () => newTabUrl,
+          async goto(url) { await log("goto:" + newTabUrl + ":" + url); },
+          async close() { await log("close:" + newTabUrl); },
+        };
         const pages = endpoint === "ws://restored"
           ? [restored, firstRun, settings]
           : endpoint === "ws://first-run-only"
             ? [firstRun]
-            : endpoint === "ws://new-tab"
+            : newTab
               ? [newTab, settings]
               : [firstRun, settings];
         const context = {
@@ -881,10 +891,16 @@ bunAsNodeTest("worker reuses startup pages and removes only the exact first-run 
       urls: [],
     }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
 
-    await expect(runPlaywrightWorker("navigate", {
-      endpoint: "ws://new-tab",
-      urls: ["https://x.com/home"],
-    }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    for (const [endpoint, startupTabUrl] of [
+      ["ws://new-tab", "chrome://newtab/"],
+      ["ws://new-tab-page", "chrome://new-tab-page/"],
+      ["ws://new-tab-page-third-party", "chrome://new-tab-page-third-party/"],
+    ]) {
+      await expect(runPlaywrightWorker("navigate", {
+        endpoint,
+        urls: ["https://x.com/home"],
+      }, { runtimeRoot: root, timeoutMs: 5_000 })).resolves.toBeNull();
+    }
 
     expect((await Bun.file(join(root, "events.log")).text()).trim().split("\n")).toEqual([
       "goto:first-run:https://x.com/home",
@@ -893,7 +909,11 @@ bunAsNodeTest("worker reuses startup pages and removes only the exact first-run 
       "detach",
       "goto:first-run:about:blank",
       "detach",
-      "goto:new-tab:https://x.com/home",
+      "goto:chrome://newtab/:https://x.com/home",
+      "detach",
+      "goto:chrome://new-tab-page/:https://x.com/home",
+      "detach",
+      "goto:chrome://new-tab-page-third-party/:https://x.com/home",
       "detach",
     ]);
   } finally {

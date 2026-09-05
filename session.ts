@@ -28,7 +28,11 @@ const SESSION_URLS = [
 const SESSION_HOSTS = [...new Set(SESSION_URLS.map((url) => new URL(url).hostname))];
 const TELEGRAM_ORIGIN = "https://web.telegram.org";
 const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
-const CHROME_NEW_TAB_URL = "chrome://newtab/";
+const INTERNAL_NEW_TAB_URLS = new Set([
+  "chrome://newtab/",
+  "chrome://new-tab-page/",
+  "chrome://new-tab-page-third-party/",
+]);
 const SESSION_CAPTURE_TIMEOUT_MS = 45_000;
 const SESSION_WRITE_TIMEOUT_MS = 240_000;
 const SESSION_CONNECT_TIMEOUT_MS = 30_000;
@@ -1337,6 +1341,10 @@ function isSessionBundleEmpty(parsed: NormalizedSessionBundle): boolean {
 }
 
 /** Replace stale normal pages while keeping one blank tab and AliasMode-owned pages. */
+function isInternalNewTabUrl(url: string): boolean {
+  return INTERNAL_NEW_TAB_URLS.has(url);
+}
+
 async function restorePortableTabs(context: any, urls: readonly string[]): Promise<void> {
   const targets = urls
     .map(canonicalUserPageUrl)
@@ -1345,7 +1353,7 @@ async function restorePortableTabs(context: any, urls: readonly string[]): Promi
   let blank = existing.find((page: any) => {
     try { return page.url() === "about:blank"; } catch { return false; }
   }) ?? existing.find((page: any) => {
-    try { return page.url() === CHROME_NEW_TAB_URL; } catch { return false; }
+    try { return isInternalNewTabUrl(page.url()); } catch { return false; }
   }) ?? existing.find((page: any) => {
     try { return page.url() === UNGOOGLED_FIRST_RUN_URL; } catch { return false; }
   });
@@ -1357,7 +1365,7 @@ async function restorePortableTabs(context: any, urls: readonly string[]): Promi
     try { url = page.url(); } catch {}
     const disposable = canonicalUserPageUrl(url) !== null
       || (url === UNGOOGLED_FIRST_RUN_URL && page !== blank)
-      || (url === CHROME_NEW_TAB_URL && page !== blank)
+      || (isInternalNewTabUrl(url) && page !== blank)
       || (url === "about:blank" && page !== blank);
     if (!disposable) continue;
     try { await page.close(); } catch (error) { firstError ??= error; }
