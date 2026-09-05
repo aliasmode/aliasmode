@@ -357,7 +357,7 @@ test("the custom NO. editor is Local-only and digits-only", () => {
   expect(app).toContain('setEF("customNo", e.target.value.replace(/\\D/g, "").slice(0, MAX_CUSTOM_NO))');
   // Cloud profiles round-trip through the portable-profile contract, which has
   // no custom NO. field — so it is never offered or sent in Cloud mode.
-  expect(app).toContain('...(!isCloudMode ? { extensions: editExts, customNo: editForm.customNo ?? "" } : {}),');
+  expect(app).toContain('...(!isCloudMode ? { customNo: editForm.customNo ?? "" } : {}),');
   expect(app).toContain('...(isCloudMode ? {} : { customNo: form.customNo }),');
 });
 
@@ -651,6 +651,21 @@ test("the existing Extensions page installs from a Web Store URL and keeps archi
   expect(app).toContain('accept=".zip,.crx,application/zip,application/x-chrome-extension"');
   expect(app).not.toContain("Chrome Web Store installs are not supported in AliasMode");
   expect(app.match(/setView\("extensions"\)/g)).toHaveLength(1);
+});
+
+test("extensions can be assigned to Cloud profiles and groups without losing missing-device IDs", () => {
+  expect(app).toContain("const [editInitialExts, setEditInitialExts] = useState<string[]>([]);");
+  expect(app).toContain("!sameExtensionSelection(editExts, editInitialExts)");
+  expect(app).toContain("Not installed on this device");
+  expect(app).toContain("new Set([...editInitialExts, ...editExts])");
+  expect(app).toContain("new Set([...storedGroupDefaultExts, ...groupDefaultExts])");
+  expect(app).toContain("Cloud assignments remain and will show as not installed here.");
+  expect(app).toContain("{editExtensionChoices.length > 0 && (");
+  expect(app).toContain("Group defaults");
+  expect(app).toContain("fetchGroupExtensionDefaults()");
+  expect(app).toContain("setGroupExtensionDefaults(groupDefaultName, groupDefaultExts)");
+  expect(app).toContain("replaces extension assignments on");
+  expect(app).toContain("New and moved profiles inherit this selection");
 });
 
 test("Settings carries the Remote MCP connector card in Cloud mode", () => {

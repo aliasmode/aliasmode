@@ -941,11 +941,22 @@ export class Launcher {
       if (proxy) args.push(proxy);
     }
     // Load any assigned (unpacked) extensions. Resolve ids → install dirs and
-    // skip any that were since deleted. --disable-extensions-except keeps the
-    // set to exactly what's assigned. (Proxy auth no longer needs an extension — the relay does it.)
-    const extDirs = (profile.extensions ?? [])
-      .map((id) => this.store.getExtension(id)?.loadDir)
-      .filter((d): d is string => !!d);
+    // skip any that are not installed on this device. --disable-extensions-except
+    // keeps the set to exactly what's assigned. (Proxy auth no longer needs an extension — the relay does it.)
+    const extDirs: string[] = [];
+    const missingExtensionIds: string[] = [];
+    for (const id of profile.extensions ?? []) {
+      const extension = this.store.getExtension(id);
+      if (extension) extDirs.push(extension.loadDir);
+      else missingExtensionIds.push(id);
+    }
+    if (missingExtensionIds.length) {
+      const plural = missingExtensionIds.length > 1;
+      this.log(
+        `profile ${profile.id}: assigned extension${plural ? "s" : ""} ${missingExtensionIds.join(", ")} ` +
+        `${plural ? "are" : "is"} not installed on this device; skipped`,
+      );
+    }
     if (extDirs.length) {
       args.push(`--load-extension=${extDirs.join(",")}`);
       args.push(`--disable-extensions-except=${extDirs.join(",")}`);

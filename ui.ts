@@ -876,16 +876,14 @@ export async function handleUiRequest(
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
-  // The extension registry is a purely local store of uploaded extension files;
-  // Cloud profiles carry assignments in their portable payload and load the
-  // matching local uploads at launch, so managing the registry works in Cloud
-  // mode too. Per-profile assignment stays Local-only (the Cloud editor never
-  // writes the extensions field).
+  // The extension registry stores files on this device. Cloud profiles and
+  // folders sync assignment ids, then resolve matching local installs at launch.
   const cloudExtensionRoute =
     (pathname === "/ui/api/extensions" && req.method === "GET") ||
     (pathname === "/ui/api/extensions/web-store" && req.method === "POST") ||
     (pathname === "/ui/api/extensions/upload" && req.method === "POST") ||
-    (pathname === "/ui/api/extensions/delete" && req.method === "POST");
+    (pathname === "/ui/api/extensions/delete" && req.method === "POST") ||
+    (pathname === "/ui/api/groups/extensions" && (req.method === "GET" || req.method === "POST"));
   if (
     options.appConfig?.read().mode === "cloud" &&
     options.cloudBrowser &&
@@ -945,6 +943,7 @@ export async function handleUiRequest(
         return Response.json({ ok: true, id });
       }
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
+      if (!options.cloudBrowser) store.applyGroupExtensionDefaults(profile, null, false);
       if (profile.proxy) await attachTimezones([profile], options.timezoneFetch).catch(() => {}); // best-effort tz
       if (options.cloudBrowser) {
         return Response.json({ ok: true, ...await options.cloudBrowser.create(profile) });
@@ -1207,7 +1206,9 @@ export async function handleUiRequest(
           const p = pending.get(u.id) ?? store.getProfile(u.id);
           if (!p) { notFound.push(u.id); continue; }
           try {
+            const previousGroup = p.group;
             if (applyEdits(p, u.set)) proxyChanged.add(u.id);
+            store.applyGroupExtensionDefaults(p, previousGroup, "extensions" in u.set);
             pending.set(u.id, p);
           } catch (error) {
             errors.push({ id: u.id, error: msg(error) });
@@ -1279,6 +1280,49 @@ export async function handleUiRequest(
       return Response.json({ ok: true, ungrouped: store.deleteGroup(name) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/groups/extensions" && (req.method === "GET" || req.method === "POST")) {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    try {
+      if (req.method === "GET") {
+        if (options.cloudBrowser) {
+          const folders = (await options.cloudConnection!.client.listFolders()).folders;
+          return Response.json({
+            ok: true,
+            groups: folders
+              .filter((folder) => !folder.archivedAt)
+              .map((folder) => ({
+                name: folder.name,
+                extensions: folder.extensionDefaults ?? [],
+                permission: folder.permission,
+              })),
+          });
+        }
+        return Response.json({
+          ok: true,
+          groups: store.listGroupExtensionDefaults().map((group) => ({ ...group, permission: "edit" as const })),
+        });
+      }
+
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+      const body = (await req.json()) as { group?: unknown; extensions?: unknown };
+      const group = String(body.group ?? "").trim();
+      const extensions = Array.isArray(body.extensions) ? body.extensions.map(String) : null;
+      if (!group || !extensions) {
+        return Response.json({ ok: false, error: "group and extensions are required" }, { status: 400 });
+      }
+      if (options.cloudBrowser) {
+        return Response.json(await options.cloudConnection!.client.setFolderExtensionDefaults(group, extensions));
+      }
+      return Response.json({ ok: true, updatedCount: store.setGroupExtensionDefaults(group, extensions) });
+    } catch (error) {
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 500;
+      return Response.json({ ok: false, error: msg(error) }, { status });
     }
   }
 
@@ -1582,7 +1626,9 @@ export async function handleUiRequest(
       // stored fields simply apply the next time its browser launches.
       const p = remote ? await remote.getProfile(id).catch(() => null) : store.getProfile(id);
       if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+      const previousGroup = p.group;
       const proxyChanged = applyEdits(p, set);
+      if (!remote) store.applyGroupExtensionDefaults(p, previousGroup, "extensions" in set);
       if (proxyChanged && p.proxy) {
         await attachTimezones([p], options.timezoneFetch).catch(() => {});
       }

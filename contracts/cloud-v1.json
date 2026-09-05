@@ -40,6 +40,7 @@
     "folders": "GET|POST /v1/workspace/folders",
     "folder": "PATCH|DELETE /v1/workspace/folders/:name; POST /v1/workspace/folders/:name/archive",
     "folderGrants": "PUT|DELETE /v1/workspace/folders/:name/grants/:accountId",
+    "folderExtensions": "PUT /v1/workspace/folders/:name/extensions",
     "moveProfile": "POST /v1/profiles/:id/move",
     "invitations": "GET|POST /v1/workspace/invitations",
     "invitation": "POST /v1/workspace/invitations/:id/resend; POST /v1/workspace/invitations/:id/revoke",

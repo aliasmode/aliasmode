@@ -177,18 +177,28 @@ test("Cloud editor save forwards the version once and preserves session and uned
   expect(updateRequest.payload.session.futureSessionField).toBe("retained");
 });
 
-test("Cloud editor moves folders before saving metadata with the incremented version", async () => {
+test("Cloud editor reloads inherited extensions after moving before saving metadata", async () => {
   const authoritative = response();
+  const moved = response(8);
+  moved.profile.group = "group-2";
+  moved.payload.profile.group = "group-2";
+  moved.payload.profile.extensionAssignments = ["group-default"];
+  let getCalls = 0;
   const calls: unknown[] = [];
   const cloud = {
-    getProfile: async () => authoritative,
+    getProfile: async () => getCalls++ === 0 ? authoritative : moved,
     moveProfile: async (profileId: string, request: unknown) => {
       calls.push(["move", profileId, request]);
-      authoritative.profile.version++;
-      return { ok: true, profile: authoritative.profile };
+      return { ok: true, profile: moved.profile };
     },
     updateProfile: async (profileId: string, request: any) => {
-      calls.push(["update", profileId, request.expectedVersion, request.payload.profile.group]);
+      calls.push([
+        "update",
+        profileId,
+        request.expectedVersion,
+        request.payload.profile.group,
+        request.payload.profile.extensionAssignments,
+      ]);
     },
   } as any;
 
@@ -197,9 +207,10 @@ test("Cloud editor moves folders before saving metadata with the incremented ver
     name: "Renamed",
   });
 
+  expect(getCalls).toBe(2);
   expect(calls).toEqual([
     ["move", "cloud1", { destination: "group-2", expectedVersion: 7 }],
-    ["update", "cloud1", 8, "group-2"],
+    ["update", "cloud1", 8, "group-2", ["group-default"]],
   ]);
 });
 

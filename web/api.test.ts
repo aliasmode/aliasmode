@@ -12,6 +12,8 @@ import {
   fetchCloudAuth,
   fetchCloudEvents,
   fetchCloudTeam,
+  fetchGroupExtensionDefaults,
+  setGroupExtensionDefaults,
   cloudWorkspaceAction,
   exportProfiles,
   fetchProfiles,
@@ -303,6 +305,30 @@ test("profile update forwards Cloud expectedVersion and response status", async 
   const result = await updateProfile("profile1", { name: "Changed" }, 7);
   expect(body).toEqual({ set: { name: "Changed" }, expectedVersion: 7 });
   expect(result).toMatchObject({ ok: false, error: "reload required", status: 409 });
+});
+
+test("group extension defaults client reads and replaces exact selections", async () => {
+  const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ input, init });
+    return init
+      ? Response.json({ ok: true, updatedCount: 2 })
+      : Response.json({
+          ok: true,
+          groups: [{ name: "Sales", extensions: ["ext-1"], permission: "edit" }],
+        });
+  }) as unknown as typeof fetch;
+
+  expect(await fetchGroupExtensionDefaults()).toEqual([
+    { name: "Sales", extensions: ["ext-1"], permission: "edit" },
+  ]);
+  expect(await setGroupExtensionDefaults("Sales", ["ext-2"])).toEqual({ ok: true, updatedCount: 2 });
+  expect(requests.map((request) => request.input)).toEqual([
+    "/ui/api/groups/extensions",
+    "/ui/api/groups/extensions",
+  ]);
+  expect(requests[1]?.init?.method).toBe("POST");
+  expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({ group: "Sales", extensions: ["ext-2"] });
 });
 
 test("app mode client sends Cloud selection with JSON", async () => {

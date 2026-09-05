@@ -157,19 +157,26 @@ export class CloudProfileEditor {
       throw new CloudProfileEditorError("expectedVersion must be a non-negative integer", 400);
     }
 
-    const authoritative = await this.cloud.getProfile(profileId);
+    let authoritative = await this.cloud.getProfile(profileId);
     if (authoritative.profile.version !== expectedVersion) {
       throw new CloudProfileEditorError("Cloud profile changed; reload it before saving", 409);
     }
     this.assertClosed(profileId, authoritative.profile.activeOpens.length);
 
-    const { profile } = decodePortableProfile(authoritative.payload);
+    let { profile } = decodePortableProfile(authoritative.payload);
     if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
     const destination = "group" in set ? String(set.group ?? "") : profile.group;
     let updateVersion = expectedVersion;
     if (destination !== profile.group) {
       const moved = await this.cloud.moveProfile(profileId, { destination, expectedVersion });
       updateVersion = moved.profile.version;
+      authoritative = await this.cloud.getProfile(profileId);
+      if (authoritative.profile.version !== updateVersion) {
+        throw new CloudProfileEditorError("Cloud profile changed; reload it before saving", 409);
+      }
+      this.assertClosed(profileId, authoritative.profile.activeOpens.length);
+      profile = decodePortableProfile(authoritative.payload).profile;
+      if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
     }
     const proxyChanged = applyEdits(profile, set);
     if (proxyChanged && profile.proxy) {

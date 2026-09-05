@@ -291,7 +291,12 @@ export const fetchCloudConnector = (connectorId: string) => cloudConnectorAction
 export const revokeCloudConnector = (connectorId: string) => cloudConnectorAction("revoke", connectorId);
 
 export interface CloudTeamState {
-  folders: Array<{ name: string; archivedAt: number | null; permission: "view" | "edit" }>;
+  folders: Array<{
+    name: string;
+    archivedAt: number | null;
+    permission: "view" | "edit";
+    extensionDefaults: string[];
+  }>;
   members: Array<{
     accountId: string; email: string; role: "owner" | "admin" | "member"; joinedAt: number;
     grants: Array<{ folderName: string; accountId: string; permission: "view" | "edit" }>;
@@ -436,6 +441,32 @@ export async function assignExtensionBulk(ids: string[], extensionId: string, op
     body: JSON.stringify({ ids, extensionId, op }),
   });
   return apiJson(r, "/ui/api/profiles/extensions");
+}
+
+export interface GroupExtensionDefaults {
+  name: string;
+  extensions: string[];
+  permission: "view" | "edit";
+}
+
+export async function fetchGroupExtensionDefaults(): Promise<GroupExtensionDefaults[]> {
+  const path = "/ui/api/groups/extensions";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true || !Array.isArray(body.groups)) {
+    throw new Error(body.error || "group extension defaults are unavailable");
+  }
+  return body.groups;
+}
+
+export async function setGroupExtensionDefaults(group: string, extensions: string[]): Promise<any> {
+  const path = "/ui/api/groups/extensions";
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ group, extensions }),
+  });
+  return apiJson(response, path);
 }
 
 export async function uploadExports(

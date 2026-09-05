@@ -1,4 +1,8 @@
 import { test, expect } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseUpdateFile, serializeCsv, serializeAdsTxt, serializeXlsxRows, rowsToUpdates, XLSX_COLUMNS, parseExport, recordToProfile } from "./parse.ts";
 import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
 import { deriveFingerprintFlags, deterministicSeed } from "./fingerprint.ts";
@@ -147,6 +151,19 @@ test("rowsToUpdates ignores identity columns, matching the .txt and .csv rules",
 
 // ---- Groups: rename + delete ----
 
+test("existing group registries gain empty extension defaults", () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-group-defaults-"));
+  const path = join(root, "profiles.sqlite");
+  const legacy = new Database(path, { create: true });
+  legacy.exec(`CREATE TABLE groups (name TEXT PRIMARY KEY); INSERT INTO groups (name) VALUES ('Legacy')`);
+  legacy.close();
+
+  const s = new ProfileStore(path);
+  expect(s.listGroupExtensionDefaults()).toContainEqual({ name: "Legacy", extensions: [] });
+  s.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("renameGroup moves members and migrates the registry", () => {
   const s = new ProfileStore(":memory:");
   s.upsertProfile(profile({ id: "a", group: "Old" }));
@@ -168,6 +185,65 @@ test("deleteGroup ungroups members (does not delete them)", () => {
   s.close();
 });
 
+test("group extension defaults replace current members and seed moves", () => {
+  const s = new ProfileStore(":memory:");
+  s.upsertProfile(profile({ id: "a", group: "Sales", extensions: ["old"] }));
+  s.upsertProfile(profile({ id: "b", group: "Sales" }));
+  s.upsertProfile(profile({ id: "c", group: "Other", extensions: ["personal"] }));
+
+  expect(s.setGroupExtensionDefaults("Sales", ["e2", "e1", "e2"])).toBe(2);
+  expect(s.listGroupExtensionDefaults()).toContainEqual({ name: "Sales", extensions: ["e2", "e1"] });
+  expect(s.getProfile("a")!.extensions).toEqual(["e2", "e1"]);
+  expect(s.getProfile("b")!.extensions).toEqual(["e2", "e1"]);
+
+  expect(s.setGroup(["c"], "Sales")).toBe(1);
+  expect(s.getProfile("c")).toMatchObject({ group: "Sales", extensions: ["e2", "e1"] });
+  s.close();
+});
+
+test("group inheritance preserves divergence on same-group and ungroup moves", () => {
+  const s = new ProfileStore(":memory:");
+  s.registerGroup("Sales");
+  s.setGroupExtensionDefaults("Sales", ["default"]);
+  s.upsertProfile(profile({ id: "a", group: "Sales", extensions: ["personal"] }));
+
+  expect(s.setGroup(["a"], "Sales")).toBe(0);
+  expect(s.getProfile("a")!.extensions).toEqual(["personal"]);
+  expect(s.setGroup(["a"], "")).toBe(1);
+  expect(s.getProfile("a")!.extensions).toEqual(["personal"]);
+  s.close();
+});
+
+test("group default inheritance respects explicit assignments", () => {
+  const s = new ProfileStore(":memory:");
+  s.registerGroup("Sales");
+  s.setGroupExtensionDefaults("Sales", ["default"]);
+  const inherited = profile({ id: "a", group: "Sales", extensions: ["old"] });
+  const explicit = profile({ id: "b", group: "Sales", extensions: ["chosen"] });
+
+  s.applyGroupExtensionDefaults(inherited, "Other", false);
+  s.applyGroupExtensionDefaults(explicit, "Other", true);
+  expect(inherited.extensions).toEqual(["default"]);
+  expect(explicit.extensions).toEqual(["chosen"]);
+  s.close();
+});
+
+test("group rename carries defaults unless it merges into an existing group", () => {
+  const s = new ProfileStore(":memory:");
+  s.registerGroup("Old");
+  s.setGroupExtensionDefaults("Old", ["source"]);
+  expect(s.renameGroup("Old", "Fresh")).toBe(0);
+  expect(s.getGroupExtensionDefaults("Fresh")).toEqual(["source"]);
+
+  s.registerGroup("Destination");
+  s.setGroupExtensionDefaults("Destination", ["destination"]);
+  s.registerGroup("Merged");
+  s.setGroupExtensionDefaults("Merged", ["discarded"]);
+  expect(s.renameGroup("Merged", "Destination")).toBe(0);
+  expect(s.getGroupExtensionDefaults("Destination")).toEqual(["destination"]);
+  s.close();
+});
+
 // ---- Extensions registry + per-profile assignment ----
 
 test("extensions: add/list/get/delete and assignment persistence", () => {
@@ -177,14 +253,16 @@ test("extensions: add/list/get/delete and assignment persistence", () => {
   expect(s.listExtensions().map((e) => e.id).sort()).toEqual(["e1", "e2"]);
   expect(s.getExtension("e1")).toMatchObject({ name: "Ext One", loadDir: "/x/e1" });
 
-  s.upsertProfile(profile({ id: "p", extensions: ["e1", "e2"] }));
+  s.upsertProfile(profile({ id: "p", group: "Assigned", extensions: ["e1", "e2"] }));
+  s.setGroupExtensionDefaults("Assigned", ["e1", "e2"]);
   expect(s.getProfile("p")!.extensions).toEqual(["e1", "e2"]);
 
-  // Deleting unassigns from profiles.
+  // Deleting unassigns from profiles and group defaults.
   s.unassignExtension("e1");
   s.deleteExtension("e1");
   expect(s.getExtension("e1")).toBeNull();
   expect(s.getProfile("p")!.extensions).toEqual(["e2"]);
+  expect(s.getGroupExtensionDefaults("Assigned")).toEqual(["e2"]);
   s.close();
 });
 

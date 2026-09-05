@@ -25,6 +25,8 @@ import {
   type ImportProfilesRequest,
   type ImportProfilesResponse,
   type SetFolderGrantResponse,
+  type SetFolderExtensionDefaultsRequest,
+  type SetFolderExtensionDefaultsResponse,
   type ListFoldersResponse,
   type ListInvitationsResponse,
   type ListMcpConnectorsResponse,
@@ -242,6 +244,19 @@ export class CloudClient {
 
   removeFolderGrant(name: string, accountId: string): Promise<{ ok: true }> {
     return this.call(`/workspace/folders/${encodeURIComponent(name)}/grants/${encodeURIComponent(accountId)}`, { method: "DELETE" });
+  }
+
+  async setFolderExtensionDefaults(
+    name: string,
+    extensionDefaults: string[],
+  ): Promise<SetFolderExtensionDefaultsResponse> {
+    const request: SetFolderExtensionDefaultsRequest = { extensionDefaults };
+    const response = await this.call<SetFolderExtensionDefaultsResponse>(
+      `/workspace/folders/${encodeURIComponent(name)}/extensions`,
+      { method: "PUT", body: JSON.stringify(request) },
+    );
+    this.profileRoster = undefined;
+    return response;
   }
 
   listMembers(): Promise<ListMembersResponse> {

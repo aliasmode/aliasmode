@@ -70,6 +70,7 @@ export interface CloudFolder {
   name: string;
   archivedAt: number | null;
   permission: FolderPermission;
+  extensionDefaults: string[];
 }
 
 export interface CloudFolderGrant {
@@ -343,6 +344,16 @@ export interface SetFolderGrantRequest {
 export interface SetFolderGrantResponse {
   ok: true;
   grant: CloudFolderGrant;
+}
+
+export interface SetFolderExtensionDefaultsRequest {
+  extensionDefaults: string[];
+}
+
+export interface SetFolderExtensionDefaultsResponse {
+  ok: true;
+  folder: CloudFolder;
+  updatedCount: number;
 }
 
 export interface MoveProfileRequest {

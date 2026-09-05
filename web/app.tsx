@@ -15,6 +15,7 @@ import {
   type DiagnoseReport,
   type EditProfile,
   type Extension,
+  type GroupExtensionDefaults,
   type AppModeConfig,
   type CloudAuthState,
   CloudSessionRestoreError,
@@ -52,6 +53,8 @@ import {
   uploadExtensions,
   removeExtension,
   assignExtensionBulk,
+  fetchGroupExtensionDefaults,
+  setGroupExtensionDefaults,
   uploadExports,
   moveProfiles,
   deleteProfiles,
@@ -100,6 +103,12 @@ const UPDATE_TEMPLATE_CSV =
  */
 function countPastedRecords(text: string): number {
   return (text.match(/^id=/gm) ?? []).length;
+}
+
+function sameExtensionSelection(left: string[], right: string[]): boolean {
+  const leftIds = new Set(left);
+  const rightIds = new Set(right);
+  return leftIds.size === rightIds.size && [...leftIds].every((id) => rightIds.has(id));
 }
 
 function downloadText(name: string, text: string, type: string): void {
@@ -983,8 +992,13 @@ function App() {
   const [editTotp, setEditTotp] = useState<{ code: string; secs: number } | null>(null);
   const [twoFaFlash, setTwoFaFlash] = useState<{ id: string; code: string } | null>(null);
   const [editExts, setEditExts] = useState<string[]>([]);
+  const [editInitialExts, setEditInitialExts] = useState<string[]>([]);
   // Local extension registry + Extensions page
   const [extensions, setExtensions] = useState<Extension[]>([]);
+  const [groupExtensionDefaults, setGroupExtensionDefaultsState] = useState<GroupExtensionDefaults[]>([]);
+  const [groupDefaultName, setGroupDefaultName] = useState("");
+  const [groupDefaultExts, setGroupDefaultExts] = useState<string[]>([]);
+  const [groupDefaultBusy, setGroupDefaultBusy] = useState(false);
   const [extSource, setExtSource] = useState("");
   const [extInstallBusy, setExtInstallBusy] = useState(false);
   const [extBusy, setExtBusy] = useState(false);
@@ -1069,6 +1083,14 @@ function App() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   });
+
+  const reloadGroupExtensionDefaults = async () => {
+    try {
+      setGroupExtensionDefaultsState(await fetchGroupExtensionDefaults());
+    } catch (error) {
+      setExtErr(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const load = async () => {
     try {
@@ -1727,6 +1749,24 @@ function App() {
   }, [appMode?.mode, restartRequired, workspaceReady]);
 
   useEffect(() => {
+    if (view !== "extensions" || !appMode || !workspaceReady || restartRequired) return;
+    void reloadGroupExtensionDefaults();
+  }, [view, appMode?.mode, restartRequired, workspaceReady]);
+
+  useEffect(() => {
+    const editable = groupExtensionDefaults.filter((item) => item.permission === "edit");
+    if (!editable.some((item) => item.name === groupDefaultName)) {
+      setGroupDefaultName(editable[0]?.name ?? "");
+    }
+  }, [groupExtensionDefaults, groupDefaultName]);
+
+  useEffect(() => {
+    setGroupDefaultExts(
+      groupExtensionDefaults.find((item) => item.name === groupDefaultName)?.extensions ?? [],
+    );
+  }, [groupExtensionDefaults, groupDefaultName]);
+
+  useEffect(() => {
     if (!appMode || !workspaceReady || restartRequired) return;
     const t = setInterval(load, REFRESH_MS);
     return () => clearInterval(t);
@@ -1868,6 +1908,22 @@ function App() {
   const canEditGroup = (name: string) => !isCloudMode ||
     team?.folders.some((folder) => folder.name === name && folder.permission === "edit" && !folder.archivedAt) === true ||
     profiles.some((profile) => profile.group === name && profile.permission === "edit");
+  const editableDefaultGroups = groupExtensionDefaults.filter((item) => item.permission === "edit");
+  const installedExtensionIds = new Set(extensions.map((item) => item.id));
+  const storedGroupDefaultExts = groupExtensionDefaults.find((item) => item.name === groupDefaultName)?.extensions ?? [];
+  const editExtensionChoices = [
+    ...extensions.map((item) => ({ ...item, missing: false })),
+    ...[...new Set([...editInitialExts, ...editExts])]
+      .filter((id) => !installedExtensionIds.has(id))
+      .map((id) => ({ id, name: id, missing: true })),
+  ];
+  const groupDefaultExtensionChoices = [
+    ...extensions.map((item) => ({ ...item, missing: false })),
+    ...[...new Set([...storedGroupDefaultExts, ...groupDefaultExts])]
+      .filter((id) => !installedExtensionIds.has(id))
+      .map((id) => ({ id, name: id, missing: true })),
+  ];
+  const groupDefaultProfileCount = profiles.filter((profile) => profile.group === groupDefaultName).length;
 
   const toggle = (id: string) =>
     setSelected((s) => {
@@ -2109,6 +2165,7 @@ function App() {
     setEditId(id);
     setEditForm({});
     setEditExts([]);
+    setEditInitialExts([]);
     setEditMobile(null);
     setEditExpectedVersion(null);
     setEditLive(false);
@@ -2128,6 +2185,7 @@ function App() {
           customNo: p.customNo ?? "",
         });
         setEditExts(p.extensions ?? []);
+        setEditInitialExts(p.extensions ?? []);
         setEditMobile(p.desktopConversion ?? null);
         setEditExpectedVersion(p.expectedVersion ?? null);
         setEditLive(p.liveEdit === true);
@@ -2145,6 +2203,8 @@ function App() {
     setEditLive(false);
     setEditLoading(false);
     setEditForm({});
+    setEditExts([]);
+    setEditInitialExts([]);
     setEditErr(null);
     setEditMobile(null);
   };
@@ -2160,7 +2220,8 @@ function App() {
         username: editForm.username ?? "", password: editForm.password ?? "",
         email: editForm.email ?? "", emailPassword: editForm.emailPassword ?? "", twofa: editForm.twofa ?? "",
         resolution: editForm.resolution ?? "", tags: editForm.tags ?? "",
-        ...(!isCloudMode ? { extensions: editExts, customNo: editForm.customNo ?? "" } : {}),
+        ...(!isCloudMode ? { customNo: editForm.customNo ?? "" } : {}),
+        ...(!sameExtensionSelection(editExts, editInitialExts) ? { extensions: editExts } : {}),
       }, isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined);
       if (r.ok) { closeEdit(); await load(); }
       else if (r.status === 409) {
@@ -2200,6 +2261,29 @@ function App() {
 
   // ---- Extensions manager (Store URL / upload / delete) ----
   const reloadExtensions = async () => { try { setExtensions(await fetchExtensions()); } catch {} };
+  const toggleGroupDefaultExt = (id: string) =>
+    setGroupDefaultExts((ids) => (ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]));
+  const applyGroupExtensionDefault = async () => {
+    if (!groupDefaultName) return;
+    if (!confirm(
+      `Apply this extension default to “${groupDefaultName}”?\n\n` +
+      `This replaces extension assignments on ${groupDefaultProfileCount} current profile(s). ` +
+      "New and moved profiles inherit this selection. Individual profile edits can differ later. " +
+      "Reopen browsers to apply the change.",
+    )) return;
+    setGroupDefaultBusy(true);
+    setExtErr(null);
+    try {
+      const result = await setGroupExtensionDefaults(groupDefaultName, groupDefaultExts);
+      if (result.ok === false) { setExtErr(result.error || "group default update failed"); return; }
+      await Promise.all([reloadGroupExtensionDefaults(), load()]);
+      flash(`Updated extension defaults for “${groupDefaultName}” on ${result.updatedCount} profile(s)`);
+    } catch (error) {
+      setExtErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGroupDefaultBusy(false);
+    }
+  };
   const doInstallWebStoreExtension = async () => {
     const source = extSource.trim();
     if (!source) { setExtErr("Paste a Chrome Web Store URL or extension ID"); return; }
@@ -2233,13 +2317,16 @@ function App() {
     }
   };
   const doRemoveExtension = async (id: string, name: string) => {
-    if (!confirm(`Remove extension "${name}"? It will be unassigned from all profiles.`)) return;
+    const message = isCloudMode
+      ? `Remove extension "${name}" from this device? Cloud assignments remain and will show as not installed here.`
+      : `Remove extension "${name}"? It will be unassigned from all profiles.`;
+    if (!confirm(message)) return;
     setExtErr(null);
     try {
       const r = await removeExtension(id);
       if (!r.ok) setExtErr(r.error || "remove failed");
       setEditExts((xs) => xs.filter((x) => x !== id));
-      await reloadExtensions();
+      await Promise.all([reloadExtensions(), reloadGroupExtensionDefaults()]);
     } catch (e) {
       setExtErr(String(e));
     }
@@ -3231,10 +3318,64 @@ function App() {
           </section>
           <p className="formnote">The in-browser Store button does not work in CloakBrowser. Paste the Store link above, or upload a ZIP/CRX archive.</p>
           <ol className="steps">
-            <li>Install the extension here.</li>
+            <li>Install the extension here. New installs stay unassigned.</li>
             <li>Use <b>Edit &gt; Extensions</b> to assign it to a profile{!isCloudMode && ", or assign many at once from the roster toolbar"}.</li>
             <li>Reopen the profile. AliasMode loads the extension when the browser starts.</li>
           </ol>
+          <section className="settings-card">
+            <header><Icon name="folder" className="sm" /><h2>Group defaults</h2></header>
+            <div className="card-body">
+              <p>Choose the exact extensions assigned to this group.</p>
+              {editableDefaultGroups.length === 0 ? (
+                <p className="formnote">Create an editable group before setting its extension defaults.</p>
+              ) : (
+                <>
+                  <label className="fld">
+                    <span>Group</span>
+                    <select
+                      aria-label="Extension default group"
+                      value={groupDefaultName}
+                      onChange={(event) => {
+                        const name = event.target.value;
+                        setGroupDefaultName(name);
+                        setGroupDefaultExts(groupExtensionDefaults.find((item) => item.name === name)?.extensions ?? []);
+                      }}
+                    >
+                      {editableDefaultGroups.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
+                    </select>
+                  </label>
+                  {groupDefaultExtensionChoices.length > 0 ? (
+                    <div className="extassign">
+                      {groupDefaultExtensionChoices.map((item) => (
+                        <label key={item.id} className="extchk">
+                          <input
+                            type="checkbox"
+                            checked={groupDefaultExts.includes(item.id)}
+                            onChange={() => toggleGroupDefaultExt(item.id)}
+                          />
+                          <span>{item.name}{item.missing && <span className="muted"> · Not installed on this device</span>}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="formnote">No extensions are installed. Apply an empty selection to clear this default.</p>
+                  )}
+                  <p className="formnote">
+                    Applying replaces assignments on {groupDefaultProfileCount} current profile(s). New and moved profiles inherit it.
+                    Individual profiles can differ later. Reopen browsers to apply changes.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    disabled={groupDefaultBusy || !groupDefaultName}
+                    onClick={applyGroupExtensionDefault}
+                  >
+                    {groupDefaultBusy ? "Applying…" : "Apply group default"}
+                  </button>
+                </>
+              )}
+            </div>
+          </section>
           {extensions.length === 0 ? (
             <div className="emptystate">
               <span className="glyph"><Icon name="puzzle" /></span>
@@ -3859,14 +4000,14 @@ function App() {
                     </div>
                   )}
                   <FingerprintSettings screen={editForm.resolution ?? ""} onScreenChange={(value) => setEF("resolution", value)} />
-                  {!isCloudMode && extensions.length > 0 && (
+                  {editExtensionChoices.length > 0 && (
                     <div className="fld">
                       <span>Extensions</span>
                       <div className="extassign">
-                        {extensions.map((x) => (
+                        {editExtensionChoices.map((x) => (
                           <label key={x.id} className="extchk">
                             <input type="checkbox" checked={editExts.includes(x.id)} onChange={() => toggleEditExt(x.id)} />
-                            <span>{x.name}</span>
+                            <span>{x.name}{x.missing && <span className="muted"> · Not installed on this device</span>}</span>
                           </label>
                         ))}
                       </div>
@@ -3874,7 +4015,7 @@ function App() {
                   )}
                   <p className="formnote">
                     Cookies and locked fingerprint values are preserved. Only editable fields change.
-                    {!isCloudMode && " Extensions load when the browser opens."}
+                    {" Extensions load when the browser opens."}
                   </p>
                 </>
               )}

@@ -125,6 +125,32 @@ test("Cloud client manages device-scoped MCP connectors", async () => {
   expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ label: "Linux Claude" });
 });
 
+test("Cloud client updates folder extension defaults and invalidates its roster cache", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const rosterRequests: Array<string | null> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/workspace/folders/Sales%20%2F%20US/extensions")) {
+      return Response.json({
+        ok: true,
+        folder: { name: "Sales / US", archivedAt: null, permission: "edit", extensionDefaults: ["e1"] },
+        updatedCount: 2,
+      });
+    }
+    rosterRequests.push(new Headers(init?.headers).get("if-none-match"));
+    return Response.json({ ok: true, profiles: [] }, { headers: { etag: '"roster-1"' } });
+  });
+
+  await cloud.listProfiles();
+  expect(await cloud.setFolderExtensionDefaults("Sales / US", ["e1"])).toMatchObject({ updatedCount: 2 });
+  await cloud.listProfiles();
+
+  expect(calls[1]!.url).toBe("https://cloud.aliasmode.test/v1/workspace/folders/Sales%20%2F%20US/extensions");
+  expect(calls[1]!.init?.method).toBe("PUT");
+  expect(JSON.parse(String(calls[1]!.init?.body))).toEqual({ extensionDefaults: ["e1"] });
+  expect(rosterRequests).toEqual([null, null]);
+});
+
 test("Cloud client rejects calls without an in-memory access token", async () => {
   const cloud = new CloudClient({
     baseUrl: "https://cloud.aliasmode.test",

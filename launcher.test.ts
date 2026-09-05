@@ -1282,6 +1282,29 @@ test("buildArgs loads the exact extension assigned through the registry", () => 
   store.close();
 });
 
+test("buildArgs logs assigned extensions missing on this device", () => {
+  const store = seeded();
+  store.addExtension({ id: "installed", name: "Fixture", loadDir: "/data/extensions/store-fixture" });
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, extensions: ["installed", "missing-device"] });
+  const logs: string[] = [];
+  const f = fleet();
+  const launcher = new Launcher({
+    store,
+    binaryPath: "/fake",
+    spawn: f.spawn,
+    fetch: f.fetchFn,
+    log: (message) => logs.push(message),
+  });
+
+  const args = launcher.buildArgs(store.getProfile("k1d0cd11")!, 9333, "/data", []);
+  expect(args).toContain("--load-extension=/data/extensions/store-fixture");
+  expect(logs).toEqual([
+    "profile k1d0cd11: assigned extension missing-device is not installed on this device; skipped",
+  ]);
+  store.close();
+});
+
 test("buildArgs rejects identity, proxy, storage, extension, mode, and WebRTC overrides", () => {
   const store = seeded();
   const f = fleet();

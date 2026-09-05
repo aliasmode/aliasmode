@@ -534,6 +534,102 @@ test("move route reassigns selected profiles' group", async () => {
   s.close();
 });
 
+test("group extension route replaces members and lists defaults", async () => {
+  const s = store();
+  const saved = await handleUiRequest(
+    new Request("http://x/ui/api/groups/extensions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ group: "va1", extensions: ["e2", "e1", "e2"] }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(saved!.status).toBe(200);
+  expect(await saved!.json()).toMatchObject({ ok: true, updatedCount: 1 });
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["e2", "e1"]);
+
+  const listed = await handleUiRequest(
+    new Request("http://x/ui/api/groups/extensions"),
+    {} as any,
+    s,
+  );
+  expect(await listed!.json()).toEqual({
+    ok: true,
+    groups: [{ name: "va1", extensions: ["e2", "e1"], permission: "edit" }],
+  });
+  s.close();
+});
+
+test("new profiles and moves inherit Local group extension defaults", async () => {
+  const s = store();
+  s.registerGroup("With defaults");
+  s.setGroupExtensionDefaults("With defaults", ["e1"]);
+
+  const created = await handleUiRequest(
+    new Request("http://x/ui/api/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "new", group: "With defaults" }),
+    }),
+    {} as any,
+    s,
+  );
+  const createdId = (await created!.json()).id;
+  expect(s.getProfile(createdId)!.extensions).toEqual(["e1"]);
+
+  const moved = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/move", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11"], group: "With defaults" }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(moved!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["e1"]);
+  s.close();
+});
+
+test("single and file group edits inherit unless extensions are explicit", async () => {
+  const s = store();
+  s.registerGroup("Defaulted");
+  s.setGroupExtensionDefaults("Defaulted", ["group-extension"]);
+
+  const inherited = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { group: "Defaulted" } }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(inherited!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["group-extension"]);
+
+  const explicit = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { group: "va1", extensions: ["chosen"] } }),
+    }),
+    {} as any,
+    s,
+  );
+  expect(explicit!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["chosen"]);
+
+  const form = new FormData();
+  form.append("files", new File(["id,group\nk1d0cd11,Defaulted\n"], "updates.csv"));
+  const fromFile = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+    {} as any,
+    s,
+  );
+  expect(fromFile!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["group-extension"]);
+  s.close();
+});
+
 test("move route with no ids is a 400", async () => {
   const s = store();
   const res = await handleUiRequest(
@@ -1058,6 +1154,7 @@ test("Chrome Web Store endpoint installs once and reuses the registered extensio
   const s = store();
   const root = mkdtempSync(join(tmpdir(), "aliasmode-web-store-"));
   const id = extensionId(extensionPublicKey);
+  const assignmentsBefore = s.listProfiles().map((profile) => profile.extensions ?? []);
   let fetches = 0;
   const request = () => new Request("http://x/ui/api/extensions/web-store", {
     method: "POST",
@@ -1081,6 +1178,7 @@ test("Chrome Web Store endpoint installs once and reuses the registered extensio
   expect(second!.status).toBe(200);
   expect(await second!.json()).toMatchObject({ ok: true, installed: { id, name: "Route Fixture" }, alreadyInstalled: true });
   expect(fetches).toBe(1);
+  expect(s.listProfiles().map((profile) => profile.extensions ?? [])).toEqual(assignmentsBefore);
   s.close();
 });
 
@@ -1999,6 +2097,59 @@ test("Cloud connector API requires an authenticated trusted JSON request", async
   }), {} as any, s, null, { cloudConnection });
   expect(rejected!.status).toBe(403);
   expect(rejected!.headers.get("cache-control")).toBe("no-store");
+  s.close();
+});
+
+test("Cloud group extension route lists and updates editable defaults", async () => {
+  const s = store();
+  const calls: unknown[] = [];
+  const client = {
+    async listFolders() {
+      return { ok: true, folders: [
+        { name: "Sales", archivedAt: null, permission: "edit", extensionDefaults: ["e1"] },
+        { name: "Archive", archivedAt: 1, permission: "edit", extensionDefaults: ["old"] },
+      ] };
+    },
+    async setFolderExtensionDefaults(name: string, extensions: string[]) {
+      calls.push({ name, extensions });
+      return {
+        ok: true,
+        folder: { name, archivedAt: null, permission: "edit", extensionDefaults: extensions },
+        updatedCount: 2,
+      };
+    },
+  };
+  const options = {
+    cloudBrowser: {} as any,
+    cloudConnection: { client } as unknown as CloudConnectionRuntime,
+  };
+
+  const listed = await handleUiRequest(
+    new Request("http://x/ui/api/groups/extensions"),
+    {} as any,
+    s,
+    null,
+    options,
+  );
+  expect(await listed!.json()).toEqual({
+    ok: true,
+    groups: [{ name: "Sales", extensions: ["e1"], permission: "edit" }],
+  });
+
+  const saved = await handleUiRequest(
+    new Request("http://x/ui/api/groups/extensions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ group: "Sales", extensions: ["e2"] }),
+    }),
+    {} as any,
+    s,
+    null,
+    options,
+  );
+  expect(saved!.status).toBe(200);
+  expect((await saved!.json()).updatedCount).toBe(2);
+  expect(calls).toEqual([{ name: "Sales", extensions: ["e2"] }]);
   s.close();
 });
 
@@ -3210,8 +3361,11 @@ test("Cloud profile editor routes return no session data and forward expectedVer
     ...s.getProfile("k1d0cd11")!,
     name: "Authoritative Cloud name",
   });
+  const movedPayload = structuredClone(payload);
+  movedPayload.profile.group = "va2";
   let updateRequest: any;
   let moveRequest: any;
+  let moved = false;
   const cloudConnection = {
     client: {
       async getProfile() {
@@ -3220,21 +3374,22 @@ test("Cloud profile editor routes return no session data and forward expectedVer
           profile: {
             id: "k1d0cd11",
             name: "Authoritative Cloud name",
-            group: "va1",
+            group: moved ? "va2" : "va1",
             platform: "",
             tags: [],
-            version: 11,
+            version: moved ? 12 : 11,
             trashedAt: null,
             trashedBy: null,
             updatedAt: 1,
             activeOpens: [],
           },
-          payload,
+          payload: moved ? movedPayload : payload,
           payloadDigest: "digest",
         };
       },
       async moveProfile(_id: string, request: unknown) {
         moveRequest = request;
+        moved = true;
         return { ok: true, profile: { version: 12 } };
       },
       async updateProfile(_id: string, request: unknown) {

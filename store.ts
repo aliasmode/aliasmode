@@ -106,7 +106,17 @@ export class ProfileStore {
     // Group registry: lets a folder exist (and stay listed) with zero profiles,
     // matching AdsPower's folders. group_id == name everywhere. Backfill from any
     // labels already on profiles so pre-existing groups persist even once emptied.
-    this.db.exec(`CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY);`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS groups (
+        name TEXT PRIMARY KEY,
+        extension_defaults_json TEXT NOT NULL DEFAULT '[]'
+      );
+    `);
+    try {
+      this.db.exec(`ALTER TABLE groups ADD COLUMN extension_defaults_json TEXT NOT NULL DEFAULT '[]'`);
+    } catch {
+      /* column already exists */
+    }
     this.db.exec(`INSERT OR IGNORE INTO groups (name) SELECT DISTINCT "group" FROM profiles WHERE "group" <> ''`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agent_temporary_profiles (
@@ -371,16 +381,27 @@ export class ProfileStore {
   }
 
   /**
-   * Reassign a set of profiles to `group` (a free-form name — a new name simply
-   * creates that group). Unknown ids are ignored. Returns the number changed.
-   * Group is pure metadata; nothing about launching depends on it.
+   * Reassign profiles to a group and materialize that group's extension defaults.
+   * Unknown ids and profiles already in the destination are ignored.
    */
   setGroup(ids: string[], group: string): number {
     if (ids.length === 0) return 0;
-    if (group.trim()) this.registerGroup(group);
-    const placeholders = ids.map(() => "?").join(",");
-    const res = this.db.query(`UPDATE profiles SET "group" = ? WHERE id IN (${placeholders})`).run(group, ...ids);
-    return Number(res.changes);
+    const destination = group.trim();
+    const move = this.db.transaction((profileIds: string[]) => {
+      if (destination) this.registerGroup(destination);
+      let changed = 0;
+      for (const id of profileIds) {
+        const profile = this.getProfile(id);
+        if (!profile || profile.group === destination) continue;
+        const previousGroup = profile.group;
+        profile.group = destination;
+        this.applyGroupExtensionDefaults(profile, previousGroup, false);
+        this.upsertProfile(profile);
+        changed++;
+      }
+      return changed;
+    });
+    return move(ids);
   }
 
   /** Register a group so it persists (and stays listed) with zero profiles. */
@@ -389,29 +410,87 @@ export class ProfileStore {
     if (n) this.db.query(`INSERT OR IGNORE INTO groups (name) VALUES (?)`).run(n);
   }
 
+  getGroupExtensionDefaults(name: string): string[] {
+    const n = name.trim();
+    if (!n) return [];
+    const row = this.db
+      .query<{ extensions: string }, [string]>(
+        `SELECT extension_defaults_json AS extensions FROM groups WHERE name = ?`,
+      )
+      .get(n);
+    return normalizeExtensionIds(safeParse<string[]>(row?.extensions, []));
+  }
+
+  listGroupExtensionDefaults(): Array<{ name: string; extensions: string[] }> {
+    return this.listGroups().map((name) => ({
+      name,
+      extensions: this.getGroupExtensionDefaults(name),
+    }));
+  }
+
+  /** Replace a group's default and every current member's materialized assignment. */
+  setGroupExtensionDefaults(name: string, extensionIds: string[]): number {
+    const group = name.trim();
+    if (!group) throw new Error("group name required");
+    const extensions = normalizeExtensionIds(extensionIds);
+    const apply = this.db.transaction(() => {
+      this.registerGroup(group);
+      this.db.query(`UPDATE groups SET extension_defaults_json = ? WHERE name = ?`)
+        .run(JSON.stringify(extensions), group);
+      let changed = 0;
+      for (const profile of this.listProfiles()) {
+        if (profile.group !== group || sameStrings(profile.extensions ?? [], extensions)) continue;
+        profile.extensions = [...extensions];
+        this.upsertProfile(profile);
+        changed++;
+      }
+      return changed;
+    });
+    return apply();
+  }
+
+  /** Apply a named destination's default unless assignments were explicitly supplied. */
+  applyGroupExtensionDefaults(profile: Profile, previousGroup: string | null, extensionsExplicit: boolean): void {
+    const destination = profile.group.trim();
+    if (extensionsExplicit || !destination || previousGroup?.trim() === destination) return;
+    profile.extensions = this.getGroupExtensionDefaults(destination);
+  }
+
   /**
    * Rename a group: move every member profile from `from` to `to`, and migrate
-   * the registry entry. If `to` already exists the groups merge. Returns how
-   * many profiles were moved.
+   * its defaults. If `to` exists the groups merge and its defaults win.
    */
   renameGroup(from: string, to: string): number {
-    const f = from.trim(), t = to.trim();
-    if (!f || !t || f === t) return 0;
-    const res = this.db.query(`UPDATE profiles SET "group" = ? WHERE "group" = ?`).run(t, f);
-    this.db.query(`DELETE FROM groups WHERE name = ?`).run(f);
-    this.db.query(`INSERT OR IGNORE INTO groups (name) VALUES (?)`).run(t);
-    return Number(res.changes);
+    const source = from.trim(), destination = to.trim();
+    if (!source || !destination || source === destination) return 0;
+    const rename = this.db.transaction(() => {
+      const destinationExists = !!this.db
+        .query<{ found: number }, [string]>(`SELECT 1 AS found FROM groups WHERE name = ?`)
+        .get(destination);
+      if (!destinationExists) {
+        this.db.query(`INSERT INTO groups (name, extension_defaults_json) VALUES (?, ?)`)
+          .run(destination, JSON.stringify(this.getGroupExtensionDefaults(source)));
+      }
+      const res = this.db.query(`UPDATE profiles SET "group" = ? WHERE "group" = ?`)
+        .run(destination, source);
+      this.db.query(`DELETE FROM groups WHERE name = ?`).run(source);
+      return Number(res.changes);
+    });
+    return rename();
   }
 
   /**
    * Delete a group. Members aren't deleted — they're moved to "ungrouped" (empty
-   * group), matching AdsPower. Returns how many profiles were ungrouped.
+   * group), matching AdsPower. Materialized extension assignments are preserved.
    */
   deleteGroup(name: string): number {
     const n = name.trim();
-    const res = this.db.query(`UPDATE profiles SET "group" = '' WHERE "group" = ?`).run(n);
-    this.db.query(`DELETE FROM groups WHERE name = ?`).run(n);
-    return Number(res.changes);
+    const remove = this.db.transaction(() => {
+      const res = this.db.query(`UPDATE profiles SET "group" = '' WHERE "group" = ?`).run(n);
+      this.db.query(`DELETE FROM groups WHERE name = ?`).run(n);
+      return Number(res.changes);
+    });
+    return remove();
   }
 
   /** Distinct group names: the registry unioned with any labels live on profiles. */
@@ -465,14 +544,21 @@ export class ProfileStore {
     this.db.query(`DELETE FROM extensions WHERE id = ?`).run(id);
   }
 
-  /** Remove an extension id from every profile that has it assigned. */
+  /** Remove an extension id from every profile and group default that contains it. */
   unassignExtension(id: string): void {
-    for (const p of this.listProfiles()) {
-      if (p.extensions && p.extensions.includes(id)) {
-        p.extensions = p.extensions.filter((x) => x !== id);
-        this.upsertProfile(p);
+    const unassign = this.db.transaction(() => {
+      for (const group of this.listGroupExtensionDefaults()) {
+        if (!group.extensions.includes(id)) continue;
+        this.db.query(`UPDATE groups SET extension_defaults_json = ? WHERE name = ?`)
+          .run(JSON.stringify(group.extensions.filter((item) => item !== id)), group.name);
       }
-    }
+      for (const profile of this.listProfiles()) {
+        if (!profile.extensions?.includes(id)) continue;
+        profile.extensions = profile.extensions.filter((item) => item !== id);
+        this.upsertProfile(profile);
+      }
+    });
+    unassign();
   }
 
   /**
@@ -610,6 +696,14 @@ export class ProfileStore {
   clearLaunch(profileId: string): void {
     this.db.query(`DELETE FROM launches WHERE profile_id = ?`).run(profileId);
   }
+}
+
+function normalizeExtensionIds(ids: string[]): string[] {
+  return [...new Set(ids.map(String).map((id) => id.trim()).filter(Boolean))];
+}
+
+function sameStrings(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 /** Parse a JSON column defensively so one corrupt row can't break list/diagnose. */
