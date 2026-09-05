@@ -7,6 +7,9 @@ import { parseUpdateFile, serializeCsv, serializeAdsTxt, serializeXlsxRows, rows
 import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
 import { deriveFingerprintFlags, deterministicSeed } from "./fingerprint.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
+import { handleUiRequest, type UiRuntimeOptions } from "./ui.ts";
+import { encodePortableProfile } from "./portable-profile.ts";
+import type { Launcher } from "./launcher.ts";
 
 const NEWLINE = String.fromCharCode(10);
 import { ProfileStore } from "./store.ts";
@@ -296,6 +299,106 @@ test("the export carries the restored identity fields", () => {
   expect(txt).toContain("platform_os=windows");
   expect(txt).toContain("extensions=ext1");
   expect(txt).toContain("tags=warm,30day");
+});
+
+test("full exports fill a blank UA from its capture without changing launch flags", async () => {
+  const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/146.0.0.0";
+  const original = profile({
+    platformOs: "windows", timezone: "America/New_York", fingerprintSeed: 1685817975,
+    fpObserved: { ua, platform: "Win32", canvas: "captured-canvas" },
+    cookies: [{ name: "session", value: "test-value", domain: ".example.com", path: "/", httpOnly: false, secure: false }],
+  });
+  const before = structuredClone(original);
+  const txtProfile = parseExport(serializeAdsTxt([original])).profiles[0]!;
+  const { headers, rows } = serializeXlsxRows([original]);
+  const sheet = await readXlsx(await writeXlsx(headers, rows));
+  const xlsxProfile = recordToProfile(sheet[0]!)!.profile;
+  for (const restored of [txtProfile, xlsxProfile]) {
+    const destination = new ProfileStore(":memory:");
+    try {
+      destination.upsertProfile(restored);
+      const saved = destination.getProfile(original.id)!;
+      expect(saved.ua).toBe(ua);
+      expect(saved.cookies).toEqual(original.cookies);
+      expect(saved.fpExpected).toEqual(original.fpObserved);
+      expect(saved.fpObserved).toBeUndefined();
+      expect(deriveFingerprintFlags(saved)).toEqual(deriveFingerprintFlags(original));
+    } finally {
+      destination.close();
+    }
+  }
+  expect(original).toEqual(before);
+});
+
+test("export preserves the configured platform ahead of a conflicting capture", () => {
+  for (const fields of [
+    { platformOs: "macos" as const },
+    { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" },
+  ]) {
+    const original = profile({ ...fields, fpObserved: { ua: "Mozilla/5.0 (Windows NT 10.0)", platform: "Win32" } });
+    const restored = parseExport(serializeAdsTxt([original])).profiles[0]!;
+    expect(restored.platformOs).toBe("macos");
+    expect(deriveFingerprintFlags(restored)).toEqual(deriveFingerprintFlags(original));
+    if (original.ua) expect(restored.ua).toBe(original.ua);
+    else expect(restored.ua).toBe("");
+  }
+});
+
+test("export pins a legacy platform from known fingerprint evidence only", () => {
+  for (const [platform, platformOs] of [["Win32", "windows"], ["MacIntel", "macos"], ["Linux x86_64", "linux"]]) {
+    const restored = parseExport(serializeAdsTxt([profile({ fpObserved: { platform } })])).profiles[0]!;
+    expect(restored.platformOs).toBe(platformOs);
+  }
+  const expected = { ua: "Mozilla/5.0 (Windows NT 10.0)", platform: "Win32", canvas: "imported" };
+  const restored = parseExport(serializeAdsTxt([profile({ fpExpected: expected })])).profiles[0]!;
+  expect(restored.ua).toBe(expected.ua);
+  expect(restored.platformOs).toBe("windows");
+  expect(restored.fpExpected).toEqual(expected);
+  const unknown = parseExport(serializeAdsTxt([profile()])).profiles[0]!;
+  expect(unknown.ua).toBe("");
+  expect(unknown.platformOs).toBe("");
+  expect(unknown.fpExpected).toBeUndefined();
+});
+
+test("export does not combine partial observations with an older expectation", () => {
+  const restored = parseExport(serializeAdsTxt([profile({
+    fpObserved: { canvas: "new-canvas" },
+    fpExpected: { ua: "Mozilla/5.0 (Windows NT 10.0)", canvas: "old-canvas" },
+  })])).profiles[0]!;
+  expect(restored.ua).toBe("");
+  expect(restored.fpExpected).toEqual({ canvas: "new-canvas" });
+});
+
+test("Cloud exports retain local fingerprint evidence without using cached profile fields", async () => {
+  const store = new ProfileStore(":memory:");
+  const ua = "Mozilla/5.0 (Windows NT 10.0) Chrome/146.0.0.0";
+  const expected = { ua, platform: "Win32", canvas: "imported-canvas" };
+  const authoritative = profile({ name: "Cloud name", platformOs: "windows", fingerprintSeed: 123456 });
+  const options = {
+    cloudBrowser: {},
+    cloudConnection: { client: { async getProfile() { return { payload: encodePortableProfile(authoritative) }; } } },
+  } as unknown as UiRuntimeOptions;
+  try {
+    for (const observed of [undefined, { ...expected, canvas: "local-canvas" }]) {
+      store.upsertProfile(profile({ name: "Stale local name", fpExpected: expected, fpObserved: observed }));
+      for (const format of ["txt", "xlsx"]) {
+        const response = await handleUiRequest(new Request("http://localhost/ui/api/profiles/export", {
+          method: "POST", body: JSON.stringify({ ids: [authoritative.id], format }),
+        }), {} as Launcher, store, null, options);
+        expect(response!.status).toBe(200);
+        const restored = format === "txt"
+          ? parseExport(await response!.text()).profiles[0]!
+          : recordToProfile((await readXlsx(new Uint8Array(await response!.arrayBuffer())))[0]!)!.profile;
+        expect(restored.name).toBe(authoritative.name);
+        expect(restored.fingerprintSeed).toBe(authoritative.fingerprintSeed);
+        expect(restored.ua).toBe(ua);
+        expect(restored.fpExpected).toEqual(observed ?? expected);
+        expect(deriveFingerprintFlags(restored)).toEqual(deriveFingerprintFlags(authoritative));
+      }
+    }
+  } finally {
+    store.close();
+  }
 });
 
 test("the export carries the measured fingerprint", () => {

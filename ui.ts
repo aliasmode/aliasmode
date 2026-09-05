@@ -1183,6 +1183,7 @@ export async function handleUiRequest(
             if (profile.id !== id) throw new Error("Cloud returned a mismatched profile payload");
             const local = store.getProfile(id);
             if (local?.fpObserved) profile.fpObserved = { ...local.fpObserved };
+            if (local?.fpExpected) profile.fpExpected = { ...local.fpExpected };
             return profile;
           }));
           profiles.push(...batch);

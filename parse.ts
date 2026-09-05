@@ -573,6 +573,14 @@ function proxyToString(p: Profile): string {
  * drift into encoding the same profile two different ways.
  */
 function profileFields(p: Profile): Record<string, string> {
+  const fp = p.fpObserved ?? p.fpExpected;
+  // Keep configured launch inputs authoritative. A capture can fill gaps, but
+  // exporting must not rewrite the source or force a stale UA/kernel at launch.
+  const capturedPlatform = fp?.platform === "Win32" ? "windows"
+    : fp?.platform === "MacIntel" ? "macos"
+    : platformFromUA(fp?.platform ?? "") ?? parsePlatformOs(fp?.platform);
+  const platform = p.platformOs || platformFromUA(p.ua)
+    || capturedPlatform || platformFromUA(fp?.ua ?? "");
   return {
     acc_id: p.accId,
     id: p.id,
@@ -587,7 +595,7 @@ function profileFields(p: Profile): Record<string, string> {
     cookie: JSON.stringify(p.cookies),
     proxytype: p.proxy?.type ?? "",
     proxy: proxyToString(p),
-    ua: p.ua,
+    ua: p.ua || (platform && platformFromUA(fp?.ua ?? "") === platform ? fp?.ua ?? "" : ""),
     resolution: `${p.screenWidth}*${p.screenHeight}`,
     // Restored fields: these DRIVE the launch on re-import. Without them the
     // importer recomputes a seed from the id and re-resolves the timezone by
@@ -595,11 +603,11 @@ function profileFields(p: Profile): Record<string, string> {
     // seed was not id-derived (see marketplace.ts).
     seed: String(p.fingerprintSeed),
     timezone: p.timezone,
-    platform_os: p.platformOs ?? "",
+    platform_os: platform || "",
     extensions: (p.extensions ?? []).join(","),
     tags: (p.tags ?? []).join(","),
     // Attested fields: a photograph of the identity, never an input to one.
-    ...attestationFields(p.fpObserved ?? p.fpExpected),
+    ...attestationFields(fp),
   };
 }
 
