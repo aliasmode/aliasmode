@@ -8,7 +8,7 @@ import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v
 import { BrowserLaunchError } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
-import { SessionRestoreError } from "./session.ts";
+import { sessionBundleSignature, SessionRestoreError } from "./session.ts";
 import { ProfileStore } from "./store.ts";
 
 function payload(): PortableProfileV1 {
@@ -68,6 +68,7 @@ function setup(options: {
   startError?: unknown;
   verifyWebSockets?: string[];
   expectedHeadless?: boolean;
+  nativeSessionAvailable?: boolean;
   platform?: string;
   proxy?: PortableProfileV1["profile"]["proxy"];
   session?: PortableProfileV1["session"];
@@ -88,6 +89,8 @@ function setup(options: {
   const navigateEndpoints: string[] = [];
   const restoreEndpoints: string[] = [];
   const captureSeeds: any[] = [];
+  const startOptionsSeen: any[] = [];
+  let cloudSessionSignature: string | null = null;
   const store = new ProfileStore(":memory:");
   const queuePath = join(mkdtempSync(join(tmpdir(), "aliasmode-cloud-browser-")), "pending.sqlite");
   const queue = new PendingSyncQueue(queuePath, new Uint8Array(32).fill(5));
@@ -201,6 +204,12 @@ function setup(options: {
     },
   };
   const launcher = {
+    matchesCloudSession(_profileId: string, signature: string) {
+      return cloudSessionSignature === signature;
+    },
+    recordCloudSession(_profileId: string, signature: string | null) {
+      cloudSessionSignature = signature;
+    },
     failedStartGeneration(error: unknown) {
       return error === retainedStartFailure
         ? { debugPort: 9222, startedAt: 1000 }
@@ -211,9 +220,9 @@ function setup(options: {
       events.push("start");
       startedProxy = store.getProfile(profileId)?.proxy;
       expect(args).toEqual(["--window-size=1200,800"]);
+      startOptionsSeen.push(startOptions);
       expect(startOptions).toMatchObject({
         autoNavigate: false,
-        restoreLastSession: false,
         sessionBaseVersion: -1,
       });
       expect(startOptions.headless).toBe(options.expectedHeadless);
@@ -231,7 +240,10 @@ function setup(options: {
         retainedStartFailure = new Error("stale browser retained");
         throw retainedStartFailure;
       }
-      return { ws: "ws://browser", port: 9222 };
+      return {
+        ws: "ws://browser", port: 9222,
+        nativeSessionRestored: !!startOptions.restoreLastSession && !!options.nativeSessionAvailable,
+      };
     },
     async stop(profileId: string) {
       events.push("stop");
@@ -305,6 +317,7 @@ function setup(options: {
     navigateEndpoints,
     restoreEndpoints,
     captureSeeds,
+    startOptionsSeen,
     store,
     queue,
     closeCalls: () => closeCalls,
@@ -455,6 +468,88 @@ test("Cloud browser keeps the platform home fallback for legacy bundles", async 
 
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   expect(state.navigatedUrls).toEqual([["https://x.com/home"]]);
+  state.queue.close();
+  state.store.close();
+});
+
+for (const closeMethod of ["managed", "window"] as const) {
+  test(`Cloud ${closeMethod} close reopens the native session without replacing its tabs`, async () => {
+    const state = setup({ nativeSessionAvailable: true });
+    const options = (state.coordinator as any).options;
+    const tabs = ["https://duckduckgo.com/", "https://saved.example/two", "https://saved.example/two"];
+    let savedPayload = payload();
+    options.readSession = async () => JSON.stringify({ ...payload().session, origins: [], tabs });
+    options.cloud.closeOpen = async (_id: string, request: { payload: PortableProfileV1 }) => {
+      savedPayload = structuredClone(request.payload);
+      return { ok: true, status: "accepted", version: 5 };
+    };
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    expect(state.startOptionsSeen[0].restoreLastSession).toBe(false);
+    if (closeMethod === "managed") {
+      expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+      expect(savedPayload.session.tabs).toEqual(tabs);
+    } else {
+      // Browser X happens before any heartbeat capture. Chromium has newer tabs
+      // than this opening checkpoint, which must not replace the native session.
+      state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+      await state.coordinator.listRoster();
+      expect(state.events).not.toContain("capture");
+      expect(savedPayload.session.tabs).toBeUndefined();
+      state.setReconcileHook(() => {});
+    }
+    options.cloud.openProfile = async () => ({
+      ok: true, registrationId: "registration2", baseVersion: 5,
+      payload: savedPayload, activeOpens: [],
+    });
+    // A new coordinator represents an app restart; the launcher owns the stamp.
+    const reopened = new CloudBrowserCoordinator(options);
+    state.restoreEndpoints.length = 0;
+    state.navigatedUrls.length = 0;
+    expect((await reopened.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    expect(state.startOptionsSeen.at(-1)).toMatchObject({ restoreLastSession: true, resetStorage: false });
+    expect(state.restoreEndpoints).toEqual([]);
+    expect(state.navigatedUrls).toEqual([]);
+    await reopened.close("profile1");
+    state.queue.close();
+    state.store.close();
+  });
+}
+
+for (const reason of ["missing files", "newer Cloud session", "explicit URL"] as const) {
+  test(`Cloud native restore falls back to portable state for ${reason}`, async () => {
+    const state = setup({ nativeSessionAvailable: reason !== "missing files" });
+    const options = (state.coordinator as any).options;
+    const original = payload();
+    options.launcher.recordCloudSession("profile1", sessionBundleSignature(JSON.stringify(original.session)));
+    const authoritative = structuredClone(original);
+    if (reason === "newer Cloud session") {
+      authoritative.session.tabs = ["https://new.example/", "https://new.example/"];
+      options.cloud.openProfile = async () => ({
+        ok: true, registrationId: "registration1", baseVersion: 6,
+        payload: authoritative, activeOpens: [],
+      });
+    }
+    let restored: unknown;
+    options.applySession = async (_endpoint: string, bundle: string) => { restored = JSON.parse(bundle); };
+    const args = ["--window-size=1200,800"];
+    if (reason === "explicit URL") args.push("https://explicit.example/");
+    expect((await state.coordinator.open("profile1", args)).ok).toBe(true);
+    expect(state.startOptionsSeen[0].restoreLastSession).toBe(reason === "missing files");
+    expect(restored).toEqual(authoritative.session);
+    await state.coordinator.close("profile1");
+    state.queue.close();
+    state.store.close();
+  });
+}
+
+test("Cloud failed portable restore cannot leave a trusted native-session stamp", async () => {
+  const state = setup({ restoreFailure: new Error("restore failed") });
+  const options = (state.coordinator as any).options;
+  const signature = sessionBundleSignature(JSON.stringify(payload().session));
+  options.launcher.recordCloudSession("profile1", signature);
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(false);
+  expect(options.launcher.matchesCloudSession("profile1", signature)).toBe(false);
+  await state.coordinator.close("profile1");
   state.queue.close();
   state.store.close();
 });

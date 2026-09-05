@@ -106,7 +106,8 @@ type CloudBrowserClient = Pick<
 type CloudBrowserLauncher = Pick<
   Launcher,
   "start" | "stop" | "active" | "hasPageTargets" | "verifyRunningIdentity" | "reconcileOrphan" |
-  "pageTargetFingerprint" | "browserStorageWatchPaths" | "failedStartGeneration"
+  "pageTargetFingerprint" | "browserStorageWatchPaths" | "failedStartGeneration" |
+  "matchesCloudSession" | "recordCloudSession"
 >;
 
 export interface CloudBrowserOptions {
@@ -631,11 +632,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       stage = "browser_launch";
       logStage("browser_launch");
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
+      const signature = sessionBundleSignature(sessionBundle);
+      const restoreNativeSession = startupUrls.length === 0 &&
+        this.options.launcher.matchesCloudSession(profileId, signature);
+      // An interrupted restore must not leave partially replaced disk state trusted.
+      this.options.launcher.recordCloudSession(profileId, null);
       const startBrowser = async () => {
         return await this.options.launcher.start(profileId, chromeArgs, {
           autoNavigate: false,
-          restoreLastSession: false,
-          resetStorage: bundleHasRestorableLogin(sessionBundle),
+          restoreLastSession: restoreNativeSession,
+          resetStorage: !restoreNativeSession && bundleHasRestorableLogin(sessionBundle),
           sessionBaseVersion: PENDING_SESSION_BASE_VERSION,
           headless: options.headless,
         });
@@ -707,7 +713,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           : [];
       let navigationWarning: string | undefined;
       try {
-        await this.options.applySession(verifiedLaunch.ws, sessionBundle, urls);
+        // Portable seeding blanks origin pages and replaces tabs. Native restore
+        // already has newer local state and preserves the full Chromium layout.
+        if (!restoreNativeSession || !launched.nativeSessionRestored) {
+          await this.options.applySession(verifiedLaunch.ws, sessionBundle, urls);
+        }
       } catch (error) {
         if (error instanceof SessionRestoreError && error.operation === "navigation") {
           navigationWarning = "Profile opened, but startup navigation failed. Open the site manually.";
@@ -752,10 +762,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const captureSeed = sessionCaptureSeed(sessionBundle);
       this.checkpointSignatures.set(profileId, {
         registrationId,
-        signature: sessionBundleSignature(sessionBundle),
+        signature,
         origins: new Set(captureSeed.origins),
         ...(captureSeed.telegramClient ? { telegramClient: captureSeed.telegramClient } : {}),
       });
+      if (!navigationWarning) this.options.launcher.recordCloudSession(profileId, signature);
 
       // Startup navigation already happened inside the single restore attach above.
       this.diagnosticEvents.record("open_running");
@@ -1232,6 +1243,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const signature = sessionBundleSignature(sessionBundle);
     const prior = this.checkpointSignatures.get(open.profileId);
     if (prior?.registrationId === open.registrationId && prior.signature === signature) {
+      this.options.launcher.recordCloudSession(open.profileId, signature);
       this.diagnosticEvents.record("checkpoint_unchanged");
       return "unchanged";
     }
@@ -1246,6 +1258,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const state = this.checkpointState(open, queue);
     state.signature = signature;
     this.checkpointSignatures.set(open.profileId, state);
+    this.options.launcher.recordCloudSession(open.profileId, signature);
     this.diagnosticEvents.record("checkpoint_saved");
     return "saved";
   }
