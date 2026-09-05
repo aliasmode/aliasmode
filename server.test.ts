@@ -92,6 +92,7 @@ function harness(): Harness {
     fetch: fetchFn,
     ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
     ensureCookies,
+    captureFingerprint: async () => null,
     // stop() routes kills through killPidFn (tree-kill); track them here.
     killPid: async (pid) => {
       killed.push(pid);

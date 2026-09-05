@@ -43,6 +43,7 @@ class Launcher extends ProductionLauncher {
       // Production policy is exercised explicitly in dedicated gate tests below.
       unsafeDisableIdentityGates: true,
       findProfileDirHolderPids: async () => [],
+      captureFingerprint: async () => null,
       ...opts,
     });
   }
@@ -1555,6 +1556,7 @@ test("a Windows persona launches on a Mac host (cross-OS spoofing allowed)", asy
     hostArch: "arm64",
     portProbe: () => true,
     spawn: (path, args) => { spawns++; return f.spawn(path, args); },
+    captureFingerprint: async () => null,
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
@@ -1594,6 +1596,7 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     hostArch: "x64",
     portProbe: () => true,
     spawn: (path, args) => { expect(path).toBe(realpathSync(binary)); spawns++; return f.spawn(path, args); },
+    captureFingerprint: async () => null,
     fetch: f.fetchFn,
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,

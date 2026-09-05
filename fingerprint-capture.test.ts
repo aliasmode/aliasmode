@@ -1,5 +1,10 @@
 import { test, expect } from "bun:test";
-import { recordCapture } from "./fingerprint-capture.ts";
+import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { ProfileStore } from "./store.ts";
+import { parseExport, serializeAdsTxt } from "./parse.ts";
 import type { FingerprintVerdict, ObservedFingerprint, Profile } from "./types.ts";
 
 function profile(overrides: Partial<Profile> = {}): Profile {
@@ -9,6 +14,73 @@ function profile(overrides: Partial<Profile> = {}): Profile {
     fingerprintSeed: 1, cookies: [], seeded: false, ...overrides,
   };
 }
+
+test("capture entrypoint runs the Node worker and persists exportable observations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-fingerprint-worker-"));
+  const store = new ProfileStore(":memory:");
+  const events = join(root, "events.log");
+  try {
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { appendFile } from "node:fs/promises";
+      const log = event => appendFile(${JSON.stringify(events)}, event + "\\n");
+      export const chromium = { async connectOverCDP(endpoint) {
+        await log("connect");
+        let closed = false;
+        const page = {
+          async evaluate(source) {
+            if (!source.includes("canvasHash") || !source.includes("navigator") || !source.endsWith(")()")) throw new Error("missing probe invocation");
+            await new Promise(resolve => setTimeout(resolve, 20));
+            if (closed) throw new Error("page closed before evaluation finished");
+            if (endpoint.endsWith("/failure")) throw new Error("probe failed");
+            await log("evaluated");
+            return { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/146.0.0.0", platform: "Win32", canvasHash: "captured" };
+          },
+          async goto() { throw new Error("capture must not navigate"); },
+          async close() { closed = true; await log("close-page"); },
+        };
+        return {
+          contexts: () => [{
+            pages() { throw new Error("capture must not use user tabs"); },
+            async newPage() { await log("new-page"); return page; },
+          }],
+          async close() { await log("detach"); },
+        };
+      } };
+    `);
+    const options = {
+      runtimeRoot: root,
+      timeoutMs: 5_000,
+      spawn: (argv: string[]) => Bun.spawn(["node", ...argv.slice(1)], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
+    };
+    const p = profile();
+    store.upsertProfile(p);
+    const logs: string[] = [];
+    const run = (endpoint: string) => recordCapture({
+      profile: p, capture: () => captureFingerprint(endpoint, options),
+      save: (id, observed, verdict) => store.saveObservedFingerprint(id, observed, verdict),
+      log: message => logs.push(message),
+    });
+    expect(await run("ws://browser/success")).toBe(true);
+    const saved = store.getProfile(p.id)!;
+    expect(saved.fpObserved?.canvas).toBe("captured");
+    expect(saved.fpObserved?.capturedAt).toBeTruthy();
+    const exported = parseExport(serializeAdsTxt([saved])).profiles[0]!;
+    expect(exported.ua).toContain("Chrome/146");
+    expect(exported.fpExpected?.canvas).toBe("captured");
+    expect(await run("ws://browser/failure")).toBe(false);
+    expect(store.getProfile(p.id)!.fpObserved).toEqual(saved.fpObserved);
+    expect(logs).toHaveLength(1);
+    expect((await readFile(events, "utf8")).trim().split("\n")).toEqual([
+      "connect", "new-page", "evaluated", "close-page", "detach",
+      "connect", "new-page", "close-page", "detach",
+    ]);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 interface Saved {
   id: string;

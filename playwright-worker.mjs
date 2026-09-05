@@ -1083,6 +1083,7 @@ async function operate(chromium, operation, payload) {
       const page = payload.temporary ? await context.newPage() : context.pages()[0] || await context.newPage();
       try {
         if (payload.url) await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: payload.timeoutMs || 30_000 }).catch(() => {});
+        if (payload.kind === "fingerprint") return await page.evaluate(payload.fingerprintScript);
         if (payload.kind === "user-agent") return page.evaluate(() => navigator.userAgent);
         if (payload.kind === "scripts") {
           const values = [];

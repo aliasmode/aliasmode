@@ -13,7 +13,7 @@
  *     failure path here logs and returns — see recordCapture.
  */
 
-import { withCdpPage } from "./cdp.ts";
+import { runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
 import { fingerprintProbe, type FingerprintSample } from "./diagnose.ts";
 import { compareAttestation, observedFromSample } from "./fingerprint-attestation.ts";
 import type { FingerprintVerdict, ObservedFingerprint, Profile } from "./types.ts";
@@ -23,14 +23,16 @@ const DEFAULT_CAPTURE_TIMEOUT_MS = 15_000;
 /** Read the live fingerprint over CDP from an isolated blank page. */
 export async function captureFingerprint(
   ws: string,
-  opts: { timeoutMs?: number } = {},
+  opts: PlaywrightWorkerOptions = {},
 ): Promise<FingerprintSample | null> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS;
-  return withCdpPage(
-    ws,
-    async (page) => (await page.evaluate(fingerprintProbe)) as FingerprintSample,
-    { timeoutMs, temporaryPage: true },
-  );
+  return runPlaywrightWorker<FingerprintSample>("page", {
+    endpoint: ws,
+    kind: "fingerprint",
+    temporary: true,
+    fingerprintScript: `(${fingerprintProbe.toString()})()`,
+    connectTimeoutMs: timeoutMs,
+  }, { ...opts, timeoutMs: timeoutMs + 10_000 });
 }
 
 export interface RecordCaptureArgs {
