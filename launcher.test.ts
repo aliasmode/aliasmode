@@ -496,6 +496,16 @@ test("cloud session authority marker is durable and invalidatable", () => {
   store.close();
 });
 
+test("Cloud session marker invalidation fails closed", () => {
+  const store = seeded();
+  const launcher = newLauncher(store, fleet(), []);
+  const marker = join(launcher.userDataDir("k1d0cd11"), ".aliasmode-cloud-session-authority-v1");
+  mkdirSync(marker, { recursive: true });
+
+  expect(() => launcher.recordCloudSession("k1d0cd11", null)).toThrow("cannot invalidate Cloud session");
+  store.close();
+});
+
 test("reattach safely migrates one revision-1 browser through managed search setup", async () => {
   const store = seeded();
   const f = fleet();

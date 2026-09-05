@@ -2060,7 +2060,8 @@ export class Launcher {
       } catch (invalidationError) {
         throw new Error(`cannot invalidate Cloud session for ${profileId}: ${invalidationError instanceof Error ? invalidationError.message : invalidationError}`);
       }
-      throw new Error(`cannot record Cloud session for ${profileId}: ${error instanceof Error ? error.message : error}`);
+      this.log(`Cloud session marker failed for ${profileId}; invalidated it instead: ${error instanceof Error ? error.message : error}`);
+      return;
     }
   }
 
