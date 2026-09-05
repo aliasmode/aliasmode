@@ -69,20 +69,31 @@ export function parseEgressResponse(body: string): EgressInfo | null {
   return ip ? { ip } : null;
 }
 
+export type EgressLookupFailure =
+  | "request_failed"
+  | "service_failed"
+  | "proxy_authentication_failed";
+
 /** Fetch this machine's direct egress using the same endpoints/parser. */
 export async function fetchDirectEgress(
   opts: EgressLookupOptions = {},
   fetchFn: typeof fetch = fetch,
+  onFailure?: (failure: EgressLookupFailure) => void,
 ): Promise<EgressInfo | null> {
   const endpoints = opts.endpoints ? [...opts.endpoints] : resolveEgressEndpoints();
   const timeoutMs = opts.timeoutMs ?? 15_000;
   for (const endpoint of endpoints) {
     try {
       const response = await fetchFn(endpoint, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) continue;
+      if (!response.ok) {
+        onFailure?.(response.status === 407 ? "proxy_authentication_failed" : "service_failed");
+        continue;
+      }
       const info = parseEgressResponse(await response.text());
       if (info) return info;
+      onFailure?.("service_failed");
     } catch {
+      onFailure?.("request_failed");
       // Try the next independent endpoint.
     }
   }

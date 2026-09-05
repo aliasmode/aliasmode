@@ -195,20 +195,33 @@ test("dashboard lists the supported profile platforms", () => {
   }
 });
 
-test("New Profile promotes the approved proxy provider after proxy credentials", () => {
+test("New and Edit profile dialogs check proxies and show only relevant provider offers", () => {
   const createModal = app.slice(app.indexOf("{showCreate && ("), app.indexOf("{editId && ("));
-  const credentials = createModal.indexOf("<span>Proxy pass</span>");
-  const referral = createModal.indexOf('className="proxy-referral"');
-  const fingerprint = createModal.indexOf("<FingerprintSettings");
+  const editModal = app.slice(app.indexOf("{editId && ("), app.indexOf("{showBulk && ("));
 
-  expect(credentials).toBeGreaterThan(-1);
-  expect(referral).toBeGreaterThan(credentials);
-  expect(fingerprint).toBeGreaterThan(referral);
-  expect(createModal).toContain('href="https://outreachproxy.com/t/aliasmode"');
-  expect(createModal).toContain('target="_blank"');
-  expect(createModal).toContain('rel="noreferrer"');
-  expect(createModal).toContain('aria-label="Get a proxy from OutreachProxy (opens externally)"');
-  expect(createModal).toContain('aria-hidden="true"');
+  expect(app).toContain('const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";');
+  expect(app).toContain("Need a proxy? Get one from our recommended provider.");
+  expect(app).toContain("This proxy is unstable. View recommended replacements.");
+  expect(app).not.toContain("outreachproxy.com");
+  expect(app).not.toContain("OutreachProxy");
+  for (const modal of [createModal, editModal]) {
+    expect(modal).toContain("Check proxy");
+    expect(modal).toContain("<ProxyCheckFeedback");
+  }
+  expect(app).toContain('target="_blank"');
+  expect(app).toContain('rel="noreferrer"');
+  expect(app).toContain('aria-label="View recommended proxies at NobleProxy (opens externally)"');
+  expect(app).toContain('if (k === "proxyType" || k === "host" || k === "port" || k === "user" || k === "pass")');
+  expect(app).toContain('if (k === "proxy" || k === "proxyType") resetEditProxyCheck();');
+  expect(app).toContain("generation === createProxyCheckGeneration.current");
+  expect(app).toContain("generation === editProxyCheckGeneration.current");
+  expect(app).toContain("createProxyCheckGeneration.current++");
+  expect(app).toContain("editProxyCheckGeneration.current++");
+  expect(createModal).toContain('className="btn primary" disabled={creating}');
+  expect(editModal).toContain('className="btn primary" disabled={editSaving || editLoading}');
+  for (const tone of ["working", "unstable", "failed", "unavailable"]) {
+    expect(styles).toContain(`.proxy-check-result.${tone}`);
+  }
   expect(styles).toContain(".proxy-referral {");
   expect(styles).toContain(".proxy-referral a:focus-visible");
 });
@@ -417,7 +430,7 @@ test("New profile and Edit are instant dialogs; only Settings and Extensions are
   expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
   expect(app).toContain('aria-labelledby="create-profile-title"');
   expect(app).toContain('aria-labelledby="edit-profile-title"');
-  expect(app).toContain('const closeCreate = () => {\n    setShowCreate(false);');
+  expect(app).toContain('const closeCreate = () => {\n    resetCreateProxyCheck();\n    setShowCreate(false);');
   expect(app).toContain("PAGE_TITLES[view]");
   // Edit opens on the click — the detail fetch fills the dialog in when it
   // lands, and a stale response for an abandoned dialog is discarded.

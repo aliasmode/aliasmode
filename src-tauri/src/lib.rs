@@ -32,7 +32,7 @@ const ALLOWED_EXTERNAL_URLS: [&str; 4] = [
     "https://aliasmode.com/terms/",
     "https://aliasmode.com/privacy/",
     "https://aliasmode.com/acceptable-use/",
-    "https://outreachproxy.com/t/aliasmode",
+    "https://nobleproxy.com/t/aliasmode",
 ];
 
 const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
@@ -267,7 +267,7 @@ mod tests {
             "https://aliasmode.com/terms/",
             "https://aliasmode.com/privacy/",
             "https://aliasmode.com/acceptable-use/",
-            "https://outreachproxy.com/t/aliasmode",
+            "https://nobleproxy.com/t/aliasmode",
         ] {
             assert!(allowed_external_url(url));
         }
@@ -277,10 +277,10 @@ mod tests {
             "https://aliasmode.com/terms/extra",
             "https://aliasmode.com/terms/?continue=https://example.com",
             "https://example.com/terms/",
-            "http://outreachproxy.com/t/aliasmode",
-            "https://outreachproxy.com/t/aliasmode/",
-            "https://outreachproxy.com/t/aliasmode?source=app",
-            "https://outreachproxy.com/t/another-campaign",
+            "http://nobleproxy.com/t/aliasmode",
+            "https://nobleproxy.com/t/aliasmode/",
+            "https://nobleproxy.com/t/aliasmode?source=app",
+            "https://nobleproxy.com/t/another-campaign",
             "https://example.com/t/aliasmode",
         ] {
             assert!(!allowed_external_url(url));

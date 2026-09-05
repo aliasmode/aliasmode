@@ -500,11 +500,102 @@ export async function deleteProfiles(ids: string[]): Promise<any> {
   return apiJson(r, "/ui/api/profiles/delete");
 }
 
+export interface ProxyCheckInput {
+  type?: string;
+  host: string;
+  port: string;
+  user?: string;
+  pass?: string;
+}
+
+export type ProxyCheckStatus = "working" | "unstable" | "failed" | "unavailable";
+export type ProxyCheckReason =
+  | "authentication_failed"
+  | "timeout"
+  | "dns_failed"
+  | "unreachable"
+  | "connection_failed"
+  | "intermittent"
+  | "proxy_bypassed"
+  | "check_unavailable";
+
+export interface ProxyCheckResult {
+  status: ProxyCheckStatus;
+  attempts: number;
+  successes: number;
+  reason?: ProxyCheckReason;
+  ip?: string;
+  country?: string;
+  region?: string;
+  city?: string;
+  rotating?: boolean;
+}
+
+const PROXY_CHECK_STATUSES = new Set<ProxyCheckStatus>(["working", "unstable", "failed", "unavailable"]);
+const PROXY_CHECK_REASONS = new Set<ProxyCheckReason>([
+  "authentication_failed",
+  "timeout",
+  "dns_failed",
+  "unreachable",
+  "connection_failed",
+  "intermittent",
+  "proxy_bypassed",
+  "check_unavailable",
+]);
+
+function proxyCheckResult(body: any): ProxyCheckResult {
+  if (
+    !PROXY_CHECK_STATUSES.has(body?.status)
+    || !Number.isInteger(body?.attempts)
+    || body.attempts < 1
+    || !Number.isInteger(body?.successes)
+    || body.successes < 0
+    || body.successes > body.attempts
+    || (body.reason !== undefined && !PROXY_CHECK_REASONS.has(body.reason))
+    || ["ip", "country", "region", "city"].some((field) => body[field] !== undefined && typeof body[field] !== "string")
+    || (body.rotating !== undefined && typeof body.rotating !== "boolean")
+  ) {
+    throw new Error("Proxy check returned invalid data");
+  }
+  return {
+    status: body.status,
+    attempts: body.attempts,
+    successes: body.successes,
+    ...(body.reason ? { reason: body.reason } : {}),
+    ...(body.ip ? { ip: body.ip } : {}),
+    ...(body.country ? { country: body.country } : {}),
+    ...(body.region ? { region: body.region } : {}),
+    ...(body.city ? { city: body.city } : {}),
+    ...(body.rotating !== undefined ? { rotating: body.rotating } : {}),
+  };
+}
+
+export class ProxyCheckError extends Error {
+  constructor(readonly kind: "invalid" | "unavailable") {
+    super("Proxy check failed");
+    this.name = "ProxyCheckError";
+  }
+}
+
+export async function checkProxy(proxy: ProxyCheckInput): Promise<ProxyCheckResult> {
+  const path = "/ui/api/proxy/check";
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proxy }),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) {
+    throw new ProxyCheckError(response.status === 400 ? "invalid" : "unavailable");
+  }
+  return proxyCheckResult(body);
+}
+
 export interface NewProfileInput {
   name?: string;
   group?: string;
   platform?: string;
-  proxy?: { type: string; host: string; port: string; user: string; pass: string } | null;
+  proxy?: ProxyCheckInput | null;
   screen?: string;
   /** Operator-chosen serial shown in the roster and the browser window title. */
   customNo?: string;

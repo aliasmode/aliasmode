@@ -15,7 +15,8 @@ import { PendingSyncRuntime } from "./pending-sync.ts";
 import { EmailVerificationRequiredError, SupabaseAuthRequestError, type SupabaseAuthClient } from "./supabase-auth.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
-import type { Profile } from "./types.ts";
+import type { ProxyCheckResult } from "./proxy-check.ts";
+import type { Profile, ProxySpec } from "./types.ts";
 
 const SAMPLE = `id=k1d0cd11
 name=sophia
@@ -125,6 +126,124 @@ test("a quarantined legacy proxy stays visible and repairable without exposing c
   const edit = (await response!.json()).profile;
   expect(edit.proxy).toBe("");
   expect(edit.proxyError).toContain("unsupported proxy type");
+  s.close();
+});
+
+test("proxy check route works in Cloud mode without storing proxy data", async () => {
+  const s = store();
+  const before = structuredClone(s.getProfile("k1d0cd11"));
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-proxy-check-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const checked: ProxySpec[] = [];
+  const results: ProxyCheckResult[] = [
+    { status: "working", attempts: 3, successes: 3, ip: "203.0.113.10", country: "US", rotating: false },
+    { status: "unstable", attempts: 3, successes: 2, reason: "intermittent", ip: "203.0.113.11" },
+    { status: "failed", attempts: 3, successes: 0, reason: "authentication_failed" },
+    { status: "unavailable", attempts: 3, successes: 0, reason: "check_unavailable" },
+  ];
+
+  for (const expected of results) {
+    const response = await handleUiRequest(
+      new Request("http://x/ui/api/proxy/check", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "http://x" },
+        body: JSON.stringify({
+          proxy: {
+            type: "socks5",
+            host: " proxy.example ",
+            port: "01080",
+            user: " proxy-user ",
+            pass: "private-password",
+          },
+        }),
+      }),
+      {} as any,
+      s,
+      null,
+      {
+        appConfig,
+        proxyCheck: async (proxy: ProxySpec) => {
+          checked.push(proxy);
+          return { ...expected, pass: "must-not-leak" } as ProxyCheckResult;
+        },
+      } as any,
+    );
+    expect(response!.status).toBe(200);
+    expect(response!.headers.get("cache-control")).toBe("no-store");
+    expect(await response!.json()).toEqual({ ok: true, ...expected });
+  }
+
+  expect(checked).toEqual(Array.from({ length: results.length }, () => ({
+    type: "socks5",
+    host: "proxy.example",
+    port: "1080",
+    user: "proxy-user",
+    pass: "private-password",
+  })));
+  expect(s.getProfile("k1d0cd11")).toEqual(before);
+  s.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("proxy check route rejects untrusted or invalid input without echoing credentials", async () => {
+  const s = store();
+  let checks = 0;
+  const options = {
+    proxyCheck: async () => {
+      checks++;
+      throw new Error("checker exposed private-password");
+    },
+  } as any;
+  const request = (body: unknown, headers: HeadersInit = { "content-type": "application/json" }) =>
+    handleUiRequest(new Request("http://x/ui/api/proxy/check", {
+      method: "POST",
+      headers,
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    }), {} as any, s, null, options);
+
+  const untrusted = await request({}, { "content-type": "text/plain" });
+  expect(untrusted!.status).toBe(415);
+  expect(untrusted!.headers.get("cache-control")).toBe("no-store");
+
+  const crossOrigin = await request({}, {
+    "content-type": "application/json",
+    origin: "https://outside.invalid",
+  });
+  expect(crossOrigin!.status).toBe(403);
+
+  for (const body of [
+    { proxy: { host: "", port: "" } },
+    { proxy: { host: "proxy.example", port: "not-a-port" } },
+    { proxy: { type: "https", host: "proxy.example", port: "8443" } },
+    { proxy: { type: "private-password", host: "proxy.example", port: "8080" } },
+    "not-json",
+  ]) {
+    const response = await request(body);
+    const text = await response!.text();
+    expect(response!.status).toBe(400);
+    expect(response!.headers.get("cache-control")).toBe("no-store");
+    expect(text).not.toContain("private-password");
+    expect(text).not.toContain("proxy.example");
+  }
+  expect(checks).toBe(0);
+
+  const failed = await request({
+    proxy: {
+      type: "http",
+      host: "proxy.example",
+      port: "8080",
+      user: "proxy-user",
+      pass: "private-password",
+    },
+  });
+  const failureText = await failed!.text();
+  expect(failed!.status).toBe(500);
+  expect(failed!.headers.get("cache-control")).toBe("no-store");
+  expect(failureText).toContain("Proxy check failed");
+  expect(failureText).not.toContain("private-password");
+  expect(failureText).not.toContain("checker exposed");
+  expect(checks).toBe(1);
   s.close();
 });
 

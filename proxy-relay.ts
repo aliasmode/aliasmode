@@ -9,7 +9,7 @@
  * loads.
  *
  * Instead the browser points at this loopback HTTP relay with NO auth. For an HTTP upstream, the
- * relay injects `Proxy-Authorization`. For SOCKS5, it performs RFC 1928/1929 itself and carries the
+ * relay injects `Proxy-Authorization` when credentials are configured. For SOCKS5, it performs RFC 1928/1929 itself and carries the
  * browser's HTTP/CONNECT traffic through that tunnel. The latter is important for packaged kernels
  * older than CloakBrowser 0.3.24, where inline SOCKS credentials are ignored by Chromium.
  */
@@ -46,7 +46,7 @@ type TrackSocket = (socket: net.Socket) => net.Socket;
 
 /** Start a loopback relay that forwards to `up`, injecting its credentials. Resolves once listening. */
 export function startProxyRelay(up: UpstreamProxy, opts: RelayOptions = {}): Promise<ProxyRelay> {
-  const auth = "Basic " + Buffer.from(`${up.user}:${up.pass}`).toString("base64");
+  const auth = up.user ? "Basic " + Buffer.from(`${up.user}:${up.pass}`).toString("base64") : null;
   const log = opts.log ?? (() => {});
   // server.close() only stops accepting new clients; it deliberately waits for
   // existing sockets and does not destroy them. Track both sides of every relay
@@ -85,7 +85,7 @@ export function startProxyRelay(up: UpstreamProxy, opts: RelayOptions = {}): Pro
 function handleClient(
   client: net.Socket,
   up: UpstreamProxy,
-  auth: string,
+  auth: string | null,
   log: (m: string) => void,
   track: TrackSocket,
 ): void {
@@ -112,7 +112,7 @@ function handleClient(
 function connectTunnel(
   client: net.Socket,
   up: UpstreamProxy,
-  auth: string,
+  auth: string | null,
   firstLine: string,
   rest: Buffer,
   log: (m: string) => void,
@@ -131,7 +131,14 @@ function connectTunnel(
   // not exist and the upstream socket otherwise survives the client.
   client.once("close", () => upSock.destroy());
   upSock.on("connect", () => {
-    upSock.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\nProxy-Authorization: ${auth}\r\n\r\n`);
+    const headers = [
+      `CONNECT ${target} HTTP/1.1`,
+      `Host: ${target}`,
+      ...(auth ? [`Proxy-Authorization: ${auth}`] : []),
+      "",
+      "",
+    ];
+    upSock.write(headers.join("\r\n"));
   });
   let rbuf = Buffer.alloc(0);
   const onUpData = (chunk: Buffer) => {
@@ -230,7 +237,7 @@ async function connectSocksTunnel(
 function plainHttp(
   client: net.Socket,
   up: UpstreamProxy,
-  auth: string,
+  auth: string | null,
   head: string,
   rest: Buffer,
   log: (m: string) => void,
@@ -245,8 +252,15 @@ function plainHttp(
   const headers = lines
     .slice(1)
     .filter((l) => l !== "" && !/^(proxy-authorization|connection|proxy-connection)\s*:/i.test(l));
-  const rebuilt =
-    [reqLine, ...headers, `Proxy-Authorization: ${auth}`, "Connection: close", "Proxy-Connection: close", "", ""].join("\r\n");
+  const rebuilt = [
+    reqLine,
+    ...headers,
+    ...(auth ? [`Proxy-Authorization: ${auth}`] : []),
+    "Connection: close",
+    "Proxy-Connection: close",
+    "",
+    "",
+  ].join("\r\n");
 
   const upSock = track(net.connect({ host: up.host, port: up.port }));
   upSock.on("error", (e) => { log(`upstream HTTP error: ${e.message}`); client.destroy(); });

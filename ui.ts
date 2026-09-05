@@ -31,7 +31,8 @@ import {
 } from "./cloud-profile-editor.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
-import type { FingerprintVerdict, Profile, CookieRecord } from "./types.ts";
+import type { FingerprintVerdict, Profile, CookieRecord, ProxySpec } from "./types.ts";
+import { checkProxy as runProxyCheck, type ProxyCheckResult } from "./proxy-check.ts";
 import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
@@ -47,7 +48,7 @@ import {
 } from "./extensions.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
-import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
+import { normalizeProxySpec, proxyHostPort, proxyLegacyString, type ProxyInput } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
 import { addBrowserCookie } from "./session.ts";
 import { join, resolve } from "node:path";
@@ -307,6 +308,20 @@ function cloudCloseResponse(result: CloudBrowserCloseResult): Response {
 function noStoreJson(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }
+
+function proxyCheckView(result: ProxyCheckResult): ProxyCheckResult {
+  return {
+    status: result.status,
+    attempts: result.attempts,
+    successes: result.successes,
+    ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.ip ? { ip: result.ip } : {}),
+    ...(result.country ? { country: result.country } : {}),
+    ...(result.region ? { region: result.region } : {}),
+    ...(result.city ? { city: result.city } : {}),
+    ...(result.rotating !== undefined ? { rotating: result.rotating } : {}),
+  };
+}
 const APPLICATION_ROOT = resolve(import.meta.dir);
 
 let appVersionPromise: Promise<string> | null = null;
@@ -423,6 +438,7 @@ export interface UiRuntimeOptions {
   mcpTunnel?: McpTunnelLifecycle;
   health?: UiHealthMetadata | null;
   timezoneFetch?: FetchLike;
+  proxyCheck?: (proxy: ProxySpec) => Promise<ProxyCheckResult>;
   extensionFetch?: ExtensionFetch;
   addCookie?: (ws: string, cookie: CookieRecord) => Promise<void>;
   /** Mode whose runtimes were wired when this process started. */
@@ -479,6 +495,34 @@ export async function handleUiRequest(
       { events: normalizeCloudDiagnostics(options.cloudBrowser?.diagnostics?.() ?? []) },
       { headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  if (pathname === "/ui/api/proxy/check" && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) {
+      rejected.headers.set("Cache-Control", "no-store");
+      return rejected;
+    }
+    let proxy: ProxySpec;
+    try {
+      const body = await req.json() as { proxy?: unknown };
+      if (!body || typeof body !== "object" || !body.proxy || typeof body.proxy !== "object" || Array.isArray(body.proxy)) {
+        throw new Error("invalid proxy input");
+      }
+      const normalized = normalizeProxySpec(body.proxy as ProxyInput);
+      if (!normalized || (normalized.type !== "http" && normalized.type !== "socks5")) {
+        throw new Error("unsupported proxy input");
+      }
+      proxy = normalized;
+    } catch {
+      return noStoreJson({ ok: false, error: "Invalid proxy settings" }, 400);
+    }
+    try {
+      const result = await (options.proxyCheck ?? runProxyCheck)(proxy);
+      return noStoreJson({ ok: true, ...proxyCheckView(result) });
+    } catch {
+      return noStoreJson({ ok: false, error: "Proxy check failed" }, 500);
+    }
   }
 
   if (pathname === "/ui/api/app-mode" && req.method === "POST") {

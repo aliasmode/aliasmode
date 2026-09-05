@@ -6,7 +6,7 @@ const EXPECTED_AUTH = "Basic " + Buffer.from("puser:ppass").toString("base64");
 
 /** A fake upstream proxy that requires Proxy-Authorization. Records the auth it saw. CONNECT with the
  *  right auth → 200 then echo; plain HTTP with the right auth → a fixed 200 body; wrong/no auth → 407. */
-function fakeUpstream(): Promise<{ port: number; close(): void; lastAuth(): string | null; connectCount(): number }> {
+function fakeUpstream(requireAuth = true): Promise<{ port: number; close(): void; lastAuth(): string | null; connectCount(): number }> {
   let lastAuth: string | null = null;
   let connects = 0;
   const server = net.createServer((sock) => {
@@ -20,7 +20,7 @@ function fakeUpstream(): Promise<{ port: number; close(): void; lastAuth(): stri
       const firstLine = head.split("\r\n")[0] ?? "";
       const authLine = head.split("\r\n").find((l) => /^proxy-authorization:/i.test(l));
       lastAuth = authLine ? authLine.split(/:\s*/).slice(1).join(": ") : null;
-      const ok = lastAuth === EXPECTED_AUTH;
+      const ok = !requireAuth || lastAuth === EXPECTED_AUTH;
       if (!ok) { sock.end("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"); return; }
       if (/^CONNECT\s/i.test(firstLine)) {
         connects++;
@@ -194,6 +194,16 @@ test("CONNECT: relay authenticates the tunnel and pipes bytes", async () => {
   up.close();
 });
 
+test("CONNECT omits Proxy-Authorization when the upstream needs no credentials", async () => {
+  const up = await fakeUpstream(false);
+  const relay = await startProxyRelay({ host: "127.0.0.1", port: up.port, user: "", pass: "" });
+  const got = await clientExchange(relay.port, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n", undefined, "ping");
+  expect(got).toContain("200 Connection established");
+  expect(up.lastAuth()).toBeNull();
+  relay.close();
+  up.close();
+});
+
 test("CONNECT: wrong upstream creds → no tunnel (relay closes the client)", async () => {
   const up = await fakeUpstream();
   const relay = await startProxyRelay({ host: "127.0.0.1", port: up.port, user: "puser", pass: "WRONG" });
@@ -210,6 +220,16 @@ test("plain HTTP: relay injects auth and forces the connection closed", async ()
   expect(got).toContain("200 OK");
   expect(got).toContain("hi");
   expect(up.lastAuth()).toBe(EXPECTED_AUTH);
+  relay.close();
+  up.close();
+});
+
+test("HTTP relay omits Proxy-Authorization when the upstream needs no credentials", async () => {
+  const up = await fakeUpstream(false);
+  const relay = await startProxyRelay({ host: "127.0.0.1", port: up.port, user: "", pass: "" });
+  const got = await clientExchange(relay.port, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n");
+  expect(got).toContain("200 OK");
+  expect(up.lastAuth()).toBeNull();
   relay.close();
   up.close();
 });

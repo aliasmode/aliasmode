@@ -967,14 +967,23 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .update-progress progress { width: 100%; height: 8px; accent-color: var(--accent); }
 .update-settings .update-progress { width: 100%; }
 
-/* OutreachProxy referral inside the create dialog's proxy section. */
+/* Proxy checker and conditional NobleProxy offer in both profile dialogs. */
+.proxy-check-actions { display: flex; justify-content: flex-end; }
+.proxy-check-btn { min-width: 118px; }
+.proxy-check-result {
+  display: flex; align-items: flex-start; gap: 7px; padding: 9px 11px;
+  border: 1px solid; border-radius: var(--r-md); font-size: 12px; line-height: 1.45;
+}
+.proxy-check-result .icon { flex: 0 0 auto; margin-top: 1px; }
+.proxy-check-result.working { color: var(--success-ink); background: var(--success-soft); border-color: var(--success-line); }
+.proxy-check-result.unstable { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
+.proxy-check-result.failed { color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-line); }
+.proxy-check-result.unavailable { color: var(--muted); background: var(--surface-sunken); border-color: var(--line); }
 .proxy-referral {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
   padding: 10px 11px; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--r-md);
 }
-.proxy-referral > div { display: flex; flex: 1 1 270px; min-width: 0; flex-direction: column; gap: 2px; }
-.proxy-referral strong { color: var(--ink); font-size: 12.5px; }
-.proxy-referral > div > span { color: var(--muted); font-size: 11.5px; line-height: 1.35; }
+.proxy-referral strong { flex: 1 1 270px; min-width: 0; color: var(--ink); font-size: 12.5px; }
 .proxy-referral a {
   flex: 0 0 auto; padding: 6px 10px; color: var(--on-fill); background: var(--accent-fill); border: 1px solid var(--accent-fill);
   border-radius: var(--r-sm); font-size: 12px; font-weight: 650; text-decoration: none; white-space: nowrap;

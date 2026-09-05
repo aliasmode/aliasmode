@@ -15,6 +15,7 @@ import {
   fetchGroupExtensionDefaults,
   setGroupExtensionDefaults,
   cloudWorkspaceAction,
+  checkProxy,
   exportProfiles,
   fetchProfiles,
   openProfile,
@@ -96,6 +97,80 @@ test("dashboard adds one cookie through a same-origin JSON request", async () =>
   expect(init?.method).toBe("POST");
   expect(init?.headers).toEqual({ "Content-Type": "application/json" });
   expect(JSON.parse(String(init?.body))).toEqual(cookie);
+});
+
+test("dashboard checks an unsaved proxy through same-origin JSON", async () => {
+  let input: RequestInfo | URL | undefined;
+  let init: RequestInit | undefined;
+  globalThis.fetch = (async (nextInput: RequestInfo | URL, nextInit?: RequestInit) => {
+    input = nextInput;
+    init = nextInit;
+    return Response.json({
+      ok: true,
+      status: "working",
+      attempts: 3,
+      successes: 3,
+      ip: "203.0.113.20",
+      country: "US",
+      rotating: false,
+      ignored: "server-only field",
+    });
+  }) as unknown as typeof fetch;
+
+  const proxy = {
+    type: "socks5",
+    host: "proxy.example",
+    port: "1080",
+    user: "proxy-user",
+    pass: "private-password",
+  };
+  await expect(checkProxy(proxy)).resolves.toEqual({
+    status: "working",
+    attempts: 3,
+    successes: 3,
+    ip: "203.0.113.20",
+    country: "US",
+    rotating: false,
+  });
+  expect(input).toBe("/ui/api/proxy/check");
+  expect(init?.method).toBe("POST");
+  expect(init?.headers).toEqual({ "Content-Type": "application/json" });
+  expect(JSON.parse(String(init?.body))).toEqual({ proxy });
+});
+
+test("proxy check client rejects errors and malformed results without exposing credentials", async () => {
+  globalThis.fetch = (async () => Response.json(
+    { ok: false, error: "private-password was rejected" },
+    { status: 400 },
+  )) as unknown as typeof fetch;
+  const invalid = await checkProxy({ host: "proxy.example", port: "8080", pass: "private-password" })
+    .catch((error) => error);
+  expect(invalid).toMatchObject({
+    name: "ProxyCheckError",
+    message: "Proxy check failed",
+    kind: "invalid",
+  });
+
+  globalThis.fetch = (async () => Response.json(
+    { ok: false, error: "private-password reached an unavailable checker" },
+    { status: 503 },
+  )) as unknown as typeof fetch;
+  const unavailable = await checkProxy({ host: "proxy.example", port: "8080" }).catch((error) => error);
+  expect(unavailable).toMatchObject({
+    name: "ProxyCheckError",
+    message: "Proxy check failed",
+    kind: "unavailable",
+  });
+
+  globalThis.fetch = (async () => Response.json({
+    ok: true,
+    status: "unknown",
+    attempts: 3,
+    successes: 3,
+    password: "private-password",
+  })) as unknown as typeof fetch;
+  await expect(checkProxy({ host: "proxy.example", port: "8080" }))
+    .rejects.toThrow("Proxy check returned invalid data");
 });
 
 test("app mode client reads first-launch state", async () => {

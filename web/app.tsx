@@ -44,6 +44,10 @@ import {
   fetchHealth,
   fetchLogs,
   fetchDiagnose,
+  checkProxy,
+  ProxyCheckError,
+  type ProxyCheckInput,
+  type ProxyCheckResult,
   addProfileCookie,
   openProfile,
   closeProfile,
@@ -891,6 +895,100 @@ const BLANK_FORM = {
 };
 
 const BLANK_COOKIE_FORM = { name: "", value: "", domain: "", path: "/" };
+const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";
+
+type ProxyCheckUiState = {
+  checking: boolean;
+  result: ProxyCheckResult | null;
+  error: "invalid" | "unavailable" | null;
+};
+
+const EMPTY_PROXY_CHECK: ProxyCheckUiState = { checking: false, result: null, error: null };
+
+function ProxyProviderOffer({ replacement = false }: { replacement?: boolean }) {
+  return (
+    <div className="proxy-referral">
+      <strong>{replacement
+        ? "This proxy is unstable. View recommended replacements."
+        : "Need a proxy? Get one from our recommended provider."}</strong>
+      <a
+        href={PROXY_PROVIDER_URL}
+        target="_blank"
+        rel="noreferrer"
+        aria-label="View recommended proxies at NobleProxy (opens externally)"
+      >
+        {replacement ? "View replacements" : "View provider"} <span aria-hidden="true">↗</span>
+      </a>
+    </div>
+  );
+}
+
+function proxyFailureMessage(reason: ProxyCheckResult["reason"]): string {
+  if (reason === "authentication_failed") return "Proxy authentication failed.";
+  if (reason === "timeout") return "Proxy connection timed out.";
+  if (reason === "dns_failed") return "Proxy host could not be resolved.";
+  if (reason === "unreachable") return "Proxy server is unreachable.";
+  if (reason === "proxy_bypassed") return "Traffic did not use this proxy.";
+  return "Proxy connection failed.";
+}
+
+function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: ProxyCheckUiState }) {
+  if (!hasProxy) return <ProxyProviderOffer />;
+  if (state.error) {
+    const invalid = state.error === "invalid";
+    return (
+      <>
+        <div className={`proxy-check-result ${invalid ? "failed" : "unavailable"}`} role="status">
+          <Icon name={invalid ? "alert" : "activity"} className="sm" />
+          <span>{invalid
+            ? "Proxy details are invalid. Check them and try again."
+            : "Proxy check is unavailable. Try again later."}</span>
+        </div>
+        {invalid && <ProxyProviderOffer replacement />}
+      </>
+    );
+  }
+  const result = state.result;
+  if (!result) return null;
+  const location = [result.city, result.region, result.country].filter(Boolean).join(", ");
+  const exit = [result.ip ? `Exit IP: ${result.ip}` : "", location].filter(Boolean).join(" · ");
+  if (result.status === "working") {
+    return (
+      <div className="proxy-check-result working" role="status">
+        <Icon name="check" className="sm" />
+        <span><strong>Proxy is working.</strong>{exit && <> {exit}.</>}{result.rotating && <> Rotating exit IPs detected.</>}</span>
+      </div>
+    );
+  }
+  if (result.status === "unstable") {
+    return (
+      <>
+        <div className="proxy-check-result unstable" role="status">
+          <Icon name="warning" className="sm" />
+          <span><strong>Proxy checks were mixed.</strong> {result.successes} of {result.attempts} succeeded.</span>
+        </div>
+        <ProxyProviderOffer replacement />
+      </>
+    );
+  }
+  if (result.status === "failed") {
+    return (
+      <>
+        <div className="proxy-check-result failed" role="status">
+          <Icon name="alert" className="sm" />
+          <span>{proxyFailureMessage(result.reason)}</span>
+        </div>
+        <ProxyProviderOffer replacement />
+      </>
+    );
+  }
+  return (
+    <div className="proxy-check-result unavailable" role="status">
+      <Icon name="activity" className="sm" />
+      <span>Proxy check is unavailable. Try again later.</span>
+    </div>
+  );
+}
 
 function App() {
   const [profiles, setProfiles] = useState<UiProfile[]>([]);
@@ -971,6 +1069,8 @@ function App() {
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState<string | null>(null);
   const [form, setForm] = useState(BLANK_FORM);
+  const [createProxyCheck, setCreateProxyCheck] = useState<ProxyCheckUiState>(EMPTY_PROXY_CHECK);
+  const createProxyCheckGeneration = useRef(0);
   const [cookieProfile, setCookieProfile] = useState<UiProfile | null>(null);
   const [cookieForm, setCookieForm] = useState(BLANK_COOKIE_FORM);
   const [cookieErr, setCookieErr] = useState<string | null>(null);
@@ -981,6 +1081,8 @@ function App() {
   const [editId, setEditId] = useState<string | null>(null);
   const [editExpectedVersion, setEditExpectedVersion] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
+  const [editProxyCheck, setEditProxyCheck] = useState<ProxyCheckUiState>(EMPTY_PROXY_CHECK);
+  const editProxyCheckGeneration = useRef(0);
   const [editErr, setEditErr] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const [editLoading, setEditLoading] = useState(false);
@@ -1859,6 +1961,8 @@ function App() {
 
   const editSerial = editId ? profiles.find((profile) => profile.id === editId)?.serial ?? null : null;
   const editRunning = editId ? profiles.find((profile) => profile.id === editId)?.running === true : false;
+  const createHasProxy = !!(form.host.trim() || form.port.trim() || form.user.trim() || form.pass);
+  const editHasProxy = !!(editForm.proxy ?? "").trim();
 
   const pastedRecordCount = bulkText.trim() ? countPastedRecords(bulkText) : null;
 
@@ -2089,10 +2193,20 @@ function App() {
     }
   };
 
-  const setF = (k: keyof typeof BLANK_FORM, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const resetCreateProxyCheck = () => {
+    createProxyCheckGeneration.current++;
+    setCreateProxyCheck(EMPTY_PROXY_CHECK);
+  };
+  const setF = (k: keyof typeof BLANK_FORM, v: string) => {
+    if (k === "proxyType" || k === "host" || k === "port" || k === "user" || k === "pass") {
+      resetCreateProxyCheck();
+    }
+    setForm((f) => ({ ...f, [k]: v }));
+  };
   // Open prefilled with the folder you're browsing; close always resets so a
   // cancelled draft never leaks into the next open.
   const openCreate = () => {
+    resetCreateProxyCheck();
     setForm({ ...BLANK_FORM, group: group !== "all" && (!isCloudMode || editableGroups.includes(group)) ? group : "" });
     setProxyPaste("");
     setProxyPasteOk(null);
@@ -2100,6 +2214,7 @@ function App() {
     setShowCreate(true);
   };
   const closeCreate = () => {
+    resetCreateProxyCheck();
     setShowCreate(false);
     setForm(BLANK_FORM);
     setProxyPaste("");
@@ -2109,6 +2224,7 @@ function App() {
   const applyProxyPaste = (raw: string) => {
     try {
       const parsed = parsePastedProxy(raw, form.proxyType === "socks5" ? "socks5" : "http");
+      resetCreateProxyCheck();
       setForm((current) => ({
         ...current,
         proxyType: parsed.type,
@@ -2123,6 +2239,35 @@ function App() {
     } catch (error) {
       setProxyPasteOk(null);
       setCreateErr(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const checkCreateProxy = async () => {
+    const generation = ++createProxyCheckGeneration.current;
+    if (form.proxyType === "https") {
+      setCreateProxyCheck({ checking: false, result: null, error: "unavailable" });
+      return;
+    }
+    setCreateProxyCheck({ checking: true, result: null, error: null });
+    const proxy: ProxyCheckInput = {
+      type: form.proxyType,
+      host: form.host,
+      port: form.port,
+      user: form.user,
+      pass: form.pass,
+    };
+    try {
+      const result = await checkProxy(proxy);
+      if (generation === createProxyCheckGeneration.current) {
+        setCreateProxyCheck({ checking: false, result, error: null });
+      }
+    } catch (error) {
+      if (generation === createProxyCheckGeneration.current) {
+        setCreateProxyCheck({
+          checking: false,
+          result: null,
+          error: error instanceof ProxyCheckError ? error.kind : "unavailable",
+        });
+      }
     }
   };
   const submitCreate = async () => {
@@ -2156,10 +2301,18 @@ function App() {
   };
 
   // ---- Edit one profile (full detail) ----
-  const setEF = (k: string, v: string) => setEditForm((f) => ({ ...f, [k]: v }));
+  const resetEditProxyCheck = () => {
+    editProxyCheckGeneration.current++;
+    setEditProxyCheck(EMPTY_PROXY_CHECK);
+  };
+  const setEF = (k: string, v: string) => {
+    if (k === "proxy" || k === "proxyType") resetEditProxyCheck();
+    setEditForm((f) => ({ ...f, [k]: v }));
+  };
   // The dialog opens on the click; the detail fetch fills it in when it lands.
   // The ref discards a stale response if the operator has moved on meanwhile.
   const openEdit = (id: string) => {
+    resetEditProxyCheck();
     setActionErr(null);
     editFetchId.current = id;
     setEditId(id);
@@ -2197,6 +2350,7 @@ function App() {
     })();
   };
   const closeEdit = () => {
+    resetEditProxyCheck();
     editFetchId.current = null;
     setEditId(null);
     setEditExpectedVersion(null);
@@ -2207,6 +2361,38 @@ function App() {
     setEditInitialExts([]);
     setEditErr(null);
     setEditMobile(null);
+  };
+  const checkEditedProxy = async () => {
+    const generation = ++editProxyCheckGeneration.current;
+    const value = editForm.proxy ?? "";
+    if (editForm.proxyType === "https" || /^\s*https:\/\//i.test(value)) {
+      setEditProxyCheck({ checking: false, result: null, error: "unavailable" });
+      return;
+    }
+    setEditProxyCheck({ checking: true, result: null, error: null });
+    let proxy: ProxyCheckInput;
+    try {
+      proxy = parsePastedProxy(value, editForm.proxyType === "socks5" ? "socks5" : "http");
+    } catch {
+      if (generation === editProxyCheckGeneration.current) {
+        setEditProxyCheck({ checking: false, result: null, error: "invalid" });
+      }
+      return;
+    }
+    try {
+      const result = await checkProxy(proxy);
+      if (generation === editProxyCheckGeneration.current) {
+        setEditProxyCheck({ checking: false, result, error: null });
+      }
+    } catch (error) {
+      if (generation === editProxyCheckGeneration.current) {
+        setEditProxyCheck({
+          checking: false,
+          result: null,
+          error: error instanceof ProxyCheckError ? error.kind : "unavailable",
+        });
+      }
+    }
   };
   const saveEdit = async () => {
     if (!editId) return;
@@ -3870,20 +4056,19 @@ function App() {
                 <label className="fld grow"><span>Proxy user</span><input value={form.user} onChange={(e) => setF("user", e.target.value)} /></label>
                 <label className="fld grow"><span>Proxy pass</span><input type="password" value={form.pass} onChange={(e) => setF("pass", e.target.value)} /></label>
               </div>
-              <div className="proxy-referral">
-                <div>
-                  <strong>Need a proxy?</strong>
-                  <span>Static residential proxies from $2.97/mo at OutreachProxy.</span>
-                </div>
-                <a
-                  href="https://outreachproxy.com/t/aliasmode"
-                  target="_blank"
-                  rel="noreferrer"
-                  aria-label="Get a proxy from OutreachProxy (opens externally)"
+              <div className="proxy-check-actions">
+                <button
+                  type="button"
+                  className="btn proxy-check-btn"
+                  disabled={createProxyCheck.checking || !createHasProxy}
+                  aria-busy={createProxyCheck.checking}
+                  onClick={checkCreateProxy}
                 >
-                  Get a proxy <span aria-hidden="true">↗</span>
-                </a>
+                  <Icon name="activity" className="sm" />
+                  {createProxyCheck.checking ? "Checking…" : "Check proxy"}
+                </button>
               </div>
+              <ProxyCheckFeedback hasProxy={createHasProxy} state={createProxyCheck} />
               <FingerprintSettings screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
             </div>
             <div className="modal-foot">
@@ -3980,6 +4165,19 @@ function App() {
                       <small>Leave blank to launch on a direct connection.</small>
                     </label>
                   </div>
+                  <div className="proxy-check-actions">
+                    <button
+                      type="button"
+                      className="btn proxy-check-btn"
+                      disabled={editProxyCheck.checking || !editHasProxy}
+                      aria-busy={editProxyCheck.checking}
+                      onClick={checkEditedProxy}
+                    >
+                      <Icon name="activity" className="sm" />
+                      {editProxyCheck.checking ? "Checking…" : "Check proxy"}
+                    </button>
+                  </div>
+                  <ProxyCheckFeedback hasProxy={editHasProxy} state={editProxyCheck} />
                   <div className="fld-row">
                     <CopyField label="Username" value={editForm.username ?? ""} onChange={(value) => setEF("username", value)} />
                     <CopyField label="Password" value={editForm.password ?? ""} onChange={(value) => setEF("password", value)} />
