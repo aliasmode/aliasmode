@@ -228,7 +228,7 @@ test("after a restart, a bootstrapped browser reattaches without rerunning searc
 
   const changedWs = `ws://127.0.0.1:${b.port}/devtools/browser/restarted`;
   f.setWs(b.port, changedWs);
-  expect(await launcherB.start("k1d0cd11")).toEqual({ ws: changedWs, port: b.port });
+  expect(await launcherB.start("k1d0cd11")).toEqual({ ws: changedWs, port: b.port, nativeSessionRestored: false });
   expect(prepared).toHaveLength(1);
   store.close();
 });
@@ -408,6 +408,91 @@ test("Local waits for delayed native tabs before opening platform home", async (
   expect(targetReads).toBeGreaterThanOrEqual(22);
   expect(navigated).toEqual([]);
   await launcher.stop("k1d0cd11");
+  store.close();
+});
+
+test("fresh native session restore reports only a restored user page", async () => {
+  const store = seeded();
+  const f = fleet();
+  const spawnedArgs: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+  const launcher = newLauncher(store, f, spawnedArgs, undefined, undefined, {
+    fetch: async (url) => url.endsWith("/json/list")
+      ? { ok: true, json: async () => [{ type: "page", url: "https://restored.example/account" }] }
+      : f.fetchFn(url),
+  });
+
+  const result = await launcher.start("k1d0cd11");
+
+  expect(spawnedArgs[0]).toContain("--restore-last-session");
+  expect(result.nativeSessionRestored).toBe(true);
+  store.close();
+});
+
+test("fresh launch reports false when native session restore has no artifacts or is opted out", async () => {
+  const store = seeded();
+  const f = fleet();
+  const spawnedArgs: string[][] = [];
+  const launcher = newLauncher(store, f, spawnedArgs);
+
+  const missing = await launcher.start("k1d0cd11");
+  expect(spawnedArgs[0]).not.toContain("--restore-last-session");
+  expect(missing.nativeSessionRestored).toBe(false);
+  await launcher.stop("k1d0cd11");
+
+  const userDataDir = launcher.userDataDir("k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+  const optedOut = await launcher.start("k1d0cd11", [], { restoreLastSession: false });
+  expect(spawnedArgs[1]).not.toContain("--restore-last-session");
+  expect(optedOut.nativeSessionRestored).toBe(false);
+  store.close();
+});
+
+test("stale cleanup prevents a deleted native session from being reported restored", async () => {
+  const store = seeded();
+  const f = fleet();
+  const spawnedArgs: string[][] = [];
+  const userDataDir = join(testDataRoot(store), "k1d0cd11");
+  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+  writeFileSync(join(userDataDir, "SingletonLock"), "stale");
+  const launcher = newLauncher(store, f, spawnedArgs, undefined, undefined, {
+    resetStorageOnUncleanExit: true,
+  });
+
+  const result = await launcher.start("k1d0cd11");
+
+  expect(existsSync(join(userDataDir, "Default", "Sessions"))).toBe(false);
+  expect(spawnedArgs[0]).not.toContain("--restore-last-session");
+  expect(result.nativeSessionRestored).toBe(false);
+  store.close();
+});
+
+test("cloud session authority marker is durable and invalidatable", () => {
+  const store = seeded();
+  const f = fleet();
+  const signature = createHash("sha256").update("cloud session").digest("hex");
+  const otherSignature = createHash("sha256").update("other cloud session").digest("hex");
+  const first = newLauncher(store, f, []);
+
+  expect(first.matchesCloudSession("k1d0cd11", signature)).toBe(false);
+  first.recordCloudSession("k1d0cd11", signature);
+
+  const marker = join(first.userDataDir("k1d0cd11"), ".aliasmode-cloud-session-authority-v1");
+  expect(readFileSync(marker, "utf8")).toBe(signature);
+  const restarted = newLauncher(store, f, []);
+  expect(restarted.matchesCloudSession("k1d0cd11", signature)).toBe(true);
+  expect(restarted.matchesCloudSession("k1d0cd11", otherSignature)).toBe(false);
+
+  writeFileSync(marker, "malformed");
+  expect(restarted.matchesCloudSession("k1d0cd11", signature)).toBe(false);
+  restarted.recordCloudSession("k1d0cd11", signature);
+  restarted.recordCloudSession("k1d0cd11", null);
+  expect(existsSync(marker)).toBe(false);
+  expect(restarted.matchesCloudSession("k1d0cd11", signature)).toBe(false);
   store.close();
 });
 

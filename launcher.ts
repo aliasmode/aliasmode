@@ -24,7 +24,7 @@ import {
   renameSync,
   statSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { CookieRecord, LaunchInfo, Profile } from "./types.ts";
 import type { ProfileStore } from "./store.ts";
 import { allocatePort } from "./ports.ts";
@@ -52,6 +52,7 @@ function needsProxyRelay(profile: Profile): boolean {
 
 const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 2;
 const SEARCH_PROVIDER_BOOTSTRAP_MARKER = `.aliasmode-search-bootstrap-v${SEARCH_PROVIDER_BOOTSTRAP_REVISION}`;
+const CLOUD_SESSION_AUTHORITY_MARKER = ".aliasmode-cloud-session-authority-v1";
 const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
 const NATIVE_SESSION_ARTIFACTS = [
   "Default/Sessions",
@@ -393,6 +394,8 @@ export interface LaunchStartOptions extends BrowserOpenOptions {
 export interface LaunchStartResult {
   ws: string;
   port: number;
+  /** True only when this fresh launch restored at least one native user page. */
+  nativeSessionRestored?: boolean;
 }
 
 export type LaunchGeneration = Pick<LaunchInfo, "debugPort" | "startedAt">;
@@ -1308,6 +1311,7 @@ export class Launcher {
           return {
             ws: currentWs,
             port: existing.debugPort,
+            nativeSessionRestored: false,
           };
         }
       }
@@ -1364,9 +1368,6 @@ export class Launcher {
     if (existingUserDataDir) await this.reapForeignProfileDirHolders(profileId, userDataDir);
 
     const nativeRestoreRequested = opts.restoreLastSession !== false;
-    // Only existence is inspected. Chromium owns the opaque session bytes.
-    const nativeSessionAvailable = nativeRestoreRequested && this.hasNativeSessionArtifacts(userDataDir);
-    const restoreLastSession = nativeSessionAvailable;
     let searchBootstrapRevision: number | undefined;
 
     // Repair a corrupt Preferences before launch. A previous unclean exit (force-kill
@@ -1390,6 +1391,11 @@ export class Launcher {
     // callers; remote mode passes false when the bundle it's about to inject can't restore the login —
     // e.g. a first-migration Telegram open with no hub session — so we never wipe the only local auth).
     this.clearStaleProfileState(profileId, opts.resetStorage ?? true);
+
+    // Only existence is inspected. Chromium owns the opaque session bytes. Check
+    // after stale-state cleanup because remote recovery can delete those files.
+    const nativeSessionAvailable = nativeRestoreRequested && this.hasNativeSessionArtifacts(userDataDir);
+    const restoreLastSession = nativeSessionAvailable;
 
     if (profile.proxy) this.persistWebRtcPolicyPreference(profileId);
 
@@ -1534,6 +1540,7 @@ export class Launcher {
       const startupTargets = restoreLastSession || SESSION_LAUNCH
         ? await this.startupPageTargets(port, profileId, restoreLastSession && startupUrls.length === 0)
         : { userUrls: [], profileCardPresent: false, firstRunPresent: false };
+      const nativeSessionRestored = restoreLastSession && !!startupTargets?.userUrls.length;
 
       if (startupTargets?.firstRunPresent) {
         try {
@@ -1693,7 +1700,7 @@ export class Launcher {
       };
       this.store.recordLaunch(info);
       this.markIdentityCertified(profileId);
-      return { ws, port };
+      return { ws, port, nativeSessionRestored };
     } catch (err) {
       // Roll back partial state so a failed start can't leak a zombie — including the relay, which
       // is brought up before the browser, so an error after that point would strand a listener.
@@ -2012,6 +2019,49 @@ export class Launcher {
     return NATIVE_SESSION_ARTIFACTS.some((relativePath) =>
       existsSync(join(userDataDir, ...relativePath.split("/")))
     );
+  }
+
+  /** Whether this profile's native state belongs to the supplied Cloud session. */
+  public matchesCloudSession(profileId: string, signature: string): boolean {
+    const base = this.containedUserDataDir(profileId, "matchesCloudSession");
+    if (!base) return false;
+    try {
+      const marker = readFileSync(join(base, CLOUD_SESSION_AUTHORITY_MARKER), "utf8");
+      return /^[a-f0-9]{64}$/.test(marker) && marker === signature;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Record the Cloud session authorized to reuse this profile's native state. */
+  public recordCloudSession(profileId: string, signature: string | null): void {
+    const base = this.containedUserDataDir(profileId, "recordCloudSession");
+    if (!base) throw new Error(`cannot record Cloud session for unsafe profile id ${JSON.stringify(profileId)}`);
+    const marker = join(base, CLOUD_SESSION_AUTHORITY_MARKER);
+    if (signature === null) {
+      try {
+        rmSync(marker, { force: true });
+      } catch (error) {
+        throw new Error(`cannot invalidate Cloud session for ${profileId}: ${error instanceof Error ? error.message : error}`);
+      }
+      return;
+    }
+    if (!/^[a-f0-9]{64}$/.test(signature)) throw new Error(`invalid Cloud session signature for ${profileId}`);
+
+    const temporary = `${marker}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      mkdirSync(base, { recursive: true });
+      writeFileSync(temporary, signature, { flag: "wx" });
+      renameSync(temporary, marker);
+    } catch (error) {
+      try { rmSync(temporary, { force: true }); } catch {}
+      try {
+        rmSync(marker, { force: true });
+      } catch (invalidationError) {
+        throw new Error(`cannot invalidate Cloud session for ${profileId}: ${invalidationError instanceof Error ? invalidationError.message : invalidationError}`);
+      }
+      throw new Error(`cannot record Cloud session for ${profileId}: ${error instanceof Error ? error.message : error}`);
+    }
   }
 
   private writeSearchBootstrapMarker(profileId: string, userDataDir: string): boolean {

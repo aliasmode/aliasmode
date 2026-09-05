@@ -2044,6 +2044,8 @@ function createCloudCrossDeviceSyntheticRuntime(
   let generation = 0;
   const launcher: CloudBrowserOptions["launcher"] = {
     failedStartGeneration() { return undefined; },
+    matchesCloudSession() { return false; },
+    recordCloudSession() {},
     async start(profileId, _launchArgs, options) {
       calls.start++;
       generation++;
