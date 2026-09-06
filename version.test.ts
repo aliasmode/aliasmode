@@ -127,7 +127,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
     job.indexOf(nextStep),
   );
 
-  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.47");
+  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.48");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
   expect(packageJson.scripts["desktop:build:nsis"]).toBe("bun run desktop:prepare && tauri build --bundles nsis --no-sign");
   expect(tauriConfig.version).toBe(ALIASMODE_VERSION);
