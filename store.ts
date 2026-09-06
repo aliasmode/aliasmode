@@ -191,6 +191,8 @@ export class ProfileStore {
       "fp_observed_json TEXT NOT NULL DEFAULT ''",
       "fp_expected_json TEXT NOT NULL DEFAULT ''",
       "fp_verdict_json TEXT NOT NULL DEFAULT ''",
+      "session_json TEXT NOT NULL DEFAULT ''",
+      "session_restore_pending INTEGER NOT NULL DEFAULT 0",
     ]) {
       try {
         this.db.exec(`ALTER TABLE profiles ADD COLUMN ${col}`);
@@ -312,11 +314,39 @@ export class ProfileStore {
   }
 
   /** Apply a prevalidated profile batch atomically (all rows or none). */
-  upsertProfiles(profiles: Profile[]): void {
+  upsertProfiles(profiles: Profile[], sessions: ReadonlyMap<string, string> = new Map()): void {
     const apply = this.db.transaction((items: Profile[]) => {
-      for (const profile of items) this.upsertProfile(profile);
+      for (const profile of items) {
+        this.upsertProfile(profile);
+        const bundle = sessions.get(profile.id);
+        if (bundle !== undefined) {
+          this.saveSessionBundle(profile.id, bundle);
+          this.db.query(`UPDATE profiles SET session_restore_pending = 1 WHERE id = ?`).run(profile.id);
+        }
+      }
     });
     apply(profiles);
+  }
+
+  getSessionBundle(id: string): string | null {
+    return this.db.query<{ session_json: string }, [string]>(
+      `SELECT session_json FROM profiles WHERE id = ?`,
+    ).get(id)?.session_json || null;
+  }
+
+  getPendingSessionBundle(id: string): string | null {
+    return this.db.query<{ session_json: string }, [string]>(
+      `SELECT session_json FROM profiles WHERE id = ? AND session_restore_pending = 1`,
+    ).get(id)?.session_json || null;
+  }
+
+  /** Capturing live state must never arm an import restore. */
+  saveSessionBundle(id: string, bundle: string): void {
+    this.db.query(`UPDATE profiles SET session_json = ? WHERE id = ?`).run(bundle, id);
+  }
+
+  markSessionRestored(id: string, bundle: string): void {
+    this.db.query(`UPDATE profiles SET session_restore_pending = 0 WHERE id = ? AND session_json = ?`).run(id, bundle);
   }
 
   getProfile(id: string): Profile | null {

@@ -1,5 +1,19 @@
 import { test, expect } from "bun:test";
-import { analyze, type ProfileReport } from "./diagnose.ts";
+import { analyze, fingerprintProbe, type ProfileReport } from "./diagnose.ts";
+import { runInNewContext } from "node:vm";
+
+test("fingerprint probe retains audio rejection instead of waiting forever for oncomplete", async () => {
+  class AudioContext {
+    createOscillator() { return { frequency: { value: 0 }, connect() {}, start() {} }; }
+    createDynamicsCompressor() { return { connect() {} }; }
+    async startRendering() { throw new Error("audio rendering failed"); }
+  }
+  const sample = await runInNewContext(`(${fingerprintProbe.toString()})()`, {
+    window: { OfflineAudioContext: AudioContext },
+  });
+  expect(sample.errors.audio).toContain("audio rendering failed");
+  expect(sample.audioHash).toBeUndefined();
+});
 
 function report(over: Partial<ProfileReport>): ProfileReport {
   return {

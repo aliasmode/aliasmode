@@ -28,8 +28,14 @@ test("capture entrypoint runs the Node worker and persists exportable observatio
       export const chromium = { async connectOverCDP(endpoint) {
         await log("connect");
         let closed = false;
+        let handler;
+        let currentUrl = "about:blank";
         const page = {
+          async route(pattern, callback) { handler = callback; await log("route"); },
+          async unroute() { handler = undefined; await log("unroute"); },
+          url: () => currentUrl,
           async evaluate(source) {
+            if (!currentUrl.startsWith("https://fingerprint.aliasmode.invalid/")) throw new Error("probe must have a secure origin");
             if (!source.includes("canvasHash") || !source.includes("navigator") || !source.endsWith(")()")) throw new Error("missing probe invocation");
             await new Promise(resolve => setTimeout(resolve, 20));
             if (closed) throw new Error("page closed before evaluation finished");
@@ -37,7 +43,14 @@ test("capture entrypoint runs the Node worker and persists exportable observatio
             await log("evaluated");
             return { userAgent: "Mozilla/5.0 (Windows NT 10.0) Chrome/146.0.0.0", platform: "Win32", canvasHash: "captured" };
           },
-          async goto() { throw new Error("capture must not navigate"); },
+          async goto(url) {
+            if (!handler) throw new Error("network navigation attempted");
+            let fulfilled = false;
+            await handler({ request: () => ({ url: () => url }), async fulfill() { fulfilled = true; }, async abort() {} });
+            if (!fulfilled) throw new Error("document was not fulfilled locally");
+            currentUrl = url;
+            await log("local-document");
+          },
           async close() { closed = true; await log("close-page"); },
         };
         return {
@@ -73,13 +86,34 @@ test("capture entrypoint runs the Node worker and persists exportable observatio
     expect(store.getProfile(p.id)!.fpObserved).toEqual(saved.fpObserved);
     expect(logs).toHaveLength(1);
     expect((await readFile(events, "utf8")).trim().split("\n")).toEqual([
-      "connect", "new-page", "evaluated", "close-page", "detach",
-      "connect", "new-page", "close-page", "detach",
+      "connect", "new-page", "route", "local-document", "evaluated", "unroute", "close-page", "detach",
+      "connect", "new-page", "route", "local-document", "unroute", "close-page", "detach",
     ]);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("partial captures retain diagnostics and do not verify an empty expectation", async () => {
+  const c = collector();
+  await recordCapture({
+    profile: profile({ fpExpected: { capturedAt: "2026-09-05T00:00:00Z" } }),
+    capture: async () => ({
+      uaFullVersion: "146.0.7680.177", uaDataPlatform: "Windows", uaDataPlatformVersion: "19.0.0",
+      uaDataBrands: ["Chromium 146"], uaFullVersionList: ["Chromium 146.0.7680.177"],
+      language: "en-US", timezone: "America/New_York",
+      screen: { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24, dpr: 1.25 },
+      errors: { audio: "unavailable" },
+    }),
+    save: c.save, log: c.log,
+  });
+  expect(c.saved[0]!.verdict).toBeNull();
+  expect(c.logs).toHaveLength(1);
+  const fp = c.saved[0]!.observed;
+  const restored = parseExport(serializeAdsTxt([profile({ fpObserved: fp })])).profiles[0]!;
+  expect(restored.fpExpected).toEqual(fp);
+  expect(fp).toMatchObject({ chrome: "146.0.7680.177", devicePixelRatio: 1.25, availableScreen: "1920*1040", errors: '{"audio":"unavailable"}' });
 });
 
 interface Saved {

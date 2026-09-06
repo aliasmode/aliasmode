@@ -26,6 +26,13 @@ import { deterministicSeed, parseResolution, platformFromUA } from "./fingerprin
 import { normalizeProxyType, parseProxySpec, proxyLegacyString } from "./proxy.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { attestationFields, expectationFromRecord, FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
+import { parseCapturedSessionBundle } from "./session.ts";
+
+/** Full export transport; session state never belongs in the roster profile. */
+export interface ProfileExport extends Profile {
+  sessionBundle?: string;
+  sessionSource?: "live" | "saved" | "cloud" | "stored-cookies";
+}
 
 /** Cookies on these domains belong to AdsPower's browser extension, not the account. */
 const EXTENSION_COOKIE_DOMAINS = ["adspower.net", "browserext.adspower.net"];
@@ -211,6 +218,7 @@ export function parseStrictProxy(type: unknown, value: unknown): ProxySpec | nul
  */
 export interface ParsedProfileImport {
   profile: Profile;
+  sessionBundle?: string;
   cookiesStripped: number;
   /** Exact source keys present in this record. Used to merge safe re-imports. */
   presentFields: string[];
@@ -271,7 +279,7 @@ export function recordToProfile(
   let cookieJson: unknown = [];
   const validationErrors: string[] = [];
   if (!isSafeProfileId(id)) validationErrors.push(PROFILE_ID_ERROR);
-  const rawCookie = rec.cookie ?? "";
+  const rawCookie = rec.session?.trim() ? "" : rec.cookie ?? "";
   if (rawCookie.trim()) {
     try {
       cookieJson = JSON.parse(rawCookie);
@@ -290,7 +298,19 @@ export function recordToProfile(
     }).length;
     if (malformed) validationErrors.push(`cookie contains ${malformed} malformed entr${malformed === 1 ? "y" : "ies"}`);
   }
-  const { cookies, stripped } = normalizeCookies(cookieJson);
+  let { cookies, stripped } = normalizeCookies(cookieJson);
+  let sessionBundle: string | undefined;
+  if (rec.session?.trim()) {
+    try {
+      const raw = JSON.parse(rec.session);
+      // Cookie-only bundles are valid; an explicitly malformed origins field is not.
+      const session = parseCapturedSessionBundle(JSON.stringify({ ...raw, origins: Object.hasOwn(raw, "origins") ? raw.origins : [] }));
+      cookies = session.cookies;
+      sessionBundle = JSON.stringify(session);
+    } catch {
+      validationErrors.push("invalid session: expected cookies and supported origin storage JSON");
+    }
+  }
   const rawResolution = rec.resolution ?? "";
   let { width, height } = parseResolution(rawResolution);
   if (Object.hasOwn(rec, "resolution") && rawResolution.trim()) {
@@ -344,6 +364,7 @@ export function recordToProfile(
   };
   return {
     profile,
+    ...(sessionBundle ? { sessionBundle } : {}),
     cookiesStripped: stripped,
     presentFields: Object.keys(rec),
     sourceFields: { ...rec },
@@ -572,7 +593,8 @@ function proxyToString(p: Profile): string {
  * built from. Kept in one place so the .txt block and the .xlsx sheet cannot
  * drift into encoding the same profile two different ways.
  */
-function profileFields(p: Profile): Record<string, string> {
+function profileFields(p: ProfileExport): Record<string, string> {
+  const session = p.sessionBundle ? JSON.parse(p.sessionBundle) : undefined;
   const fp = p.fpObserved ?? p.fpExpected;
   // Keep configured launch inputs authoritative. A capture can fill gaps, but
   // exporting must not rewrite the source or force a stale UA/kernel at launch.
@@ -592,7 +614,9 @@ function profileFields(p: Profile): Record<string, string> {
     email: p.email ?? "",
     emailpassword: p.emailPassword ?? "",
     fakey: p.twofa,
-    cookie: JSON.stringify(p.cookies),
+    cookie: JSON.stringify(session?.cookies ?? p.cookies),
+    session: session ? JSON.stringify(session) : "",
+    session_source: p.sessionSource ?? (session ? "saved" : "stored-cookies"),
     proxytype: p.proxy?.type ?? "",
     proxy: proxyToString(p),
     ua: p.ua || (platform && platformFromUA(fp?.ua ?? "") === platform ? fp?.ua ?? "" : ""),
@@ -621,7 +645,7 @@ const RESTORED_KEYS = ["seed", "timezone", "platform_os", "extensions", "tags"] 
 const TXT_KEYS = [
   "acc_id", "id", "group", "platform", "name", "username", "password",
   "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
-  ...RESTORED_KEYS, ...FP_BLOCK_KEYS,
+  ...RESTORED_KEYS, ...FP_BLOCK_KEYS, "session", "session_source",
 ] as const;
 
 /**
@@ -632,11 +656,11 @@ const TXT_KEYS = [
 export const XLSX_COLUMNS = [
   "id", "acc_id", "group", "platform", "name", "username", "password",
   "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
-  ...RESTORED_KEYS, ...FP_BLOCK_KEYS,
+  ...RESTORED_KEYS, ...FP_BLOCK_KEYS, "session", "session_source",
 ] as const;
 
 /** Serialize profiles to the AdsPower `key=value` export format. */
-export function serializeAdsTxt(profiles: Profile[]): string {
+export function serializeAdsTxt(profiles: ProfileExport[]): string {
   const blocks = profiles.map((p) => {
     const f = profileFields(p);
     return [...TXT_KEYS.map((k) => `${k}=${f[k]}`), "******************"].join("\n");
@@ -649,7 +673,7 @@ export function serializeAdsTxt(profiles: Profile[]): string {
  * caller turns these into a workbook (xlsx.ts); keeping the shaping here means
  * the sheet and the .txt block stay one decision, not two.
  */
-export function serializeXlsxRows(profiles: Profile[]): { headers: string[]; rows: string[][] } {
+export function serializeXlsxRows(profiles: ProfileExport[]): { headers: string[]; rows: string[][] } {
   return {
     headers: [...XLSX_COLUMNS],
     rows: profiles.map((p) => {

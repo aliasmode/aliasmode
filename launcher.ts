@@ -35,7 +35,7 @@ import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "
 import { assertSafeProfileId } from "./profile-id.ts";
 import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
 import type { FingerprintSample } from "./diagnose.ts";
-import { canonicalUserPageUrl, SessionRestoreError } from "./session.ts";
+import { applySessionToEndpoint, bundleTabUrls, bundleTelegramClient, canonicalUserPageUrl, parseCapturedSessionBundle, readSessionInSubprocess, sessionCaptureSeed, SessionRestoreError } from "./session.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
@@ -362,6 +362,8 @@ export interface LauncherOptions {
    * defaults to the real CDP probe. Never allowed to fail a launch.
    */
   captureFingerprint?: (ws: string) => Promise<FingerprintSample | null>;
+  readSession?: typeof readSessionInSubprocess;
+  applySession?: typeof applySessionToEndpoint;
   /** Budget for the graceful close above before falling through to the force-kill. */
   gracefulStopMs?: number;
   /**
@@ -382,6 +384,8 @@ export interface BrowserOpenOptions {
 
 export interface LaunchStartOptions extends BrowserOpenOptions {
   autoNavigate?: boolean;
+  /** Cloud/remote coordinators own their session restore instead. */
+  restoreLocalSession?: boolean;
   /** Use Chromium's on-disk last session. Defaults on for Local launches. */
   restoreLastSession?: boolean;
   resetStorage?: boolean;
@@ -599,6 +603,8 @@ export class Launcher {
   private ensureCookiesFn: CookieEnsurer;
   private ensureSearchProviderFn?: SearchProviderEnsurer;
   private captureFingerprintFn: (ws: string) => Promise<FingerprintSample | null>;
+  private readSessionFn: typeof readSessionInSubprocess;
+  private applySessionFn: typeof applySessionToEndpoint;
   private navigateFn: LaunchNavigator;
   private enforceHostCompatibility: boolean;
   private hostPlatform: NodeJS.Platform;
@@ -689,6 +695,8 @@ export class Launcher {
     this.ensureCookiesFn = opts.ensureCookies ?? defaultEnsureCookies;
     this.ensureSearchProviderFn = opts.ensureSearchProvider;
     this.captureFingerprintFn = opts.captureFingerprint ?? ((ws) => captureFingerprint(ws));
+    this.readSessionFn = opts.readSession ?? readSessionInSubprocess;
+    this.applySessionFn = opts.applySession ?? applySessionToEndpoint;
     this.navigateFn = opts.navigate ?? defaultNavigate;
     // Test spawners do not implicitly weaken production policy. Every disabled
     // identity gate must be requested through the conspicuous unsafe option.
@@ -1210,7 +1218,11 @@ export class Launcher {
     // already know cannot be used. Automation' established response to a nonzero
     // start is stop + one retry; stop() can now reap that process by its PID,
     // which recovers this run without ever double-launching the profile.
+    const pendingSession = opts.restoreLocalSession === false ? null : this.store.getPendingSessionBundle(profileId);
     let existing = this.store.getLaunch(profileId);
+    if (existing && pendingSession) {
+      return await this.rejectUnsafeExistingLaunch(profileId, "pending session restore", new SessionRestoreError("origin_storage", "failed"));
+    }
     if (existing) {
       if (existing.headless !== undefined && existing.headless !== headless) {
         throw new BrowserLaunchError("mode_conflict");
@@ -1367,7 +1379,7 @@ export class Launcher {
     // scan before any repair or cleanup touches their files.
     if (existingUserDataDir) await this.reapForeignProfileDirHolders(profileId, userDataDir);
 
-    const nativeRestoreRequested = opts.restoreLastSession !== false;
+    const nativeRestoreRequested = !pendingSession && opts.restoreLastSession !== false;
     let searchBootstrapRevision: number | undefined;
 
     // Repair a corrupt Preferences before launch. A previous unclean exit (force-kill
@@ -1603,7 +1615,21 @@ export class Launcher {
       //     it, so ensureCookies leaves it untouched.
       // Best-effort: a failed check/injection must not fail the launch.
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "session injection");
-      if (profile.cookies.length > 0) {
+      if (pendingSession) {
+        const home = platformHomeUrl(profile.platform, bundleTelegramClient(pendingSession));
+        const urls = (opts.autoNavigate ?? true)
+          ? startupUrls.length ? startupUrls : !bundleTabUrls(pendingSession).length && home ? [home] : []
+          : [];
+        try {
+          await this.applySessionFn(ws, pendingSession, urls);
+        } catch (error) {
+          // Navigation happens after cookies and storage have been restored.
+          if (!(error instanceof SessionRestoreError) || error.operation !== "navigation") throw error;
+          this.log(`${profileId}: session restored, but startup navigation failed; open the site manually`);
+        }
+        this.requireUnchangedProfile(profileId, profileSnapshot, "session restore");
+      }
+      if (!pendingSession && profile.cookies.length > 0) {
         const target = cookieBootstrapTarget(profile.cookies);
         if (!target) {
           this.log(`${profileId}: no usable X/Telegram session cookies in export — leaving login to the app's auto-login`);
@@ -1628,7 +1654,7 @@ export class Launcher {
       // Open explicit caller URLs after any natively restored tabs. The platform
       // home is only a true empty-state fallback. An uncertain target probe must
       // not replace a page that Chromium may still be restoring.
-      if (opts.autoNavigate ?? true) {
+      if (!pendingSession && (opts.autoNavigate ?? true)) {
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "account navigation");
         // Standalone mode has no roamed bundle carrying the last A/K choice, so platformHomeUrl keeps
         // its historical K fallback. Remote mode passes the captured client explicitly (defaulting A).
@@ -1700,6 +1726,7 @@ export class Launcher {
       };
       this.store.recordLaunch(info);
       this.markIdentityCertified(profileId);
+      if (pendingSession) this.store.markSessionRestored(profileId, pendingSession);
       return { ws, port, nativeSessionRestored };
     } catch (err) {
       // Roll back partial state so a failed start can't leak a zombie — including the relay, which
@@ -2612,6 +2639,29 @@ export class Launcher {
       || this.stopsInFlight.has(profileId)
       || this.procs.has(profileId)
       || this.store.getLaunch(profileId) !== null;
+  }
+
+  /** Best-effort Local export/managed-close snapshot. Never opens a browser. */
+  async captureLocalSession(profileId: string): Promise<boolean> {
+    const launch = this.store.getLaunch(profileId);
+    if (!launch) return false;
+    const unchanged = () => this.launchGenerationMatches(profileId, launch)
+      && this.store.getLaunch(profileId)?.ws === launch.ws
+      && !this.startsInFlight.has(profileId) && !this.stopsInFlight.has(profileId)
+      && !this.store.getPendingSessionBundle(profileId);
+    try {
+      if (!unchanged() || !await this.certifiedActive(profileId) || !unchanged()) return false;
+      const bundle = await this.readSessionFn(launch.ws, {
+        captureSeed: sessionCaptureSeed(this.store.getSessionBundle(profileId) ?? ""),
+      });
+      parseCapturedSessionBundle(bundle);
+      if (!unchanged() || !await this.active(profileId) || !unchanged()) return false;
+      this.store.saveSessionBundle(profileId, bundle);
+      return true;
+    } catch {
+      this.log(`${profileId}: session snapshot unavailable; keeping the last saved state`);
+      return false;
+    }
   }
 
   /** True iff the profile's browser is currently reachable over CDP. */

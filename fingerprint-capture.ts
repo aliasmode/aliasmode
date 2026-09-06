@@ -3,24 +3,20 @@
  *
  * Two rules govern this file:
  *
- *  1. It runs in its OWN blank page and never navigates. Reading canvas and
- *     WebGL inside a live account tab is exactly the behaviour a detection
- *     script watches for, and the entire point of this work is to not look
- *     unusual. (diagnoseOverCDP visits example.com and x.com because it is an
- *     operator-invoked diagnostic; a per-launch capture must cost nothing
- *     observable.)
+ *  1. It runs in its OWN locally fulfilled secure page, never an account tab.
+ *     The document is intercepted locally; no external request is sent.
  *  2. It can never fail a launch. Identity capture is bookkeeping. Every
  *     failure path here logs and returns — see recordCapture.
  */
 
 import { runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
 import { fingerprintProbe, type FingerprintSample } from "./diagnose.ts";
-import { compareAttestation, observedFromSample } from "./fingerprint-attestation.ts";
+import { compareAttestation, observedFromSample, VERDICT_FIELDS } from "./fingerprint-attestation.ts";
 import type { FingerprintVerdict, ObservedFingerprint, Profile } from "./types.ts";
 
 const DEFAULT_CAPTURE_TIMEOUT_MS = 15_000;
 
-/** Read the live fingerprint over CDP from an isolated blank page. */
+/** Read the live fingerprint over CDP from an isolated secure page. */
 export async function captureFingerprint(
   ws: string,
   opts: PlaywrightWorkerOptions = {},
@@ -63,7 +59,10 @@ export async function recordCapture(args: RecordCaptureArgs): Promise<boolean> {
   }
   if (!sample) return false;
   const observed = observedFromSample(sample, { webrtc, capturedAt: new Date().toISOString() });
-  const verdict = profile.fpExpected ? compareAttestation(profile.fpExpected, observed) : null;
+  const expected = profile.fpExpected;
+  const comparable = expected && VERDICT_FIELDS.some((field) => expected[field] !== undefined && expected[field] !== "");
+  const verdict = comparable ? compareAttestation(expected, observed) : null;
+  if (observed.errors) log(`${profile.id}: fingerprint fields unavailable (${Object.keys(sample.errors!).join(", ")})`);
   try {
     save(profile.id, observed, verdict);
   } catch (err) {

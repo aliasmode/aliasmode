@@ -265,6 +265,8 @@ function normalizeRecord(
 
   const cookie = find(index, COOKIE_ALIASES);
   if (cookie.present) output.cookie = cookies(cookie.value);
+  const session = find(index, ["session"]);
+  if (session.present) output.session = typeof session.value === "string" ? session.value : JSON.stringify(session.value);
 
   const resolution = find(index, RESOLUTION_ALIASES);
   const resolutionText = scalar(resolution.value);

@@ -37,6 +37,7 @@ import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, t
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictCustomNo, decodeText } from "./parse.ts";
+import type { ProfileExport } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
 import {
@@ -1103,7 +1104,7 @@ export async function handleUiRequest(
       if (uploads.length === 0) return Response.json({ ok: false, error: "no files uploaded" }, { status: 400 });
       if (options.cloudBrowser) {
         const prepared = await prepareImportBuffers(uploads, console.log, override);
-        await options.cloudBrowser.importProfiles(override.group!, prepared.profiles);
+        await options.cloudBrowser.importProfiles(override.group!, prepared.imports.map(({ profile, sessionBundle }) => ({ ...profile, sessionBundle })));
         return Response.json({ ok: true, ...prepared.result });
       }
       if (remote) {
@@ -1164,7 +1165,7 @@ export async function handleUiRequest(
     // credential view.
     const full = format !== "csv";
     try {
-      let profiles: Profile[];
+      let profiles: ProfileExport[];
       if (remote) {
         // The local store is only a launch cache in remote mode.
         profiles = await remote.getProfiles(ids, full);
@@ -1179,17 +1180,24 @@ export async function handleUiRequest(
         for (let i = 0; i < ids.length; i += 8) {
           const batch = await Promise.all(ids.slice(i, i + 8).map(async (id) => {
             const authoritative = await options.cloudConnection!.client.getProfile(id);
-            const { profile } = decodePortableProfile(authoritative.payload);
+            const { profile, sessionBundle } = decodePortableProfile(authoritative.payload);
             if (profile.id !== id) throw new Error("Cloud returned a mismatched profile payload");
             const local = store.getProfile(id);
             if (local?.fpObserved) profile.fpObserved = { ...local.fpObserved };
             if (local?.fpExpected) profile.fpExpected = { ...local.fpExpected };
-            return profile;
+            return { ...profile, sessionBundle, sessionSource: "cloud" as const };
           }));
           profiles.push(...batch);
         }
       } else {
-        profiles = ids.map((id) => store.getProfile(id)).filter((p): p is Profile => !!p);
+        profiles = [];
+        for (const id of ids) {
+          const fresh = full && await launcher.captureLocalSession(id);
+          const profile = store.getProfile(id);
+          if (!profile) continue;
+          const sessionBundle = full ? store.getSessionBundle(id) ?? undefined : undefined;
+          profiles.push({ ...profile, sessionBundle, sessionSource: fresh ? "live" : sessionBundle ? "saved" : "stored-cookies" });
+        }
       }
 
       if (format === "xlsx") {
@@ -1772,7 +1780,9 @@ export async function handleUiRequest(
         return Response.json({ ok: true, port: r.port });
       }
       if (action[2] === "close") {
-        return (await launcher.stop(id))
+        const launch = store.getLaunch(id);
+        await launcher.captureLocalSession(id);
+        return (await launcher.stop(id, launch ?? undefined))
           ? Response.json({ ok: true })
           : Response.json({ ok: false, error: "browser teardown unconfirmed" }, { status: 500 });
       }

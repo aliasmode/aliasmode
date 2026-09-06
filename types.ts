@@ -141,6 +141,17 @@ export interface ObservedFingerprint {
   webrtc?: string;
   /** ISO-8601 instant of capture. */
   capturedAt?: string;
+  uaChPlatform?: string;
+  uaChPlatformVersion?: string;
+  uaChBrands?: string;
+  uaChFullVersionList?: string;
+  language?: string;
+  timezone?: string;
+  availableScreen?: string;
+  colorDepth?: number;
+  devicePixelRatio?: number;
+  /** JSON-encoded probe errors; informational, never compared as identity. */
+  errors?: string;
 }
 
 export interface FingerprintDifference {

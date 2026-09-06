@@ -227,6 +227,7 @@ export function canonicalUserPageUrl(value: unknown): string | null {
     const parsed = new URL(value);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
     if (parsed.searchParams.has("__aliasmode_session_capture__")
+      || parsed.searchParams.has("__aliasmode_fingerprint__")
       || parsed.searchParams.has("__aliasmode_session_restore__")) return null;
     if (parsed.hostname === "127.0.0.1"
       && parsed.pathname === "/card"

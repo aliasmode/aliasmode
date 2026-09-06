@@ -147,6 +147,7 @@ function canonicalUserPageUrl(value) {
     const parsed = new URL(value);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
     if (parsed.searchParams.has("__aliasmode_session_capture__")
+      || parsed.searchParams.has("__aliasmode_fingerprint__")
       || parsed.searchParams.has("__aliasmode_session_restore__")) return undefined;
     if (parsed.hostname === "127.0.0.1"
       && parsed.pathname === "/card"
@@ -1087,11 +1088,29 @@ async function operate(chromium, operation, payload) {
         return { fingerprint, webrtcIps, egress, login };
       } finally { await page.close().catch(() => {}); }
     }
+    if (operation === "page" && payload.kind === "fingerprint") {
+      const page = await context.newPage();
+      const url = "https://fingerprint.aliasmode.invalid/?__aliasmode_fingerprint__=1";
+      let intercepted = false;
+      const handler = async (route) => {
+        if (route.request().url() !== url) return route.abort();
+        intercepted = true;
+        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Fingerprint</title>" });
+      };
+      try {
+        await page.route("**/*", handler);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+        if (!intercepted || page.url() !== url) throw new Error("fingerprint document was not fulfilled locally");
+        return await page.evaluate(payload.fingerprintScript);
+      } finally {
+        await page.unroute("**/*", handler).catch(() => {});
+        await page.close().catch(() => {});
+      }
+    }
     if (operation === "page") {
       const page = payload.temporary ? await context.newPage() : context.pages()[0] || await context.newPage();
       try {
         if (payload.url) await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: payload.timeoutMs || 30_000 }).catch(() => {});
-        if (payload.kind === "fingerprint") return await page.evaluate(payload.fingerprintScript);
         if (payload.kind === "user-agent") return page.evaluate(() => navigator.userAgent);
         if (payload.kind === "scripts") {
           const values = [];

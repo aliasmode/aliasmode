@@ -109,7 +109,7 @@ function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
     out.screenWidth = p.screenWidth;
     out.screenHeight = p.screenHeight;
   }
-  if (present.has("cookie")) out.cookies = p.cookies;
+  if (present.has("cookie") || incoming.sessionBundle !== undefined) out.cookies = p.cookies;
   if (present.has("seed")) {
     const seed = Number(incoming.sourceFields.seed?.trim());
     if (Number.isInteger(seed) && seed >= 1 && seed <= 0xffff_ffff) out.fingerprintSeed = p.fingerprintSeed;
@@ -229,10 +229,10 @@ export async function importBuffers(
     ) {
       problems.push(`${entry.source}: profile ${entry.profile.id}: blank resolution would erase the stored screen identity`);
     }
-    if (present.has("cookie") && !entry.sourceFields.cookie?.trim() && existing.cookies.length) {
+    if (!entry.sessionBundle && present.has("cookie") && !entry.sourceFields.cookie?.trim() && existing.cookies.length) {
       problems.push(`${entry.source}: profile ${entry.profile.id}: blank cookie field would erase stored cookies; use [] to clear them explicitly`);
     }
-    if (present.has("cookie") && entry.cookiesStripped > 0 && entry.profile.cookies.length === 0 && existing.cookies.length) {
+    if (!entry.sessionBundle && present.has("cookie") && entry.cookiesStripped > 0 && entry.profile.cookies.length === 0 && existing.cookies.length) {
       problems.push(`${entry.source}: profile ${entry.profile.id}: cookie field contained only stripped extension cookies; use [] to clear stored cookies explicitly`);
     }
     prepared.push(mergeExisting(existing, entry));
@@ -248,7 +248,9 @@ export async function importBuffers(
   // Keep these checks adjacent to the single batch write: the hub guard closes
   // the claim-vs-import race after all parsing/timezone I/O has completed.
   beforeCommit?.(prepared);
-  store.upsertProfiles(prepared);
+  store.upsertProfiles(prepared, new Map(collected
+    .filter((entry) => entry.sessionBundle !== undefined)
+    .map((entry) => [entry.profile.id, entry.sessionBundle!])));
   return batch.result;
 }
 

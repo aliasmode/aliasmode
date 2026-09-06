@@ -196,6 +196,121 @@ function legacyProxyPersonaDigest(store: ProfileStore, profileId: string, binary
   })).digest("hex");
 }
 
+test("Local imports restore storage once before navigation, not on subsequent launches or captures", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const id = "k1d0cd11";
+  const bundle = JSON.stringify({ cookies: [], origins: [{ origin: "https://example.com", localStorage: [{ name: "device", value: "test" }] }], tabs: ["https://example.com/account"] });
+  store.upsertProfiles([store.getProfile(id)!], new Map([[id, bundle]]));
+  const events: string[] = [];
+  const args: string[][] = [];
+  const launcher = newLauncher(store, fleet(), args, undefined, undefined, {
+    applySession: async (_ws, value, urls) => {
+      expect(value).toBe(bundle);
+      expect(urls).toEqual([]);
+      events.push("restore");
+    },
+    ensureCookies: async () => { events.push("cookies"); return { injected: true }; },
+    navigate: async () => { events.push("navigate"); },
+  });
+  const dir = launcher.userDataDir(id);
+  mkdirSync(join(dir, "Default", "Sessions"), { recursive: true });
+  writeFileSync(join(dir, "Default", "Sessions", "Tabs_1"), "old native session");
+  try {
+    await launcher.start(id);
+    expect(events).toEqual(["restore"]);
+    expect(args[0]).not.toContain("--restore-last-session");
+    expect(store.getPendingSessionBundle(id)).toBeNull();
+    expect(await launcher.stop(id)).toBe(true);
+    store.saveSessionBundle(id, JSON.stringify({ cookies: [], origins: [] }));
+    await launcher.start(id);
+    expect(events.filter(event => event === "restore")).toHaveLength(1);
+  } finally { await launcher.stop(id); store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("failed Local restore stays pending for retry and Cloud/remote can disable it", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const id = "k1d0cd11";
+  const bundle = JSON.stringify({ cookies: [], origins: [] });
+  store.upsertProfiles([store.getProfile(id)!], new Map([[id, bundle]]));
+  let attempts = 0;
+  let navigated = 0;
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    applySession: async () => { if (++attempts === 1) throw new SessionRestoreError("origin_storage", "failed"); },
+    navigate: async () => { navigated++; },
+  });
+  try {
+    await expect(launcher.start(id, ["https://example.com"])).rejects.toThrow("session_restore/origin_storage");
+    expect(navigated).toBe(0);
+    expect(store.getPendingSessionBundle(id)).toBe(bundle);
+    await launcher.start(id, [], { restoreLocalSession: false, autoNavigate: false });
+    expect(attempts).toBe(1);
+    expect(store.getPendingSessionBundle(id)).toBe(bundle);
+    await launcher.stop(id);
+    await launcher.start(id);
+    expect(attempts).toBe(2);
+    expect(store.getPendingSessionBundle(id)).toBeNull();
+  } finally { await launcher.stop(id); store.close(); rmSync(launcher.userDataDir(id), { recursive: true, force: true }); }
+});
+
+test("unavailable imported tabs do not replay successfully restored storage on every open", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const id = "k1d0cd11";
+  store.upsertProfiles([store.getProfile(id)!], new Map([[id, JSON.stringify({ cookies: [], origins: [], tabs: ["https://offline.example/"] })]]));
+  let attempts = 0;
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    applySession: async () => { attempts++; throw new SessionRestoreError("navigation", "failed"); },
+    log: () => {},
+  });
+  try {
+    await launcher.start(id);
+    expect(store.getPendingSessionBundle(id)).toBeNull();
+    await launcher.stop(id);
+    await launcher.start(id);
+    expect(attempts).toBe(1);
+  } finally { await launcher.stop(id); store.close(); rmSync(launcher.userDataDir(id), { recursive: true, force: true }); }
+});
+
+test("Local snapshots capture only a verified unchanged live generation and retain the previous bundle on failure", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const id = "k1d0cd11";
+  const previous = JSON.stringify({ cookies: [], origins: [{ origin: "https://example.com", localStorage: [] }] });
+  const fresh = JSON.stringify({ cookies: [], origins: [], tabs: ["https://example.com/latest"] });
+  store.saveSessionBundle(id, previous);
+  let mode = "success";
+  let reads = 0;
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    readSession: async (_ws, options) => {
+      reads++;
+      if (reads === 1) expect(options?.captureSeed?.origins).toEqual(["https://example.com"]);
+      if (mode === "failure") throw new Error("private session error");
+      if (mode === "replacement") store.recordLaunch({ ...store.getLaunch(id)!, startedAt: 123 });
+      return fresh;
+    },
+    log: () => {},
+  });
+  try {
+    expect(await launcher.captureLocalSession(id)).toBe(false);
+    expect(reads).toBe(0);
+    await launcher.start(id);
+    expect(await launcher.captureLocalSession(id)).toBe(true);
+    expect(store.getSessionBundle(id)).toBe(fresh);
+    expect(store.getPendingSessionBundle(id)).toBeNull();
+    store.saveSessionBundle(id, previous);
+    mode = "failure";
+    expect(await launcher.captureLocalSession(id)).toBe(false);
+    expect(store.getSessionBundle(id)).toBe(previous);
+    mode = "replacement";
+    const launch = store.getLaunch(id)!;
+    expect(await launcher.captureLocalSession(id)).toBe(false);
+    expect(store.getSessionBundle(id)).toBe(previous);
+    store.recordLaunch(launch);
+  } finally { await launcher.stop(id); store.close(); rmSync(launcher.userDataDir(id), { recursive: true, force: true }); }
+});
+
 test("after a restart, a bootstrapped browser reattaches without rerunning search setup", async () => {
   const store = seeded();
   const f = fleet();

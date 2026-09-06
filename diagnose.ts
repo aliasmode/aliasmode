@@ -28,6 +28,8 @@ export interface FingerprintSample {
   userAgent?: string;
   uaDataPlatform?: string;
   uaDataBrands?: string[];
+  uaDataPlatformVersion?: string;
+  uaFullVersionList?: string[];
   uaFullVersion?: string;
   platform?: string;
   language?: string;
@@ -242,7 +244,9 @@ export async function fingerprintProbe(): Promise<FingerprintSample> {
     if (uaData) {
       const hi = await uaData.getHighEntropyValues(["platform", "platformVersion", "uaFullVersion", "fullVersionList"]);
       out.uaDataPlatform = hi.platform;
+      out.uaDataPlatformVersion = hi.platformVersion;
       out.uaFullVersion = hi.uaFullVersion;
+      out.uaFullVersionList = hi.fullVersionList?.map((b: any) => `${b.brand} ${b.version}`);
       out.uaDataBrands = (uaData.brands ?? []).map((b: any) => `${b.brand} ${b.version}`);
     }
   } catch (e) {
@@ -290,10 +294,7 @@ export async function fingerprintProbe(): Promise<FingerprintSample> {
     osc.connect(comp);
     comp.connect(ac.destination);
     osc.start(0);
-    const buf: AudioBuffer = await new Promise((res) => {
-      ac.oncomplete = (e: any) => res(e.renderedBuffer);
-      ac.startRendering();
-    });
+    const buf: AudioBuffer = await ac.startRendering();
     const data = buf.getChannelData(0).slice(0, 1000);
     let sum = 0;
     for (const x of data) sum += Math.abs(x);
@@ -388,9 +389,9 @@ export async function diagnoseOverCDP(
     endpoint: ws,
     timeoutMs,
     collectLogin: opts.collectLogin !== false,
-    fingerprintScript: fingerprintProbe.toString(),
-    webrtcScript: webrtcProbe.toString(),
-    loginScript: loginProbe.toString(),
+    fingerprintScript: `(${fingerprintProbe.toString()})()`,
+    webrtcScript: `(${webrtcProbe.toString()})()`,
+    loginScript: `(${loginProbe.toString()})()`,
     egressUrls: resolveEgressEndpoints(),
     connectTimeoutMs: timeoutMs,
   }, { timeoutMs: timeoutMs * 3 + 20_000 });

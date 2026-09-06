@@ -35,6 +35,8 @@ export const FP_BLOCK_KEYS = [
   "fp_screen",
   "fp_webrtc",
   "fp_captured_at",
+  "fp_ua_ch_platform", "fp_ua_ch_platform_version", "fp_ua_ch_brands", "fp_ua_ch_full_version_list",
+  "fp_language", "fp_timezone", "fp_screen_available", "fp_color_depth", "fp_dpr", "fp_errors",
 ] as const;
 
 export type FpBlockKey = (typeof FP_BLOCK_KEYS)[number];
@@ -54,10 +56,20 @@ const FIELD_BY_KEY: Record<FpBlockKey, keyof ObservedFingerprint> = {
   fp_screen: "screen",
   fp_webrtc: "webrtc",
   fp_captured_at: "capturedAt",
+  fp_ua_ch_platform: "uaChPlatform",
+  fp_ua_ch_platform_version: "uaChPlatformVersion",
+  fp_ua_ch_brands: "uaChBrands",
+  fp_ua_ch_full_version_list: "uaChFullVersionList",
+  fp_language: "language",
+  fp_timezone: "timezone",
+  fp_screen_available: "availableScreen",
+  fp_color_depth: "colorDepth",
+  fp_dpr: "devicePixelRatio",
+  fp_errors: "errors",
 };
 
 /** Properties parsed back as numbers rather than strings. */
-const NUMERIC_FIELDS = new Set<keyof ObservedFingerprint>(["hardwareConcurrency", "deviceMemory"]);
+const NUMERIC_FIELDS = new Set<keyof ObservedFingerprint>(["hardwareConcurrency", "deviceMemory", "colorDepth", "devicePixelRatio"]);
 
 /**
  * The fields a verdict is computed from — every one a pure function of the
@@ -99,7 +111,7 @@ export function observedFromSample(
 ): ObservedFingerprint {
   return defined<ObservedFingerprint>({
     ua: sample.userAgent,
-    chrome: chromeVersion(sample.userAgent) ?? sample.uaFullVersion,
+    chrome: sample.uaFullVersion ?? chromeVersion(sample.userAgent),
     platform: sample.platform ?? sample.uaDataPlatform,
     languages: sample.languages?.join(","),
     hardwareConcurrency: sample.hardwareConcurrency,
@@ -111,6 +123,16 @@ export function observedFromSample(
     screen: sample.screen ? `${sample.screen.width}*${sample.screen.height}` : undefined,
     webrtc: extra.webrtc,
     capturedAt: extra.capturedAt,
+    uaChPlatform: sample.uaDataPlatform,
+    uaChPlatformVersion: sample.uaDataPlatformVersion,
+    uaChBrands: sample.uaDataBrands ? JSON.stringify(sample.uaDataBrands) : undefined,
+    uaChFullVersionList: sample.uaFullVersionList ? JSON.stringify(sample.uaFullVersionList) : undefined,
+    language: sample.language,
+    timezone: sample.timezone,
+    availableScreen: sample.screen ? `${sample.screen.availWidth}*${sample.screen.availHeight}` : undefined,
+    colorDepth: sample.screen?.colorDepth,
+    devicePixelRatio: sample.screen?.dpr,
+    errors: sample.errors && Object.keys(sample.errors).length ? JSON.stringify(sample.errors) : undefined,
   });
 }
 

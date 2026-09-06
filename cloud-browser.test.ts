@@ -223,6 +223,7 @@ function setup(options: {
       startOptionsSeen.push(startOptions);
       expect(startOptions).toMatchObject({
         autoNavigate: false,
+        restoreLocalSession: false,
         sessionBaseVersion: -1,
       });
       expect(startOptions.headless).toBe(options.expectedHeadless);
@@ -352,7 +353,12 @@ test("Cloud browser imports one encoded batch without populating the Local store
   second.id = "profile2";
   second.name = "Second";
 
-  expect(await state.coordinator.importProfiles("Sales", [first, second])).toEqual({
+  const sessionBundle = JSON.stringify({
+    cookies: first.cookies,
+    origins: [{ origin: "https://x.com", localStorage: [{ name: "device", value: "portable-device" }] }],
+    tabs: ["https://x.com/messages"],
+  });
+  expect(await state.coordinator.importProfiles("Sales", [{ ...first, sessionBundle }, second])).toEqual({
     ok: true,
     imported: 2,
     ids: ["profile1", "profile2"],
@@ -360,6 +366,7 @@ test("Cloud browser imports one encoded batch without populating the Local store
   expect(state.events).toEqual(["cloud-import"]);
   expect(state.imports).toHaveLength(1);
   expect(state.imports[0]!.destination).toBe("Sales");
+  expect(JSON.parse(decodePortableProfile(state.imports[0]!.profiles[0]!).sessionBundle)).toMatchObject(JSON.parse(sessionBundle));
   expect(state.imports[0]!.profiles.map((item) => decodePortableProfile(item).profile)).toEqual([first, second]);
   expect(state.store.getProfile("profile1")).toBeNull();
   expect(state.store.getProfile("profile2")).toBeNull();

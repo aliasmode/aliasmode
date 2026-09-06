@@ -34,6 +34,7 @@ import {
 } from "./session.ts";
 import type { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
+import type { ProfileExport } from "./parse.ts";
 
 export interface CloudBrowserOpenResult {
   ok: boolean;
@@ -86,7 +87,7 @@ export interface CloudBrowserLifecycle {
       checkpoint re-encode it and happen promptly. Optional for partial fakes. */
   noteProfileEdited?(profileId: string): void;
   create(profile: Profile): Promise<{ id: string }>;
-  importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse>;
+  importProfiles(destination: string, profiles: ProfileExport[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<CloudBrowserCloseResult>;
   secureAfterAuthentication(current?: () => boolean): Promise<void>;
@@ -510,12 +511,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     return { id: profile.id };
   }
 
-  async importProfiles(destination: string, profiles: Profile[]): Promise<ImportProfilesResponse> {
+  async importProfiles(destination: string, profiles: ProfileExport[]): Promise<ImportProfilesResponse> {
     this.requireContext(false);
     const ids = profiles.map((profile) => profile.id);
     const imported = await this.options.cloud.importProfiles({
       destination,
-      profiles: profiles.map((profile) => encodePortableProfile(profile)),
+      profiles: profiles.map((profile) => encodePortableProfile(profile, profile.sessionBundle)),
     });
     if (
       imported.imported !== ids.length
@@ -640,6 +641,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const startBrowser = async () => {
         return await this.options.launcher.start(profileId, chromeArgs, {
           autoNavigate: false,
+          restoreLocalSession: false,
           restoreLastSession: restoreNativeSession,
           resetStorage: !restoreNativeSession && bundleHasRestorableLogin(sessionBundle),
           sessionBaseVersion: PENDING_SESSION_BASE_VERSION,

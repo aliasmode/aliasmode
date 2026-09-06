@@ -296,12 +296,13 @@ test("open/close routes call the launcher", async () => {
   const launcher: any = {
     start: async (id: string) => { calls.push(`start:${id}`); return { ws: "ws://x", port: 9333 }; },
     stop: async (id: string) => { calls.push(`stop:${id}`); return true; },
+    captureLocalSession: async (id: string) => { calls.push(`capture:${id}`); return false; },
   };
   const open = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/open", { method: "POST" }), launcher, s);
   expect((await open!.json()).ok).toBe(true);
   const close = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/close", { method: "POST" }), launcher, s);
   expect((await close!.json()).ok).toBe(true);
-  expect(calls).toEqual(["start:k1d0cd11", "stop:k1d0cd11"]);
+  expect(calls).toEqual(["start:k1d0cd11", "capture:k1d0cd11", "stop:k1d0cd11"]);
   s.close();
 });
 
@@ -1643,8 +1644,15 @@ test("Cloud export uses the authoritative portable profile", async () => {
   const cloudProfile = {
     ...local,
     name: "Authoritative Cloud name",
+    timezone: "UTC",
     cookies: [{ name: "auth_token", value: "CLOUD_COOKIE", domain: ".x.com", path: "/" }],
   };
+  const cloudBundle = JSON.stringify({
+    cookies: cloudProfile.cookies,
+    origins: [{ origin: "https://x.com", localStorage: [{ name: "device", value: "cloud-device" }] }],
+    tabs: ["https://x.com/messages"],
+  });
+  s.saveSessionBundle(local.id, JSON.stringify({ cookies: [], origins: [], tabs: ["https://local-stale.example/"] }));
   const fetched: string[] = [];
   const cloudConnection = {
     client: {
@@ -1652,7 +1660,7 @@ test("Cloud export uses the authoritative portable profile", async () => {
         fetched.push(id);
         return {
           profile: { id, version: 3, activeOpens: [{ accountId: "other-device" }] },
-          payload: encodePortableProfile(cloudProfile),
+          payload: encodePortableProfile(cloudProfile, cloudBundle),
         };
       },
     },
@@ -1676,6 +1684,25 @@ test("Cloud export uses the authoritative portable profile", async () => {
   expect(text).toContain("name=Authoritative Cloud name");
   expect(text).toContain("CLOUD_COOKIE");
   expect(text).toContain("fp_canvas=local-canvas-attestation");
+  expect(text).not.toContain("local-stale.example");
+  expect(text).toContain("session_source=cloud");
+  const exportedSession = parseExport(text).imports[0]!.sessionBundle!;
+  expect(JSON.parse(exportedSession).origins).toEqual(JSON.parse(cloudBundle).origins);
+  expect(JSON.parse(exportedSession).tabs).toEqual(["https://x.com/messages"]);
+  const form = new FormData();
+  form.append("group", "Imported");
+  form.append("files", new File([text], "export.txt"));
+  let imported = false;
+  const upload = await handleUiRequest(new Request("http://x/ui/api/import/upload", { method: "POST", body: form }), {} as any, s, null, {
+    appConfig,
+    cloudBrowser: { importProfiles: async (_destination: string, profiles: any[]) => {
+      expect(profiles[0].sessionBundle).toBe(exportedSession);
+      imported = true;
+      return { ok: true, imported: 1, ids: [local.id] };
+    } } as any,
+  });
+  expect(upload!.status).toBe(200);
+  expect(imported).toBe(true);
   s.close();
 });
 
@@ -1761,7 +1788,7 @@ test("export as xlsx returns a workbook carrying the full identity", async () =>
       method: "POST",
       body: JSON.stringify({ ids: ["k1d0cd11"], format: "xlsx" }),
     }),
-    {} as any,
+    new Launcher({ store: s }),
     s,
     null as any,
   );

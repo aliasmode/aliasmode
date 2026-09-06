@@ -912,6 +912,7 @@ export class RemoteCoordinator {
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
       const { ws, port } = await this.d.launcher.start(profileId, chromeArgs, {
         autoNavigate: false,
+        restoreLocalSession: false,
         restoreLastSession: false,
         resetStorage,
         // A manager crash after spawn but before the authoritative restore
@@ -1390,6 +1391,7 @@ export class RemoteCoordinator {
             if (!await this.d.launcher.active(launch.profileId)) throw new Error("browser identity/CDP is unavailable");
             currentWs = (await this.d.launcher.start(launch.profileId, [], {
               autoNavigate: false,
+              restoreLocalSession: false,
               restoreLastSession: false,
             })).ws;
           }
@@ -1502,6 +1504,7 @@ export class RemoteCoordinator {
             }
             await this.d.launcher.start(launch.profileId, [], {
               autoNavigate: false,
+              restoreLocalSession: false,
               restoreLastSession: false,
             });
           }
