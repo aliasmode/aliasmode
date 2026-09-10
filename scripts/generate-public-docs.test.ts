@@ -92,6 +92,7 @@ function fakes() {
   const launcher = {
     start: async () => ({ ws: "ws://127.0.0.1:9222/devtools/browser/test", port: 9222 }),
     stop: async () => true,
+    captureLocalSession: async () => false,
     certifiedActive: async () => true,
     clearCache: async () => {},
     removeUserDataDir: () => true,

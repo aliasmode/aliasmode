@@ -196,7 +196,9 @@ export async function handleRequest(
 
   if (pathname === "/api/v1/browser/stop") {
     if (!userId) return fail("missing user_id");
-    return (await launcher.stop(userId))
+    const launch = store.getLaunch(userId);
+    await launcher.captureLocalSession(userId);
+    return (await launcher.stop(userId, launch ?? undefined))
       ? ok()
       : fail(`browser teardown unconfirmed: ${userId}`);
   }

@@ -13,6 +13,7 @@ import {
   dispatchWithLifecycleAdmission,
 } from "./lifecycle-admission.ts";
 import { parseExport } from "./parse.ts";
+import { handleUiRequest } from "./ui.ts";
 
 const SAMPLE = `id=k1d0cd11
 name=acct
@@ -40,7 +41,7 @@ interface Harness {
   setCdpAlive: (alive: boolean) => void;
 }
 
-function harness(): Harness {
+function harness(readSession?: ConstructorParameters<typeof Launcher>[0]["readSession"]): Harness {
   const store = new ProfileStore(":memory:");
   for (const p of parseExport(SAMPLE).profiles) store.upsertProfile(p);
 
@@ -93,6 +94,7 @@ function harness(): Harness {
     ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
     ensureCookies,
     captureFingerprint: async () => null,
+    readSession: readSession ?? (async () => JSON.stringify({ cookies: [], origins: [] })),
     // stop() routes kills through killPidFn (tree-kill); track them here.
     killPid: async (pid) => {
       killed.push(pid);
@@ -139,6 +141,69 @@ function harness(): Harness {
 function req(path: string): Request {
   return new Request(`http://127.0.0.1:50400${path}`);
 }
+
+test("Local API stop saves a live session before teardown for later TXT export", async () => {
+  const bundle = JSON.stringify({
+    cookies: [{ name: "auth_token", value: "rotated-test-cookie", domain: ".x.com", path: "/" }],
+    origins: [{ origin: "https://x.com", localStorage: [{ name: "device", value: "test-device" }] }],
+    tabs: ["https://x.com/messages"],
+  });
+  let reads = 0;
+  const h = harness(async (ws) => {
+    expect(ws).toBe(h.store.getLaunch("k1d0cd11")!.ws);
+    expect(h.gracefulCloses).toEqual([]);
+    reads++;
+    return bundle;
+  });
+  try {
+    await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
+    const stopped = await handleRequest(req("/api/v1/browser/stop?user_id=k1d0cd11"), h.launcher, h.store);
+    expect((await stopped.json()).code).toBe(0);
+    expect(reads).toBe(1);
+    expect(h.store.getLaunch("k1d0cd11")).toBeNull();
+    expect(h.store.getPendingSessionBundle("k1d0cd11")).toBeNull();
+    const exported = await handleUiRequest(new Request("http://x/ui/api/profiles/export", {
+      method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"], format: "txt" }),
+    }), h.launcher, h.store);
+    expect(exported!.status).toBe(200);
+    const parsed = parseExport(await exported!.text());
+    expect(JSON.parse(parsed.imports[0]!.sessionBundle!)).toEqual(JSON.parse(bundle));
+    expect(parsed.profiles[0]!.cookies[0]!.value).toBe("rotated-test-cookie");
+    expect(reads).toBe(1);
+  } finally { await h.launcher.stop("k1d0cd11"); h.store.close(); }
+});
+
+test("Local API stop keeps the saved snapshot and closes when capture fails", async () => {
+  let reads = 0;
+  const h = harness(async () => { reads++; throw new Error("capture unavailable"); });
+  const saved = JSON.stringify({ cookies: [], origins: [], tabs: ["https://x.com/home"] });
+  try {
+    h.store.saveSessionBundle("k1d0cd11", saved);
+    await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
+    const stopped = await handleRequest(req("/api/v1/browser/stop?user_id=k1d0cd11"), h.launcher, h.store);
+    expect((await stopped.json()).code).toBe(0);
+    expect(h.store.getLaunch("k1d0cd11")).toBeNull();
+    expect(h.store.getSessionBundle("k1d0cd11")).toBe(saved);
+    expect(reads).toBe(1);
+  } finally { await h.launcher.stop("k1d0cd11"); h.store.close(); }
+});
+
+test("Local API stop does not kill a replacement generation during capture", async () => {
+  const h = harness(async () => {
+    const launch = h.store.getLaunch("k1d0cd11")!;
+    h.store.recordLaunch({ ...launch, startedAt: launch.startedAt + 1 });
+    return JSON.stringify({ cookies: [], origins: [] });
+  });
+  try {
+    await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
+    const stopped = await handleRequest(req("/api/v1/browser/stop?user_id=k1d0cd11"), h.launcher, h.store);
+    expect((await stopped.json()).code).toBe(-1);
+    expect(h.store.getLaunch("k1d0cd11")).not.toBeNull();
+    expect(h.store.getSessionBundle("k1d0cd11")).toBeNull();
+    expect(h.gracefulCloses).toEqual([]);
+    expect(h.killed).toEqual([]);
+  } finally { await h.launcher.stop("k1d0cd11"); h.store.close(); }
+});
 
 test("isAdsPowerBrowserControl matches only the lifecycle routes remote mode routes through the hub", () => {
   expect(isAdsPowerBrowserControl("/api/v1/browser/start")).toBe(true);
