@@ -6,8 +6,8 @@
  * AdsPower uses, which keeps automation debug-port-based teardown working.
  *
  * Launch is read-only with respect to identity: proxy, fingerprint seed, UA,
- * and screen come straight from the store. Cookies are injected exactly once
- * (first launch); after that the persistent dir carries browser state.
+ * and screen come straight from the store. Imported cookies fill gaps in the
+ * persistent browser state without replacing cookies changed by the browser.
  */
 
 import { basename, join, resolve, sep } from "node:path";
@@ -122,54 +122,13 @@ export type WindowLabeler = (ws: string, label: string) => Promise<void>;
 export type SearchProviderEnsurer = (
   options: SearchProviderBootstrapOptions,
 ) => Promise<SearchProviderSetupResult>;
-/**
- * Ensure the browser has a logged-in session: inject the exported cookies
- * only when none is present, and report whether it injected. Leaving an
- * existing session untouched preserves cookies the platform rotated during
- * prior sessions.
- */
+/** Add missing imported cookies without replacing values already in the browser. */
 export type CookieEnsurer = (ws: string, cookies: CookieRecord[]) => Promise<{ injected: boolean }>;
-
-/**
- * True if the exported cookies carry a usable X login token — a non-empty
- * `auth_token` that hasn't expired. A session-scoped token (no expiry) counts.
- * When false, injecting can't establish a session, so the manager defers to the
- * app's credential auto-login instead of replaying a dead cookie.
- */
-export function hasUsableAuthToken(cookies: CookieRecord[]): boolean {
-  return cookies.some((c) => c.name === "auth_token" && !!c.value && cookieIsCurrent(c));
-}
-
-/** True when an export carries a current Telegram web cookie. */
-export function hasUsableTelegramCookie(cookies: CookieRecord[]): boolean {
-  return cookies.some((c) => !!c.name && !!c.value && cookieDomainMatches(c, "telegram.org") && cookieIsCurrent(c));
-}
-
-type CookieBootstrapTarget = {
-  name: "X" | "Telegram";
-  url: string;
-  hasUsableCookie: (cookies: CookieRecord[]) => boolean;
-};
-
-const COOKIE_BOOTSTRAP_TARGETS: CookieBootstrapTarget[] = [
-  { name: "X", url: "https://x.com", hasUsableCookie: hasUsableAuthToken },
-  { name: "Telegram", url: "https://web.telegram.org", hasUsableCookie: hasUsableTelegramCookie },
-];
-
-function cookieBootstrapTarget(cookies: CookieRecord[]): CookieBootstrapTarget | null {
-  return COOKIE_BOOTSTRAP_TARGETS.find((target) => target.hasUsableCookie(cookies)) ?? null;
-}
 
 function cookieIsCurrent(c: CookieRecord): boolean {
   const nowSec = Date.now() / 1000;
   const expires = Number(c.expires);
   return c.expires === undefined || expires < 0 || expires > nowSec;
-}
-
-function cookieDomainMatches(c: CookieRecord, parentDomain: string): boolean {
-  const domain = c.domain.replace(/^\./, "").toLowerCase();
-  const parent = parentDomain.toLowerCase();
-  return domain === parent || domain.endsWith(`.${parent}`);
 }
 
 export function splitLaunchUrls(launchArgs: string[]): { chromeArgs: string[]; startupUrls: string[] } {
@@ -1603,17 +1562,9 @@ export class Launcher {
         }
       }
 
-      // Cookie injection is a one-time BOOTSTRAP to migrate the AdsPower
-      // session, not an ongoing login mechanism:
-      //   - Skip if the export has no platform-specific usable cookie — replaying
-      //     dead cookies can't log anyone in; automation credential auto-login owns
-      //     recovery for logged-out accounts (and its fresh session persists in
-      //     the user-data dir, so the next launch sees a live session and skips).
-      //   - Otherwise inject ONLY when there's no live platform session. Once
-      //     logged in (original or auto-login-refreshed), that session — including
-      //     rotated cookies — persists; re-injecting the stale export would revert
-      //     it, so ensureCookies leaves it untouched.
-      // Best-effort: a failed check/injection must not fail the launch.
+      // Restore a pending snapshot authoritatively. Otherwise, import unexpired
+      // cookies for every site without replacing cookies already in the browser.
+      // Cookie-only import remains best-effort; a failure must not fail the launch.
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "session injection");
       if (pendingSession) {
         const home = platformHomeUrl(profile.platform, bundleTelegramClient(pendingSession));
@@ -1630,16 +1581,16 @@ export class Launcher {
         this.requireUnchangedProfile(profileId, profileSnapshot, "session restore");
       }
       if (!pendingSession && profile.cookies.length > 0) {
-        const target = cookieBootstrapTarget(profile.cookies);
-        if (!target) {
-          this.log(`${profileId}: no usable X/Telegram session cookies in export — leaving login to the app's auto-login`);
+        const cookies = profile.cookies.filter(cookieIsCurrent);
+        if (!cookies.length) {
+          this.log(`${profileId}: imported cookies have expired — skipped cookie import`);
         } else {
           try {
-            const { injected } = await this.ensureCookiesFn(ws, profile.cookies);
+            const { injected } = await this.ensureCookiesFn(ws, cookies);
             this.log(
               injected
-                ? `injected ${profile.cookies.length} cookies into ${profileId} (no live ${target.name} session)`
-                : `${profileId} already logged in to ${target.name} — kept its existing session`,
+                ? `imported missing cookies into ${profileId}`
+                : `${profileId} already holds its imported cookies — kept existing values`,
             );
             if (injected && !profile.seeded) {
               this.store.markSeeded(profileId);
@@ -4188,12 +4139,8 @@ const defaultLabelWindow: WindowLabeler = async (ws, label) => {
  * client without terminating the browser, leaving the persistent dir seeded.
  */
 const defaultEnsureCookies: CookieEnsurer = async (ws, cookies) => {
-  const target = cookieBootstrapTarget(cookies);
-  if (!target) return { injected: false };
   return runPlaywrightWorker<{ injected: boolean }>("ensure-cookies", {
     endpoint: ws,
-    url: target.url,
-    target: target.name,
     cookies,
     connectTimeoutMs: 30_000,
   });

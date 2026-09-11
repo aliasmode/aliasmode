@@ -13,8 +13,6 @@ import {
   createInFlightSnapshotReader,
   createFailureBackoffReader,
   defaultSpawn,
-  hasUsableAuthToken,
-  hasUsableTelegramCookie,
   isTelegramPlatform,
   matchOwnedBrowserPids,
   matchProfileDirHolderPids,
@@ -201,7 +199,8 @@ test("Local imports restore storage once before navigation, not on subsequent la
   makeDirect(store);
   const id = "k1d0cd11";
   const bundle = JSON.stringify({ cookies: [], origins: [{ origin: "https://example.com", localStorage: [{ name: "device", value: "test" }] }], tabs: ["https://example.com/account"] });
-  store.upsertProfiles([store.getProfile(id)!], new Map([[id, bundle]]));
+  const cookies = [{ name: "custom_session", value: "session", domain: "example.com", path: "/" }];
+  store.upsertProfiles([{ ...store.getProfile(id)!, cookies }], new Map([[id, bundle]]));
   const events: string[] = [];
   const args: string[][] = [];
   const launcher = newLauncher(store, fleet(), args, undefined, undefined, {
@@ -225,6 +224,7 @@ test("Local imports restore storage once before navigation, not on subsequent la
     store.saveSessionBundle(id, JSON.stringify({ cookies: [], origins: [] }));
     await launcher.start(id);
     expect(events.filter(event => event === "restore")).toHaveLength(1);
+    expect(events.filter(event => event === "cookies")).toHaveLength(1);
   } finally { await launcher.stop(id); store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1363,21 +1363,45 @@ test("quoteWindowsCommandArg preserves argv boundaries for the session-launch co
   expect(quoteWindowsCommandArg("")).toBe('""');
 });
 
-test("hasUsableAuthToken accepts a live/non-expiring token and rejects expired/missing", () => {
-  const nowSec = Date.now() / 1000;
-  expect(hasUsableAuthToken([{ name: "auth_token", value: "v", domain: ".x.com", path: "/", expires: nowSec + 99999 }])).toBe(true);
-  expect(hasUsableAuthToken([{ name: "auth_token", value: "v", domain: ".x.com", path: "/" }])).toBe(true); // session cookie, no expiry
-  expect(hasUsableAuthToken([{ name: "auth_token", value: "v", domain: ".x.com", path: "/", expires: nowSec - 10 }])).toBe(false); // expired
-  expect(hasUsableAuthToken([{ name: "auth_token", value: "", domain: ".x.com", path: "/" }])).toBe(false); // empty value
-  expect(hasUsableAuthToken([{ name: "ct0", value: "x", domain: ".x.com", path: "/" }])).toBe(false); // no auth_token
+test("start imports unexpired cookies for any site without a platform selection", async () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  const cookies = [
+    { name: "SID", value: "google-session", domain: ".google.com", path: "/", expires: Date.now() / 1000 + 3600 },
+    { name: "custom_session", value: "", domain: "example.org", path: "/" },
+    { name: "expired", value: "old", domain: ".example.net", path: "/", expires: 1 },
+  ];
+  store.upsertProfile({ ...profile, platform: "", cookies });
+  const injected: unknown[] = [];
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    ensureCookies: async (_ws, cookies) => { injected.push(cookies); return { injected: true }; },
+  });
+  try {
+    await launcher.start(profile.id);
+    expect(injected).toEqual([cookies.slice(0, 2)]);
+    expect(store.getProfile(profile.id)!.seeded).toBe(true);
+  } finally {
+    await launcher.stop(profile.id);
+    store.close();
+  }
 });
 
-test("hasUsableTelegramCookie accepts current Telegram cookies and rejects expired/non-Telegram cookies", () => {
-  const nowSec = Date.now() / 1000;
-  expect(hasUsableTelegramCookie([{ name: "stel_token", value: "v", domain: "web.telegram.org", path: "/", expires: nowSec + 99999 }])).toBe(true);
-  expect(hasUsableTelegramCookie([{ name: "stel_token", value: "v", domain: ".telegram.org", path: "/" }])).toBe(true);
-  expect(hasUsableTelegramCookie([{ name: "stel_token", value: "v", domain: "web.telegram.org", path: "/", expires: nowSec - 10 }])).toBe(false);
-  expect(hasUsableTelegramCookie([{ name: "auth_token", value: "v", domain: ".x.com", path: "/" }])).toBe(false);
+test("start skips expired imports without marking the profile seeded", async () => {
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, cookies: [{ name: "SID", value: "old", domain: ".google.com", path: "/", expires: 1 }] });
+  let calls = 0;
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    ensureCookies: async () => { calls++; return { injected: true }; },
+  });
+  try {
+    await launcher.start(profile.id);
+    expect(calls).toBe(0);
+    expect(store.getProfile(profile.id)!.seeded).toBe(false);
+  } finally {
+    await launcher.stop(profile.id);
+    store.close();
+  }
 });
 
 test("splitLaunchUrls separates startup URLs from chromium flags", () => {

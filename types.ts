@@ -108,8 +108,8 @@ export interface Profile {
   cookies: CookieRecord[];
   /**
    * Legacy bookkeeping flag: set true the first time cookies were injected.
-   * NOTE: injection is NOT gated on this. The real gate is hasUsableAuthToken()
-   * plus the live-session probe in launcher.ts. Do NOT add an
+   * NOTE: injection is NOT gated on this. The ensure-cookies worker adds only
+   * cookies missing from the browser. Do NOT add an
    * `if (profile.seeded) return` short-circuit — that would break cookie
    * (re)injection for accounts whose session legitimately needs it.
    */

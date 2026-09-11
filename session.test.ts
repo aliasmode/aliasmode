@@ -125,6 +125,26 @@ test("writeSessionToBrowser bounds a hung origin restore and disconnects", async
   expect(closes).toBe(1);
 });
 
+test("Cloud restore preserves every cookie name and domain", async () => {
+  const cookies = [
+    { name: "SID", value: "session", domain: ".google.com", path: "/", httpOnly: true, secure: true, sameSite: "None" },
+    ...["bcookie", "bscookie", "li_rm"].flatMap((name) => [".linkedin.com", "example.org"].map((domain) => ({
+      name, value: "device", domain, path: "/", expires: 4_070_908_800,
+    }))),
+  ];
+  const events: unknown[] = [];
+  const browser = {
+    contexts: () => [{
+      pages: () => [],
+      async clearCookies() { events.push("clear"); },
+      async addCookies(value: unknown) { events.push(value); },
+    }],
+    async close() {},
+  };
+  await writeSessionToBrowser(browser, normalizeBundle({ cookies }));
+  expect(events).toEqual(["clear", cookies]);
+});
+
 test("writeSessionToBrowser restores without detaching its borrowed CDP lease", async () => {
   let closes = 0;
   let cleared = false;

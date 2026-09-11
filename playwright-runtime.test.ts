@@ -220,6 +220,71 @@ test("source worker loads pinned dependencies under Node from PATH", async () =>
   expect(error).toMatchObject({ code: "invalid_request" });
 });
 
+bunAsNodeTest("worker imports all sites without replacing existing cookies and restores complete Cloud jars", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-cookie-import-"));
+  const existing = { name: "session", value: "rotated", domain: "example.org", path: "/", secure: true };
+  const partitioned = { ...existing, domain: "example.net", partitionKey: "https://example.org", _crHasCrossSiteAncestor: true };
+  const imported = [
+    { ...existing, value: "stale" },
+    { ...partitioned, value: "stale", _crHasCrossSiteAncestor: undefined },
+    { ...existing, domain: ".example.org", value: "domain-session" },
+    { ...existing, path: "/account", value: "path-session" },
+    { ...existing, partitionKey: "https://example.net", _crHasCrossSiteAncestor: false },
+    { ...existing, partitionKey: "https://example.net", _crHasCrossSiteAncestor: true },
+    { name: "SID", value: "google-session", domain: ".google.com", path: "/", httpOnly: true, secure: true, sameSite: "None", expires: 4_070_908_800 },
+    ...["bcookie", "bscookie", "li_rm"].flatMap((name) => [".linkedin.com", "example.net"].map((domain) => ({
+      name, value: "device", domain, path: "/",
+    }))),
+  ];
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    const jar = join(root, "jar.json");
+    const events = join(root, "events.json");
+    await writeFile(jar, JSON.stringify([existing, partitioned]));
+    await writeFile(events, "[]");
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      import { readFileSync, writeFileSync } from "node:fs";
+      const jar = ${JSON.stringify(jar)}, events = ${JSON.stringify(events)};
+      const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+      const write = (path, value) => writeFileSync(path, JSON.stringify(value));
+      const context = {
+        pages: () => [],
+        async cookies(...args) {
+          if (args.length) throw new Error("cookie read must cover every domain");
+          return read(jar);
+        },
+        async addCookies(cookies) {
+          write(jar, [...read(jar), ...cookies]);
+          write(events, [...read(events), cookies]);
+        },
+        async clearCookies() { write(jar, []); write(events, [...read(events), "clear"]); },
+      };
+      export const chromium = { async connectOverCDP() {
+        return { contexts: () => [context], async close() {} };
+      } };
+    `);
+    const options = { runtimeRoot: root, timeoutMs: 5_000 };
+    const payload = { endpoint: "ws://browser", cookies: imported };
+    expect(await runPlaywrightWorker<{ injected: boolean }>("ensure-cookies", payload, options)).toEqual({ injected: true });
+    expect(await Bun.file(jar).json()).toEqual([existing, partitioned, ...imported.slice(2)]);
+    expect(await runPlaywrightWorker<{ injected: boolean }>("ensure-cookies", payload, options)).toEqual({ injected: false });
+    expect(await Bun.file(events).json()).toEqual([imported.slice(2)]);
+
+    await runPlaywrightWorker("session-restore", { endpoint: "ws://browser", bundle: JSON.stringify({ cookies: imported }), urls: [] }, options);
+    expect(await Bun.file(jar).json()).toEqual(imported);
+    const captured = JSON.parse(await runPlaywrightWorker<string>("session-capture", { endpoint: "ws://browser" }, options));
+    expect(captured.cookies).toEqual(imported);
+    await runPlaywrightWorker("session-restore", { endpoint: "ws://browser", bundle: JSON.stringify({ cookies: [] }), urls: [], authoritative: true }, options);
+    expect(await Bun.file(jar).json()).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 bunAsNodeTest("worker adds exactly one cookie without clearing the live jar", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-cookie-add-"));
   try {

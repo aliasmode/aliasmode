@@ -61,15 +61,6 @@ export function playwrightTransportAttribution(): PlaywrightTransportAttribution
 
 export type TelegramWebClient = "a" | "k";
 
-// LinkedIn device-identity cookies. These are minted on the account's ORIGINAL device (these accounts
-// were created on mobile/Android) and claim that device, conflicting with aliasmode's Windows-desktop
-// fingerprint — LinkedIn detects the mismatch and kills the session (Set-Cookie li_at="delete me" +
-// /uas/login) a few seconds after the feed loads. We strip ONLY these; li_at, JSESSIONID (the CSRF
-// token the SPA needs for any click/action — over-stripping it logs you out on the first interaction)
-// and routing cookies are kept. These names are LinkedIn-specific, so this is a no-op for other
-// platforms. Note: the session must also be MINTED on a desktop browser for a full match.
-const LINKEDIN_DEVICE_COOKIES = new Set(["bcookie", "bscookie", "li_rm"]);
-
 export interface StorageNameValue {
   name: string;
   value: string;
@@ -1177,11 +1168,8 @@ export async function writeSessionToBrowser(
     // authoritative state — including when that state is intentionally empty.
     await runOperation("cookie_clear", () => ctx.clearCookies());
     ensureCurrent();
-    // Strip the Android device-identity cookies (see LINKEDIN_DEVICE_COOKIES) but keep everything else,
-    // crucially li_at and JSESSIONID (CSRF). No-op for non-LinkedIn platforms.
-    const inject = parsed.cookies.filter((c) => !LINKEDIN_DEVICE_COOKIES.has(c.name));
-    if (inject.length > 0) {
-      await runOperation("cookie_add", () => ctx.addCookies(inject as any));
+    if (parsed.cookies.length > 0) {
+      await runOperation("cookie_add", () => ctx.addCookies(parsed.cookies as any));
     }
   })();
 

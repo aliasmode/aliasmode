@@ -123,7 +123,6 @@ const INTERNAL_NEW_TAB_URLS = new Set([
   "chrome://new-tab-page/",
   "chrome://new-tab-page-third-party/",
 ]);
-const LINKEDIN_DEVICE_COOKIES = new Set(["bcookie", "bscookie", "li_rm"]);
 const TELEGRAM_AUTH_INDEXEDDB_RULES = [
   { databaseName: "tt-passcode", stores: ["store"], presence: [{ stores: ["store"], allKeys: ["sessionEncrypted", "globalEncrypted"] }] },
   { databaseName: "tweb-common", stores: ["session", "localStorage__encrypted"], presence: [{ stores: ["localStorage__encrypted"], allKeys: ["data"] }] },
@@ -819,8 +818,7 @@ async function restoreSession(browser, context, payload) {
     });
   }
   await sessionStep("cookie_clear", () => context.clearCookies());
-  const inject = cookies.filter((cookie) => !LINKEDIN_DEVICE_COOKIES.has(cookie.name));
-  if (inject.length) await sessionStep("cookie_add", () => context.addCookies(inject));
+  if (cookies.length) await sessionStep("cookie_add", () => context.addCookies(cookies));
   await sessionStep("navigation", () => navigatePages(context, payload.urls, !!payload.replacePages));
   return null;
 }
@@ -1058,14 +1056,14 @@ async function operate(chromium, operation, payload) {
       return null;
     }
     if (operation === "ensure-cookies") {
-      const existing = await context.cookies(payload.url);
-      const current = (cookie) => cookie.expires === undefined || Number(cookie.expires) < 0 || Number(cookie.expires) > Date.now() / 1000;
-      const usable = payload.target === "X"
-        ? existing.some((cookie) => cookie.name === "auth_token" && cookie.value && current(cookie))
-        : existing.some((cookie) => cookie.name && cookie.value && String(cookie.domain || "").replace(/^\./, "").toLowerCase().endsWith("telegram.org") && current(cookie));
-      if (usable) return { injected: false };
-      await context.addCookies(payload.cookies);
-      return { injected: true };
+      const key = (cookie) => JSON.stringify([
+        cookie.name, cookie.domain.toLowerCase(), cookie.path || "/",
+        cookie.partitionKey || "", cookie.partitionKey ? cookie._crHasCrossSiteAncestor ?? true : null,
+      ]);
+      const present = new Set((await context.cookies()).map(key));
+      const missing = payload.cookies.filter((cookie) => !present.has(key(cookie)));
+      if (missing.length) await context.addCookies(missing);
+      return { injected: missing.length > 0 };
     }
     if (operation === "diagnostics") {
       const page = await context.newPage();
