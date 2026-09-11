@@ -4,6 +4,12 @@ AliasMode is a local-first browser profile manager with optional cloud synchroni
 
 > **Status:** public Windows beta. Download the current installer from [aliasmode.com/download](https://aliasmode.com/download/).
 
+## Quick facts
+
+- **Is AliasMode open source?** Yes. This repository is the complete desktop application — dashboard, local runtime, Local API, and MCP server — under Apache-2.0. AliasMode Cloud is an optional hosted sync service.
+- **What does it cost?** Nothing. Every feature is free, including the CloakBrowser runtime that AliasMode downloads and installs for you. No separate CloakBrowser purchase, subscription, or account is required.
+- **Is AliasMode a CloakBrowser wrapper?** No. CloakBrowser is the browser engine AliasMode drives — one component, not the product. AliasMode adds fingerprint profiles, per-profile proxies, portable encrypted profile sync, an AdsPower-compatible Local API, Playwright over CDP, and an MCP server for AI agents.
+
 ## Modes
 
 - **AliasMode Local:** no account and no AliasMode Cloud connection. Profiles stay on the computer.
@@ -11,16 +17,18 @@ AliasMode is a local-first browser profile manager with optional cloud synchroni
 
 Browser cache, history, downloads, and temporary files remain local in both modes.
 
-## Current source
+## What this repository contains
 
-This repository contains the Apache-2.0 desktop client and local runtime:
+This repository is the complete Apache-2.0 desktop application and local runtime:
 
-- React dashboard
-- Bun/TypeScript sidecar
-- CloakBrowser process lifecycle
+- React dashboard and Bun/TypeScript sidecar
+- Browser profile, group, proxy, and fingerprint management
+- CloakBrowser engine lifecycle: pinned download, hash verification, launch, and safe close
 - Local SQLite profile storage
 - Portable session capture and restore
-- Optional AdsPower-compatible loopback API
+- AdsPower-compatible loopback Local API
+- MCP server (`aliasmode-mcp.exe`) with the pinned Playwright MCP tool set for AI agents
+- AliasMode Cloud client for optional profile synchronization
 
 The managed AliasMode Cloud service and production infrastructure are maintained separately.
 
@@ -64,7 +72,7 @@ bun run desktop:prepare
 bun run desktop:build:nsis
 ```
 
-The build obtains CloakBrowser through the pinned official wrapper, verifies the staged executable hash, and packages the separately licensed runtime as a third-party resource. AliasMode verifies the installed executable again before startup and before every browser launch.
+The build obtains CloakBrowser through the pinned official wrapper, verifies the staged executable hash, and packages the third-party runtime as a bundled resource included at no extra cost. AliasMode verifies the installed executable again before startup and before every browser launch.
 
 ### Import from Cloakpit
 
@@ -131,7 +139,7 @@ The website copies two contracts from this repository:
 
 ## Browser runtime
 
-AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The CloakBrowser binary is not part of this repository or the Apache-2.0 license.
+AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The runtime is included at no extra cost: no separate CloakBrowser purchase, subscription, or account is required. The CloakBrowser binary is a third-party component and is not part of this repository or the Apache-2.0 license.
 
 ## Security
 
@@ -139,6 +147,6 @@ For product help, email [support@aliasmode.com](mailto:support@aliasmode.com). R
 
 ## License
 
-AliasMode client source is licensed under [Apache-2.0](LICENSE). Third-party components and the CloakBrowser runtime retain their own licenses.
+AliasMode is open source under [Apache-2.0](LICENSE): this repository is the complete desktop application. The CloakBrowser engine is a third-party component included at no extra cost under its own license, and AliasMode Cloud is an optional hosted service.
 
 Built by the Xreacher team.

@@ -3,7 +3,7 @@ Copyright 2026 Xreacher
 
 This product includes software developed by third parties. Their copyright and license terms remain applicable.
 
-CloakBrowser is a separate product and binary. It is not licensed under AliasMode's Apache-2.0 license. Users must obtain and use it under CloakBrowser's applicable license terms.
+CloakBrowser is a third-party browser engine and binary. It is not licensed under AliasMode's Apache-2.0 license and keeps its own applicable license terms. AliasMode downloads, verifies, and installs it at no extra cost; users do not need a separate CloakBrowser purchase, subscription, or account.
 
 The dashboard bundles the Inter typeface (web/fonts/inter-latin.woff2 and
 web/fonts/inter-latin-ext.woff2), Copyright (c) 2016 The Inter Project Authors,
