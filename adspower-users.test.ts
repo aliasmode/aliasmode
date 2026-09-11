@@ -69,6 +69,14 @@ test("group/create requires a name", async () => {
   expect(body.code).toBe(-1);
 });
 
+test("user/list filters by user_id so a single-profile lookup reads its own row", async () => {
+  const { store, launcher } = setup();
+  const one = await (await handleUserApi(get("/api/v1/user/list?user_id=k1d0cd11"), launcher, store))!.json();
+  expect(one.data.list.map((r: any) => r.user_id)).toEqual(["k1d0cd11"]);
+  const none = await (await handleUserApi(get("/api/v1/user/list?user_id=nope"), launcher, store))!.json();
+  expect(none.data.list).toEqual([]);
+});
+
 test("user/list returns AdsPower-shaped rows with timestamps + serial", async () => {
   const { store, launcher } = setup();
   const body = await (await handleUserApi(get("/api/v1/user/list?page=1&page_size=100"), launcher, store))!.json();

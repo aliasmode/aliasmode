@@ -130,7 +130,8 @@ function cloudAutomationError(req: Request, opts: DashboardServerOptions): Respo
   const pathname = new URL(req.url).pathname;
   if (
     opts.cloudBrowser &&
-    (pathname === "/api/v1/status" || pathname === "/status" || isAdsPowerBrowserControl(pathname))
+    (pathname === "/api/v1/status" || pathname === "/status" || isAdsPowerBrowserControl(pathname) ||
+      isCloudRosterRoute(req))
   ) {
     return null;
   }
@@ -155,12 +156,28 @@ function automationHealthResponse(
   return handleAutomationHealthSnapshot(req, remote);
 }
 
+/** Read-only AdsPower list routes that Cloud mode can answer from the Cloud roster. */
+function isCloudRosterRoute(req: Request): boolean {
+  const pathname = new URL(req.url).pathname;
+  return req.method === "GET" && (pathname === "/api/v1/group/list" || pathname === "/api/v1/user/list");
+}
+
 async function handleAutomationRequest(
   req: Request,
   opts: DashboardServerOptions,
   lifecycle: BrowserLifecycleContext,
 ): Promise<Response> {
   const { launcher, store } = opts;
+  if (!opts.remote && opts.cloudBrowser && isCloudRosterRoute(req)) {
+    const cloudBrowser = opts.cloudBrowser;
+    try {
+      const roster = { listProfiles: async () => (await cloudBrowser.listRoster()).profiles };
+      const users = await handleUserApi(req, launcher, store, null, undefined, roster);
+      if (users) return users;
+    } catch (error) {
+      return Response.json({ code: -1, msg: error instanceof Error ? error.message : String(error), data: {} });
+    }
+  }
   const users = await handleUserApi(req, launcher, store, opts.remote);
   if (users) return users;
   const pathname = new URL(req.url).pathname;
