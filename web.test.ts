@@ -187,6 +187,13 @@ test("Cloud automation API routes browser control through the Cloud lifecycle", 
         calls.push(`close:${id}`);
         return { closed: true, sync: "complete" };
       },
+      listRoster: async () => ({
+        profiles: [
+          { id: "k1", name: "first", group: "Folder A" },
+          { id: "k2", name: "second", group: "Folder B" },
+        ],
+        healthSources: [],
+      }),
     } as any,
     log: () => {},
   });
@@ -195,6 +202,19 @@ test("Cloud automation API routes browser control through the Cloud lifecycle", 
     const origin = `http://127.0.0.1:${server.port}`;
     const status = await fetch(`${origin}/api/v1/status`).then((response) => response.json());
     expect(status.code).toBe(0);
+
+    // Folder import: resolve the group, then page its profiles from the Cloud roster.
+    const groups = await fetch(`${origin}/api/v1/group/list?group_name=Folder%20A&page_size=2000`)
+      .then((response) => response.json());
+    expect(groups.data.list).toEqual([
+      { group_id: "Folder A", group_name: "Folder A" },
+      { group_id: "Folder B", group_name: "Folder B" },
+    ]);
+    const members = await fetch(`${origin}/api/v1/user/list?group_id=Folder%20B&page_size=100&page=1`)
+      .then((response) => response.json());
+    expect(members.data.list.map((row: any) => [row.user_id, row.name])).toEqual([["k2", "second"]]);
+    const byId = await fetch(`${origin}/api/v1/user/list?user_id=k1`).then((response) => response.json());
+    expect(byId.data.list.map((row: any) => row.name)).toEqual(["first"]);
 
     const start = await fetch(`${origin}/api/v1/browser/start?user_id=k1&launch_args=%5B%22--flag%22%5D`)
       .then((response) => response.json());
@@ -210,6 +230,31 @@ test("Cloud automation API routes browser control through the Cloud lifecycle", 
 
     const blocked = await fetch(`${origin}/api/v1/user/create`, { method: "POST" });
     expect(blocked.status).toBe(503);
+    const destructive = await fetch(`${origin}/api/v1/user/delete`, { method: "POST" });
+    expect(destructive.status).toBe(503);
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});
+
+test("Cloud automation API reports a roster failure in the AdsPower envelope", async () => {
+  const store = new ProfileStore(":memory:");
+  const server = serveAutomationApi({
+    port: 0,
+    launcher: {} as any,
+    store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudBrowser: {
+      listRoster: async () => { throw new Error("Cloud authentication is required"); },
+    } as any,
+    log: () => {},
+  });
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/group/list?page_size=2000`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ code: -1, msg: "Cloud authentication is required", data: {} });
   } finally {
     await server.stop(true);
     store.close();

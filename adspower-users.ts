@@ -43,6 +43,11 @@ function fail(msg: string) {
  * profiles with an empty label. Map both "0" and "" to "" on the way in/out so
  * create→list round-trips and group filtering stay symmetric.
  */
+/** Read-only profile roster behind the list routes when the local store is not authoritative. */
+export interface ProfileRoster {
+  listProfiles(): Promise<Array<{ id: string; name: string; group: string }>>;
+}
+
 function normalizeGroup(g: unknown): string {
   const s = String(g ?? "").trim();
   return s === "0" ? "" : s;
@@ -113,6 +118,7 @@ export async function handleUserApi(
   store: ProfileStore,
   remote?: RemoteCoordinator | null,
   geoipFetch?: GeoipFetch,
+  roster: ProfileRoster | null = remote ?? null,
 ): Promise<Response | null> {
   const { pathname, searchParams } = new URL(req.url);
 
@@ -121,10 +127,10 @@ export async function handleUserApi(
     const page = intParam(searchParams.get("page"), 1);
     const pageSize = intParam(searchParams.get("page_size"), 100);
     // Standalone: registry ∪ profile labels (empty folders included, so the client's
-    // find_group_id resolves a group before its first profile). Remote: distinct
-    // group labels off the hub roster.
-    const names = remote
-      ? [...new Set((await remote.listProfiles()).map((p) => normalizeGroup(p.group)).filter((g) => g))].sort()
+    // find_group_id resolves a group before its first profile). Remote/Cloud: distinct
+    // group labels off the roster.
+    const names = roster
+      ? [...new Set((await roster.listProfiles()).map((p) => normalizeGroup(p.group)).filter((g) => g))].sort()
       : store.listGroups();
     const list = names.slice((page - 1) * pageSize, page * pageSize).map((g) => ({ group_id: g, group_name: g }));
     return ok({ list, page, page_size: pageSize });
@@ -151,11 +157,11 @@ export async function handleUserApi(
   if (pathname === "/api/v1/user/list" && req.method === "GET") {
     const page = intParam(searchParams.get("page"), 1);
     const pageSize = intParam(searchParams.get("page_size"), 100);
-    // Remote: map the hub roster (no timestamps → 0). Standalone: the local store.
-    let rows = remote
-      // The hub roster carries no local measurement, so remote rows report no
+    // Remote/Cloud: map the roster (no timestamps → 0). Standalone: the local store.
+    let rows = roster
+      // A roster carries no local measurement, so its rows report no
       // verdict rather than a misleading empty-means-verified one.
-      ? (await remote.listProfiles()).map((p, i) => ({ id: p.id, name: p.name, group: p.group, createdAt: 0, lastOpenAt: 0, serial: i + 1, fpVerdict: "", fpCapturedAt: "" }))
+      ? (await roster.listProfiles()).map((p, i) => ({ id: p.id, name: p.name, group: p.group, createdAt: 0, lastOpenAt: 0, serial: i + 1, fpVerdict: "", fpCapturedAt: "" }))
       : store.listUserRecords();
 
     const groupId = searchParams.get("group_id");
@@ -163,6 +169,9 @@ export async function handleUserApi(
       const want = normalizeGroup(groupId);
       rows = rows.filter((r) => normalizeGroup(r.group) === want);
     }
+    // AdsPower's user_id filter: clients look a single profile up by id and read list[0].
+    const userId = searchParams.get("user_id");
+    if (userId) rows = rows.filter((r) => r.id === userId);
 
     // Honor AdsPower's user_sort={"created_time"|"last_open_time":"asc"|"desc"}.
     // (No-op on the remote roster, which carries no timestamps.)
