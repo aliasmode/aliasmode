@@ -27,6 +27,8 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import type { CookieRecord, LaunchInfo, Profile } from "./types.ts";
 import type { ProfileStore } from "./store.ts";
+import type { AutofillBridge } from "./autofill-bridge.ts";
+import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-extension.ts";
 import { allocatePort } from "./ports.ts";
 import { deriveFingerprintFlags, isMobileUserAgent, platformFromUA, proxyServerFlag } from "./fingerprint.ts";
 export { isMobileUserAgent } from "./fingerprint.ts";
@@ -234,6 +236,7 @@ export function platformHomeUrl(platform: string | undefined, telegramClient: "a
 
 export interface LauncherOptions {
   store: ProfileStore;
+  autofill?: AutofillBridge;
   /** Path to the CloakBrowser binary. Defaults to $CLOAKBROWSER_BINARY_PATH. */
   binaryPath?: string;
   /**
@@ -542,6 +545,7 @@ const RESETTABLE_SESSION_STORES = [
 
 export class Launcher {
   private store: ProfileStore;
+  private autofill?: AutofillBridge;
   private binaryPath: string;
   private expectedBinarySha256: string;
   private unsafeDisableIdentityGates: boolean;
@@ -626,6 +630,7 @@ export class Launcher {
 
   constructor(opts: LauncherOptions) {
     this.store = opts.store;
+    this.autofill = opts.autofill;
     this.binaryPath = opts.binaryPath ?? defaultBinaryPath();
     this.unsafeDisableIdentityGates = opts.unsafeDisableIdentityGates ?? false;
     this.expectedBinarySha256 = (
@@ -808,6 +813,7 @@ export class Launcher {
       screen: [profile.screenWidth, profile.screenHeight],
       fingerprintSeed: profile.fingerprintSeed,
       extensions,
+      ...(this.autofill ? { autofill: AUTOFILL_EXTENSION_REVISION } : {}),
     });
     return createHash("sha256").update(serialized).digest("hex");
   }
@@ -912,7 +918,7 @@ export class Launcher {
     }
     // Load any assigned (unpacked) extensions. Resolve ids → install dirs and
     // skip any that are not installed on this device. --disable-extensions-except
-    // keeps the set to exactly what's assigned. (Proxy auth no longer needs an extension — the relay does it.)
+    // keeps the set to the built-in helper and assigned extensions. (Proxy auth uses the relay.)
     const extDirs: string[] = [];
     const missingExtensionIds: string[] = [];
     for (const id of profile.extensions ?? []) {
@@ -927,9 +933,11 @@ export class Launcher {
         `${plural ? "are" : "is"} not installed on this device; skipped`,
       );
     }
+    const hasAssignedExtensions = extDirs.length > 0;
+    if (this.autofill) extDirs.unshift(autofillExtensionDir(userDataDir));
     if (extDirs.length) {
       args.push(`--load-extension=${extDirs.join(",")}`);
-      args.push(`--disable-extensions-except=${extDirs.join(",")}`);
+      if (hasAssignedExtensions) args.push(`--disable-extensions-except=${extDirs.join(",")}`);
     }
     // OWNERSHIP MARKERS ARE LOAD-BEARING: AliasMode contributes its distinct
     // --aliasmode-launcher-pid through baseArgs, while an automation client may
@@ -1464,6 +1472,7 @@ export class Launcher {
         searchBootstrapRevision,
       };
       this.store.recordLaunch(provisionalLaunch);
+      this.autofill?.install(provisionalLaunch);
       spawnAttempted = true;
       try {
         proc = this.spawnFn(spawnVerifiedBinary.path, args);
@@ -2099,6 +2108,7 @@ export class Launcher {
     // Delete durable ownership first. If SQLite refuses the write, leave every
     // in-memory resource intact so a later retry still knows what it owns.
     this.store.clearLaunch(profileId);
+    this.autofill?.retire(profileId, launch);
     this.liveReserved.delete(launch.debugPort);
     this.closeRelay(profileId);
     this.procs.delete(profileId);

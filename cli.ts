@@ -21,6 +21,7 @@
 import { parseExport, decodeText, splitRecords } from "./parse.ts";
 import { ProfileStore } from "./store.ts";
 import { Launcher, readSnapshotChildBounded } from "./launcher.ts";
+import { AutofillBridge } from "./autofill-bridge.ts";
 import {
   defaultPlaywrightRuntimeRoot,
   runPlaywrightWorker,
@@ -372,8 +373,11 @@ function makeLauncher(
   ensureSearchProvider = ensureDuckDuckGoDefault,
 ): Launcher {
   const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
+  const autofill = new AutofillBridge(store);
+  autofill.listen();
   return new Launcher({
     store,
+    autofill,
     dataRoot: defaultDataRoot,
     headless: has(rest, "headless"),
     // Explicit canary-only escape hatch for constrained test hosts where a

@@ -4,6 +4,8 @@ import { join, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { ProfileStore } from "./store.ts";
+import { AutofillBridge } from "./autofill-bridge.ts";
+import { autofillExtensionDir } from "./autofill-extension.ts";
 import {
   BrowserLaunchError,
   Launcher as ProductionLauncher,
@@ -193,6 +195,163 @@ function legacyProxyPersonaDigest(store: ProfileStore, profileId: string, binary
     extensions,
   })).digest("hex");
 }
+
+test("autofill alone does not disable extensions installed directly in the browser", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const autofill = new AutofillBridge(store);
+  autofill.listen();
+  const args: string[][] = [];
+  const launcher = newLauncher(store, fleet(), args, undefined, undefined, { autofill });
+  try {
+    await launcher.start("k1d0cd11");
+    expect(args[0]!.some((arg) => arg.startsWith("--load-extension="))).toBe(true);
+    expect(args[0]!.some((arg) => arg.startsWith("--disable-extensions-except="))).toBe(false);
+  } finally {
+    await launcher.stop("k1d0cd11");
+    autofill.close();
+    store.close();
+    rmSync(testDataRoot(store), { recursive: true, force: true });
+  }
+});
+
+for (const headless of [false, true]) {
+  test(`autofill is bundled with assigned extensions and retired on stop (headless=${headless})`, async () => {
+    const store = seeded();
+    makeDirect(store);
+    const profile = store.getProfile("k1d0cd11")!;
+    store.addExtension({ id: "assigned", name: "Fixture", loadDir: "/data/extensions/assigned" });
+    store.upsertProfile({ ...profile, platform: "x.com", username: "test-user", extensions: ["assigned"] });
+    const autofill = new AutofillBridge(store);
+    autofill.listen();
+    const args: string[][] = [];
+    const launcher = newLauncher(store, fleet(), args, undefined, undefined, { autofill });
+    const directory = autofillExtensionDir(launcher.userDataDir(profile.id));
+    try {
+      await launcher.start(profile.id, [], { headless });
+      expect(args[0]).toContain(`--load-extension=${directory},/data/extensions/assigned`);
+      expect(args[0]).toContain(`--disable-extensions-except=${directory},/data/extensions/assigned`);
+      const binding = JSON.parse(readFileSync(join(directory, "bind.json"), "utf8"));
+      expect(binding.port).toBe(autofill.port);
+      const request = () => new Request(`http://127.0.0.1:${binding.port}/v1/fields`, {
+        method: "POST", headers: { authorization: `Bearer ${binding.token}` }, body: JSON.stringify({ url: "https://x.com" }),
+      });
+      expect((await autofill.handle(request())).status).toBe(200);
+      expect(JSON.stringify(store.getLaunch(profile.id)).includes(binding.token)).toBe(false);
+      await launcher.start(profile.id, [], { headless });
+      expect(args).toHaveLength(1);
+      expect((await autofill.handle(request())).status).toBe(200);
+      expect(await launcher.stop(profile.id)).toBe(true);
+      expect((await autofill.handle(request())).status).toBe(401);
+      expect(existsSync(join(directory, "bind.json"))).toBe(false);
+    } finally {
+      await launcher.stop(profile.id);
+      autofill.close();
+      store.close();
+      rmSync(testDataRoot(store), { recursive: true, force: true });
+    }
+  });
+}
+
+test("autofill refreshes a surviving browser binding without spawning or changing its persona", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const firstBridge = new AutofillBridge(store);
+  firstBridge.listen();
+  const first = newLauncher(store, f, [], undefined, undefined, { autofill: firstBridge });
+  const nextBridge = new AutofillBridge(store);
+  const args: string[][] = [];
+  const next = newLauncher(store, f, args, undefined, undefined, { autofill: nextBridge });
+  const id = "k1d0cd11";
+  try {
+    await first.start(id);
+    const launch = store.getLaunch(id)!;
+    const file = join(autofillExtensionDir(first.userDataDir(id)), "bind.json");
+    const previous = JSON.parse(readFileSync(file, "utf8"));
+    firstBridge.close();
+    nextBridge.listen();
+    const current = JSON.parse(readFileSync(file, "utf8"));
+    expect(current.token !== previous.token).toBe(true);
+    expect(current.port).toBe(nextBridge.port);
+    await next.reconcileOrphans();
+    await next.start(id);
+    expect(args).toHaveLength(0);
+    expect(store.getLaunch(id)!.personaDigest).toBe(launch.personaDigest);
+    expect(await next.stop(id)).toBe(true);
+    expect(existsSync(file)).toBe(false);
+  } finally {
+    await next.stop(id);
+    firstBridge.close();
+    nextBridge.close();
+    store.close();
+    rmSync(testDataRoot(store), { recursive: true, force: true });
+  }
+});
+
+test("autofill setup failure rolls back the reservation without spawning a browser", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const autofill = new AutofillBridge(store);
+  autofill.listen();
+  const args: string[][] = [];
+  const launcher = newLauncher(store, fleet(), args, undefined, undefined, { autofill });
+  const directory = autofillExtensionDir(launcher.userDataDir("k1d0cd11"));
+  mkdirSync(join(directory, "background.js"), { recursive: true });
+  try {
+    await expect(launcher.start("k1d0cd11")).rejects.toBeInstanceOf(BrowserLaunchError);
+    expect(args).toHaveLength(0);
+    expect(store.getLaunch("k1d0cd11")).toBeNull();
+    expect(existsSync(join(directory, "bind.json"))).toBe(false);
+  } finally {
+    autofill.close();
+    store.close();
+    rmSync(testDataRoot(store), { recursive: true, force: true });
+  }
+});
+
+test("autofill is retired after a post-spawn session restore failure", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const id = "k1d0cd11";
+  store.upsertProfiles([store.getProfile(id)!], new Map([[id, JSON.stringify({ cookies: [], origins: [] })]]));
+  const autofill = new AutofillBridge(store);
+  autofill.listen();
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    autofill, applySession: async () => { throw new SessionRestoreError("origin_storage", "failed"); },
+  });
+  try {
+    await expect(launcher.start(id)).rejects.toBeInstanceOf(SessionRestoreError);
+    expect(store.getLaunch(id)).toBeNull();
+    expect(existsSync(join(autofillExtensionDir(launcher.userDataDir(id)), "bind.json"))).toBe(false);
+  } finally {
+    autofill.close();
+    store.close();
+    rmSync(testDataRoot(store), { recursive: true, force: true });
+  }
+});
+
+test("autofill revision uses existing survivor retirement instead of bypassing persona checks", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const prior = newLauncher(store, f, []);
+  const autofill = new AutofillBridge(store);
+  const next = newLauncher(store, f, [], undefined, undefined, { autofill });
+  try {
+    await prior.start("k1d0cd11");
+    autofill.listen();
+    await expect(next.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+    expect(store.getLaunch("k1d0cd11")).toBeNull();
+    await next.start("k1d0cd11");
+    expect(existsSync(join(autofillExtensionDir(next.userDataDir("k1d0cd11")), "manifest.json"))).toBe(true);
+  } finally {
+    await next.stop("k1d0cd11");
+    autofill.close();
+    store.close();
+    rmSync(testDataRoot(store), { recursive: true, force: true });
+  }
+});
 
 test("Local imports restore storage once before navigation, not on subsequent launches or captures", async () => {
   const store = seeded();
