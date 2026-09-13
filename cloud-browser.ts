@@ -19,6 +19,7 @@ import {
   type PendingSyncQueue,
   retryPendingSync,
 } from "./pending-sync.ts";
+import { PlaywrightWorkerError } from "./playwright-runtime.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { proxyHostPort } from "./proxy.ts";
 import {
@@ -255,6 +256,7 @@ export function observeBrowserTargets(
 function errorCode(error: unknown): string {
   if (error instanceof CloudApiError) return error.code;
   if (error instanceof SessionRestoreError) return error.outcome;
+  if (error instanceof PlaywrightWorkerError) return error.code;
   if (error instanceof BrowserLaunchError) return "failed";
   return "transport_error";
 }
@@ -274,6 +276,7 @@ export type CloudOpenStage =
 function safeErrorType(error: unknown): string {
   if (error instanceof CloudApiError) return "CloudApiError";
   if (error instanceof SessionRestoreError) return "SessionRestoreError";
+  if (error instanceof PlaywrightWorkerError) return "PlaywrightWorkerError";
   if (error instanceof BrowserLaunchError) return "BrowserLaunchError";
   if (error instanceof TypeError) return "TypeError";
   return error instanceof Error ? "Error" : "unknown";
@@ -1200,6 +1203,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         bundle = await this.options.readSession(endpoint, captureSeed);
       } catch (error) {
         this.diagnosticEvents.record("checkpoint_capture_failed");
+        this.log(`${open.profileId}: Cloud session capture failed (${errorCode(error)}, ${safeErrorType(error)})`);
         throw error;
       }
       try {
@@ -1590,6 +1594,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         return;
       }
       const secured = await this.captureAndStopOpen(open, context.queue, true);
+      if (!secured) this.startHeartbeat(profileId);
       this.log(secured
         ? `${profileId}: Cloud access ended (${lease.errorCode}); browser stopped`
         : `${profileId}: Cloud access ended (${lease.errorCode}); capture failed and browser was retained`);

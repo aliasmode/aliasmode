@@ -7,6 +7,7 @@ import { CloudBrowserCoordinator, observeBrowserTargets } from "./cloud-browser.
 import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v1.ts";
 import { BrowserLaunchError } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
+import { PlaywrightWorkerError } from "./playwright-runtime.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { sessionBundleSignature, SessionRestoreError } from "./session.ts";
 import { ProfileStore } from "./store.ts";
@@ -801,6 +802,62 @@ test("Cloud heartbeat releases a retained restoring registration after manual br
   expect(state.coordinator.diagnostics().map((event) => event.type)).toContain("manual_stop_detected");
   state.queue.close();
   state.store.close();
+});
+
+test("terminal running heartbeat retries a failed capture without an external close", async () => {
+  const state = setup({
+    heartbeatMs: 60_000,
+    closeConflict: true,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+  });
+  const options = (state.coordinator as any).options;
+  const readSession = options.readSession;
+  try {
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    options.cloud.heartbeat = async () => { throw new CloudApiError("stale", "version_conflict", 409); };
+    options.readSession = async () => { throw new Error("capture failed"); };
+    await state.coordinator.heartbeatOnce("profile1");
+    expect(state.store.getLaunch("profile1")).not.toBeNull();
+    expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+    expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBeUndefined();
+    expect(state.closeCalls()).toBe(0);
+    expect(state.abandonCalls()).toBe(0);
+    expect((state.coordinator as any).timers.has("profile1")).toBe(true);
+
+    options.readSession = readSession;
+    await state.coordinator.heartbeatOnce("profile1");
+    expect(state.store.getLaunch("profile1")).toBeNull();
+    expect((state.coordinator as any).timers.has("profile1")).toBe(false);
+    expect(state.queue.list("account1")).toMatchObject([{ readyToSubmit: true, status: "conflict" }]);
+  } finally {
+    options.readSession = readSession;
+    await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
+test("Cloud capture diagnostics expose the worker failure class but not its payload", async () => {
+  const state = setup({ heartbeatMs: 60_000, setIntervalFn: () => ({}), clearIntervalFn: () => {} });
+  const options = (state.coordinator as any).options;
+  const readSession = options.readSession;
+  try {
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    options.readSession = async () => { throw new PlaywrightWorkerError("timeout", "private worker detail"); };
+    await expect(state.coordinator.close("profile1")).rejects.toThrow("Cloud session capture failed (timeout); browser left open");
+    expect(state.logs).toContain("profile1: Cloud session capture failed (timeout, PlaywrightWorkerError)");
+    expect(JSON.stringify(state.logs)).not.toContain("private worker detail");
+    expect(state.store.getLaunch("profile1")).not.toBeNull();
+    expect((state.coordinator as any).timers.has("profile1")).toBe(true);
+    expect(state.closeCalls()).toBe(0);
+    expect(state.abandonCalls()).toBe(0);
+  } finally {
+    options.readSession = readSession;
+    await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
 });
 
 test("terminal restoring heartbeat retries an uncertain stop", async () => {
