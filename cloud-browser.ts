@@ -297,6 +297,7 @@ function normalizeBrowserLaunchError(error: unknown): BrowserLaunchError {
 export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private readonly transitions = new Map<string, Promise<void>>();
   private readonly opening = new Map<string, Promise<CloudBrowserOpenResult>>();
+  private readonly startupLeases = new Map<string, { registrationId: string; error?: CloudApiError }>();
   private readonly closing = new Map<string, Promise<CloudBrowserCloseResult>>();
   private readonly timers = new Map<string, unknown>();
   private readonly heartbeatInFlight = new Map<string, CloudLeaseInFlight>();
@@ -626,6 +627,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         return { ok: false, error: CLOUD_PROFILE_OPEN_ERROR };
       }
 
+      // Lease renewal must not wait for browser launch or session restoration.
+      const startupLease: { registrationId: string; error?: CloudApiError } = { registrationId };
+      this.startupLeases.set(profileId, startupLease);
+      this.startHeartbeat(profileId);
+
       stage = "payload_restore";
       logStage("payload_restore");
       const { profile, sessionBundle } = decodePortableProfile(opened.payload);
@@ -663,6 +669,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         if (!cleanupGeneration) throw launchError;
         const stopped = await this.options.launcher.stop(profileId, cleanupGeneration).catch(() => false);
         if (!stopped) throw launchError;
+        if (startupLease.error) throw startupLease.error;
         this.log(`${profileId}: stopped retained browser launch ownership; retrying once`);
         try {
           launched = await startBrowser();
@@ -679,6 +686,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         debugPort: launch.debugPort,
         startedAt: launch.startedAt,
       };
+      if (startupLease.error) throw startupLease.error;
 
       stage = "lifecycle_restoring";
       logStage("lifecycle_restoring");
@@ -732,7 +740,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           throw error;
         }
       }
+      const renewal = this.heartbeatInFlight.get(profileId);
+      if (renewal?.registrationId === registrationId) await renewal.promise;
       await this.options.launcher.verifyRunningIdentity(profileId);
+      if (startupLease.error) throw startupLease.error;
       const restoredLaunch = this.options.store.getLaunch(profileId);
       if (
         !restoredLaunch ||
@@ -877,6 +888,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         ok: false,
         error: `Cloud profile open failed at ${failureStage} (${code})`,
       };
+    } finally {
+      if (this.startupLeases.get(profileId)?.registrationId === registrationId) {
+        this.startupLeases.delete(profileId);
+      }
     }
   }
 
@@ -1349,7 +1364,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       return null;
     }
     const open = context.queue.getOpen(profileId, context.accountId);
-    if (!open || (open.phase !== "running" && open.phase !== "restoring")) return null;
+    if (!open) return null;
     const existing = this.heartbeatInFlight.get(profileId);
     if (existing?.registrationId === open.registrationId) return existing.promise;
 
@@ -1368,6 +1383,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           error instanceof CloudApiError &&
           (error.code === "folder_access_denied" || TERMINAL_HEARTBEAT_ERRORS.has(error.code))
         ) {
+          // The open transition owns cleanup until startup settles. Remember
+          // terminal access loss now so it cannot promote this launch to running.
+          const startupLease = this.startupLeases.get(profileId);
+          if (startupLease?.registrationId === open.registrationId) startupLease.error = error;
           this.diagnosticEvents.record(
             error.code === "version_conflict"
               ? "heartbeat_terminal_conflict"

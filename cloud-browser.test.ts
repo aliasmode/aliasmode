@@ -410,6 +410,135 @@ test("Cloud browser passes the authenticated proxy to Launcher without exposing 
 });
 
 
+for (const stalledStage of ["opening", "restoring"] as const) {
+  test(`Cloud renews its lease during slow ${stalledStage}`, async () => {
+    const timers = new Set<() => void>();
+    const state = setup({
+      heartbeatMs: 60_000,
+      setIntervalFn(fn) { timers.add(fn); return fn; },
+      clearIntervalFn(handle) { timers.delete(handle as () => void); },
+    });
+    const options = (state.coordinator as any).options;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    let now = 0;
+    let lastHeartbeat = 0;
+    let renewals = 0;
+    options.cloud.heartbeat = async () => {
+      if (now - lastHeartbeat >= 120_000) throw new CloudApiError("expired", "version_conflict", 409);
+      lastHeartbeat = now;
+      renewals++;
+      return { ok: true, revoked: false, activeOpens: [] };
+    };
+    const owner = stalledStage === "opening" ? options.launcher : options;
+    const method = stalledStage === "opening" ? "start" : "applySession";
+    const original = owner[method];
+    owner[method] = async (...args: unknown[]) => {
+      entered();
+      await gate;
+      return original(...args);
+    };
+    const opening = state.coordinator.open("profile1", ["--window-size=1200,800"]);
+    try {
+      await ready;
+      expect(state.queue.getOpen("profile1", "account1")?.phase).toBe(stalledStage);
+      for (now = 60_000; now <= 180_000; now += 60_000) {
+        for (const tick of timers) tick();
+        await Bun.sleep(0);
+      }
+      expect(renewals).toBe(3);
+      expect(state.events).not.toContain("capture");
+      expect(state.events).not.toContain("stop");
+      release();
+      expect((await opening).ok).toBe(true);
+      expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+    } finally {
+      release();
+      await opening;
+      await state.coordinator.releaseAll(true);
+      state.queue.close();
+      state.store.close();
+    }
+  });
+
+  test(`Cloud does not report a successful open after access ends during ${stalledStage}`, async () => {
+    const state = setup({ heartbeatMs: 60_000, setIntervalFn: () => ({}), clearIntervalFn: () => {} });
+    const options = (state.coordinator as any).options;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const owner = stalledStage === "opening" ? options.launcher : options;
+    const method = stalledStage === "opening" ? "start" : "applySession";
+    const original = owner[method];
+    owner[method] = async (...args: unknown[]) => {
+      entered();
+      await gate;
+      return original(...args);
+    };
+    options.cloud.heartbeat = async () => { throw new CloudApiError("expired", "version_conflict", 409); };
+    const opening = state.coordinator.open("profile1", ["--window-size=1200,800"]);
+    let heartbeat: Promise<void> | undefined;
+    try {
+      await ready;
+      heartbeat = state.coordinator.heartbeatOnce("profile1");
+      await Bun.sleep(0);
+      expect(state.events).not.toContain("stop");
+      release();
+      expect((await opening).ok).toBe(false);
+      await heartbeat;
+      expect(state.coordinator.diagnostics().some((event) => event.type === "open_running")).toBe(false);
+      expect(state.store.getLaunch("profile1")).toBeNull();
+      expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+      expect(state.closeCalls()).toBe(0);
+      expect(state.abandonCalls()).toBe(1);
+      expect((state.coordinator as any).timers.size).toBe(0);
+    } finally {
+      release();
+      await opening;
+      await heartbeat;
+      await state.coordinator.releaseAll(true);
+      state.queue.close();
+      state.store.close();
+    }
+  });
+}
+
+test("Cloud waits for an in-flight startup renewal before reporting success", async () => {
+  const state = setup({ heartbeatMs: 60_000, setIntervalFn: () => ({}), clearIntervalFn: () => {} });
+  const options = (state.coordinator as any).options;
+  let rejectRenewal!: (error: Error) => void;
+  let heartbeat: Promise<void> | undefined;
+  options.cloud.heartbeat = () => new Promise((_resolve, reject) => { rejectRenewal = reject; });
+  options.applySession = async () => {
+    heartbeat = state.coordinator.heartbeatOnce("profile1");
+    await Bun.sleep(0);
+  };
+  const opening = state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  let settled = false;
+  void opening.then(() => { settled = true; });
+  try {
+    for (let i = 0; i < 50 && !rejectRenewal; i++) await Bun.sleep(1);
+    expect(rejectRenewal).toBeDefined();
+    await Bun.sleep(5);
+    expect(settled).toBe(false);
+    rejectRenewal(new CloudApiError("revoked", "device_revoked", 403));
+    expect((await opening).ok).toBe(false);
+    await heartbeat;
+    expect(state.store.getLaunch("profile1")).toBeNull();
+    expect((state.coordinator as any).startupLeases.size).toBe(0);
+  } finally {
+    rejectRenewal?.(new CloudApiError("revoked", "device_revoked", 403));
+    await opening;
+    await heartbeat;
+    await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
 test("Cloud browser restores the session and navigates in one attach", async () => {
   const state = setup();
   const result = await state.coordinator.open("profile1", [
