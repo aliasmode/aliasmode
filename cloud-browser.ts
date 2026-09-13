@@ -395,8 +395,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       rememberRegistration(open.profileId, open.registrationId);
     }
     for (const summary of queue.list(accountId)) {
-      const pending = queue.get(summary.id, accountId);
-      if (pending) rememberRegistration(pending.profileId, pending.registrationId);
+      try {
+        const pending = queue.get(summary.id, accountId);
+        if (pending) rememberRegistration(pending.profileId, pending.registrationId);
+      } catch {
+        // An unreadable registration cannot prove local ownership or hide a Cloud lock.
+      }
     }
     return {
       profiles: response.profiles

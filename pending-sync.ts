@@ -250,8 +250,9 @@ export class PendingSyncQueue {
   }
 
   list(accountId: string): PendingCloseSummary[] {
-    return this.db.query<PendingRow, [string]>(`
-      SELECT * FROM pending_closes
+    return this.db.query<Omit<PendingRow, "account_id" | "nonce" | "ciphertext" | "auth_tag">, [string]>(`
+      SELECT id, profile_id, expected_version, ready_to_submit, status, created_at, updated_at, error
+      FROM pending_closes
       WHERE account_id = ?
       ORDER BY created_at, id
     `).all(accountId).map((row) => ({
@@ -744,7 +745,14 @@ export async function retryPendingSync(
   for (const summary of queue.list(accountId)) {
     if (!current()) break;
     if (summary.status === "conflict" || !summary.readyToSubmit) continue;
-    const pending = queue.get(summary.id, accountId);
+    let pending: PendingClose | null;
+    try {
+      pending = queue.get(summary.id, accountId);
+    } catch {
+      // Retain unreadable sessions and their reopen block without stalling other profiles.
+      if (queue.markRetrying(summary.id, accountId, "local_read_failed")) result.failed++;
+      continue;
+    }
     if (!pending) continue;
     queue.markRetrying(pending.id, accountId);
     try {

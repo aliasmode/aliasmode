@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -101,6 +101,77 @@ test("pending sync queue detects ciphertext tampering", () => {
   db.close();
   expect(() => state.queue.get(id, "account1")).toThrow();
   state.queue.close();
+});
+
+test("pending sync summaries do not select encrypted payload columns", () => {
+  const state = queue();
+  const query = spyOn((state.queue as unknown as { db: Database }).db, "query");
+  try {
+    expect(state.queue.list("account1")).toEqual([]);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]![0]).not.toMatch(/\*|\b(?:nonce|ciphertext|auth_tag)\b/);
+  } finally {
+    query.mockRestore();
+    state.queue.close();
+  }
+});
+
+test("pending sync retains an unreadable close and submits later readable closes", async () => {
+  const state = queue();
+  try {
+    const id = state.queue.enqueue({
+      accountId: "account1", profileId: "profile1", registrationId: "unreadable",
+      expectedVersion: 2, payload: payload(),
+    });
+    const db = new Database(state.path);
+    db.query("UPDATE pending_closes SET ciphertext = zeroblob(3), created_at = 0 WHERE id = ?").run(id);
+    db.close();
+    state.queue.enqueue({
+      accountId: "account1", profileId: "profile2", registrationId: "readable",
+      expectedVersion: 2, payload: { ...payload(), profile: { ...payload().profile, id: "profile2" } },
+    });
+    const seen: string[] = [];
+    expect(await retryPendingSync(state.queue, {
+      async closeOpen(registrationId) {
+        seen.push(registrationId);
+        return { ok: true, status: "accepted", version: 3 };
+      },
+    }, "account1")).toEqual({ accepted: 1, conflicts: 0, failed: 1 });
+    expect(seen).toEqual(["readable"]);
+    expect(state.queue.list("account1")).toMatchObject([{
+      id, profileId: "profile1", status: "retrying", error: "local_read_failed", readyToSubmit: true,
+    }]);
+    expect(state.queue.list("account1")).toHaveLength(1);
+    expect(() => state.queue.get(id, "account1")).toThrow();
+  } finally {
+    state.queue.close();
+  }
+});
+
+test("pending sync propagates failure to record an unreadable close", async () => {
+  const state = queue();
+  try {
+    const id = state.queue.enqueue({
+      accountId: "account1", profileId: "profile1", registrationId: "unreadable",
+      expectedVersion: 2, payload: payload(),
+    });
+    const db = new Database(state.path);
+    db.query("UPDATE pending_closes SET ciphertext = zeroblob(3) WHERE id = ?").run(id);
+    db.close();
+    const failure = new Error("database or disk is full");
+    state.queue.markRetrying = () => { throw failure; };
+    let submitted = 0;
+    await expect(retryPendingSync(state.queue, {
+      async closeOpen() {
+        submitted++;
+        return { ok: true, status: "accepted", version: 3 };
+      },
+    }, "account1")).rejects.toBe(failure);
+    expect(submitted).toBe(0);
+    expect(state.queue.list("account1")).toMatchObject([{ id, status: "pending" }]);
+  } finally {
+    state.queue.close();
+  }
 });
 
 test("pending sync retry accepts first valid closes and preserves conflicts", async () => {

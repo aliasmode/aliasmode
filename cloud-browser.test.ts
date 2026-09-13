@@ -3231,6 +3231,71 @@ test("Cloud browser reports the exact safe session restore operation", async () 
   state.store.close();
 });
 
+test("Cloud roster stays available without claiming an unreadable pending registration", async () => {
+  const state = setup();
+  try {
+    const id = state.queue.enqueue({
+      accountId: "account1", profileId: "profile1", registrationId: "unreadable-registration",
+      expectedVersion: 2, payload: payload(),
+    });
+    (state.queue as any).db.query("UPDATE pending_closes SET ciphertext = zeroblob(3) WHERE id = ?").run(id);
+    const cloud = (state.coordinator as any).options.cloud;
+    const originalList = cloud.listProfiles;
+    cloud.listProfiles = async () => {
+      const response = await originalList();
+      response.profiles.push({ ...response.profiles[0], id: "profile2", activeOpens: [] });
+      response.profiles[0].activeOpens = [{ registrationId: "unreadable-registration" }];
+      return response;
+    };
+    const roster = await state.coordinator.listRoster();
+    expect(roster.profiles).toMatchObject([
+      { id: "profile1", lockedBy: "1 other session(s)" },
+      { id: "profile2", lockedBy: null },
+    ]);
+    expect(state.queue.list("account1")).toMatchObject([{ id, status: "pending", error: null }]);
+    expect(() => state.queue.get(id, "account1")).toThrow();
+    expect(state.queue.listOpens("account1")).toEqual([]);
+    expect(state.startCalls()).toBe(0);
+  } finally {
+    state.queue.close();
+    state.store.close();
+  }
+});
+
+test("Cloud browser isolates an unreadable pending close without reopening its profile", async () => {
+  const state = setup();
+  try {
+    const id = state.queue.enqueue({
+      accountId: "account1", profileId: "profile2", registrationId: "unreadable-registration",
+      expectedVersion: 2, payload: { ...payload(), profile: { ...payload().profile, id: "profile2" } },
+    });
+    (state.queue as any).db.query("UPDATE pending_closes SET ciphertext = zeroblob(3) WHERE id = ?").run(id);
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    expect(state.startCalls()).toBe(1);
+    expect(state.queue.getOpen("profile1", "account1")).toMatchObject({
+      registrationId: "registration1", phase: "running",
+    });
+    expect(await state.coordinator.open("profile2", [])).toMatchObject({
+      ok: false, error: "Pending Cloud synchronization must be resolved before reopening",
+    });
+    expect(state.startCalls()).toBe(1);
+    expect(state.events.filter((event) => event === "cloud-open")).toHaveLength(1);
+    expect(state.queue.getOpen("profile2", "account1")).toBeNull();
+    const pending = state.queue.list("account1");
+    expect(pending.find((entry) => entry.id === id)).toMatchObject({
+      profileId: "profile2", status: "retrying", error: "local_read_failed",
+    });
+    expect(pending.find((entry) => entry.profileId === "profile1")).toMatchObject({
+      status: "pending", readyToSubmit: false,
+    });
+    expect(() => state.queue.get(id, "account1")).toThrow();
+  } finally {
+    if (state.startCalls() > 0) await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
 test("Cloud browser logs the local queue error behind a pending_sync open failure", async () => {
   const state = setup();
   const queue = (state.coordinator as any).options.queue();
