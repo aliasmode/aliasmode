@@ -338,6 +338,6 @@ export function serveDashboard(opts: DashboardServerOptions) {
     },
   });
   void agentHub?.cleanupTemporaryProfiles();
-  log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AdsPower API under /api)`);
+  log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AliasMode Local API under /api; AdsPower-compatible)`);
   return server;
 }

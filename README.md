@@ -8,7 +8,7 @@ AliasMode is a local-first browser profile manager with optional cloud synchroni
 
 - **Is AliasMode open source?** Yes. This repository is the complete desktop application — dashboard, local runtime, Local API, and MCP server — under Apache-2.0. AliasMode Cloud is an optional hosted sync service.
 - **What does it cost?** Nothing. Every feature is free, including the CloakBrowser runtime that AliasMode downloads and installs for you. No separate CloakBrowser purchase, subscription, or account is required.
-- **Is AliasMode a CloakBrowser wrapper?** No. CloakBrowser is the browser engine AliasMode drives — one component, not the product. AliasMode adds fingerprint profiles, per-profile proxies, portable encrypted profile sync, an AdsPower-compatible Local API, Playwright over CDP, and an MCP server for AI agents.
+- **Is AliasMode a CloakBrowser wrapper?** No. CloakBrowser is the browser engine AliasMode drives — one component, not the product. AliasMode adds fingerprint profiles, per-profile proxies, portable encrypted profile sync, the AliasMode Local API (AdsPower-compatible), Playwright over CDP, and an MCP server for AI agents.
 
 ## Modes
 
@@ -26,7 +26,7 @@ This repository is the complete Apache-2.0 desktop application and local runtime
 - CloakBrowser engine lifecycle: pinned download, hash verification, launch, and safe close
 - Local SQLite profile storage
 - Portable session capture and restore
-- AdsPower-compatible loopback Local API
+- AliasMode Local API (AdsPower-compatible, loopback only)
 - MCP server (`aliasmode-mcp.exe`) with the pinned Playwright MCP tool set for AI agents
 - AliasMode Cloud client for optional profile synchronization
 
