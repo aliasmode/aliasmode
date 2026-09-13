@@ -43,9 +43,12 @@ function fail(msg: string) {
  * profiles with an empty label. Map both "0" and "" to "" on the way in/out so
  * create→list round-trips and group filtering stay symmetric.
  */
-/** Read-only profile roster behind the list routes when the local store is not authoritative. */
+/** Authoritative roster, with optional Cloud folder and profile creation operations. */
 export interface ProfileRoster {
   listProfiles(): Promise<Array<{ id: string; name: string; group: string }>>;
+  listGroups?(): Promise<string[]>;
+  createGroup?(name: string): Promise<void>;
+  createProfile?(profile: Profile): Promise<{ id: string }>;
 }
 
 function normalizeGroup(g: unknown): string {
@@ -126,12 +129,13 @@ export async function handleUserApi(
   if (pathname === "/api/v1/group/list" && req.method === "GET") {
     const page = intParam(searchParams.get("page"), 1);
     const pageSize = intParam(searchParams.get("page_size"), 100);
-    // Standalone: registry ∪ profile labels (empty folders included, so the client's
-    // find_group_id resolves a group before its first profile). Remote/Cloud: distinct
-    // group labels off the roster.
-    const names = roster
-      ? [...new Set((await roster.listProfiles()).map((p) => normalizeGroup(p.group)).filter((g) => g))].sort()
-      : store.listGroups();
+    // Cloud: authoritative folders, including empty ones. Remote: profile labels.
+    // Standalone: registry ∪ profile labels.
+    const names = roster?.listGroups
+      ? (await roster.listGroups()).sort()
+      : roster
+        ? [...new Set((await roster.listProfiles()).map((p) => normalizeGroup(p.group)).filter((g) => g))].sort()
+        : store.listGroups();
     const list = names.slice((page - 1) * pageSize, page * pageSize).map((g) => ({ group_id: g, group_name: g }));
     return ok({ list, page, page_size: pageSize });
   }
@@ -149,7 +153,10 @@ export async function handleUserApi(
     // Remote: the hub has no empty-group registry; the folder materializes when a
     // profile is created/moved into it (id == name, so this is enough for the
     // create flow). Standalone: persist it so empty folders list immediately.
-    if (!remote) store.registerGroup(name);
+    if (!remote) {
+      if (roster?.createGroup) await roster.createGroup(name);
+      else store.registerGroup(name);
+    }
     return ok({ group_id: name });
   }
 
@@ -224,6 +231,7 @@ export async function handleUserApi(
       // Match the browser clock to the proxy's geo, exactly as /ui/api create and
       // AdsPower's automatic_timezone do. Best-effort: never fail create on geoip.
       if (profile.proxy) await attachTimezones([profile], geoipFetch).catch(() => {});
+      if (roster?.createProfile) return ok(await roster.createProfile(profile));
       store.upsertProfile(profile);
       return ok({ id: profile.id });
     } catch (e) {

@@ -97,8 +97,13 @@ test("user/list filters by group_id; '0' means ungrouped", async () => {
   expect(ungrouped.data.list.length).toBe(0);
 });
 
-test("user/create maps AdsPower payload → profile (proxy, screen, geoip tz, group '0'→ungrouped)", async () => {
+test.each([false, true])("user/create maps AdsPower payload → profile (Cloud: %s)", async (cloud) => {
   const { store, launcher } = setup();
+  let cloudProfile: any;
+  const roster = cloud ? {
+    listProfiles: async () => [],
+    createProfile: async (profile: any) => { cloudProfile = profile; return { id: profile.id }; },
+  } : null;
   const res = await handleUserApi(
     post("/api/v1/user/create", {
       name: "newacct",
@@ -122,13 +127,18 @@ test("user/create maps AdsPower payload → profile (proxy, screen, geoip tz, gr
     store,
     null,
     geoip,
+    roster,
   );
   const body = await res!.json();
   expect(body.code).toBe(0);
   const id = body.data.id as string;
   expect(typeof id).toBe("string");
 
-  const p = store.getProfile(id)!;
+  const p = cloud ? cloudProfile : store.getProfile(id)!;
+  if (cloud) {
+    expect(store.getProfile(id)).toBeNull();
+    expect(store.count()).toBe(1);
+  }
   expect(p.name).toBe("newacct");
   expect(p.group).toBe(""); // "0" → ungrouped
   expect(p.platform).toBe("x.com");

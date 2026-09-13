@@ -219,6 +219,10 @@ test("Cloud automation API routes browser control through the Cloud lifecycle", 
         healthSources: [],
       }),
     } as any,
+    cloudConnection: { client: { listFolders: async () => ({ folders: [
+      { name: "Folder A", archivedAt: null },
+      { name: "Folder B", archivedAt: null },
+    ] }) } } as any,
     log: () => {},
   });
 
@@ -227,7 +231,7 @@ test("Cloud automation API routes browser control through the Cloud lifecycle", 
     const status = await fetch(`${origin}/api/v1/status`).then((response) => response.json());
     expect(status.code).toBe(0);
 
-    // Folder import: resolve the group, then page its profiles from the Cloud roster.
+    // Folder import: resolve the group, then page its profiles from Cloud.
     const groups = await fetch(`${origin}/api/v1/group/list?group_name=Folder%20A&page_size=2000`)
       .then((response) => response.json());
     expect(groups.data.list).toEqual([
@@ -252,7 +256,7 @@ test("Cloud automation API routes browser control through the Cloud lifecycle", 
     expect(calls).toEqual(['open:k1:["--flag"]', "close:k1"]);
     expect(localStarts).toBe(0);
 
-    const blocked = await fetch(`${origin}/api/v1/user/create`, { method: "POST" });
+    const blocked = await fetch(`${origin}/api/v1/user/update`, { method: "POST" });
     expect(blocked.status).toBe(503);
     const destructive = await fetch(`${origin}/api/v1/user/delete`, { method: "POST" });
     expect(destructive.status).toBe(503);
@@ -276,9 +280,104 @@ test("Cloud automation API reports a roster failure in the AdsPower envelope", a
   });
 
   try {
-    const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/group/list?page_size=2000`);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/user/list?page_size=2000`);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ code: -1, msg: "Cloud authentication is required", data: {} });
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});
+
+test("Cloud setup lists empty folders and creates folders and profiles without local writes", async () => {
+  const store = new ProfileStore(":memory:");
+  const folders = [
+    { name: "Empty", archivedAt: null as number | null },
+    { name: "Archived", archivedAt: 1 },
+  ];
+  const profiles: any[] = [];
+  const createdFolders: string[] = [];
+  const server = serveAutomationApi({
+    port: 0, launcher: {} as any, store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudConnection: { client: {
+      listFolders: async () => ({ folders }),
+      createFolder: async (name: string) => {
+        if (folders.some((folder) => folder.name === name)) throw new Error("Folder already exists");
+        createdFolders.push(name);
+        const folder = { name, archivedAt: null };
+        folders.push(folder);
+        return { ok: true, folder };
+      },
+    } } as any,
+    cloudBrowser: {
+      listRoster: async () => ({ profiles, healthSources: [] }),
+      create: async (profile: any) => { profiles.push(profile); return { id: profile.id }; },
+    } as any,
+    log: () => {},
+  });
+  const origin = `http://127.0.0.1:${server.port}`;
+  const post = (path: string, body: unknown) => fetch(`${origin}${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((response) => response.json());
+  const groups = (page = 1) => fetch(`${origin}/api/v1/group/list?page_size=1&page=${page}`)
+    .then((response) => response.json());
+  try {
+    expect((await groups()).data.list).toEqual([{ group_id: "Empty", group_name: "Empty" }]);
+    for (const name of ["Empty", "New", "New"]) {
+      expect(await post("/api/v1/group/create", { group_name: name }))
+        .toMatchObject({ code: 0, data: { group_id: name } });
+    }
+    expect(createdFolders).toEqual(["New"]);
+    expect((await groups(2)).data.list).toEqual([{ group_id: "New", group_name: "New" }]);
+    expect((await groups(3)).data.list).toEqual([]);
+    expect(await post("/api/v1/group/create", { group_name: "Archived" }))
+      .toMatchObject({ code: -1, msg: "Folder already exists" });
+
+    const created = await post("/api/v1/user/create", { name: "newacct", group_id: "New" });
+    expect(created.code).toBe(0);
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]).toMatchObject({ id: created.data.id, name: "newacct", group: "New" });
+    const listed = await fetch(`${origin}/api/v1/user/list?group_id=New`).then((response) => response.json());
+    expect(listed.data.list).toMatchObject([{ user_id: created.data.id, group_id: "New" }]);
+    expect(store.count()).toBe(0);
+    expect(store.listGroups()).toEqual([]);
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});
+
+test("Cloud folder and profile errors never fall back to the local store", async () => {
+  const store = new ProfileStore(":memory:");
+  let failure = "list";
+  const denied = () => { throw new Error("Cloud access denied"); };
+  const server = serveAutomationApi({
+    port: 0, launcher: {} as any, store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudConnection: { client: {
+      listFolders: async () => failure === "list" ? denied() : { folders: [] },
+      createFolder: async () => denied(),
+    } } as any,
+    cloudBrowser: { create: async () => denied() } as any,
+    log: () => {},
+  });
+  try {
+    for (const [path, body] of [
+      ["group/list", undefined],
+      ["group/create", { group_name: "New" }],
+      ["user/create", { name: "newacct", group_id: "New" }],
+    ] as const) {
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/${path}`, {
+        method: body ? "POST" : "GET",
+        headers: { "content-type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      expect(await response.json()).toMatchObject({ code: -1, msg: "Cloud access denied", data: {} });
+      failure = "create";
+    }
+    expect(store.count()).toBe(0);
+    expect(store.listGroups()).toEqual([]);
   } finally {
     await server.stop(true);
     store.close();

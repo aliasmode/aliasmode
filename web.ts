@@ -27,7 +27,7 @@ import {
   type BrowserLifecycleContext,
 } from "./server.ts";
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
-import { handleUserApi } from "./adspower-users.ts";
+import { handleUserApi, type ProfileRoster } from "./adspower-users.ts";
 import {
   AGENT_CONTROL_MAX_MESSAGE_BYTES,
   AGENT_CONTROL_PATH,
@@ -131,7 +131,7 @@ function cloudAutomationError(req: Request, opts: DashboardServerOptions): Respo
   if (
     opts.cloudBrowser &&
     (pathname === "/api/v1/status" || pathname === "/status" || isAdsPowerBrowserControl(pathname) ||
-      isCloudRosterRoute(req))
+      isCloudProfileRoute(req))
   ) {
     return null;
   }
@@ -156,10 +156,11 @@ function automationHealthResponse(
   return handleAutomationHealthSnapshot(req, remote);
 }
 
-/** Read-only AdsPower list routes that Cloud mode can answer from the Cloud roster. */
-function isCloudRosterRoute(req: Request): boolean {
+/** AdsPower list/create routes backed by Cloud folders and profiles. */
+function isCloudProfileRoute(req: Request): boolean {
   const pathname = new URL(req.url).pathname;
-  return req.method === "GET" && (pathname === "/api/v1/group/list" || pathname === "/api/v1/user/list");
+  return (req.method === "GET" && (pathname === "/api/v1/group/list" || pathname === "/api/v1/user/list")) ||
+    (req.method === "POST" && (pathname === "/api/v1/group/create" || pathname === "/api/v1/user/create"));
 }
 
 async function handleAutomationRequest(
@@ -168,10 +169,22 @@ async function handleAutomationRequest(
   lifecycle: BrowserLifecycleContext,
 ): Promise<Response> {
   const { launcher, store } = opts;
-  if (!opts.remote && opts.cloudBrowser && isCloudRosterRoute(req)) {
+  if (!opts.remote && opts.cloudBrowser && isCloudProfileRoute(req)) {
     const cloudBrowser = opts.cloudBrowser;
     try {
-      const roster = { listProfiles: async () => (await cloudBrowser.listRoster()).profiles };
+      const listGroups = async () => {
+        if (!opts.cloudConnection) throw new Error("Cloud connection is unavailable");
+        const { folders } = await opts.cloudConnection.client.listFolders();
+        return folders.filter((folder) => folder.archivedAt === null).map((folder) => folder.name);
+      };
+      const roster: ProfileRoster = {
+        listProfiles: async () => (await cloudBrowser.listRoster()).profiles,
+        listGroups,
+        createGroup: async (name) => {
+          if (!(await listGroups()).includes(name)) await opts.cloudConnection!.client.createFolder(name);
+        },
+        createProfile: (profile) => cloudBrowser.create(profile),
+      };
       const users = await handleUserApi(req, launcher, store, null, undefined, roster);
       if (users) return users;
     } catch (error) {
