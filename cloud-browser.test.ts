@@ -967,16 +967,26 @@ test("terminal running heartbeat retries a failed capture without an external cl
   }
 });
 
-test("Cloud capture diagnostics expose the worker failure class but not its payload", async () => {
+test.each([
+  ["cookies", undefined, "cookies"],
+  ["worker_timeout", undefined, "worker_timeout"],
+  ["private worker stage", undefined, "unknown"],
+  [undefined, "empty_stdout", "empty_stdout"],
+  [undefined, "private response detail", "unknown"],
+])("Cloud capture diagnostics allowlist stage %s / %s", async (operation, responseCategory, stage) => {
   const state = setup({ heartbeatMs: 60_000, setIntervalFn: () => ({}), clearIntervalFn: () => {} });
   const options = (state.coordinator as any).options;
   const readSession = options.readSession;
   try {
     expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-    options.readSession = async () => { throw new PlaywrightWorkerError("timeout", "private worker detail"); };
+    options.readSession = async () => {
+      throw new PlaywrightWorkerError("timeout", "private worker detail", {
+        operation, responseCategory: responseCategory as any,
+      });
+    };
     await expect(state.coordinator.close("profile1")).rejects.toThrow("Cloud session capture failed (timeout); browser left open");
-    expect(state.logs).toContain("profile1: Cloud session capture failed (timeout, PlaywrightWorkerError)");
-    expect(JSON.stringify(state.logs)).not.toContain("private worker detail");
+    expect(state.logs.some((line) => line.includes(`Cloud session capture failed (timeout, PlaywrightWorkerError, stage=${stage}, elapsedMs=`))).toBe(true);
+    expect(JSON.stringify(state.logs)).not.toContain("private");
     expect(state.store.getLaunch("profile1")).not.toBeNull();
     expect((state.coordinator as any).timers.has("profile1")).toBe(true);
     expect(state.closeCalls()).toBe(0);

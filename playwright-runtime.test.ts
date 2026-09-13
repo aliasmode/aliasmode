@@ -112,6 +112,21 @@ test("worker timeout kills only the worker and waits for its exit", async () => 
   expect(await result).toMatchObject({ code: "timeout" });
 });
 
+test("capture worker timeout reports only the outer deadline, not a guessed browser stage", async () => {
+  const error = await runPlaywrightWorker("session-capture", { endpoint: "ws://private" }, {
+    timeoutMs: 5,
+    spawn: () => ({
+      ...fakeWorker(""),
+      exited: new Promise<number>(() => {}),
+    }),
+  }).then(() => null, (failure) => failure);
+  expect(error).toMatchObject({
+    code: "timeout",
+    details: { operation: "worker_timeout", outcome: "timeout", workerOperation: "session-capture" },
+  });
+  expect(JSON.stringify(error)).not.toContain("private");
+});
+
 test("worker timeout returns when kill and exit confirmation fail", async () => {
   let killed = false;
   const hangingStream = () => new ReadableStream<Uint8Array>({ start() {} });
@@ -676,6 +691,47 @@ bunAsNodeTest("worker restore failures preserve operation and outcome details", 
   }
 });
 
+bunAsNodeTest("capture failures identify connection, context, cookies, and detach without raw errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aliasmode-capture-stages-"));
+  try {
+    await mkdir(join(root, "node"), { recursive: true });
+    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
+    await symlink(process.execPath, join(root, "node", "node.exe"));
+    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
+    await writeFile(join(root, "node_modules", "playwright-core", "package.json"), JSON.stringify({ name: "playwright-core", version: "1.58.2", type: "module" }));
+    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"), `
+      export const chromium = { async connectOverCDP(endpoint) {
+        const mode = endpoint.split("//")[1];
+        if (mode === "connect") throw new Error("private connection detail");
+        return {
+          contexts: () => mode === "context" ? [] : [{
+            pages: () => [],
+            async cookies() {
+              if (mode === "cookies" || mode === "cookies-and-disconnect") throw new Error("private cookie detail");
+              return [];
+            },
+          }],
+          async close() { if (mode.includes("disconnect")) throw new Error("private detach detail"); },
+        };
+      } };
+    `);
+    for (const [mode, operation, code] of [
+      ["connect", "connect", "timeout"], ["context", "context", "timeout"],
+      ["cookies", "cookies", "operation_failed"], ["disconnect", "disconnect", "timeout"],
+      ["cookies-and-disconnect", "cookies", "operation_failed"],
+    ]) {
+      const error = await runPlaywrightWorker("session-capture", {
+        endpoint: `ws://${mode}`, connectTimeoutMs: 20,
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(error).toMatchObject({ code, details: { operation, outcome: code === "timeout" ? "timeout" : "failed" } });
+      expect(JSON.stringify(error)).not.toContain("private");
+      expect(error.message).not.toContain("private");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed captures, and restores safely", async () => {
   const root = await mkdtemp(join(tmpdir(), "aliasmode-worker-web-session-"));
   try {
@@ -782,7 +838,7 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
       const malformedCookie = await runPlaywrightWorker("session-capture", {
         endpoint,
       }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
-      expect(malformedCookie).toMatchObject({ code: "operation_failed" });
+      expect(malformedCookie).toMatchObject({ code: "operation_failed", details: { operation: "validation" } });
     }
 
     for (const endpoint of ["ws://malformed-storage", "ws://internal-origin"]) {
@@ -792,7 +848,7 @@ bunAsNodeTest("worker captures arbitrary web sessions, rejects malformed capture
           ? { captureSeed: { origins: ["chrome-extension://abc"] } }
           : {}),
       }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
-      expect(invalidOrigin).toMatchObject({ code: "operation_failed" });
+      expect(invalidOrigin).toMatchObject({ code: "operation_failed", details: { operation: "validation" } });
     }
 
     expect(JSON.parse(await runPlaywrightWorker<string>("session-capture", {
@@ -1242,6 +1298,7 @@ bunAsNodeTest("worker proves hidden target identity through marker collisions an
               if (method === "Network.enable" || method === "DOMStorage.enable") return {};
               if (method === "Network.setBypassServiceWorker") { bypassed = params?.bypass === true; return {}; }
               if (method === "DOMStorage.getDOMStorageItems") {
+                if (mode === "origin_storage") throw new Error("private storage detail");
                 const origin = params.storageId.securityOrigin;
                 return { entries: [["token", origin]] };
               }
@@ -1283,6 +1340,7 @@ bunAsNodeTest("worker proves hidden target identity through marker collisions an
               async goto(url) {
                 navigations++;
                 await note("goto");
+                if (mode === "navigation") throw new Error("private navigation detail");
                 if (commands.at(-1) !== "Browser.getWindowForTarget") throw new Error("navigation preceded hidden-target proof");
                 this.currentUrl = url;
                 await routeHandler?.({ fulfill: async () => { fulfillments++; } });
@@ -1385,7 +1443,10 @@ bunAsNodeTest("worker proves hidden target identity through marker collisions an
         endpoint: `ws://${mode}`,
         captureSeed: { origins: ["https://closed.example"] },
       }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
-      expect(error).toMatchObject({ code: "operation_failed" });
+      expect(error).toMatchObject({
+        code: "operation_failed",
+        details: { operation: mode === "unsupported" ? "hidden_target_unsupported" : "hidden_target" },
+      });
       const logFile = Bun.file(join(root, `${mode}.log`));
       const events = await logFile.exists() ? (await logFile.text()).trim().split("\n") : [];
       if (["unsupported", "unparseable"].includes(mode)) expect(events).not.toContain("create");
@@ -1396,6 +1457,18 @@ bunAsNodeTest("worker proves hidden target identity through marker collisions an
       expect(events).not.toContain("route");
       expect(events).not.toContain("goto");
       expect(events).not.toContain("newPage");
+    }
+    for (const operation of ["navigation", "origin_storage"]) {
+      const error = await runPlaywrightWorker("session-capture", {
+        endpoint: `ws://${operation}`,
+        captureSeed: { origins: ["https://closed.example"] },
+      }, { runtimeRoot: root, timeoutMs: 5_000 }).then(() => null, (failure) => failure);
+      expect(error).toMatchObject({ code: "operation_failed", details: { operation, outcome: "failed" } });
+      expect(JSON.stringify(error)).not.toContain("private");
+      expect(error.message).not.toContain("private");
+      const events = (await Bun.file(join(root, `${operation}.log`)).text()).trim().split("\n");
+      expect(events).toContain("target-close");
+      expect(events).toContain("browser-detach");
     }
   } finally {
     await rm(root, { recursive: true, force: true });

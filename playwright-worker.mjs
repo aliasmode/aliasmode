@@ -64,12 +64,13 @@ async function closeWithin(close, timeoutMs = 5_000) {
 
 async function withBrowser(chromium, endpoint, timeout, operation, run) {
   const deadline = Date.now() + timeout;
+  const sessionOperation = operation === "session-restore" || operation === "session-capture";
   let browser;
   let context;
   let waitingFor = "connect";
   while (!context) {
     const remaining = deadline - Date.now();
-    if (remaining <= 0) throw operation === "session-restore"
+    if (remaining <= 0) throw sessionOperation
       ? sessionError(waitingFor, "timeout")
       : typed("timeout");
     try {
@@ -82,7 +83,7 @@ async function withBrowser(chromium, endpoint, timeout, operation, run) {
     if (!context) {
       waitingFor = "context";
       const detached = await closeWithin(() => browser.close(), Math.min(5_000, Math.max(1, deadline - Date.now())));
-      if (!detached) throw operation === "session-restore"
+      if (!detached) throw sessionOperation
         ? sessionError("disconnect", "timeout")
         : typed("timeout");
       browser = undefined;
@@ -99,7 +100,7 @@ async function withBrowser(chromium, endpoint, timeout, operation, run) {
   }
   const detached = await closeWithin(() => browser.close());
   if (operationError) throw operationError;
-  if (!detached) throw operation === "session-restore"
+  if (!detached) throw sessionOperation
     ? sessionError("disconnect", "timeout")
     : typed("timeout");
   return result;
@@ -507,9 +508,8 @@ async function createHiddenPage(browser, context, marker) {
       ? /^[^/\s]+\/([1-9]\d*)(?:\.|$)/.exec(version.product)
       : null;
     const productMajor = product ? Number(product[1]) : NaN;
-    if (!Number.isSafeInteger(productMajor) || productMajor < 137) {
-      throw new Error("hidden storage target requires Chromium 137 or newer");
-    }
+    if (!Number.isSafeInteger(productMajor)) throw sessionError("hidden_target");
+    if (productMajor < 137) throw sessionError("hidden_target_unsupported");
 
     const existing = new Set(context.pages());
     const previousAttachToOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
@@ -595,11 +595,13 @@ async function createReadOnlyStorageReader(browser, context) {
         intercepted = true;
         return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
       };
-      await context.route(url, handler);
+      await sessionStep("navigation", () => context.route(url, handler));
       try {
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
-        if (!intercepted) throw new Error("Capture navigation was not intercepted");
-        if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
+        await sessionStep("navigation", async () => {
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 10_000 });
+          if (!intercepted) throw new Error("Capture navigation was not intercepted");
+          if (new URL(page.url()).origin !== origin) throw new Error("Wrong capture origin");
+        });
         const response = await cdp.send("DOMStorage.getDOMStorageItems", {
           storageId: { securityOrigin: origin, isLocalStorage: true },
         });
@@ -622,7 +624,7 @@ async function captureSession(browser, payload) {
     || !Array.isArray(seed.origins)
     || seed.origins.some((origin) => typeof origin !== "string" || canonicalWebOrigin(origin) !== origin)
     || (seed.telegramClient !== undefined && seed.telegramClient !== "a" && seed.telegramClient !== "k"))) {
-    throw new Error("Invalid session capture seed");
+    throw sessionError("validation");
   }
 
   const origins = new Set(seed?.origins ?? []);
@@ -648,16 +650,16 @@ async function captureSession(browser, payload) {
     for (const origin of [...origins].sort()) {
       let storage = await captureLiveOrigin(context, origin);
       if (!storage) {
-        reader ??= await createReadOnlyStorageReader(browser, context);
-        storage = await reader.read(origin);
+        reader ??= await sessionStep("hidden_target", () => createReadOnlyStorageReader(browser, context));
+        storage = await sessionStep("origin_storage", () => reader.read(origin));
       }
-      const captured = capturedWebOriginStorage(origin, storage);
+      const captured = await sessionStep("validation", () => capturedWebOriginStorage(origin, storage));
       if (captured) byOrigin.set(origin, captured);
     }
 
-    const cookies = typeof context.cookies === "function"
+    const cookies = await sessionStep("cookies", async () => typeof context.cookies === "function"
       ? await context.cookies()
-      : (await context.storageState()).cookies;
+      : (await context.storageState()).cookies);
     if (!Array.isArray(cookies) || cookies.some((cookie) =>
       typeof cookie?.name !== "string" || typeof cookie.value !== "string" ||
       typeof cookie.domain !== "string" || typeof cookie.path !== "string" ||
@@ -667,7 +669,7 @@ async function captureSession(browser, payload) {
       (cookie.partitionKey !== undefined && typeof cookie.partitionKey !== "string") ||
       (cookie._crHasCrossSiteAncestor !== undefined && typeof cookie._crHasCrossSiteAncestor !== "boolean") ||
       (cookie.sameSite !== undefined && !["Strict", "Lax", "None"].includes(cookie.sameSite))
-    )) throw new Error("Invalid captured cookies");
+    )) throw sessionError("validation");
     return JSON.stringify({
       cookies,
       origins: [...byOrigin.values()],

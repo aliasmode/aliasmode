@@ -229,7 +229,9 @@ export async function runPlaywrightWorker<T>(
   ]);
   if (timer) clearTimeout(timer);
   if (outcome.kind === "timeout") {
-    throw new PlaywrightWorkerError("timeout", "Playwright worker timed out");
+    throw new PlaywrightWorkerError("timeout", "Playwright worker timed out", operation === "session-capture"
+      ? { operation: "worker_timeout", outcome: "timeout", workerOperation: operation }
+      : undefined);
   }
   const [output, errorOutput, exit] = outcome.results;
   if (output.status === "rejected") {

@@ -282,6 +282,17 @@ function safeErrorType(error: unknown): string {
   return error instanceof Error ? "Error" : "unknown";
 }
 
+function captureFailureStage(error: unknown): string {
+  if (!(error instanceof PlaywrightWorkerError)) return "unknown";
+  // Worker envelopes are runtime data. Never print arbitrary detail fields.
+  const stage = error.details?.operation ?? error.details?.responseCategory;
+  return typeof stage === "string" && [
+    "connect", "context", "hidden_target", "hidden_target_unsupported", "navigation", "origin_storage", "cookies",
+    "disconnect", "validation", "worker_timeout", "empty_stdout", "malformed_json",
+    "wrong_protocol_shape", "stdout_overflow", "stdout_read_failed", "success_nonzero_exit",
+  ].includes(stage) ? stage : "unknown";
+}
+
 function sessionRestoreDiagnostic(error: SessionRestoreError): CloudDiagnosticType {
   return `session_restore_${error.operation}_${error.outcome}` as CloudDiagnosticType;
 }
@@ -1214,11 +1225,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (suspended) this.stopStorageWatchers(suspended);
     try {
       let bundle: string;
+      const startedAt = performance.now();
       try {
         bundle = await this.options.readSession(endpoint, captureSeed);
       } catch (error) {
         this.diagnosticEvents.record("checkpoint_capture_failed");
-        this.log(`${open.profileId}: Cloud session capture failed (${errorCode(error)}, ${safeErrorType(error)})`);
+        this.log(`${open.profileId}: Cloud session capture failed (${errorCode(error)}, ${safeErrorType(error)}, stage=${captureFailureStage(error)}, elapsedMs=${Math.round(performance.now() - startedAt)})`);
         throw error;
       }
       try {
