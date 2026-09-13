@@ -58,7 +58,7 @@ function toolAnnotations(title, { readOnly = false, destructive = false, openWor
 const ALIAS_TOOLS = [
   {
     name: "aliasmode_profiles_list",
-    description: "List AliasMode profiles and their current browser state.",
+    description: "List AliasMode profiles and their current browser state. Cloud profiles include expectedVersion and permission for editing.",
     annotations: toolAnnotations("List AliasMode profiles"),
     inputSchema: EMPTY_SCHEMA,
   },
@@ -113,6 +113,40 @@ const ALIAS_TOOLS = [
         },
         temporary: { type: "boolean", default: false },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aliasmode_profile_update",
+    description: "Edit a closed AliasMode Cloud profile by ID using expectedVersion from aliasmode_profiles_list. Only supplied fields change; empty strings clear fields. Sessions and cookies are preserved. Returns confirmation, not credentials.",
+    annotations: toolAnnotations("Edit an AliasMode Cloud profile", { destructive: true }),
+    inputSchema: {
+      type: "object",
+      properties: {
+        profileId: PROFILE_ID,
+        expectedVersion: { type: "integer", minimum: 0 },
+        set: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            group: { type: "string" },
+            platform: { type: "string" },
+            username: { type: "string" },
+            password: { type: "string" },
+            email: { type: "string" },
+            emailPassword: { type: "string" },
+            twofa: { type: "string" },
+            proxy: { type: "string", description: "host:port:user:pass, or an empty string to remove the proxy" },
+            proxyType: { type: "string" },
+            resolution: { type: "string", description: "WIDTH*HEIGHT" },
+            extensions: { type: "array", items: { type: "string" } },
+            tags: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
+          },
+          minProperties: 1,
+          additionalProperties: false,
+        },
+      },
+      required: ["profileId", "expectedVersion", "set"],
       additionalProperties: false,
     },
   },
@@ -272,6 +306,9 @@ export async function createAliasModeMcp(options = {}) {
       }
       if (name === "aliasmode_profile_create") {
         return toolResult(await runtime.call("profiles.create", profileInput(args)));
+      }
+      if (name === "aliasmode_profile_update") {
+        return toolResult(await runtime.call("profiles.update", args));
       }
       if (name === "aliasmode_profile_delete") {
         return toolResult(await runtime.call("profiles.delete", { profileId: args.profileId }));

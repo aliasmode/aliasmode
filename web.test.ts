@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import { ProfileStore } from "./store.ts";
 import {
@@ -50,6 +50,30 @@ test("dashboard health route blocks browser cross-origin submissions on loopback
     expect(publishes).toBe(1);
   } finally {
     await server.stop(true);
+  }
+});
+
+test("Cloud file updates disable the idle timeout while saving the batch", async () => {
+  const store = new ProfileStore(":memory:");
+  const server = serveDashboard({
+    port: 0, launcher: {} as any, store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudBrowser: {} as any,
+    cloudConnection: { client: {} } as any,
+    log: () => {},
+  });
+  const timeout = spyOn(server, "timeout");
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/ui/api/profiles/update-file`, {
+      method: "POST", body: new FormData(),
+    });
+    expect(await response.json()).toMatchObject({ ok: true, updated: 0 });
+    expect(timeout).toHaveBeenCalledTimes(1);
+    expect(timeout.mock.calls[0]![1]).toBe(0);
+  } finally {
+    timeout.mockRestore();
+    await server.stop(true);
+    store.close();
   }
 });
 

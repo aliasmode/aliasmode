@@ -168,6 +168,8 @@ export class CloudProfileEditor {
     const destination = "group" in set ? String(set.group ?? "") : profile.group;
     let updateVersion = expectedVersion;
     if (destination !== profile.group) {
+      // Validate all supplied fields before the move commits independently.
+      applyEdits({ ...profile }, set);
       const moved = await this.cloud.moveProfile(profileId, { destination, expectedVersion });
       updateVersion = moved.profile.version;
       authoritative = await this.cloud.getProfile(profileId);

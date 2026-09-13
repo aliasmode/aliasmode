@@ -12,6 +12,7 @@ class FakeRuntime {
     this.events.push(`${method}:${params.profileId ?? ""}`);
     this.calls.push({ method, params: structuredClone(params) });
     if (method === "profiles.list") return { profiles: [] };
+    if (method === "profiles.update") return { profileId: params.profileId, updated: true };
     if (method === "profiles.replaceProxies") {
       return {
         ok: true,
@@ -139,6 +140,34 @@ test("MCP lifecycle tools include directory annotations", async () => {
   });
   expect(tools.find((tool) => tool.name === "aliasmode_browser_close")?.annotations?.destructiveHint).toBe(true);
   expect(tools.find((tool) => tool.name === "browser_close")?.annotations?.destructiveHint).toBe(true);
+
+  await client.close();
+  await host.close();
+});
+
+test("MCP profile update forwards versioned edits without returning credentials", async () => {
+  const runtime = new FakeRuntime();
+  const host = await createAliasModeMcp({ discovered: { client: runtime }, playwright: new FakePlaywright() });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const tool = (await client.listTools()).tools.find((tool) => tool.name === "aliasmode_profile_update");
+  expect(tool?.annotations?.destructiveHint).toBe(true);
+  expect(tool?.inputSchema).toMatchObject({
+    required: ["profileId", "expectedVersion", "set"], additionalProperties: false,
+    properties: {
+      expectedVersion: { type: "integer", minimum: 0 },
+      set: { type: "object", minProperties: 1, additionalProperties: false, properties: { password: { type: "string" }, extensions: { type: "array" } } },
+    },
+  });
+  const args = { profileId: "profile1", expectedVersion: 7, set: { username: "matched-user", password: "private-password", twofa: "private-totp" } };
+  const result = await client.callTool({ name: "aliasmode_profile_update", arguments: args });
+  expect(result.isError).not.toBe(true);
+  expect(runtime.calls.at(-1)).toEqual({ method: "profiles.update", params: args });
+  expect(result.structuredContent).toEqual({ profileId: "profile1", updated: true });
+  expect(JSON.stringify(result)).not.toContain("private-password");
+  expect(JSON.stringify(result)).not.toContain("private-totp");
 
   await client.close();
   await host.close();

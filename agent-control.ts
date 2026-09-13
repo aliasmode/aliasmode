@@ -55,6 +55,8 @@ type SafeProfile = {
   running: boolean;
   debugPort?: number;
   headless?: boolean;
+  expectedVersion?: number;
+  permission?: "view" | "edit";
 };
 
 function object(value: unknown): Record<string, unknown> {
@@ -200,6 +202,8 @@ export class AgentControlSession {
         return await this.replaceProfileProxies(params);
       case "profiles.create":
         return await this.createProfile(params);
+      case "profiles.update":
+        return await this.updateProfile(params);
       case "profiles.delete":
         return await this.deleteProfile(stringParam(params, "profileId"));
       case "browser.open":
@@ -265,6 +269,35 @@ export class AgentControlSession {
     return runProxyReplacements(connection.client, params);
   }
 
+  private async updateProfile(params: Record<string, unknown>) {
+    if (!this.deps.cloudBrowser) {
+      throw agentError("cloud_unavailable", "Switch to AliasMode Cloud and sign in on this device first");
+    }
+    const { connection } = this.cloudMcpConnection();
+    const profileId = stringParam(params, "profileId");
+    const set = object(params.set);
+    const stringFields = ["name", "group", "platform", "username", "password", "email", "emailPassword", "twofa", "proxy", "proxyType", "resolution"];
+    if (!Object.keys(set).length) throw agentError("invalid_request", "set must contain an editable field");
+    for (const [field, value] of Object.entries(set)) {
+      const valid = stringFields.includes(field) ? typeof value === "string"
+        : field === "extensions" || field === "tags"
+          ? (field === "tags" && typeof value === "string") || Array.isArray(value) && value.every((item) => typeof item === "string")
+          : false;
+      if (!valid) throw agentError("invalid_request", `invalid editable field: ${field}`);
+    }
+    try {
+      const editor = new CloudProfileEditor(connection.client, this.deps.store);
+      await editor.save(profileId, params.expectedVersion as number, set);
+      return { profileId, updated: true as const };
+    } catch (error) {
+      if (error instanceof CloudApiError) throw agentError(error.code, error.message);
+      if (error instanceof CloudProfileEditorError) {
+        throw agentError(error.status === 409 ? "conflict" : "invalid_request", error.message);
+      }
+      throw error;
+    }
+  }
+
   private async listProfiles(): Promise<SafeProfile[]> {
     await this.deps.launcher.reconcileOrphans();
     if (this.deps.cloudBrowser) {
@@ -277,6 +310,8 @@ export class AgentControlSession {
           group: profile.group,
           platform: profile.platform ?? "",
           tags: profile.tags,
+          expectedVersion: profile.version,
+          permission: profile.permission,
           running: !!launch,
           ...(launch ? { debugPort: launch.debugPort, headless: launch.headless } : {}),
         };

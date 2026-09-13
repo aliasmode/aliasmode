@@ -214,6 +214,21 @@ test("Cloud editor reloads inherited extensions after moving before saving metad
   ]);
 });
 
+test("Cloud editor validates edits before committing a folder move", async () => {
+  for (const set of [{ resolution: "bad" }, { proxy: "bad" }]) {
+    const writes: string[] = [];
+    const cloud = {
+      getProfile: async () => response(),
+      moveProfile: async () => { writes.push("move"); return response(8); },
+      updateProfile: async () => { writes.push("update"); },
+    } as any;
+    await expect(new CloudProfileEditor(cloud, readOnlyStore()).save("cloud1", 7, {
+      group: "group-2", ...set,
+    })).rejects.toThrow();
+    expect(writes).toEqual([]);
+  }
+});
+
 test("Cloud editor does not move when the folder is unchanged", async () => {
   let moveCalls = 0;
   let updateVersion: number | undefined;

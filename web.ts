@@ -296,6 +296,10 @@ export function serveDashboard(opts: DashboardServerOptions) {
       // bound beyond loopback, this ingestion route remains local-only.
       const health = automationHealthResponse(req, server.requestIP(req)?.address, opts.remote);
       if (health) return health;
+      if (opts.cloudBrowser && req.method === "POST" && reqUrl.pathname === "/ui/api/profiles/update-file") {
+        // A large batch must retain its result connection until all Cloud writes finish.
+        server.timeout(req, 0);
+      }
 
       return dispatchWithLifecycleAdmission(req, admission, async () => {
         const ui = await handleUiRequest(req, launcher, store, opts.remote, {

@@ -1024,6 +1024,109 @@ test("upload route reports an open-profile import conflict as 409", async () => 
   s.close();
 });
 
+function cloudFileHarness() {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-update-file-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const profiles = new Map(Array.from({ length: 4 }, (_, index) => {
+    const id = `cloud000${index + 1}`;
+    return [id, {
+      profile: { id, version: 3, activeOpens: [] as unknown[] },
+      payload: encodePortableProfile({ ...s.getProfile("k1d0cd11")!, id }),
+    }] as const;
+  }));
+  const updates: Array<{ id: string; request: any }> = [];
+  const client = {
+    async getProfile(id: string) {
+      const value = profiles.get(id);
+      if (!value) throw new CloudApiError("Cloud profile was not found", "profile_not_found", 404);
+      return value;
+    },
+    async updateProfile(id: string, request: any) { updates.push({ id, request }); },
+  };
+  return {
+    s, profiles, updates, client,
+    async upload(files: File[]) {
+      const form = new FormData();
+      for (const file of files) form.append("files", file);
+      return (await handleUiRequest(
+        new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }),
+        {} as any, s, null,
+        { appConfig, cloudBrowser: {} as any, cloudConnection: { client } as any },
+      ))!;
+    },
+    close() { s.close(); rmSync(root, { recursive: true, force: true }); },
+  };
+}
+
+test("Cloud file updates merge IDs across CSV, TXT and XLSX without replacing sessions or Local profiles", async () => {
+  const h = cloudFileHarness();
+  try {
+    const workbook = await writeXlsx(
+      ["id", "username", "cookie", "ua", "custom_no"],
+      [["cloud0002", "second-user", "[]", "ignored-ua", "12"]],
+    );
+    const response = await h.upload([
+      new File(["id,username,password,twofa\ncloud0001,first-user,first-pass,\nk1d0cd11,local-must-not-change\n,missing-id\n"], "updates.csv"),
+      new File(["id=cloud0001\npassword=final-pass\n******************"], "updates.txt"),
+      new File([workbook as unknown as BlobPart], "updates.xlsx"),
+    ]);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, updated: 2, skipped: 1, notFound: ["k1d0cd11"], errors: [] });
+    expect(h.updates.map((update) => update.id)).toEqual(["cloud0001", "cloud0002"]);
+    expect(h.updates[0]!.request.payload.profile).toMatchObject({ username: "first-user", password: "final-pass", twofa: "", emailPassword: "MAILSECRETpw" });
+    expect(h.updates[1]!.request.payload.profile).toMatchObject({ username: "second-user", password: "SECRETpw" });
+    for (const { id, request } of h.updates) {
+      const before = h.profiles.get(id)!.payload;
+      expect(request.expectedVersion).toBe(3);
+      expect(request.payload.session).toEqual(before.session);
+      for (const field of ["proxy", "ua", "fingerprintSeed", "screenWidth", "screenHeight", "timezone"] as const) {
+        expect(request.payload.profile[field]).toEqual(before.profile[field]);
+      }
+    }
+    expect(h.s.getProfile("k1d0cd11")!.username).toBe("account-user");
+    expect(h.s.getProfile("cloud0001")).toBeNull();
+  } finally { h.close(); }
+});
+
+test("Cloud file updates report partial failures and continue after open, denied and conflicting profiles", async () => {
+  const h = cloudFileHarness();
+  try {
+    h.profiles.get("cloud0001")!.profile.activeOpens.push({});
+    const getProfile = h.client.getProfile;
+    h.client.getProfile = async (id) => {
+      if (id === "cloud0002") throw new CloudApiError("No edit permission", "folder_access_denied", 403);
+      return getProfile(id);
+    };
+    const attempts: string[] = [];
+    h.client.updateProfile = async (id, request) => {
+      attempts.push(id);
+      if (id === "cloud0003") throw new CloudApiError("Version conflict", "version_conflict", 409);
+      h.updates.push({ id, request });
+    };
+    const response = await h.upload([new File([
+      "id,password\ncloud0001,new-password\ncloud0002,new-password\ncloud0003,new-password\ncloud0004,new-password\n",
+    ], "updates.csv")]);
+    const result = await response.json();
+    expect(result).toMatchObject({ ok: false, updated: 1, skipped: 0, notFound: [] });
+    expect(result.errors.map((error: { id: string }) => error.id)).toEqual(["cloud0001", "cloud0002", "cloud0003"]);
+    expect(attempts).toEqual(["cloud0003", "cloud0004"]);
+    expect(h.updates.map((update) => update.id)).toEqual(["cloud0004"]);
+    expect(JSON.stringify(result)).not.toContain("new-password");
+  } finally { h.close(); }
+});
+
+test("Cloud file updates reject invalid IDs before writing any profile", async () => {
+  const h = cloudFileHarness();
+  try {
+    const response = await h.upload([new File(["id,password\ncloud0001,new-password\n../bad,new-password\n"], "updates.csv")]);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ ok: false, updated: 0, errors: [{ id: "../bad" }] });
+    expect(h.updates).toEqual([]);
+  } finally { h.close(); }
+});
+
 test("bulk update validates every row before atomically writing any profile", async () => {
   const s = store();
   const first = s.getProfile("k1d0cd11")!;

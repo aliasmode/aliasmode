@@ -915,6 +915,7 @@ export async function handleUiRequest(
     (pathname === "/ui/api/profiles/move" && req.method === "POST") ||
     (pathname === "/ui/api/profiles/delete" && req.method === "POST") ||
     (pathname === "/ui/api/profiles/export" && req.method === "POST") ||
+    (pathname === "/ui/api/profiles/update-file" && req.method === "POST") ||
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies)$/.test(pathname));
@@ -1239,6 +1240,7 @@ export async function handleUiRequest(
       const notFound: string[] = [];
       const errors: Array<{ id: string; error: string }> = [];
       const pending = new Map<string, Profile>();
+      const cloudPending = new Map<string, Record<string, string>>();
       const proxyChanged = new Set<string>();
       for (const [, value] of form) {
         if (!(value instanceof File)) continue;
@@ -1254,6 +1256,12 @@ export async function handleUiRequest(
         for (const u of summary.updates) {
           if (!isSafeProfileId(u.id)) {
             errors.push({ id: u.id, error: PROFILE_ID_ERROR });
+            continue;
+          }
+          if (options.cloudBrowser) {
+            const set = { ...cloudPending.get(u.id), ...u.set };
+            delete set.customNo;
+            cloudPending.set(u.id, set);
             continue;
           }
           const p = pending.get(u.id) ?? store.getProfile(u.id);
@@ -1272,6 +1280,24 @@ export async function handleUiRequest(
       // reports its id and leaves every otherwise-valid row untouched.
       if (errors.length) {
         return Response.json({ ok: false, updated: 0, skipped, notFound, errors }, { status: 400 });
+      }
+      if (options.cloudBrowser) {
+        if (!options.cloudConnection) {
+          return Response.json({ ok: false, error: "AliasMode Cloud connection is unavailable" }, { status: 503 });
+        }
+        const editor = new CloudProfileEditor(options.cloudConnection.client, store, options.timezoneFetch);
+        // Cloud writes are separate versioned requests, not a Local transaction.
+        for (const [id, set] of cloudPending) {
+          try {
+            const expectedVersion = await editor.closedProfileVersion(id);
+            await editor.save(id, expectedVersion, set);
+            updated++;
+          } catch (error) {
+            if (error instanceof CloudApiError && error.code === "profile_not_found") notFound.push(id);
+            else errors.push({ id, error: msg(error) });
+          }
+        }
+        return Response.json({ ok: errors.length === 0, updated, skipped, notFound, errors });
       }
       const liveIds = [...pending.keys()].filter((id) => !!store.getLaunch(id));
       if (liveIds.length > 0) {

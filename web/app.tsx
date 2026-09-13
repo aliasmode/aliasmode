@@ -2612,7 +2612,12 @@ function App() {
     setUpdateBusy(true); setUpdateErr(null); setUpdateResult(null);
     try {
       const r = await updateFromFile([updateFile]);
-      if (!r.ok) { setUpdateErr(r.error || "update failed"); return; }
+      if (!r.ok) {
+        setUpdateErr(r.errors?.length
+          ? r.errors.map((item: { id: string; error: string }) => `${item.id}: ${item.error}`).join(" · ")
+          : r.error || "update failed");
+        if (typeof r.updated !== "number") return;
+      }
       let m = `Updated ${r.updated} profile(s)`;
       if (r.notFound?.length) m += ` · ${r.notFound.length} id(s) in the file matched no profile`;
       if (r.skipped) m += ` · ${r.skipped} row(s) skipped (no id)`;
@@ -3209,8 +3214,7 @@ function App() {
               <Icon name="laptop" className="sm" />Convert mobile ({selectedMobileCount})
             </button>
           )}
-          {/* Export works in Cloud mode too (the server decrypts the selected
-              profiles); Convert and Edit-from-file remain Local-only. */}
+          {/* Export and file edits work in Cloud; mobile conversion remains Local-only. */}
           <div className="menuwrap" ref={exportRef}>
             <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>
               <Icon name="export" className="sm" />Export<Icon name="chevronDown" className="sm" />
@@ -3223,11 +3227,9 @@ function App() {
               </div>
             )}
           </div>
-          {!isCloudMode && (
-            <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
-              <Icon name="edit" className="sm" />Edit from file
-            </button>
-          )}
+          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
+            <Icon name="edit" className="sm" />Edit from file
+          </button>
           <span className="vsep" />
           <div className="movewrap">
             {newMode ? (
@@ -4365,8 +4367,9 @@ function App() {
               <ol className="steps">
                 <li><b>Export</b> the profiles you want to change — that gives you a file with each profile's <code>id</code> (how rows are matched).</li>
                 <li><b>Edit</b> the columns you want (name, username, password, 2FA, proxy…). Keep the <code>id</code> column; delete any column you don't want to touch.</li>
-                <li>Add a <code>custom_no</code> column to renumber profiles in bulk — that number shows in the roster and in the launched browser's window title.</li>
-                <li><b>Re-upload</b> the edited file below. Matched by <code>id</code>; cookies &amp; fingerprints are preserved — editing a <code>cookie</code> or <code>ua</code> column has no effect, an update never rewrites an identity.</li>
+                {!isCloudMode && <li>Add a <code>custom_no</code> column to renumber profiles in bulk — that number shows in the roster and in the launched browser's window title.</li>}
+                <li><b>Re-upload</b> the edited file below. IDs in the file determine which profiles change, not the current selection. Cookies &amp; fingerprints are preserved — editing a <code>cookie</code> or <code>ua</code> column has no effect.</li>
+                {isCloudMode && <li>Close profiles before updating. Each Cloud profile saves separately; successful updates remain saved if other profiles fail.</li>}
               </ol>
               <div className="updexport">
                 {selected.size > 0 ? (

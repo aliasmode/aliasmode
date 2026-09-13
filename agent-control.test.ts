@@ -8,6 +8,9 @@ import {
   validAgentAuthorization,
 } from "./agent-control.ts";
 import type { ProxyReplacementsRequest } from "./contracts/cloud-v1.ts";
+import { CloudApiError } from "./cloud-client.ts";
+import { buildNewProfile } from "./create.ts";
+import { encodePortableProfile } from "./portable-profile.ts";
 
 function wire(method: string, params: Record<string, unknown> = {}, id = 1): string {
   return JSON.stringify({ protocol: AGENT_CONTROL_PROTOCOL, id, method, params });
@@ -297,6 +300,81 @@ test("MCP connector methods return the token once and use the current device URL
   const revoked = await session.enqueue(wire("mcp.connectors.revoke", { connectorId: "connector-id" }));
   expect(revoked).toMatchObject({ ok: true, result: { connectorId: "connector-id", revoked: true } });
   expect(calls).toEqual(["create:Linux Claude", "revoke:connector-id"]);
+});
+
+function cloudEditHarness() {
+  const h = harness();
+  const profile = buildNewProfile({ name: "Cloud account", group: "accounts" }, () => false);
+  profile.id = "profile1";
+  profile.password = "old-password";
+  profile.email = "keep@example.test";
+  profile.cookies = [{ name: "auth_token", value: "session-secret", domain: ".x.com", path: "/" }];
+  const payload = encodePortableProfile(profile);
+  const authoritative = {
+    profile: { id: profile.id, name: profile.name, group: profile.group, platform: "x.com", tags: [], version: 7, permission: "edit", activeOpens: [] as unknown[] },
+    payload,
+  };
+  const updates: any[] = [];
+  const client = {
+    getProfile: async () => authoritative,
+    updateProfile: async (profileId: string, request: unknown) => { updates.push({ profileId, request }); },
+  };
+  const deps = {
+    ...h.deps,
+    launcher: { ...h.deps.launcher, reconcileOrphans: async () => {} },
+    cloudBrowser: { listRoster: async () => ({ profiles: [authoritative.profile] }) } as any,
+    cloudConnection: { deviceId: () => "device-id", client } as any,
+  };
+  return { ...h, deps, client, authoritative, updates, session: new AgentControlSession(deps) };
+}
+
+test("Cloud profile edits use roster versions and preserve unedited credentials and sessions", async () => {
+  const h = cloudEditHarness();
+  const listed = await h.session.enqueue(wire("profiles.list"));
+  expect(listed).toMatchObject({ ok: true, result: { profiles: [{ id: "profile1", expectedVersion: 7, permission: "edit" }] } });
+  expect(JSON.stringify(listed)).not.toContain("old-password");
+
+  const result = await h.session.enqueue(wire("profiles.update", {
+    profileId: "profile1", expectedVersion: 7,
+    set: { username: "matched-user", password: "new-password", twofa: "", tags: ["backfilled"] },
+  }));
+  expect(result).toMatchObject({ ok: true, result: { profileId: "profile1", updated: true } });
+  expect(h.updates).toHaveLength(1);
+  expect(h.updates[0].request.expectedVersion).toBe(7);
+  expect(h.updates[0].request.payload.profile).toMatchObject({ username: "matched-user", password: "new-password", email: "keep@example.test", twofa: "", tags: ["backfilled"], fingerprintSeed: h.authoritative.payload.profile.fingerprintSeed });
+  expect(h.updates[0].request.payload.session).toEqual(h.authoritative.payload.session);
+  expect(JSON.stringify(result)).not.toContain("new-password");
+  expect(JSON.stringify(result)).not.toContain("session-secret");
+});
+
+test("Cloud profile edits reject open, stale, unsupported and malformed updates before PATCH", async () => {
+  const h = cloudEditHarness();
+  for (const params of [
+    { expectedVersion: 6, set: { password: "new-password" } },
+    { expectedVersion: -1, set: { password: "new-password" } },
+    { expectedVersion: 7, set: {} },
+    { expectedVersion: 7, set: { cookies: [] } },
+    { expectedVersion: 7, set: { password: 123 } },
+    { expectedVersion: 7, set: { extensions: "not-an-array" } },
+  ]) {
+    expect((await h.session.enqueue(wire("profiles.update", { profileId: "profile1", ...params }))).ok).toBe(false);
+  }
+  h.authoritative.profile.activeOpens = [{}];
+  expect((await h.session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { password: "new-password" } }))).ok).toBe(false);
+  expect(h.updates).toEqual([]);
+  expect((await harness().session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { password: "new-password" } })))).toMatchObject({ ok: false, error: { code: "cloud_unavailable" } });
+});
+
+test("Cloud profile edits preserve Cloud error codes without retrying", async () => {
+  for (const [code, status] of [["version_conflict", 409], ["folder_access_denied", 403]] as const) {
+    const h = cloudEditHarness();
+    let calls = 0;
+    h.client.updateProfile = async () => { calls++; throw new CloudApiError("Cloud edit rejected", code, status); };
+    const result = await h.session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { password: "new-password" } }));
+    expect(result).toMatchObject({ ok: false, error: { code } });
+    expect(calls).toBe(1);
+    expect(JSON.stringify(result)).not.toContain("new-password");
+  }
 });
 
 test("proxy replacement Agent Control method is Cloud-only and returns safe results", async () => {

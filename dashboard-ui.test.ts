@@ -644,14 +644,27 @@ test("the sidebar offers extension management in both modes and a support link",
   expect(styles).toContain("a.navitem");
 });
 
-test("editable Cloud selections expose every profile export format", () => {
+test("editable Cloud selections expose exports and Edit from file", () => {
   const toolbar = app.slice(app.indexOf('className="toolbar active"'), app.indexOf("className={`tablewrap"));
   expect(toolbar).toContain("(!isCloudMode || selectedEditable) && <>");
-  // Export is deliberately NOT Local-gated (the Cloud editor decrypts the
-  // selected profiles server-side); Convert and Edit-from-file remain Local.
+  // Export and file edits use Cloud; mobile conversion remains Local-only.
   expect(toolbar).not.toContain("{!isCloudMode && <>");
   expect(toolbar).toContain("!isCloudMode && selectedMobileCount > 0");
+  expect(toolbar).toContain("onClick={openUpdate}");
+  expect(toolbar).not.toMatch(/\{!isCloudMode && \(\s*<button[^>]*onClick=\{openUpdate\}/);
   for (const format of ["csv", "txt", "xlsx"]) expect(toolbar).toContain(`exportSelected("${format}")`);
+});
+
+test("file update results retain partial counts and per-profile failures before refreshing", () => {
+  const submit = app.slice(app.indexOf("const submitUpdate ="), app.indexOf("// ---- Group create"));
+  expect(submit).toContain('if (typeof r.updated !== "number") return;');
+  expect(submit).toContain("r.errors.map(");
+  expect(submit).toContain("${item.id}: ${item.error}");
+  expect(submit).toContain("setUpdateResult(m);\n      await load();");
+  const modal = app.slice(app.indexOf("{showUpdate && ("));
+  expect(modal).toContain("{updateErr &&");
+  expect(modal).toContain("{updateResult &&");
+  expect(modal).toMatch(/\{!isCloudMode && <li>[^\n]*<code>custom_no<\/code>/);
 });
 
 test("the existing Extensions page installs from a Web Store URL and keeps archive upload", () => {
