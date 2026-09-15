@@ -1682,6 +1682,28 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
             // Capture the exact Cloud generation before any teardown attempt.
           }
           if (!current()) return;
+          let dead = false;
+          try {
+            const reconciled = await this.options.launcher.reconcileOrphan(open.profileId, {
+              debugPort: launch.debugPort,
+              startedAt: launch.startedAt,
+            });
+            dead = reconciled === "dead" && !this.options.store.getLaunch(open.profileId);
+          } catch {
+            // An uncertain local probe must not release the retained browser.
+          }
+          if (!current() || this.options.accountId() !== accountId) return;
+          const retained = queue.getOpen(open.profileId, accountId);
+          if (dead && retained?.registrationId === open.registrationId) {
+            await this.stopHeartbeatAndWait(open.profileId);
+            if (!current() || this.options.accountId() !== accountId) return;
+            const latest = queue.getOpen(open.profileId, accountId);
+            if (latest?.registrationId === open.registrationId && !latest.cleanupMode && !this.options.store.getLaunch(open.profileId)) {
+              this.diagnosticEvents.record("browser_death_confirmed");
+              await this.finishStoppedOpen(latest, queue, current);
+              continue;
+            }
+          }
           if (!await this.captureAndStopOpen(open, queue, true, current)) {
             throw new Error("a Cloud browser survivor could not be captured safely");
           }

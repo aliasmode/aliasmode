@@ -2670,6 +2670,139 @@ test("Cloud browser reports an exclusive-open rejection without local lifecycle 
   state.store.close();
 });
 
+for (const checkpoint of ["saved", "missing", "offline", "conflict"] as const) {
+  test(`Cloud authentication resumes a confirmed-dead browser with ${checkpoint} checkpoint`, async () => {
+    const state = setup({ closeTransportFailure: checkpoint === "offline", closeConflict: checkpoint === "conflict" });
+    try {
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      const options = (state.coordinator as any).options;
+      options.launcher.verifyRunningIdentity = async () => { throw new Error("browser exited"); };
+      state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+      if (checkpoint === "missing") state.queue.removeUnreadyCaptures("profile1", "account1", "registration1");
+      const before = state.queue.list("account1")[0];
+      const recovered = new CloudBrowserCoordinator(options);
+      state.events.length = 0;
+
+      await recovered.resumeAfterAuthentication();
+
+      expect(state.events).toContain("reconcile");
+      expect(state.events).not.toContain("capture");
+      expect(state.events).not.toContain("stop");
+      expect(state.store.getLaunch("profile1")).toBeNull();
+      expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+      expect(state.abandonCalls()).toBe(checkpoint === "missing" ? 1 : 0);
+      if (checkpoint === "offline" || checkpoint === "conflict") {
+        expect(state.queue.list("account1")).toMatchObject([{
+          id: before!.id, readyToSubmit: true,
+          status: checkpoint === "offline" ? "retrying" : "conflict",
+        }]);
+        expect(state.queue.get(before!.id, "account1")?.payload.session).toEqual(payload().session);
+      } else {
+        expect(state.queue.list("account1")).toEqual([]);
+      }
+    } finally {
+      state.queue.close();
+      state.store.close();
+    }
+  });
+}
+
+for (const cleanupMode of ["discard", "abandon", "sync"] as const) {
+  test(`Cloud authentication preserves ${cleanupMode} cleanup after browser death`, async () => {
+    const state = setup();
+    try {
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      const options = (state.coordinator as any).options;
+      options.launcher.verifyRunningIdentity = async () => { throw new Error("browser exited"); };
+      state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+      (state.coordinator as any).stopHeartbeatAndWait = async () => {
+        expect(state.queue.setOpenCleanup("profile1", "account1", "registration1", cleanupMode)).toBe(true);
+      };
+      const pending = state.queue.list("account1");
+      state.events.length = 0;
+
+      await expect(state.coordinator.resumeAfterAuthentication()).rejects.toThrow("could not be captured safely");
+
+      expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBe(cleanupMode);
+      expect(state.queue.list("account1")).toEqual(pending);
+      expect(state.closeCalls()).toBe(0);
+      expect(state.abandonCalls()).toBe(0);
+      expect(state.events).not.toContain("capture");
+      expect(state.events).not.toContain("stop");
+    } finally {
+      state.queue.close();
+      state.store.close();
+    }
+  });
+}
+
+for (const failure of ["identity", "capture", "reconciliation"] as const) {
+  test(`Cloud authentication retains an uncertain survivor after ${failure} failure`, async () => {
+    const state = setup({ activeResult: false });
+    try {
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      const options = (state.coordinator as any).options;
+      if (failure !== "capture") options.launcher.verifyRunningIdentity = async () => { throw new Error("identity unavailable"); };
+      if (failure === "capture") options.readSession = async () => { throw new Error("capture unavailable"); };
+      if (failure === "reconciliation") state.setReconcileHook(() => { throw new Error("process probe unavailable"); });
+      const before = state.queue.list("account1");
+      state.events.length = 0;
+
+      await expect(state.coordinator.resumeAfterAuthentication()).rejects.toThrow("could not be captured safely");
+
+      expect(state.events).not.toContain("stop");
+      expect(state.closeCalls()).toBe(0);
+      expect(state.abandonCalls()).toBe(0);
+      expect(state.store.getLaunch("profile1")).not.toBeNull();
+      expect(state.queue.getOpen("profile1", "account1")?.phase).toBe("running");
+      expect(state.queue.list("account1")).toEqual(before);
+    } finally {
+      state.queue.close();
+      state.store.close();
+    }
+  });
+}
+
+for (const changed of ["registration", "launch", "authentication"] as const) {
+  test(`Cloud authentication does not finalize a survivor after ${changed} changes during reconciliation`, async () => {
+    let current = true;
+    const state = setup();
+    try {
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      const options = (state.coordinator as any).options;
+      options.launcher.verifyRunningIdentity = async () => { throw new Error("browser unavailable"); };
+      options.launcher.reconcileOrphan = async (_id: string, expected: { debugPort: number; startedAt: number }) => {
+        expect(expected).toEqual({ debugPort: 9222, startedAt: 1000 });
+        state.store.clearLaunch("profile1");
+        if (changed === "registration") {
+          state.queue.removeOpen("profile1", "account1");
+          state.queue.recordOpen({ accountId: "account1", profileId: "profile1", registrationId: "replacement", expectedVersion: 5 });
+        } else if (changed === "launch") {
+          state.store.recordLaunch({ profileId: "profile1", pid: 11, debugPort: 9333, ws: "ws://replacement", startedAt: 2000 });
+        } else {
+          current = false;
+        }
+        return "dead";
+      };
+      const pending = state.queue.list("account1");
+      const recovering = state.coordinator.resumeAfterAuthentication(() => current);
+      if (changed === "authentication") await recovering;
+      else await expect(recovering).rejects.toThrow("could not be captured safely");
+
+      expect(state.closeCalls()).toBe(0);
+      expect(state.abandonCalls()).toBe(0);
+      expect(state.events).not.toContain("capture");
+      expect(state.events).not.toContain("stop");
+      expect(state.queue.list("account1")).toEqual(pending);
+      expect(state.queue.getOpen("profile1", "account1")?.registrationId).toBe(changed === "registration" ? "replacement" : "registration1");
+      if (changed === "launch") expect(state.store.getLaunch("profile1")?.startedAt).toBe(2000);
+    } finally {
+      state.queue.close();
+      state.store.close();
+    }
+  });
+}
+
 test("Cloud authentication secures a previous account browser before legal acceptance", async () => {
   const state = setup();
   state.store.upsertProfile(decodePortableProfile(payload()).profile);
