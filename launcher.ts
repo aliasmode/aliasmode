@@ -794,7 +794,7 @@ export class Launcher {
    * Durable, secret-safe revision of every input that determines the browser
    * persona. Proxy credentials are covered by the hash but never persisted.
    */
-  private launchPersonaDigest(profile: Profile, binarySha256: string, headless: boolean): string {
+  private launchPersonaDigest(profile: Profile, binarySha256: string, headless: boolean, autofill = !!this.autofill): string {
     const extensions = (profile.extensions ?? []).map((id) => ({
       id,
       loadDir: this.store.getExtension(id)?.loadDir ?? null,
@@ -813,7 +813,7 @@ export class Launcher {
       screen: [profile.screenWidth, profile.screenHeight],
       fingerprintSeed: profile.fingerprintSeed,
       extensions,
-      ...(this.autofill ? { autofill: AUTOFILL_EXTENSION_REVISION } : {}),
+      ...(autofill ? { autofill: AUTOFILL_EXTENSION_REVISION } : {}),
     });
     return createHash("sha256").update(serialized).digest("hex");
   }
@@ -833,7 +833,9 @@ export class Launcher {
       throw new Error("legacy launch is missing its headless mode");
     }
     const expectedPersona = this.launchPersonaDigest(profile, approvedSha256, launch.headless);
-    if (!launch.personaDigest || launch.personaDigest !== expectedPersona) {
+    // Pre-autofill browsers keep their exact persona and gain the helper only after a fresh launch.
+    const preAutofillPersona = this.launchPersonaDigest(profile, approvedSha256, launch.headless, false);
+    if (!launch.personaDigest || (launch.personaDigest !== expectedPersona && launch.personaDigest !== preAutofillPersona)) {
       throw new Error("live browser persona or launch mode differs from the current approved profile revision");
     }
   }

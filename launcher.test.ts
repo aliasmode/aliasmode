@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { ProfileStore } from "./store.ts";
 import { AutofillBridge } from "./autofill-bridge.ts";
+import { CloudBrowserCoordinator } from "./cloud-browser.ts";
+import { PendingSyncQueue } from "./pending-sync.ts";
 import { autofillExtensionDir } from "./autofill-extension.ts";
 import {
   BrowserLaunchError,
@@ -331,27 +333,113 @@ test("autofill is retired after a post-spawn session restore failure", async () 
   }
 });
 
-test("autofill revision uses existing survivor retirement instead of bypassing persona checks", async () => {
-  const store = seeded();
-  makeDirect(store);
-  const f = fleet();
-  const prior = newLauncher(store, f, []);
-  const autofill = new AutofillBridge(store);
-  const next = newLauncher(store, f, [], undefined, undefined, { autofill });
-  try {
-    await prior.start("k1d0cd11");
-    autofill.listen();
-    await expect(next.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
-    expect(store.getLaunch("k1d0cd11")).toBeNull();
-    await next.start("k1d0cd11");
-    expect(existsSync(join(autofillExtensionDir(next.userDataDir("k1d0cd11")), "manifest.json"))).toBe(true);
-  } finally {
-    await next.stop("k1d0cd11");
-    autofill.close();
-    store.close();
-    rmSync(testDataRoot(store), { recursive: true, force: true });
-  }
-});
+for (const proxied of [false, true]) {
+  test(`Cloud login preserves a pre-autofill survivor without restarting it (proxied=${proxied})`, async () => {
+    const store = seeded();
+    if (!proxied) makeDirect(store);
+    const f = fleet();
+    const prior = newLauncher(store, f, []);
+    const autofill = new AutofillBridge(store);
+    const spawned: string[][] = [];
+    const killed: number[] = [];
+    const next = newLauncher(store, f, spawned, killed, undefined, { autofill });
+    const root = testDataRoot(store);
+    mkdirSync(root, { recursive: true });
+    const queue = new PendingSyncQueue(join(root, "pending.sqlite"), new Uint8Array(32).fill(7));
+    const id = "k1d0cd11";
+    try {
+      await prior.start(id, [], { sessionBaseVersion: 7 });
+      (prior as any).closeRelay(id);
+      const original = store.getLaunch(id)!;
+      const profile = store.getProfile(id)!;
+      queue.recordOpen({ accountId: "test-account", profileId: id, registrationId: "test-registration", expectedVersion: 7 });
+      queue.updateOpen(id, "test-account", "running", { debugPort: original.debugPort, startedAt: original.startedAt });
+      autofill.listen();
+      const coordinator = new CloudBrowserCoordinator({
+        cloud: {} as any,
+        launcher: next,
+        store,
+        queue: () => queue,
+        accountId: () => "test-account",
+        deviceId: () => "test-device",
+        readSession: async () => { throw new Error("healthy survivor must not be captured"); },
+        applySession: async () => { throw new Error("healthy survivor must not be restored"); },
+        heartbeatMs: 0,
+        dirtyMonitorMs: 0,
+      });
+
+      await next.reconcileOrphans();
+      await coordinator.resumeAfterAuthentication();
+      await next.verifyRunningIdentity(id);
+      await next.start(id);
+
+      expect(spawned).toHaveLength(0);
+      expect(killed).toEqual([]);
+      expect(store.getLaunch(id)).toMatchObject({
+        pid: original.pid, debugPort: original.debugPort, startedAt: original.startedAt,
+        personaDigest: original.personaDigest, sessionBaseVersion: 7,
+      });
+      expect(store.getProfile(id)).toEqual(profile);
+      expect(queue.getOpen(id, "test-account")?.registrationId).toBe("test-registration");
+      expect(queue.list("test-account")).toEqual([]);
+      const manifest = join(autofillExtensionDir(next.userDataDir(id)), "manifest.json");
+      expect(existsSync(manifest)).toBe(false);
+      expect(await next.stop(id)).toBe(true);
+      await next.start(id);
+      expect(spawned).toHaveLength(1);
+      expect(existsSync(manifest)).toBe(true);
+      expect(store.getLaunch(id)!.personaDigest).not.toBe(original.personaDigest);
+    } finally {
+      await next.stop(id);
+      (prior as any).closeRelay(id);
+      autofill.close();
+      queue.close();
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const changed of ["proxy", "fingerprint", "timezone", "extensions", "ua", "kernel", "headless", "missing digest", "old WebRTC policy"] as const) {
+  test(`pre-autofill compatibility still rejects changed ${changed}`, async () => {
+    const store = seeded();
+    const f = fleet();
+    const prior = newLauncher(store, f, []);
+    const autofill = new AutofillBridge(store);
+    const spawned: string[][] = [];
+    const killed: number[] = [];
+    const next = newLauncher(store, f, spawned, killed, undefined, { autofill });
+    const id = "k1d0cd11";
+    try {
+      await prior.start(id);
+      (prior as any).closeRelay(id);
+      const profile = store.getProfile(id)!;
+      const original = store.getLaunch(id)!;
+      switch (changed) {
+        case "proxy": store.upsertProfile({ ...profile, proxy: null }); break;
+        case "fingerprint": store.upsertProfile({ ...profile, fingerprintSeed: profile.fingerprintSeed + 1 }); break;
+        case "timezone": store.upsertProfile({ ...profile, timezone: "Etc/UTC" }); break;
+        case "extensions": store.upsertProfile({ ...profile, extensions: ["different-extension"] }); break;
+        case "ua": store.upsertProfile({ ...profile, ua: `${profile.ua} changed` }); break;
+        case "kernel": store.recordLaunch({ ...original, binarySha256: "f".repeat(64) }); break;
+        case "headless": store.recordLaunch({ ...original, headless: true }); break;
+        case "missing digest": store.recordLaunch({ ...original, personaDigest: undefined }); break;
+        case "old WebRTC policy": store.recordLaunch({ ...original, personaDigest: legacyProxyPersonaDigest(store, id, original.binarySha256!) }); break;
+      }
+      const retained = store.getLaunch(id)!;
+      await expect(next.verifyRunningIdentity(id)).rejects.toThrow();
+      expect(store.getLaunch(id)).toEqual(retained);
+      expect(spawned).toEqual([]);
+      expect(killed).toEqual([]);
+    } finally {
+      await next.stop(id);
+      (prior as any).closeRelay(id);
+      autofill.close();
+      store.close();
+      rmSync(testDataRoot(store), { recursive: true, force: true });
+    }
+  });
+}
 
 test("Local imports restore storage once before navigation, not on subsequent launches or captures", async () => {
   const store = seeded();

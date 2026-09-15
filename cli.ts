@@ -2751,13 +2751,18 @@ async function main() {
         break;
       }
 
-      // Local (standalone) mode: reconcile/certify durable launch ownership
-      // before imports. Otherwise a stale crash row makes the hardened importer
-      // reject startup before it has a chance to prove the row dead.
-      console.log("standalone mode (no HUB_URL) — local only, NOT connected to a hub");
+      // Reconcile/certify durable launch ownership before imports. Otherwise a
+      // stale crash row rejects startup before it can be proven dead.
+      console.log(`${configuredMode.mode} mode: preparing browser recovery`);
+      console.log("startup: initializing autofill bridge");
       const launcher = makeLauncher(store, rest, savedMode.mode === "cloud", profileDataRoot);
+      console.log(`startup: checking ${store.listLaunches().length} saved browser process(es)`);
       await launcher.reconcileOrphans();
-      if (savedMode.mode !== "cloud") await launcher.certifySurvivors();
+      if (savedMode.mode !== "cloud") {
+        console.log("startup: verifying surviving local browsers");
+        await launcher.certifySurvivors();
+      }
+      console.log("startup: browser recovery checks complete");
       const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);
       startMemoryAttributionLog();
       if (configuredMode.mode === "cloud") {

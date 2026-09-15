@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
 import { statePaths } from "./paths.ts";
+import { AppConfigStore } from "./app-config.ts";
 
 const cloudMode = {
   version: 1 as const,
@@ -118,41 +119,61 @@ test("source start reports when Node is unavailable", async () => {
   await removeTemporaryRoot(parent);
 });
 
-test("source start serves the loopback dashboard", async () => {
-  const stateRoot = mkdtempSync(join(tmpdir(), "aliasmode-cli-source-start-"));
-  const port = await freeLoopbackPort();
-  const child = Bun.spawn([
-    process.execPath,
-    join(import.meta.dir, "cli.ts"),
-    "start",
-    "--port", String(port),
-    "--state-root", stateRoot,
-  ], {
-    stdout: "ignore",
-    stderr: "ignore",
-    env: {
-      ...process.env,
-      CLOAKBROWSER_BINARY_PATH: process.execPath,
-      CLOAKBROWSER_BINARY_SHA256: "0".repeat(64),
-    },
-  });
-  try {
-    let health: Response | undefined;
-    for (let attempt = 0; attempt < 50; attempt++) {
-      try {
-        health = await fetch(`http://127.0.0.1:${port}/ui/api/health`);
-        if (health.ok) break;
-      } catch {}
-      if (await Promise.race([child.exited.then(() => true), Bun.sleep(100).then(() => false)])) break;
+for (const mode of ["unconfigured", "local", "cloud"] as const) {
+  test(`source start reports ${mode} recovery and serves the loopback dashboard`, async () => {
+    const stateRoot = mkdtempSync(join(tmpdir(), "aliasmode-cli-source-start-"));
+    if (mode !== "unconfigured") {
+      new AppConfigStore(statePaths(stateRoot).config).setMode(mode, mode === "cloud" ? "http://127.0.0.1:1" : undefined);
     }
-    expect(health?.ok).toBe(true);
-    expect(await health?.json()).toMatchObject({ ok: true });
-  } finally {
-    child.kill();
-    await child.exited;
-    await removeTemporaryRoot(stateRoot);
-  }
-});
+    const port = await freeLoopbackPort();
+    const child = Bun.spawn([
+      process.execPath,
+      "--no-env-file",
+      join(import.meta.dir, "cli.ts"),
+      "start",
+      "--port", String(port),
+      "--state-root", stateRoot,
+    ], {
+      cwd: stateRoot,
+      stdout: "pipe",
+      stderr: "ignore",
+      env: {
+        ...process.env,
+        HUB_URL: "",
+        ALIASMODE_CLOUD_URL: "http://127.0.0.1:1",
+        ALIASMODE_SUPABASE_URL: "http://127.0.0.1:1",
+        ALIASMODE_SUPABASE_ANON_KEY: "source-start-fixture",
+        CLOAKBROWSER_BINARY_PATH: process.execPath,
+        CLOAKBROWSER_BINARY_SHA256: "0".repeat(64),
+      },
+    });
+    const output = new Response(child.stdout).text();
+    try {
+      let health: Response | undefined;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        try {
+          health = await fetch(`http://127.0.0.1:${port}/ui/api/health`);
+          if (health.ok) break;
+        } catch {}
+        if (await Promise.race([child.exited.then(() => true), Bun.sleep(100).then(() => false)])) break;
+      }
+      expect(health?.ok).toBe(true);
+      expect(await health?.json()).toMatchObject({ ok: true });
+    } finally {
+      child.kill();
+      await child.exited;
+      await removeTemporaryRoot(stateRoot);
+    }
+    const logs = await output;
+    expect(logs).toContain(`${mode} mode:`);
+    expect(logs).not.toContain("NOT connected to a hub");
+    const phases = ["initializing autofill bridge", "checking 0 saved browser process(es)", "browser recovery checks complete"];
+    const positions = phases.map((phase) => logs.indexOf(`startup: ${phase}`));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(logs.includes("startup: verifying surviving local browsers")).toBe(mode !== "cloud");
+  });
+}
 
 test("compiled sidecar smoke restores before navigation and capture", async () => {
   const events: string[] = [];
