@@ -1705,7 +1705,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
             }
           }
           if (!await this.captureAndStopOpen(open, queue, true, current)) {
-            throw new Error("a Cloud browser survivor could not be captured safely");
+            this.log("Cloud browser recovery remains pending; retained local ownership without blocking same-account login");
           }
           continue;
         }

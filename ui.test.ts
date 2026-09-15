@@ -10,7 +10,8 @@ import { listUiProfiles, handleUiRequest } from "./ui.ts";
 import { readXlsx, writeXlsx } from "./xlsx.ts";
 import { AppConfigStore } from "./app-config.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
-import type { CloudConnectionRuntime } from "./cloud-connection.ts";
+import { CloudConnectionRuntime } from "./cloud-connection.ts";
+import { CloudBrowserCoordinator } from "./cloud-browser.ts";
 import { PendingSyncRuntime } from "./pending-sync.ts";
 import { EmailVerificationRequiredError, SupabaseAuthRequestError, type SupabaseAuthClient } from "./supabase-auth.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
@@ -2500,6 +2501,104 @@ test("Cloud workspace API forwards folder deletion and preserves Cloud conflicts
   expect(deleted).toEqual(["Empty folder", "Used folder"]);
   s.close();
 });
+
+for (const action of ["signin", "restore"] as const) {
+  for (const sameAccount of [true, false]) {
+    test(`Cloud ${action} retains unverified browsers without bypassing account isolation (sameAccount=${sameAccount})`, async () => {
+      const s = store();
+      const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-retained-auth-"));
+      const pendingSync = new PendingSyncRuntime(join(root, "pending.sqlite"));
+      const { queue, createdKey: queueKey } = pendingSync.initialize();
+      const profileId = "k1d0cd11";
+      const owner = sameAccount ? "account1" : "previous-account";
+      const session = async () => ({
+        accessToken: "test-access", refreshToken: "test-refresh", expiresIn: 60, expiresAt: 61_000,
+        user: { id: "account1", email: "user@example.com", email_confirmed_at: "verified" },
+      });
+      const cloudAuth = new CloudAuthRuntime({ signIn: session, refresh: session } as unknown as SupabaseAuthClient, () => 1_000);
+      const legal = { terms: "1", privacy: "1", acceptableUse: "1" };
+      const requests: string[] = [];
+      const cloudConnection = new CloudConnectionRuntime({
+        baseUrl: "https://cloud.aliasmode.test", accessToken: () => cloudAuth.accessToken(),
+        installation: { installationId: "test-installation", label: "test", platform: "windows", appVersion: "test" },
+        fetchFn: async (url) => {
+          requests.push(new URL(url).pathname);
+          return Response.json({
+            ok: true, account: { id: "account1" }, device: { id: "device1" },
+            deviceCredential: "test-device", legal: { current: legal, accepted: legal },
+          });
+        },
+      });
+      const browserCalls: string[] = [];
+      let scans = 0;
+      const launcher = new Launcher({
+        store: s, binaryPath: join(root, "fake-browser"), dataRoot: root,
+        expectedBinarySha256: "0".repeat(64),
+        fetch: async () => ({ ok: false, json: async () => ({}) }),
+        isPidAlive: () => false,
+        findOwnedBrowserPids: async () => { scans++; return null; },
+        spawn: () => { browserCalls.push("spawn"); throw new Error("must not spawn"); },
+        killPid: async () => { browserCalls.push("kill"); },
+        browserClose: async () => { browserCalls.push("close"); return false; },
+        log: () => {},
+      });
+      s.recordLaunch({
+        profileId, pid: 123, debugPort: 9333, ws: "ws://127.0.0.1:9333/test", startedAt: 1_000,
+        binaryPath: join(root, "fake-browser"), userDataDir: join(root, profileId),
+        binarySha256: "0".repeat(64), personaDigest: "0".repeat(64), headless: false,
+      });
+      queue.recordOpen({ accountId: owner, profileId, registrationId: "retained-registration", expectedVersion: 4 });
+      queue.updateOpen(profileId, owner, "running", { debugPort: 9333, startedAt: 1_000 });
+      const cloudBrowser = new CloudBrowserCoordinator({
+        cloud: cloudConnection.client, launcher, store: s, queue: () => pendingSync.queue(),
+        accountId: () => cloudConnection.accountId(), deviceId: () => cloudConnection.deviceId(),
+        heartbeatMs: 0, dirtyMonitorMs: 0, log: () => {},
+        readSession: async () => { browserCalls.push("capture"); throw new Error("must not capture"); },
+        applySession: async () => { browserCalls.push("restore"); throw new Error("must not restore"); },
+      });
+      const launch = s.getLaunch(profileId);
+      const profile = s.getProfile(profileId);
+      const retainedOpen = queue.getOpen(profileId, owner);
+      try {
+        await launcher.reconcileOrphans();
+        const response = await handleUiRequest(new Request(`http://x/ui/api/cloud-auth/${action}`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify(action === "signin"
+            ? { email: "user@example.com", password: "test-password", queueKey }
+            : { refreshToken: "test-refresh", deviceCredential: "test-device", queueKey, resumeLifecycle: true }),
+        }), launcher, s, null, { cloudAuth, cloudConnection, pendingSync, cloudBrowser });
+        const body = await response!.json();
+        if (sameAccount) {
+          expect(body).toMatchObject({ ok: true, authenticated: true });
+          expect(response!.status).toBe(200);
+          expect(cloudAuth.state().authenticated).toBe(true);
+          expect(cloudConnection.accountId()).toBe("account1");
+          expect(pendingSync.queue()).toBe(queue);
+          expect((await cloudBrowser.open(profileId)).ok).toBe(false);
+        } else {
+          expect(response!.ok).toBe(false);
+          if (action === "signin") {
+            expect(cloudAuth.state().authenticated).toBe(false);
+            expect(cloudConnection.accountId()).toBeUndefined();
+            expect(pendingSync.queue()).toBeUndefined();
+          }
+        }
+        const retainedQueue = pendingSync.queue() ?? pendingSync.initialize(queueKey).queue;
+        expect(retainedQueue.getOpen(profileId, owner)).toEqual(retainedOpen);
+        expect(retainedQueue.list(owner)).toEqual([]);
+        expect(s.getLaunch(profileId)).toEqual(launch);
+        expect(s.getProfile(profileId)).toEqual(profile);
+        expect(browserCalls).toEqual([]);
+        expect(scans).toBeGreaterThan(0);
+        expect(requests).toEqual([action === "signin" ? "/v1/account/bootstrap" : "/v1/status"]);
+      } finally {
+        pendingSync.close();
+        s.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 test("Cloud auth API accepts verified sign-in without exposing extra user metadata", async () => {
   const s = store();

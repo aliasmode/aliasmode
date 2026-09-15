@@ -2721,7 +2721,7 @@ for (const cleanupMode of ["discard", "abandon", "sync"] as const) {
       const pending = state.queue.list("account1");
       state.events.length = 0;
 
-      await expect(state.coordinator.resumeAfterAuthentication()).rejects.toThrow("could not be captured safely");
+      await state.coordinator.resumeAfterAuthentication();
 
       expect(state.queue.getOpen("profile1", "account1")?.cleanupMode).toBe(cleanupMode);
       expect(state.queue.list("account1")).toEqual(pending);
@@ -2748,7 +2748,7 @@ for (const failure of ["identity", "capture", "reconciliation"] as const) {
       const before = state.queue.list("account1");
       state.events.length = 0;
 
-      await expect(state.coordinator.resumeAfterAuthentication()).rejects.toThrow("could not be captured safely");
+      await state.coordinator.resumeAfterAuthentication();
 
       expect(state.events).not.toContain("stop");
       expect(state.closeCalls()).toBe(0);
@@ -2762,6 +2762,54 @@ for (const failure of ["identity", "capture", "reconciliation"] as const) {
     }
   });
 }
+
+test("Cloud authentication isolates an uncertain profile and later recovers confirmed death", async () => {
+  const state = setup();
+  const resumed: string[] = [];
+  try {
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    state.store.upsertProfile({ ...state.store.getProfile("profile1")!, id: "profile2" });
+    state.store.recordLaunch({ ...state.store.getLaunch("profile1")!, profileId: "profile2", debugPort: 9333, startedAt: 2000 });
+    state.queue.recordOpen({ accountId: "account1", profileId: "profile2", registrationId: "registration2", expectedVersion: 4 });
+    state.queue.updateOpen("profile2", "account1", "running", { debugPort: 9333, startedAt: 2000 });
+    expect(state.queue.listOpens("account1").map(open => open.profileId)).toEqual(["profile1", "profile2"]);
+    const options = (state.coordinator as any).options;
+    options.launcher.verifyRunningIdentity = async (id: string) => {
+      if (id === "profile1") throw new Error("ownership unavailable");
+    };
+    (state.coordinator as any).startHeartbeat = (id: string) => { resumed.push(id); };
+    const launch = state.store.getLaunch("profile1");
+    const pending = state.queue.list("account1");
+    state.events.length = 0;
+
+    await state.coordinator.resumeAfterAuthentication();
+
+    expect(resumed).toEqual(["profile2"]);
+    expect(state.store.getLaunch("profile1")).toEqual(launch);
+    expect(state.queue.list("account1")).toEqual(pending);
+    expect(state.closeCalls()).toBe(0);
+    expect(state.abandonCalls()).toBe(0);
+    expect((await state.coordinator.open("profile1")).ok).toBe(false);
+    expect(state.events).not.toContain("cloud-open");
+    expect(state.events).not.toContain("start");
+    expect(state.events).not.toContain("capture");
+    expect(state.events).not.toContain("stop");
+
+    state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+    await state.coordinator.listRoster();
+
+    expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+    expect(state.queue.list("account1")).toEqual([]);
+    expect(state.closeCalls()).toBe(1);
+    expect(state.abandonCalls()).toBe(0);
+    expect(state.queue.getOpen("profile2", "account1")?.registrationId).toBe("registration2");
+    expect(state.events).not.toContain("capture");
+    expect(state.events).not.toContain("stop");
+  } finally {
+    state.queue.close();
+    state.store.close();
+  }
+});
 
 for (const changed of ["registration", "launch", "authentication"] as const) {
   test(`Cloud authentication does not finalize a survivor after ${changed} changes during reconciliation`, async () => {
@@ -2785,9 +2833,7 @@ for (const changed of ["registration", "launch", "authentication"] as const) {
         return "dead";
       };
       const pending = state.queue.list("account1");
-      const recovering = state.coordinator.resumeAfterAuthentication(() => current);
-      if (changed === "authentication") await recovering;
-      else await expect(recovering).rejects.toThrow("could not be captured safely");
+      await state.coordinator.resumeAfterAuthentication(() => current);
 
       expect(state.closeCalls()).toBe(0);
       expect(state.abandonCalls()).toBe(0);
