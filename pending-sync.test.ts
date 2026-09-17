@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
-import { PendingSyncQueue, PendingSyncRuntime, retryPendingSync } from "./pending-sync.ts";
+import { isResavableConflict, PendingSyncQueue, PendingSyncRuntime, retryPendingSync } from "./pending-sync.ts";
 import type { PortableProfileV1 } from "./contracts/cloud-v1.ts";
 
 function payload(secret = "very-secret-cookie"): PortableProfileV1 {
@@ -720,4 +720,151 @@ test("pending checkpoint removal is registration-fenced", () => {
 test("pending sync queue requires an AES-256 key", () => {
   const path = join(mkdtempSync(join(tmpdir(), "aliasmode-pending-")), "pending.sqlite");
   expect(() => new PendingSyncQueue(path, new Uint8Array(16))).toThrow("32 bytes");
+});
+
+function lapsedCloud(options: {
+  resaveBaseVersion?: number;
+  openError?: CloudApiError;
+  seen?: string[];
+} = {}) {
+  const seen = options.seen ?? [];
+  return {
+    seen,
+    async closeOpen(registrationId: string, request: { expectedVersion: number }) {
+      seen.push(`close:${registrationId}:${request.expectedVersion}`);
+      if (registrationId === "lapsed-registration") {
+        return {
+          ok: false as const,
+          error: { code: "version_conflict" as const, message: "expired", currentVersion: 2 },
+        };
+      }
+      return { ok: true as const, status: "accepted" as const, version: request.expectedVersion + 1 };
+    },
+    async openProfile(profileId: string, request: { deviceId: string }) {
+      seen.push(`open:${profileId}:${request.deviceId}`);
+      if (options.openError) throw options.openError;
+      return {
+        ok: true as const,
+        registrationId: "fresh-registration",
+        baseVersion: options.resaveBaseVersion ?? 2,
+        payload: payload("cloud-copy"),
+        activeOpens: [],
+      };
+    },
+    async abandon(registrationId: string) {
+      seen.push(`abandon:${registrationId}`);
+      return { ok: true as const };
+    },
+  };
+}
+
+function enqueueLapsed(state: ReturnType<typeof queue>) {
+  return state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "lapsed-registration",
+    expectedVersion: 2,
+    payload: payload("device-session"),
+  });
+}
+
+test("a close rejected only because its lease expired is saved through a fresh registration", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  const cloud = lapsedCloud();
+
+  expect(await retryPendingSync(state.queue, cloud, "account1", () => true, "device1"))
+    .toEqual({ accepted: 1, conflicts: 0, failed: 0 });
+
+  expect(cloud.seen).toEqual([
+    "close:lapsed-registration:2",
+    "open:profile1:device1",
+    "close:fresh-registration:2",
+  ]);
+  expect(state.queue.get(id, "account1")).toBeNull();
+  state.queue.close();
+});
+
+test("a lapsed close stays a conflict when Cloud changed before the resave", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  const cloud = lapsedCloud({ resaveBaseVersion: 3 });
+
+  expect(await retryPendingSync(state.queue, cloud, "account1", () => true, "device1"))
+    .toEqual({ accepted: 0, conflicts: 1, failed: 0 });
+  expect(cloud.seen).toEqual([
+    "close:lapsed-registration:2",
+    "open:profile1:device1",
+    "abandon:fresh-registration",
+  ]);
+  expect(state.queue.get(id, "account1")).toMatchObject({
+    status: "conflict",
+    error: "version conflict (current version 3)",
+    payload: { session: { cookies: [{ value: "device-session" }] } },
+  });
+
+  cloud.seen.length = 0;
+  await retryPendingSync(state.queue, cloud, "account1", () => true, "device1");
+  expect(cloud.seen).toEqual([]);
+  state.queue.close();
+});
+
+test("an existing lease-expired conflict is resaved once the device can write", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  expect(state.queue.markConflict(id, "account1", "version conflict (current version 2)")).toBe(true);
+  const cloud = lapsedCloud();
+
+  expect(await retryPendingSync(state.queue, cloud, "account1", () => true, "device1"))
+    .toEqual({ accepted: 1, conflicts: 0, failed: 0 });
+  expect(cloud.seen).toEqual(["open:profile1:device1", "close:fresh-registration:2"]);
+  expect(state.queue.get(id, "account1")).toBeNull();
+  state.queue.close();
+});
+
+test("a lapsed close waits while another device holds the profile", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  const blocked = lapsedCloud({
+    openError: new CloudApiError("open elsewhere", "profile_open", 409),
+  });
+
+  expect(await retryPendingSync(state.queue, blocked, "account1", () => true, "device1"))
+    .toEqual({ accepted: 0, conflicts: 0, failed: 1 });
+  expect(state.queue.get(id, "account1")).toMatchObject({ status: "conflict", error: "lease_expired" });
+  expect(isResavableConflict(state.queue.list("account1")[0]!)).toBe(true);
+
+  const cloud = lapsedCloud();
+  expect(await retryPendingSync(state.queue, cloud, "account1", () => true, "device1"))
+    .toEqual({ accepted: 1, conflicts: 0, failed: 0 });
+  expect(state.queue.get(id, "account1")).toBeNull();
+  state.queue.close();
+});
+
+test("a lapsed close is never resaved while this device has the profile open", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  state.queue.recordOpen({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "live-registration",
+    expectedVersion: 2,
+  });
+  const cloud = lapsedCloud();
+
+  await retryPendingSync(state.queue, cloud, "account1", () => true, "device1");
+  expect(cloud.seen).toEqual(["close:lapsed-registration:2"]);
+  expect(state.queue.get(id, "account1")).toMatchObject({ status: "conflict", error: "lease_expired" });
+  state.queue.close();
+});
+
+test("a lapsed close without a device keeps the resavable conflict", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  const cloud = lapsedCloud();
+
+  await retryPendingSync(state.queue, cloud, "account1");
+  expect(cloud.seen).toEqual(["close:lapsed-registration:2"]);
+  expect(state.queue.get(id, "account1")).toMatchObject({ status: "conflict", error: "lease_expired" });
+  state.queue.close();
 });

@@ -2156,7 +2156,8 @@ test("Cloud browser reopens the latest Cloud state while preserving a stale CAS 
 
   expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toMatchObject({
     ok: true,
-    warning: "Opened the latest Cloud state. An older conflicting snapshot remains encrypted on this device.",
+    warning: "Opened the current Cloud copy. This device's last session for this profile was not saved because " +
+      "Cloud rejected it; that session remains encrypted on this device.",
   });
   expect(restoredSession.cookies[0]?.value).toBe("latest-cloud-session");
   expect(state.queue.get(conflict!.id, "account1")?.status).toBe("conflict");
@@ -2165,6 +2166,76 @@ test("Cloud browser reopens the latest Cloud state while preserving a stale CAS 
   expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
   expect(state.queue.list("account1")).toEqual([conflict!]);
   expect(state.queue.get(conflict!.id, "account1")?.status).toBe("conflict");
+  state.queue.close();
+  state.store.close();
+});
+
+/** Cloud rejects registration1 only because its lease expired: the version is still 4. */
+function expireFirstLease(state: ReturnType<typeof setup>, resaveOpen: () => Promise<OpenProfileResponse>) {
+  const options = (state.coordinator as any).options;
+  const closed: string[] = [];
+  options.cloud.closeOpen = async (registrationId: string, request: { expectedVersion: number }) => {
+    closed.push(registrationId);
+    if (registrationId === "registration1") {
+      return {
+        ok: false,
+        error: { code: "version_conflict", message: "The open registration expired.", currentVersion: 4 },
+      };
+    }
+    return { ok: true, status: "accepted", version: request.expectedVersion + 1 };
+  };
+  options.cloud.openProfile = async () => {
+    state.events.push("cloud-open");
+    return resaveOpen();
+  };
+  return closed;
+}
+
+function freshOpen(registrationId: string, baseVersion = 4): OpenProfileResponse {
+  return { ok: true, registrationId, baseVersion, payload: payload(), activeOpens: [] };
+}
+
+test("Cloud browser saves a lease-expired close through a fresh registration", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const closed = expireFirstLease(state, async () => freshOpen("registration2"));
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+  expect(closed).toEqual(["registration1", "registration2"]);
+  expect(state.queue.list("account1")).toEqual([]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser keeps a lease-expired session instead of reopening the older Cloud copy", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  let heldElsewhere = true;
+  let registrations = 1;
+  const closed = expireFirstLease(state, async () => {
+    if (heldElsewhere) throw new CloudApiError("open elsewhere", "profile_open", 409);
+    return freshOpen(`registration${++registrations}`, registrations === 2 ? 4 : 5);
+  });
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+  expect(state.queue.list("account1")).toMatchObject([{ status: "conflict", error: "lease_expired" }]);
+
+  const restoresBefore = state.events.filter((event) => event === "restore").length;
+  expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toEqual({
+    ok: false,
+    error: "This profile's last session from this device is still being saved to Cloud. Try again shortly.",
+  });
+  expect(state.events.filter((event) => event === "restore")).toHaveLength(restoresBefore);
+
+  heldElsewhere = false;
+  const reopened = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(reopened).toMatchObject({ ok: true });
+  expect((reopened as { warning?: string }).warning).toBeUndefined();
+  expect(closed).toEqual(["registration1", "registration2"]);
+  // Only the new open's baseline checkpoint remains, on top of the resaved version.
+  expect(state.queue.list("account1")).toMatchObject([
+    { expectedVersion: 5, readyToSubmit: false, status: "pending" },
+  ]);
   state.queue.close();
   state.store.close();
 });

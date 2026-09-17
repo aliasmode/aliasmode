@@ -14,6 +14,7 @@ import {
   type Launcher,
 } from "./launcher.ts";
 import {
+  isResavableConflict,
   type PendingClose,
   type PendingOpenSession,
   type PendingSyncQueue,
@@ -144,7 +145,15 @@ const DEFAULT_CHECKPOINT_MIN_INTERVAL_MS = 3_000;
 const CLOUD_PROFILE_OPEN_ERROR =
   "This Cloud profile is open in another session. Close it there, or try again shortly if that browser already closed.";
 const TERMINAL_CONFLICT_WARNING =
-  "Opened the latest Cloud state. An older conflicting snapshot remains encrypted on this device.";
+  "Opened the current Cloud copy. This device's last session for this profile was not saved because " +
+  "Cloud rejected it; that session remains encrypted on this device.";
+const RESAVE_PENDING_ERROR =
+  "This profile's last session from this device is still being saved to Cloud. Try again shortly.";
+
+/** A conflict Cloud will never accept, unlike a close that only lost its lease. */
+function isTerminalConflict(capture: PendingClose): boolean {
+  return capture.status === "conflict" && !isResavableConflict(capture);
+}
 
 interface CloudCheckpointState {
   registrationId: string;
@@ -598,11 +607,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     };
 
     try {
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
       const pendingForProfile = queue.list(accountId)
         .filter((pending) => pending.profileId === profileId);
       if (pendingForProfile.some((pending) => pending.status !== "conflict")) {
         return { ok: false, error: "Pending Cloud synchronization must be resolved before reopening" };
+      }
+      // Opening now would restore the older Cloud copy over the unsaved session.
+      if (pendingForProfile.some(isResavableConflict)) {
+        return { ok: false, error: RESAVE_PENDING_ERROR };
       }
       const hasTerminalConflict = pendingForProfile.some((pending) => pending.status === "conflict");
       if (queue.getOpen(profileId, accountId)) {
@@ -1052,7 +1065,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     this.clearCheckpointSignature(open);
     if (this.options.accountId() === accountId) {
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
     }
     const result = this.closeResultForOpen(open, queue);
     this.diagnosticEvents.record(result.sync === "complete" ? "session_synced" : "cleanup_retained");
@@ -1096,7 +1109,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       return { closed: true, sync: "complete" };
     }
     this.startPendingRetry();
-    if (captures.some((capture) => capture.status === "conflict")) {
+    if (captures.some(isTerminalConflict)) {
       this.diagnosticEvents.record("session_sync_conflict");
       return { closed: true, sync: "conflict" };
     }
@@ -1190,12 +1203,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
       this.clearCheckpointSignature(open);
       if (current() && this.options.accountId() === open.accountId) {
-        await retryPendingSync(queue, this.options.cloud, open.accountId, current);
+        await this.submitPending(queue, open.accountId, current);
       }
       const retainedCaptures = this.pendingCapturesForOpen(open, queue);
       if (retainedCaptures.length > 0) {
         this.diagnosticEvents.record(
-          retainedCaptures.some((capture) => capture.status === "conflict")
+          retainedCaptures.some(isTerminalConflict)
             ? "session_sync_conflict"
             : "session_sync_pending",
         );
@@ -1719,7 +1732,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         if (stopped) await this.finishStoppedOpen(open, queue, current);
       }
       if (!current()) return;
-      await retryPendingSync(queue, this.options.cloud, accountId, current);
+      await this.submitPending(queue, accountId, current);
       if (current()) this.startPendingRetry();
     } finally {
       if (!this.shuttingDown && current()) this.draining = false;
@@ -1840,10 +1853,18 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       submitAfterStop && current() &&
       this.options.accountId() === open.accountId
     ) {
-      await retryPendingSync(queue, this.options.cloud, open.accountId, current);
+      await this.submitPending(queue, open.accountId, current);
       if (current()) this.closeResultForOpen(open, queue);
     }
     return true;
+  }
+
+  private submitPending(
+    queue: PendingSyncQueue,
+    accountId: string,
+    current?: () => boolean,
+  ): ReturnType<typeof retryPendingSync> {
+    return retryPendingSync(queue, this.options.cloud, accountId, current, this.options.deviceId());
   }
 
   async retryPending(): Promise<void> {
@@ -1851,7 +1872,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const pending = (async () => {
       const { queue, accountId } = this.requireContext(false);
       await this.reconcileClosedBrowsers(queue, accountId);
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
     })().finally(() => {
       if (this.pendingRetryInFlight === pending) this.pendingRetryInFlight = null;
     });
@@ -1878,7 +1899,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       let teardownConfirmed = true;
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
       while (true) {
         const opens = queue.listOpens(accountId);
         if (opens.length === 0) break;
@@ -1896,7 +1917,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         if (closedThisPass === 0) break;
       }
       if (this.options.accountId() === accountId) {
-        await retryPendingSync(queue, this.options.cloud, accountId);
+        await this.submitPending(queue, accountId);
       }
       released = this.options.accountId() === accountId &&
         teardownConfirmed &&
