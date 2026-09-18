@@ -692,20 +692,51 @@ export async function convertMobileProfile(id: string): Promise<any> {
 }
 
 export type ExportFormat = "csv" | "txt" | "xlsx";
+export interface ExportProgress { completed: number; total: number; }
 
 // ---- Export selected → download a CSV / .txt / Excel workbook ----------------
-export async function exportProfiles(ids: string[], format: ExportFormat): Promise<void> {
+export async function exportProfiles(
+  ids: string[], format: ExportFormat, onProgress?: (progress: ExportProgress) => void,
+): Promise<void> {
   const path = "/ui/api/profiles/export";
   const r = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ids, format }),
+    body: JSON.stringify({ ids, format, stream: true }),
   });
   if (!r.ok) {
     const body = await apiJson(r, path);
     throw new Error(body.error || "export failed");
   }
-  const blob = await r.blob();
+  let blob: Blob | undefined;
+  if (r.headers.get("content-type")?.includes("application/x-ndjson")) {
+    const reader = r.body!.getReader();
+    const decoder = new TextDecoder();
+    let pending = "";
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(value, { stream: true });
+        let end: number;
+        while ((end = pending.indexOf("\n")) !== -1) {
+          const record = JSON.parse(pending.slice(0, end));
+          pending = pending.slice(end + 1);
+          if (record.type === "error") throw new Error(record.error);
+          if (record.type === "progress") onProgress?.({ completed: record.completed, total: record.total });
+          if (record.type === "file") {
+            blob = new Blob([Uint8Array.from(atob(record.data), (char) => char.charCodeAt(0))], { type: record.mime });
+          }
+        }
+      }
+      if (!blob || pending.trim()) throw new Error("Export interrupted before the file was complete. Please try again.");
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  } else {
+    blob = await r.blob();
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

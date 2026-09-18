@@ -68,6 +68,7 @@ import {
   convertMobileProfile,
   exportProfiles,
   type ExportFormat,
+  type ExportProgress,
   updateFromFile,
   createGroup,
   renameGroup,
@@ -1062,6 +1063,9 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null); // transient success banner
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Active profile export: null when idle, otherwise how far the server-side
+  // collection has progressed ({completed: total} = file being built).
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [moveTarget, setMoveTarget] = useState("");
   const [newMode, setNewMode] = useState(false);
   const [newGroup, setNewGroup] = useState("");
@@ -2602,9 +2606,18 @@ function App() {
   // ---- Export selected → file ----
   const exportSelected = async (format: ExportFormat) => {
     setExportOpen(false);
-    if (!selected.size) return;
-    try { await exportProfiles([...selected], format); }
-    catch (e) { setActionErr(String(e)); }
+    if (!selected.size || exportProgress) return;
+    const ids = [...selected];
+    setActionErr(null);
+    setExportProgress({ completed: 0, total: ids.length });
+    try {
+      await exportProfiles(ids, format, (progress) => setExportProgress(progress));
+      flash(`Exported ${ids.length.toLocaleString()} profile${ids.length === 1 ? "" : "s"} as ${format.toUpperCase()}`);
+    } catch (e) {
+      setActionErr(String(e));
+    } finally {
+      setExportProgress(null);
+    }
   };
 
   // ---- Transient success banner ----
@@ -3138,6 +3151,14 @@ function App() {
           <Icon name="check" className="sm" />{notice}
         </div>
       )}
+      {exportProgress && (
+        <div className="notice" role="status">
+          <Icon name="export" className="sm" />
+          {exportProgress.completed >= exportProgress.total
+            ? "Building export file…"
+            : `Preparing export: ${exportProgress.completed.toLocaleString()} / ${exportProgress.total.toLocaleString()} profiles`}
+        </div>
+      )}
       {desktopUpdateResultSummary && !desktopUpdateResultDismissed && (
         <div
           className={`update-banner update-result ${desktopUpdateResultSummary.tone}`}
@@ -3230,10 +3251,10 @@ function App() {
           )}
           {/* Export and file edits work in Cloud; mobile conversion remains Local-only. */}
           <div className="menuwrap" ref={exportRef}>
-            <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>
+            <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size || !!exportProgress} onClick={() => setExportOpen((o) => !o)}>
               <Icon name="export" className="sm" />Export<Icon name="chevronDown" className="sm" />
             </button>
-            {exportOpen && selected.size > 0 && (
+            {exportOpen && selected.size > 0 && !exportProgress && (
               <div className="exportmenu popover below-left" onMouseLeave={() => setExportOpen(false)}>
                 <button className="pop-item" onClick={() => exportSelected("csv")}><Icon name="file" className="sm" />Export as CSV (credentials)</button>
                 <button className="pop-item" onClick={() => exportSelected("txt")}><Icon name="file" className="sm" />Export as .txt (full profile)</button>
@@ -3241,7 +3262,7 @@ function App() {
               </div>
             )}
           </div>
-          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
+          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size || !!exportProgress} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
             <Icon name="edit" className="sm" />Edit from file
           </button>
           <span className="vsep" />

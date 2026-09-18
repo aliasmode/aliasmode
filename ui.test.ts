@@ -1885,6 +1885,193 @@ test("Cloud export fails the whole download when one profile cannot be fetched",
   s.close();
 });
 
+test("streamed export reports progress in 16-wide Cloud batches and streams the identical file", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-export-stream-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const base = s.getProfile("k1d0cd11")!;
+  const ids = Array.from({ length: 34 }, (_, i) => `cloud${String(i).padStart(4, "0")}`);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+        const profile = { ...base, id, name: `Cloud ${id}` };
+        return { profile: { id, version: 1, activeOpens: [] }, payload: encodePortableProfile(profile) };
+      },
+    },
+  } as any;
+
+  const streamed = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids, format: "txt", stream: true }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(streamed!.status).toBe(200);
+  expect(streamed!.headers.get("content-type")).toContain("application/x-ndjson");
+  expect(streamed!.headers.get("cache-control")).toBe("no-store");
+  const records = (await streamed!.text()).trim().split("\n").map((line) => JSON.parse(line));
+  const progress = records.filter((record) => record.type === "progress");
+  expect(progress[0]).toEqual({ type: "progress", completed: 0, total: 34 });
+  expect(progress.at(-1)).toEqual({ type: "progress", completed: 34, total: 34 });
+  expect(maxInFlight).toBe(16); // 16-wide fan-out, not the previous 8
+  expect(records.filter((record) => record.type === "file")).toHaveLength(1);
+  const file = records.at(-1)!;
+  expect(file.type).toBe("file");
+  expect(file.mime).toContain("text/plain");
+
+  // The streamed file must be byte-identical to the legacy single-response export.
+  const legacy = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids, format: "txt" }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(Buffer.from(file.data, "base64").toString("utf8")).toBe(await legacy!.text());
+  s.close();
+});
+
+test("streamed export turns a failed Cloud fetch into an error record without a file", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-export-stream-error-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        if (id === "missing001") throw new CloudApiError("Cloud profile was not found", "profile_not_found", 404);
+        const profile = { ...s.getProfile("k1d0cd11")!, id };
+        return { profile: { id, version: 1, activeOpens: [] }, payload: encodePortableProfile(profile) };
+      },
+    },
+  } as any;
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11", "missing001"], format: "txt", stream: true }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  expect(response!.status).toBe(200);
+  const records = (await response!.text()).trim().split("\n").map((line) => JSON.parse(line));
+  expect(records[0]).toEqual({ type: "progress", completed: 0, total: 2 });
+  expect(records.find((record) => record.type === "error")).toMatchObject({ type: "error", error: "Cloud profile was not found" });
+  expect(records.some((record) => record.type === "file")).toBe(false);
+  s.close();
+});
+
+test("a disconnected streamed export stops scheduling further Cloud batches", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-cloud-export-stream-cancel-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const base = s.getProfile("k1d0cd11")!;
+  const ids = Array.from({ length: 40 }, (_, i) => `cloud${String(i).padStart(4, "0")}`);
+  const fetched: string[] = [];
+  const cloudConnection = {
+    client: {
+      async getProfile(id: string) {
+        fetched.push(id);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const profile = { ...base, id };
+        return { profile: { id, version: 1, activeOpens: [] }, payload: encodePortableProfile(profile) };
+      },
+    },
+  } as any;
+
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids, format: "txt", stream: true }),
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser: {} as any, cloudConnection },
+  );
+  const reader = response!.body!.getReader();
+  const first = await reader.read();
+  expect(new TextDecoder().decode(first.value!)).toContain('"completed":0');
+  await reader.cancel(); // the browser tab closed / the request was aborted
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(fetched).toHaveLength(16); // the in-flight batch finished; the rest were never scheduled
+  s.close();
+});
+
+test("remote-mode streamed export reports progress between hub batches", async () => {
+  const s = store();
+  const base = parseExport(SAMPLE).profiles[0]!;
+  const ids = Array.from({ length: 20 }, (_, i) => `hub${String(i).padStart(4, "0")}`);
+  const remote = {
+    async getProfiles(selected: string[], _full: boolean, onProgress?: (completed: number, total: number) => void) {
+      const out: Profile[] = [];
+      for (let i = 0; i < selected.length; i += 8) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        out.push(...selected.slice(i, i + 8).map((id) => ({ ...base, id })));
+        onProgress?.(out.length, selected.length);
+      }
+      return out;
+    },
+  } as any;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids, format: "csv", stream: true }),
+    }),
+    {} as any,
+    s,
+    remote,
+  );
+  const records = (await response!.text()).trim().split("\n").map((line) => JSON.parse(line));
+  expect(records.filter((record) => record.type === "progress").map((record) => record.completed)).toEqual([0, 8, 16, 20]);
+  const file = records.at(-1)!;
+  expect(file.type).toBe("file");
+  expect(file.mime).toContain("text/csv");
+  expect(Buffer.from(file.data, "base64").toString("utf8")).toContain("hub0000");
+  s.close();
+});
+
+test("local-mode streamed export reports progress after each profile", async () => {
+  const s = store();
+  s.upsertProfile({ ...s.getProfile("k1d0cd11")!, id: "local0002", name: "second" });
+  const captured: string[] = [];
+  const launcher = { async captureLocalSession(id: string) { captured.push(id); return false; } } as any;
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: ["k1d0cd11", "local0002"], format: "txt", stream: true }),
+    }),
+    launcher,
+    s,
+  );
+  const records = (await response!.text()).trim().split("\n").map((line) => JSON.parse(line));
+  expect(records.filter((record) => record.type === "progress").map((record) => record.completed)).toEqual([0, 1, 2]);
+  const file = records.at(-1)!;
+  expect(file.type).toBe("file");
+  const text = Buffer.from(file.data, "base64").toString("utf8");
+  expect(parseExport(text).profiles.map((profile) => profile.id)).toEqual(["k1d0cd11", "local0002"]);
+  expect(captured).toEqual(["k1d0cd11", "local0002"]);
+  s.close();
+});
+
 test("export as xlsx returns a workbook carrying the full identity", async () => {
   const s = store();
   const res = await handleUiRequest(

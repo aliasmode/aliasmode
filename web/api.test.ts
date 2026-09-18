@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   acceptCloudLegal,
   addProfileCookie,
@@ -62,6 +62,65 @@ test("profile export reports the server error", async () => {
   await expect(exportProfiles(["profile1"], "txt")).rejects.toThrow(
     "Cloud profile could not be downloaded",
   );
+});
+
+test("profile export reads split progress records and downloads the exact file bytes", async () => {
+  const bytes = new Uint8Array([0, 1, 127, 128, 255]);
+  const records = [
+    { type: "progress", completed: 0, total: 2 },
+    { type: "progress", completed: 2, total: 2 },
+    { type: "file", mime: "application/octet-stream", data: Buffer.from(bytes).toString("base64") },
+  ].map((record) => JSON.stringify(record) + "\n").join("");
+  let request: any;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    request = JSON.parse(String(init?.body));
+    return new Response(new ReadableStream({ start(controller) {
+      const encoded = new TextEncoder().encode(records);
+      for (let i = 0; i < encoded.length; i += 7) controller.enqueue(encoded.slice(i, i + 7));
+      controller.close();
+    } }), { headers: { "content-type": "application/x-ndjson" } });
+  }) as typeof fetch;
+  const progress: unknown[] = [];
+  let downloaded: Blob | undefined;
+  let clicks = 0;
+  const anchor = { href: "", download: "", click() { clicks++; }, remove() {} };
+  const documentDescriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", { configurable: true, value: {
+    createElement: () => anchor, body: { appendChild() {} },
+  } });
+  const create = spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+    downloaded = blob as Blob;
+    return "blob:synthetic";
+  });
+  const revoke = spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  try {
+    await exportProfiles(["p1", "p2"], "xlsx", (value) => progress.push(value));
+    expect(request).toEqual({ ids: ["p1", "p2"], format: "xlsx", stream: true });
+    expect(progress).toEqual([{ completed: 0, total: 2 }, { completed: 2, total: 2 }]);
+    expect(new Uint8Array(await downloaded!.arrayBuffer())).toEqual(bytes);
+    expect(anchor.download).toBe("aliasmode-export.xlsx");
+    expect(clicks).toBe(1);
+  } finally {
+    create.mockRestore();
+    revoke.mockRestore();
+    if (documentDescriptor) Object.defineProperty(globalThis, "document", documentDescriptor);
+    else Reflect.deleteProperty(globalThis, "document");
+  }
+});
+
+test("profile export rejects streamed errors and incomplete files", async () => {
+  for (const body of [
+    '{"type":"progress","completed":1,"total":2}\n',
+    '{"type":"file","mime":"text/plain","data":"YWJj"}',
+    '{"type":"error","error":"Cloud export failed"}\n',
+  ]) {
+    globalThis.fetch = (async () => new Response(body, {
+      headers: { "content-type": "application/x-ndjson" },
+    })) as unknown as typeof fetch;
+    await expect(exportProfiles(["p1", "p2"], "txt")).rejects.toThrow(
+      body.includes('"error"') ? "Cloud export failed" : "Export interrupted",
+    );
+  }
 });
 
 test("dashboard roster carries health and group metadata while tolerating an older local server", async () => {

@@ -1140,13 +1140,20 @@ export async function handleUiRequest(
     return Response.json({ report: await readLatestDiagnose(options.paths?.reports) });
   }
 
+  // Cloud exports fan out this many concurrent profile fetches. Big enough to
+  // keep a 1,600-profile export moving, small enough not to open hundreds of
+  // Cloud connections at once.
+  const CLOUD_EXPORT_BATCH = 16;
+
   if (pathname === "/ui/api/profiles/export" && req.method === "POST") {
-    // Export selected profiles for offline editing. Returns the file directly
-    // (not JSON) so the browser saves it. Both formats carry `id` so the file
-    // can be re-uploaded through /ui/api/profiles/update-file.
-    let body: { ids?: unknown; format?: unknown };
+    // Export selected profiles for offline editing. Replies with the finished
+    // file directly (not JSON) so the browser saves it; the dashboard opts into
+    // `stream: true` for newline-delimited progress + file records instead.
+    // Both formats carry `id` so the file can be re-uploaded through
+    // /ui/api/profiles/update-file.
+    let body: { ids?: unknown; format?: unknown; stream?: unknown };
     try {
-      body = (await req.json()) as { ids?: unknown; format?: unknown };
+      body = (await req.json()) as { ids?: unknown; format?: unknown; stream?: unknown };
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
     }
@@ -1165,59 +1172,123 @@ export async function handleUiRequest(
     // user-agent, so they need the profile's secrets. .csv is the trimmed
     // credential view.
     const full = format !== "csv";
+    if (options.cloudBrowser && !options.cloudConnection && !remote) {
+      return Response.json(
+        { ok: false, error: "AliasMode Cloud connection is unavailable" },
+        { status: 503 },
+      );
+    }
     try {
-      let profiles: ProfileExport[];
-      if (remote) {
-        // The local store is only a launch cache in remote mode.
-        profiles = await remote.getProfiles(ids, full);
-      } else if (options.cloudBrowser) {
-        if (!options.cloudConnection) {
-          return Response.json(
-            { ok: false, error: "AliasMode Cloud connection is unavailable" },
-            { status: 503 },
-          );
+      // Collect the export rows from whichever store owns the profile. The
+      // optional hooks exist for the streaming response below: `onProgress`
+      // reports how many selected profiles are fully processed, and `aborted`
+      // (a disconnected client) stops further batches instead of fetching a
+      // file nobody is left to receive.
+      const collectProfiles = async (
+        onProgress: (completed: number) => void,
+        aborted: () => boolean,
+      ): Promise<ProfileExport[]> => {
+        if (remote) {
+          // The local store is only a launch cache in remote mode; the hub
+          // reader keeps its own bounded fan-out and reports between batches.
+          return remote.getProfiles(ids, full, (completed) => onProgress(completed));
         }
-        profiles = [];
-        for (let i = 0; i < ids.length; i += 8) {
-          const batch = await Promise.all(ids.slice(i, i + 8).map(async (id) => {
-            const authoritative = await options.cloudConnection!.client.getProfile(id);
-            const { profile, sessionBundle } = decodePortableProfile(authoritative.payload);
-            if (profile.id !== id) throw new Error("Cloud returned a mismatched profile payload");
-            const local = store.getProfile(id);
-            if (local?.fpObserved) profile.fpObserved = { ...local.fpObserved };
-            if (local?.fpExpected) profile.fpExpected = { ...local.fpExpected };
-            return { ...profile, sessionBundle, sessionSource: "cloud" as const };
-          }));
-          profiles.push(...batch);
+        if (options.cloudBrowser) {
+          const profiles: ProfileExport[] = [];
+          for (let i = 0; i < ids.length; i += CLOUD_EXPORT_BATCH) {
+            if (aborted()) return profiles;
+            const batch = await Promise.all(ids.slice(i, i + CLOUD_EXPORT_BATCH).map(async (id) => {
+              const authoritative = await options.cloudConnection!.client.getProfile(id);
+              const { profile, sessionBundle } = decodePortableProfile(authoritative.payload);
+              if (profile.id !== id) throw new Error("Cloud returned a mismatched profile payload");
+              const local = store.getProfile(id);
+              if (local?.fpObserved) profile.fpObserved = { ...local.fpObserved };
+              if (local?.fpExpected) profile.fpExpected = { ...local.fpExpected };
+              return { ...profile, sessionBundle, sessionSource: "cloud" as const };
+            }));
+            profiles.push(...batch);
+            onProgress(Math.min(i + CLOUD_EXPORT_BATCH, ids.length));
+          }
+          return profiles;
         }
-      } else {
-        profiles = [];
+        const profiles: ProfileExport[] = [];
+        let processed = 0;
         for (const id of ids) {
+          if (aborted()) return profiles;
           const fresh = full && await launcher.captureLocalSession(id);
           const profile = store.getProfile(id);
-          if (!profile) continue;
-          const sessionBundle = full ? store.getSessionBundle(id) ?? undefined : undefined;
-          profiles.push({ ...profile, sessionBundle, sessionSource: fresh ? "live" : sessionBundle ? "saved" : "stored-cookies" });
+          if (profile) {
+            const sessionBundle = full ? store.getSessionBundle(id) ?? undefined : undefined;
+            profiles.push({ ...profile, sessionBundle, sessionSource: fresh ? "live" : sessionBundle ? "saved" : "stored-cookies" });
+          }
+          onProgress(++processed);
         }
-      }
+        return profiles;
+      };
 
-      if (format === "xlsx") {
-        const { headers, rows } = serializeXlsxRows(profiles);
-        const book = await writeXlsx(headers, rows);
-        return new Response(book as unknown as BodyInit, {
+      const buildExportFile = async (profiles: ProfileExport[]): Promise<{ mime: string; bytes: Uint8Array }> => {
+        if (format === "xlsx") {
+          const { headers, rows } = serializeXlsxRows(profiles);
+          return {
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            bytes: await writeXlsx(headers, rows),
+          };
+        }
+        const text = format === "txt" ? serializeAdsTxt(profiles) : serializeCsv(profiles);
+        return { mime: `${format === "txt" ? "text/plain" : "text/csv"}; charset=utf-8`, bytes: new TextEncoder().encode(text) };
+      };
+
+      if (body.stream !== true) {
+        // Legacy single-response export: build everything, then reply with the
+        // finished file in one piece.
+        const { mime, bytes } = await buildExportFile(await collectProfiles(() => {}, () => false));
+        return new Response(bytes as unknown as BodyInit, {
           headers: {
-            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "content-disposition": "attachment; filename=aliasmode-export.xlsx",
+            "content-type": mime,
+            "content-disposition": `attachment; filename=aliasmode-export.${format}`,
             "cache-control": "no-store",
           },
         });
       }
 
-      const text = format === "txt" ? serializeAdsTxt(profiles) : serializeCsv(profiles);
-      return new Response(text, {
+      // Streaming export (dashboard): newline-delimited JSON records keep the
+      // HTTP response alive while profiles are fetched — a 1,600-profile Cloud
+      // export can run for minutes — then one file record delivers the bytes.
+      // The connection staying active also sidesteps idle-timeout failure of a
+      // single long-silent response.
+      let clientGone = false;
+      req.signal.addEventListener("abort", () => { clientGone = true; });
+      const encoder = new TextEncoder();
+      const records = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (record: unknown) => {
+            if (clientGone) return;
+            try {
+              controller.enqueue(encoder.encode(JSON.stringify(record) + "\n"));
+            } catch {
+              clientGone = true; // the client aborted between batches
+            }
+          };
+          try {
+            send({ type: "progress", completed: 0, total: ids.length });
+            const profiles = await collectProfiles(
+              (completed) => send({ type: "progress", completed, total: ids.length }),
+              () => clientGone,
+            );
+            if (clientGone) return;
+            const { mime, bytes } = await buildExportFile(profiles);
+            send({ type: "file", mime, data: Buffer.from(bytes).toString("base64") });
+          } catch (error) {
+            send({ type: "error", error: msg(error) });
+          } finally {
+            try { controller.close(); } catch { /* already closed by cancel() */ }
+          }
+        },
+        cancel() { clientGone = true; },
+      });
+      return new Response(records, {
         headers: {
-          "content-type": `${format === "txt" ? "text/plain" : "text/csv"}; charset=utf-8`,
-          "content-disposition": `attachment; filename=aliasmode-export.${format}`,
+          "content-type": "application/x-ndjson; charset=utf-8",
           "cache-control": "no-store",
         },
       });
