@@ -1,3 +1,22 @@
+; The bundled sidecar owns the browsers, so the app always stops it before an
+; update installs. A crash, a forced close, or an interrupted shutdown can still
+; leave one running, and the default template only closes the main executable.
+; Installing over a running sidecar fails with "Error opening file for writing",
+; so stop it here. Cloud sessions survive: every open browser's session is saved
+; again from its encrypted local queue after the next start.
+!macro NSIS_HOOK_PREINSTALL
+  Push $R0
+
+  nsExec::Exec 'taskkill /IM "aliasmode-sidecar.exe"'
+  Pop $R0
+  Sleep 5000
+  nsExec::Exec 'taskkill /F /T /IM "aliasmode-sidecar.exe"'
+  Pop $R0
+  Sleep 2000
+
+  Pop $R0
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   Push $R0
   Push $R1

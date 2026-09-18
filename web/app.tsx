@@ -52,6 +52,7 @@ import {
   openProfile,
   closeProfile,
   raiseProfile,
+  restoreParkedSession,
   fetchExtensions,
   installWebStoreExtension,
   uploadExtensions,
@@ -277,6 +278,7 @@ const CLOUD_DIAGNOSTIC_LABELS: Record<CloudDiagnosticEvent["type"], string> = {
   browser_teardown_unconfirmed: "Browser teardown could not be confirmed",
   session_sync_conflict: "Session synchronization has a terminal conflict",
   access_ended: "Cloud access ended",
+  parked_session_restored: "Saved session restored to Cloud",
 };
 
 function cloudDiagnosticFailed(type: CloudDiagnosticEvent["type"]): boolean {
@@ -2115,6 +2117,22 @@ function App() {
     }
   };
 
+  /**
+   * A session Cloud refused is kept encrypted here. Restoring writes it back as
+   * the profile's current session, replacing the logins Cloud holds now.
+   */
+  const restoreSession = (profile: UiProfile) => {
+    const savedAt = profile.parkedSession
+      ? new Date(profile.parkedSession.savedAt).toLocaleString()
+      : "";
+    if (!confirm(
+      `Restore the session saved on this device for ${profile.name} (${savedAt})?\n\n` +
+      "Its cookies and logins replace the ones Cloud has for this profile. " +
+      "Everything else keeps its current Cloud values.",
+    )) return;
+    void act(profile.id, restoreParkedSession);
+  };
+
   const openCookie = (profile: UiProfile) => {
     setCookieProfile(profile);
     setCookieForm({ ...BLANK_COOKIE_FORM, domain: profile.platform });
@@ -3428,6 +3446,26 @@ function App() {
                               <Icon name="laptop" className="sm" />Convert
                             </button>
                           ) : null
+                        ) : p.parkedSession && p.permission === "edit" ? (
+                          <>
+                            <button
+                              className="btn sm warn tip"
+                              data-tip={`Saved on this device ${new Date(p.parkedSession.savedAt).toLocaleString()}`}
+                              aria-label={`Restore the saved session of ${p.name}`}
+                              disabled={busy[p.id]}
+                              onClick={() => restoreSession(p)}
+                            >
+                              <Icon name="refresh" className="sm" />Restore session
+                            </button>
+                            <button
+                              className="btn sm primary"
+                              aria-label={`Open ${p.name}`}
+                              disabled={busy[p.id]}
+                              onClick={() => act(p.id, openProfile)}
+                            >
+                              <Icon name="play" className="sm" />Open
+                            </button>
+                          </>
                         ) : (
                           <button
                             className="btn sm primary"

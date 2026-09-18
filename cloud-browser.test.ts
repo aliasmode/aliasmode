@@ -2156,7 +2156,8 @@ test("Cloud browser reopens the latest Cloud state while preserving a stale CAS 
 
   expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toMatchObject({
     ok: true,
-    warning: "Opened the latest Cloud state. An older conflicting snapshot remains encrypted on this device.",
+    warning: "Opened the current Cloud copy. This device's last session for this profile was not saved because " +
+      "Cloud rejected it; that session remains encrypted on this device.",
   });
   expect(restoredSession.cookies[0]?.value).toBe("latest-cloud-session");
   expect(state.queue.get(conflict!.id, "account1")?.status).toBe("conflict");
@@ -2165,6 +2166,76 @@ test("Cloud browser reopens the latest Cloud state while preserving a stale CAS 
   expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
   expect(state.queue.list("account1")).toEqual([conflict!]);
   expect(state.queue.get(conflict!.id, "account1")?.status).toBe("conflict");
+  state.queue.close();
+  state.store.close();
+});
+
+/** Cloud rejects registration1 only because its lease expired: the version is still 4. */
+function expireFirstLease(state: ReturnType<typeof setup>, resaveOpen: () => Promise<OpenProfileResponse>) {
+  const options = (state.coordinator as any).options;
+  const closed: string[] = [];
+  options.cloud.closeOpen = async (registrationId: string, request: { expectedVersion: number }) => {
+    closed.push(registrationId);
+    if (registrationId === "registration1") {
+      return {
+        ok: false,
+        error: { code: "version_conflict", message: "The open registration expired.", currentVersion: 4 },
+      };
+    }
+    return { ok: true, status: "accepted", version: request.expectedVersion + 1 };
+  };
+  options.cloud.openProfile = async () => {
+    state.events.push("cloud-open");
+    return resaveOpen();
+  };
+  return closed;
+}
+
+function freshOpen(registrationId: string, baseVersion = 4): OpenProfileResponse {
+  return { ok: true, registrationId, baseVersion, payload: payload(), activeOpens: [] };
+}
+
+test("Cloud browser saves a lease-expired close through a fresh registration", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const closed = expireFirstLease(state, async () => freshOpen("registration2"));
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+  expect(closed).toEqual(["registration1", "registration2"]);
+  expect(state.queue.list("account1")).toEqual([]);
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser keeps a lease-expired session instead of reopening the older Cloud copy", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  let heldElsewhere = true;
+  let registrations = 1;
+  const closed = expireFirstLease(state, async () => {
+    if (heldElsewhere) throw new CloudApiError("open elsewhere", "profile_open", 409);
+    return freshOpen(`registration${++registrations}`, registrations === 2 ? 4 : 5);
+  });
+
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+  expect(state.queue.list("account1")).toMatchObject([{ status: "conflict", error: "lease_expired" }]);
+
+  const restoresBefore = state.events.filter((event) => event === "restore").length;
+  expect(await state.coordinator.open("profile1", ["--window-size=1200,800"])).toEqual({
+    ok: false,
+    error: "This profile's last session from this device is still being saved to Cloud. Try again shortly.",
+  });
+  expect(state.events.filter((event) => event === "restore")).toHaveLength(restoresBefore);
+
+  heldElsewhere = false;
+  const reopened = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(reopened).toMatchObject({ ok: true });
+  expect((reopened as { warning?: string }).warning).toBeUndefined();
+  expect(closed).toEqual(["registration1", "registration2"]);
+  // Only the new open's baseline checkpoint remains, on top of the resaved version.
+  expect(state.queue.list("account1")).toMatchObject([
+    { expectedVersion: 5, readyToSubmit: false, status: "pending" },
+  ]);
   state.queue.close();
   state.store.close();
 });
@@ -3593,4 +3664,126 @@ test("Cloud close renews its lease through capture and confirmed teardown", asyn
     state.queue.close();
     state.store.close();
   }
+});
+
+/** Park a session Cloud refused for a real version change, as a lost session is. */
+async function parkRejectedSession(state: ReturnType<typeof setup>) {
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  options.readSession = async () => JSON.stringify({
+    cookies: [{ name: "auth_token", value: "rescued-session", domain: ".x.com", path: "/" }],
+    origins: [],
+  });
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "conflict" });
+  const parked = state.queue.list("account1")[0]!;
+  expect(parked).toMatchObject({ status: "conflict", expectedVersion: 4 });
+  return parked;
+}
+
+/** Cloud moved to version 5 while this device held the refused session. */
+function cloudMovedOn(state: ReturnType<typeof setup>) {
+  const options = (state.coordinator as any).options;
+  const current = payload();
+  current.profile.name = "Renamed in Cloud";
+  current.session.cookies[0]!.value = "current-cloud-session";
+  const saved: PortableProfileV1[] = [];
+  options.cloud.openProfile = async () => {
+    state.events.push("cloud-open");
+    return { ok: true, registrationId: "registration2", baseVersion: 5, payload: current, activeOpens: [] };
+  };
+  options.cloud.closeOpen = async (registrationId: string, request: { expectedVersion: number; payload: PortableProfileV1 }) => {
+    expect(registrationId).toBe("registration2");
+    expect(request.expectedVersion).toBe(5);
+    saved.push(structuredClone(request.payload));
+    return { ok: true, status: "accepted", version: 6 };
+  };
+  return saved;
+}
+
+test("Cloud browser restores a parked session onto the current Cloud copy", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  const saved = cloudMovedOn(state);
+
+  expect(await state.coordinator.restoreParkedSession("profile1")).toEqual({ ok: true, version: 6 });
+  expect(saved).toHaveLength(1);
+  expect(saved[0]!.session.cookies[0]!.value).toBe("rescued-session");
+  // Everything else stays as Cloud has it now.
+  expect(saved[0]!.profile.name).toBe("Renamed in Cloud");
+  expect(state.queue.get(parked.id, "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser keeps a parked session when the restore is refused", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  const options = (state.coordinator as any).options;
+  options.cloud.openProfile = async () => {
+    throw new CloudApiError("open elsewhere", "profile_open", 409);
+  };
+
+  expect(await state.coordinator.restoreParkedSession("profile1")).toMatchObject({ ok: false });
+  expect(state.queue.get(parked.id, "account1")?.status).toBe("conflict");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser refuses to restore a parked session while the profile is open", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  cloudMovedOn(state);
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+
+  expect(await state.coordinator.restoreParkedSession("profile1")).toEqual({
+    ok: false,
+    error: "Close this profile's browser before restoring a saved session.",
+  });
+  expect(state.queue.get(parked.id, "account1")?.status).toBe("conflict");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster reports a parked session for recovery", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  const roster = await state.coordinator.listRoster();
+  expect(roster.profiles[0]).toMatchObject({
+    id: "profile1",
+    parkedSession: { savedAt: parked.createdAt },
+  });
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud releaseAll closes several profiles at once", async () => {
+  const state = setup();
+  const ids = ["profile1", "profile2", "profile3", "profile4", "profile5", "profile6"];
+  for (const profileId of ids) {
+    state.queue.recordOpen({
+      accountId: "account1",
+      profileId,
+      registrationId: `registration-${profileId}`,
+      expectedVersion: 4,
+    });
+  }
+  let inFlight = 0;
+  let peak = 0;
+  const closed: string[] = [];
+  (state.coordinator as any).close = async (profileId: string) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await Bun.sleep(5);
+    state.queue.removeOpen(profileId, "account1");
+    closed.push(profileId);
+    inFlight--;
+    return { closed: true, sync: "complete" };
+  };
+
+  expect(await state.coordinator.releaseAll(true)).toBe(true);
+  expect(closed.sort()).toEqual([...ids].sort());
+  expect(peak).toBeGreaterThan(1);
+  expect(peak).toBeLessThanOrEqual(4);
+  state.queue.close();
+  state.store.close();
 });

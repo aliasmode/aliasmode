@@ -810,3 +810,12 @@ test("the update banner shows release highlights and native install progress", (
   expect(app).toContain('invoke("update_now", { onProgress })');
   expect(styles).toContain(".update-progress progress");
 });
+
+test("a profile with a session Cloud refused offers restoring it before opening", () => {
+  expect(app).toContain("p.parkedSession && p.permission === \"edit\" ? (");
+  expect(app).toContain("Restore session");
+  // Restoring replaces the Cloud logins, so it must never happen unprompted.
+  const restore = app.slice(app.indexOf("const restoreSession ="), app.indexOf("const openCookie ="));
+  expect(restore).toContain("if (!confirm(");
+  expect(restore).toContain("act(profile.id, restoreParkedSession)");
+});

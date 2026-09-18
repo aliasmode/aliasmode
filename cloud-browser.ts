@@ -1,6 +1,10 @@
 import { watch } from "node:fs";
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
-import type { CloudProfileSummary, ImportProfilesResponse } from "./contracts/cloud-v1.ts";
+import type {
+  CloudProfileSummary,
+  ImportProfilesResponse,
+  OpenProfileResponse,
+} from "./contracts/cloud-v1.ts";
 import {
   CloudDiagnostics,
   type CloudDiagnosticEvent,
@@ -14,7 +18,9 @@ import {
   type Launcher,
 } from "./launcher.ts";
 import {
+  isResavableConflict,
   type PendingClose,
+  type PendingCloseSummary,
   type PendingOpenSession,
   type PendingSyncQueue,
   retryPendingSync,
@@ -54,6 +60,16 @@ export type CloudBrowserCloseResult =
   | CloudBrowserClosedResult
   | { closed: false; reason: "teardown_unconfirmed" };
 
+export type CloudRestoreResult =
+  | { ok: true; version: number }
+  | { ok: false; error: string };
+
+/** A session Cloud refused for good, kept encrypted here for manual recovery. */
+export interface CloudParkedSession {
+  savedAt: number;
+  reason: string | null;
+}
+
 export interface CloudBrowserProfile {
   id: string;
   name: string;
@@ -76,6 +92,8 @@ export interface CloudBrowserProfile {
   lockedBy: string | null;
   permission: "view" | "edit";
   version: number;
+  /** Present while a refused session for this profile is recoverable here. */
+  parkedSession?: CloudParkedSession;
 }
 
 export interface CloudBrowserLifecycle {
@@ -91,6 +109,8 @@ export interface CloudBrowserLifecycle {
   importProfiles(destination: string, profiles: ProfileExport[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<CloudBrowserCloseResult>;
+  /** Write this device's refused session back to Cloud as a new version. */
+  restoreParkedSession(profileId: string): Promise<CloudRestoreResult>;
   secureAfterAuthentication(current?: () => boolean): Promise<void>;
   resumeAfterAuthentication(current?: () => boolean): Promise<void>;
   retryPending(): Promise<void>;
@@ -139,12 +159,22 @@ const PENDING_SESSION_BASE_VERSION = -1;
 const PROXY_BACKFILL_BATCH = 8;
 /** How long a failed backfill fetch stays quiet before it is retried. */
 const PROXY_BACKFILL_RETRY_MS = 300_000;
+/** Parallel closes during a release, matching the dashboard lifecycle limit. */
+const RELEASE_CLOSE_LIMIT = 4;
 const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 1_200;
 const DEFAULT_CHECKPOINT_MIN_INTERVAL_MS = 3_000;
 const CLOUD_PROFILE_OPEN_ERROR =
   "This Cloud profile is open in another session. Close it there, or try again shortly if that browser already closed.";
 const TERMINAL_CONFLICT_WARNING =
-  "Opened the latest Cloud state. An older conflicting snapshot remains encrypted on this device.";
+  "Opened the current Cloud copy. This device's last session for this profile was not saved because " +
+  "Cloud rejected it; that session remains encrypted on this device.";
+const RESAVE_PENDING_ERROR =
+  "This profile's last session from this device is still being saved to Cloud. Try again shortly.";
+
+/** A conflict Cloud will never accept, unlike a close that only lost its lease. */
+function isTerminalConflict(capture: PendingClose): boolean {
+  return capture.status === "conflict" && !isResavableConflict(capture);
+}
 
 interface CloudCheckpointState {
   registrationId: string;
@@ -251,6 +281,27 @@ export function observeBrowserTargets(
       try { socket.close(); } catch {}
     },
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function openProfileError(error: unknown): string {
+  if (error instanceof CloudApiError && error.code === "profile_open") return CLOUD_PROFILE_OPEN_ERROR;
+  return errorMessage(error);
+}
+
+/** The most recent session Cloud refused for good, for this profile. */
+function newestParkedSession(
+  queue: PendingSyncQueue,
+  accountId: string,
+  profileId: string,
+): PendingCloseSummary | undefined {
+  return queue.list(accountId)
+    .filter((summary) => summary.profileId === profileId && summary.status === "conflict"
+      && summary.readyToSubmit && !isResavableConflict(summary))
+    .at(-1);
 }
 
 function errorCode(error: unknown): string {
@@ -408,6 +459,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         .map((profile) => {
           const launch = this.options.store.getLaunch(profile.id);
           const cached = this.options.store.getProfile(profile.id);
+          const parked = newestParkedSession(queue, accountId, profile.id);
           const localRegistrationIds = localRegistrations.get(profile.id);
           const otherActiveOpens = profile.activeOpens.filter(
             (open) => !localRegistrationIds?.has(open.registrationId),
@@ -433,6 +485,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
               : null,
             permission: profile.permission,
             version: profile.version,
+            ...(parked ? { parkedSession: { savedAt: parked.createdAt, reason: parked.error } } : {}),
           };
         }),
       healthSources: [],
@@ -598,11 +651,15 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     };
 
     try {
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
       const pendingForProfile = queue.list(accountId)
         .filter((pending) => pending.profileId === profileId);
       if (pendingForProfile.some((pending) => pending.status !== "conflict")) {
         return { ok: false, error: "Pending Cloud synchronization must be resolved before reopening" };
+      }
+      // Opening now would restore the older Cloud copy over the unsaved session.
+      if (pendingForProfile.some(isResavableConflict)) {
+        return { ok: false, error: RESAVE_PENDING_ERROR };
       }
       const hasTerminalConflict = pendingForProfile.some((pending) => pending.status === "conflict");
       if (queue.getOpen(profileId, accountId)) {
@@ -910,6 +967,57 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
   }
 
+  /**
+   * Write a parked session back to Cloud as a new version. A session is parked
+   * when Cloud refused its close for good — the profile changed elsewhere first
+   * — so only the operator can decide it is the state they want. Everything but
+   * the session keeps Cloud's current values, and the parked copy is released
+   * only once Cloud accepts it.
+   */
+  async restoreParkedSession(profileId: string): Promise<CloudRestoreResult> {
+    if (this.shuttingDown || this.draining) {
+      return { ok: false, error: "Cloud browser coordinator is shutting down" };
+    }
+    return this.withProfileTransition(profileId, async () => {
+      const { queue, accountId, deviceId } = this.requireContext(true);
+      if (queue.getOpen(profileId, accountId) || this.options.store.getLaunch(profileId)) {
+        return { ok: false, error: "Close this profile's browser before restoring a saved session." };
+      }
+      const summary = newestParkedSession(queue, accountId, profileId);
+      if (!summary) return { ok: false, error: "This profile has no saved session on this device." };
+      let parked: PendingClose | null;
+      try {
+        parked = queue.get(summary.id, accountId);
+      } catch {
+        return { ok: false, error: "The saved session on this device could not be decrypted." };
+      }
+      if (!parked) return { ok: false, error: "This profile has no saved session on this device." };
+
+      let opened: OpenProfileResponse;
+      try {
+        opened = await this.options.cloud.openProfile(profileId, { deviceId });
+      } catch (error) {
+        return { ok: false, error: openProfileError(error) };
+      }
+      try {
+        const response = await this.options.cloud.closeOpen(opened.registrationId, {
+          expectedVersion: opened.baseVersion,
+          payload: { ...opened.payload, session: parked.payload.session },
+        });
+        if (!response.ok) {
+          await this.options.cloud.abandon(opened.registrationId).catch(() => {});
+          return { ok: false, error: "Cloud changed while restoring. Try again." };
+        }
+        queue.remove(parked.id, accountId);
+        this.diagnosticEvents.record("parked_session_restored");
+        return { ok: true, version: response.version };
+      } catch (error) {
+        await this.options.cloud.abandon(opened.registrationId).catch(() => {});
+        return { ok: false, error: errorMessage(error) };
+      }
+    });
+  }
+
   async close(profileId: string): Promise<CloudBrowserCloseResult> {
     const existing = this.closing.get(profileId);
     if (existing) return existing;
@@ -1052,7 +1160,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     this.clearCheckpointSignature(open);
     if (this.options.accountId() === accountId) {
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
     }
     const result = this.closeResultForOpen(open, queue);
     this.diagnosticEvents.record(result.sync === "complete" ? "session_synced" : "cleanup_retained");
@@ -1096,7 +1204,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       return { closed: true, sync: "complete" };
     }
     this.startPendingRetry();
-    if (captures.some((capture) => capture.status === "conflict")) {
+    if (captures.some(isTerminalConflict)) {
       this.diagnosticEvents.record("session_sync_conflict");
       return { closed: true, sync: "conflict" };
     }
@@ -1190,12 +1298,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
       this.clearCheckpointSignature(open);
       if (current() && this.options.accountId() === open.accountId) {
-        await retryPendingSync(queue, this.options.cloud, open.accountId, current);
+        await this.submitPending(queue, open.accountId, current);
       }
       const retainedCaptures = this.pendingCapturesForOpen(open, queue);
       if (retainedCaptures.length > 0) {
         this.diagnosticEvents.record(
-          retainedCaptures.some((capture) => capture.status === "conflict")
+          retainedCaptures.some(isTerminalConflict)
             ? "session_sync_conflict"
             : "session_sync_pending",
         );
@@ -1719,7 +1827,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         if (stopped) await this.finishStoppedOpen(open, queue, current);
       }
       if (!current()) return;
-      await retryPendingSync(queue, this.options.cloud, accountId, current);
+      await this.submitPending(queue, accountId, current);
       if (current()) this.startPendingRetry();
     } finally {
       if (!this.shuttingDown && current()) this.draining = false;
@@ -1840,10 +1948,18 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       submitAfterStop && current() &&
       this.options.accountId() === open.accountId
     ) {
-      await retryPendingSync(queue, this.options.cloud, open.accountId, current);
+      await this.submitPending(queue, open.accountId, current);
       if (current()) this.closeResultForOpen(open, queue);
     }
     return true;
+  }
+
+  private submitPending(
+    queue: PendingSyncQueue,
+    accountId: string,
+    current?: () => boolean,
+  ): ReturnType<typeof retryPendingSync> {
+    return retryPendingSync(queue, this.options.cloud, accountId, current, this.options.deviceId());
   }
 
   async retryPending(): Promise<void> {
@@ -1851,7 +1967,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const pending = (async () => {
       const { queue, accountId } = this.requireContext(false);
       await this.reconcileClosedBrowsers(queue, accountId);
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
     })().finally(() => {
       if (this.pendingRetryInFlight === pending) this.pendingRetryInFlight = null;
     });
@@ -1878,25 +1994,34 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
 
       let teardownConfirmed = true;
-      await retryPendingSync(queue, this.options.cloud, accountId);
+      await this.submitPending(queue, accountId);
       while (true) {
         const opens = queue.listOpens(accountId);
         if (opens.length === 0) break;
         let closedThisPass = 0;
-        for (const open of opens) {
-          try {
-            const result = await this.close(open.profileId);
-            const current = queue.getOpen(open.profileId, accountId);
-            if (!current || current.registrationId !== open.registrationId) closedThisPass++;
-            if (!result.closed) teardownConfirmed = false;
-          } catch {
-            teardownConfirmed = false;
+        // Each close captures and uploads a whole browser session, so closing
+        // them one at a time makes a shutdown budget scale with the profile
+        // count. Bounded like the dashboard's own bulk close.
+        const remaining = [...opens];
+        const closeNext = async (): Promise<void> => {
+          for (let open = remaining.shift(); open; open = remaining.shift()) {
+            try {
+              const result = await this.close(open.profileId);
+              const current = queue.getOpen(open.profileId, accountId);
+              if (!current || current.registrationId !== open.registrationId) closedThisPass++;
+              if (!result.closed) teardownConfirmed = false;
+            } catch {
+              teardownConfirmed = false;
+            }
           }
-        }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(RELEASE_CLOSE_LIMIT, remaining.length) }, closeNext),
+        );
         if (closedThisPass === 0) break;
       }
       if (this.options.accountId() === accountId) {
-        await retryPendingSync(queue, this.options.cloud, accountId);
+        await this.submitPending(queue, accountId);
       }
       released = this.options.accountId() === accountId &&
         teardownConfirmed &&

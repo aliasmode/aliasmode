@@ -244,3 +244,14 @@ test("desktop shutdown fails closed when browser teardown is unconfirmed", async
   await expect(runtime.shutdown()).rejects.toThrow("browser teardown was not confirmed");
   expect(storeClosed).toBe(true);
 });
+
+test("the Windows installer stops a leftover sidecar before overwriting it", () => {
+  const hooks = readFileSync(
+    join(import.meta.dir, "src-tauri", "windows", "installer-hooks.nsh"),
+    "utf8",
+  );
+  expect(hooks).toContain("!macro NSIS_HOOK_PREINSTALL");
+  // A graceful attempt first, then force: a locked sidecar aborts the install.
+  expect(hooks).toContain(`nsExec::Exec 'taskkill /IM "aliasmode-sidecar.exe"'`);
+  expect(hooks).toContain(`nsExec::Exec 'taskkill /F /T /IM "aliasmode-sidecar.exe"'`);
+});

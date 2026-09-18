@@ -21,9 +21,12 @@ import {
 import { dirname } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
 import type {
+  AbandonOpenResponse,
   CloseOpenConflict,
   CloseOpenRequest,
   CloseOpenResponse,
+  OpenProfileRequest,
+  OpenProfileResponse,
   PendingSyncStatus,
   PortableProfileV1,
 } from "./contracts/cloud-v1.ts";
@@ -317,6 +320,15 @@ export class PendingSyncQueue {
 
   markConflict(id: string, accountId: string, error: string): boolean {
     return this.updateStatus(id, accountId, "conflict", error);
+  }
+
+  /** Record why a close is a conflict, including one that already was. */
+  setConflictError(id: string, accountId: string, error: string): boolean {
+    return this.db.query(`
+      UPDATE pending_closes
+      SET status = 'conflict', error = ?, updated_at = ?
+      WHERE id = ? AND account_id = ?
+    `).run(error, Date.now(), id, accountId).changes === 1;
   }
 
   remove(id: string, accountId: string): boolean {
@@ -716,6 +728,9 @@ export interface PendingCloseSubmitter {
     registrationId: string,
     request: CloseOpenRequest,
   ): Promise<CloseOpenResponse | CloseOpenConflict>;
+  /** Needed to resave a close whose lease expired while nobody else wrote the profile. */
+  openProfile?(profileId: string, request: OpenProfileRequest): Promise<OpenProfileResponse>;
+  abandon?(registrationId: string): Promise<AbandonOpenResponse>;
 }
 
 export interface PendingSyncRetryResult {
@@ -734,26 +749,116 @@ const TERMINAL_PENDING_CLOSE_ERRORS = new Set([
   "validation_failed",
 ]);
 
+/**
+ * Cloud rejects a close once its open lease has expired, even when nobody else
+ * wrote the profile. Any heartbeat gap longer than the lease causes that: an app
+ * update, a crash, sleep, or a network outage. Such a close is still the newest
+ * state of the profile, so it stays resavable instead of a permanent conflict.
+ */
+const LEASE_EXPIRED = "lease_expired";
+
+function versionConflictError(currentVersion: number): string {
+  return `version conflict (current version ${currentVersion})`;
+}
+
+/** True for a conflict that only lost its lease and can still be saved unchanged. */
+export function isResavableConflict(summary: PendingCloseSummary): boolean {
+  return summary.status === "conflict" && summary.readyToSubmit && (
+    summary.error === LEASE_EXPIRED ||
+    // Captures stored before resaving existed record the lease loss this way.
+    summary.error === versionConflictError(summary.expectedVersion)
+  );
+}
+
+type ResaveOutcome = "accepted" | "conflict" | "waiting" | "transport_error" | "gone";
+
+/**
+ * Save a lease-expired close through a fresh registration. The fresh open keeps
+ * Cloud's exclusivity: it fails while another device holds the profile, and a
+ * base version other than the capture's means someone else wrote first.
+ */
+async function resaveLapsedClose(
+  queue: PendingSyncQueue,
+  cloud: PendingCloseSubmitter,
+  pending: PendingClose,
+  deviceId: string | undefined,
+): Promise<ResaveOutcome> {
+  const keep = (error: string, outcome: ResaveOutcome): ResaveOutcome =>
+    queue.setConflictError(pending.id, pending.accountId, error) ? outcome : "gone";
+  // A live open on this device will capture newer state than this close.
+  if (!deviceId || !cloud.openProfile || !cloud.abandon ||
+    queue.getOpen(pending.profileId, pending.accountId)) {
+    return keep(LEASE_EXPIRED, "waiting");
+  }
+  let opened: OpenProfileResponse;
+  try {
+    opened = await cloud.openProfile(pending.profileId, { deviceId });
+  } catch (error) {
+    if (error instanceof CloudApiError) {
+      return TERMINAL_PENDING_CLOSE_ERRORS.has(error.code)
+        ? keep(error.code, "conflict")
+        : keep(LEASE_EXPIRED, "waiting");
+    }
+    return keep(LEASE_EXPIRED, "transport_error");
+  }
+  if (opened.baseVersion !== pending.expectedVersion) {
+    await cloud.abandon(opened.registrationId).catch(() => {});
+    return keep(versionConflictError(opened.baseVersion), "conflict");
+  }
+  try {
+    const response = await cloud.closeOpen(opened.registrationId, {
+      expectedVersion: opened.baseVersion,
+      payload: pending.payload,
+    });
+    if (response.ok) return queue.remove(pending.id, pending.accountId) ? "accepted" : "gone";
+    return keep(versionConflictError(response.error.currentVersion), "conflict");
+  } catch (error) {
+    await cloud.abandon(opened.registrationId).catch(() => {});
+    if (error instanceof CloudApiError && TERMINAL_PENDING_CLOSE_ERRORS.has(error.code)) {
+      return keep(error.code, "conflict");
+    }
+    return keep(LEASE_EXPIRED, "transport_error");
+  }
+}
+
 /** Retry queued closes in order for the currently authenticated account only. */
 export async function retryPendingSync(
   queue: PendingSyncQueue,
   cloud: PendingCloseSubmitter,
   accountId: string,
   current: () => boolean = () => true,
+  deviceId?: string,
 ): Promise<PendingSyncRetryResult> {
   const result: PendingSyncRetryResult = { accepted: 0, conflicts: 0, failed: 0 };
+  /** Count a resave and report whether the pass should stop for transport loss. */
+  const countResave = (outcome: ResaveOutcome): boolean => {
+    if (outcome === "accepted") result.accepted++;
+    else if (outcome === "conflict") result.conflicts++;
+    else if (outcome !== "gone") result.failed++;
+    return outcome === "transport_error";
+  };
   for (const summary of queue.list(accountId)) {
     if (!current()) break;
-    if (summary.status === "conflict" || !summary.readyToSubmit) continue;
+    const resavable = isResavableConflict(summary);
+    if ((summary.status === "conflict" && !resavable) || !summary.readyToSubmit) continue;
     let pending: PendingClose | null;
     try {
       pending = queue.get(summary.id, accountId);
     } catch {
       // Retain unreadable sessions and their reopen block without stalling other profiles.
-      if (queue.markRetrying(summary.id, accountId, "local_read_failed")) result.failed++;
+      // A resavable one records the read failure instead, so an undecryptable
+      // capture cannot block its profile from opening forever.
+      const marked = resavable
+        ? queue.setConflictError(summary.id, accountId, "local_read_failed")
+        : queue.markRetrying(summary.id, accountId, "local_read_failed");
+      if (marked) result.failed++;
       continue;
     }
     if (!pending) continue;
+    if (resavable) {
+      if (countResave(await resaveLapsedClose(queue, cloud, pending, deviceId))) break;
+      continue;
+    }
     queue.markRetrying(pending.id, accountId);
     try {
       const response = await cloud.closeOpen(pending.registrationId, {
@@ -762,10 +867,17 @@ export async function retryPendingSync(
       });
       if (response.ok) {
         if (queue.remove(pending.id, accountId)) result.accepted++;
+      } else if (response.error.currentVersion === pending.expectedVersion) {
+        // Nobody else wrote the profile; only this registration's lease expired.
+        if (!current()) {
+          queue.setConflictError(pending.id, accountId, LEASE_EXPIRED);
+          break;
+        }
+        if (countResave(await resaveLapsedClose(queue, cloud, pending, deviceId))) break;
       } else if (queue.markConflict(
         pending.id,
         accountId,
-        `version conflict (current version ${response.error.currentVersion})`,
+        versionConflictError(response.error.currentVersion),
       )) {
         result.conflicts++;
       }

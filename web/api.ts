@@ -41,6 +41,8 @@ export interface UiProfile {
   permission?: "view" | "edit";
   version?: number;
   hasSession?: boolean;
+  /** Cloud mode: a session Cloud refused that is still recoverable from this device. */
+  parkedSession?: { savedAt: number; reason: string | null };
   healthStatus?: HealthStatus;
   healthObservedAt?: number | null;
   /**
@@ -398,6 +400,8 @@ export const openProfile = (id: string, force = false) =>
   post(`/ui/api/profiles/${encodeURIComponent(id)}/open${force ? "?force=1" : ""}`);
 export const closeProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/close`);
 export const raiseProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/raise`);
+export const restoreParkedSession = (id: string) =>
+  post(`/ui/api/profiles/${encodeURIComponent(id)}/restore-session`);
 export const importInbox = () => post("/ui/api/import");
 
 // ---- Extensions registry ----------------------------------------------------

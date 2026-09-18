@@ -2809,7 +2809,9 @@ async function main() {
                   await mcpTunnel?.stop();
                   return cloudBrowser.releaseAll(true);
                 },
-                { maxDrainMs: Math.min(DEFAULT_REMOTE_SHUTDOWN_TIMEOUT_MS, remainingMs) },
+                // Cloud closes capture and upload every open browser in turn, so
+                // many open profiles need the whole desktop shutdown budget.
+                { maxDrainMs: remainingMs },
               ),
             } : {}),
           }), desktopHealth, assignedPort, desktopCredentials!);
