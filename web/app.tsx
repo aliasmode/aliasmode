@@ -69,6 +69,7 @@ import {
   convertMobileProfile,
   exportProfiles,
   type ExportFormat,
+  type ExportProgress,
   updateFromFile,
   createGroup,
   renameGroup,
@@ -1064,6 +1065,9 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null); // transient success banner
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Active profile export: null when idle, otherwise how far the server-side
+  // collection has progressed ({completed: total} = file being built).
+  const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
   const [moveTarget, setMoveTarget] = useState("");
   const [newMode, setNewMode] = useState(false);
   const [newGroup, setNewGroup] = useState("");
@@ -2039,6 +2043,11 @@ function App() {
       return n;
     });
   const allVisibleSelected = visibleProfiles.length > 0 && visibleProfiles.every((p) => selected.has(p.id));
+  const selectedFilteredCount = filtered.filter((p) => selected.has(p.id)).length;
+  const selectedOutsideFilter = selected.size - selectedFilteredCount;
+  const allFilteredSelected = filtered.length > 0 && selectedFilteredCount === filtered.length && selectedOutsideFilter === 0;
+  const selectionScope = `${filtered.length.toLocaleString()} ${q ? "matching profiles" : "profiles"}${group === "all" ? "" : ` in “${group}”`}`;
+  const selectAllFiltered = () => setSelected(new Set(filtered.map((p) => p.id)));
   const toggleAll = () =>
     setSelected((s) => {
       const n = new Set(s);
@@ -2615,9 +2624,18 @@ function App() {
   // ---- Export selected → file ----
   const exportSelected = async (format: ExportFormat) => {
     setExportOpen(false);
-    if (!selected.size) return;
-    try { await exportProfiles([...selected], format); }
-    catch (e) { setActionErr(String(e)); }
+    if (!selected.size || exportProgress) return;
+    const ids = [...selected];
+    setActionErr(null);
+    setExportProgress({ completed: 0, total: ids.length });
+    try {
+      await exportProfiles(ids, format, (progress) => setExportProgress(progress));
+      flash(`Exported ${ids.length.toLocaleString()} profile${ids.length === 1 ? "" : "s"} as ${format.toUpperCase()}`);
+    } catch (e) {
+      setActionErr(String(e));
+    } finally {
+      setExportProgress(null);
+    }
   };
 
   // ---- Transient success banner ----
@@ -3151,6 +3169,14 @@ function App() {
           <Icon name="check" className="sm" />{notice}
         </div>
       )}
+      {exportProgress && (
+        <div className="notice" role="status">
+          <Icon name="export" className="sm" />
+          {exportProgress.completed >= exportProgress.total
+            ? "Building export file…"
+            : `Preparing export: ${exportProgress.completed.toLocaleString()} / ${exportProgress.total.toLocaleString()} profiles`}
+        </div>
+      )}
       {desktopUpdateResultSummary && !desktopUpdateResultDismissed && (
         <div
           className={`update-banner update-result ${desktopUpdateResultSummary.tone}`}
@@ -3211,6 +3237,14 @@ function App() {
           </div>
         </div>
 
+        {allVisibleSelected && !allFilteredSelected && (
+          <div className="toolbar" role="status">
+            <span>All {visibleProfiles.length} profiles on this page are selected.</span>
+            <button type="button" className="tlink" onClick={selectAllFiltered}>Select all {selectionScope}</button>
+            {selectedOutsideFilter > 0 && <span className="muted">This replaces your selection, excluding {selectedOutsideFilter} outside this view.</span>}
+          </div>
+        )}
+
         {/* Bulk actions only exist once there is a selection to act on — an
             always-present strip of disabled buttons read as clutter. */}
         {selected.size > 0 && (
@@ -3219,6 +3253,7 @@ function App() {
             <Icon name="check" className="sm" />
             {selected.size} selected
           </span>
+          <button type="button" className="btn ghost" aria-label="Clear selection" onClick={() => setSelected(new Set())}>Clear selection</button>
           <button className="btn primary tip" data-tip="Open selected browsers" disabled={!selected.size} onClick={openSelected}>
             <Icon name="play" className="sm" />Open
           </button>
@@ -3234,10 +3269,10 @@ function App() {
           )}
           {/* Export and file edits work in Cloud; mobile conversion remains Local-only. */}
           <div className="menuwrap" ref={exportRef}>
-            <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size} onClick={() => setExportOpen((o) => !o)}>
+            <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size || !!exportProgress} onClick={() => setExportOpen((o) => !o)}>
               <Icon name="export" className="sm" />Export<Icon name="chevronDown" className="sm" />
             </button>
-            {exportOpen && selected.size > 0 && (
+            {exportOpen && selected.size > 0 && !exportProgress && (
               <div className="exportmenu popover below-left" onMouseLeave={() => setExportOpen(false)}>
                 <button className="pop-item" onClick={() => exportSelected("csv")}><Icon name="file" className="sm" />Export as CSV (credentials)</button>
                 <button className="pop-item" onClick={() => exportSelected("txt")}><Icon name="file" className="sm" />Export as .txt (full profile)</button>
@@ -3245,7 +3280,7 @@ function App() {
               </div>
             )}
           </div>
-          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
+          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size || !!exportProgress} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
             <Icon name="edit" className="sm" />Edit from file
           </button>
           <span className="vsep" />

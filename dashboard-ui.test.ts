@@ -389,6 +389,105 @@ test("the roster is sortable, pageable and its columns are selectable", () => {
   expect(app).toContain("catch { /* private mode / disabled storage */ }");
 });
 
+function rosterSelection(filtered: { id: string }[], selected = new Set<string>(), group = "all", q = "", page = 0) {
+  const source = app.slice(app.indexOf("  const allVisibleSelected ="), app.indexOf("  const moveSelected ="));
+  const controls = new Function("visibleProfiles", "filtered", "selected", "group", "q", "setSelected", `${source}
+    return { toggleAll, selectAllFiltered, allFilteredSelected, selectedOutsideFilter, selectionScope };`)(
+    filtered.slice(page * 50, (page + 1) * 50), filtered, selected, group, q,
+    (next: Set<string> | ((current: Set<string>) => Set<string>)) => {
+      selected = typeof next === "function" ? next(selected) : next;
+    },
+  );
+  return { ...controls, selected: () => selected };
+}
+
+test("page selection stays page-only and scope selection reaches all 1600 profiles", () => {
+  const profiles = Array.from({ length: 1600 }, (_, i) => ({ id: `profile-${i}` }));
+  const page = rosterSelection(profiles);
+  page.toggleAll();
+  expect([...page.selected()]).toEqual(profiles.slice(0, 50).map((p) => p.id));
+  const scope = rosterSelection(profiles, page.selected());
+  expect(scope.allFilteredSelected).toBe(false);
+  scope.selectAllFiltered();
+  expect([...scope.selected()]).toEqual(profiles.map((p) => p.id));
+  expect(rosterSelection(profiles, scope.selected(), "all", "", 12).allFilteredSelected).toBe(true);
+});
+
+test("folder and search scope selection replaces unrelated hidden selections", () => {
+  const profiles = Array.from({ length: 1600 }, (_, i) => ({ id: `folder-${i}` }));
+  const scope = rosterSelection(profiles, new Set(["other-folder"]), "Imported");
+  expect(scope.selectedOutsideFilter).toBe(1);
+  expect(scope.selectionScope).toContain("Imported");
+  scope.selectAllFiltered();
+  expect([...scope.selected()]).toEqual(profiles.map((p) => p.id));
+  expect(scope.selected().has("other-folder")).toBe(false);
+
+  const matches = profiles.filter((_, i) => i % 2 === 0);
+  const search = rosterSelection(matches, scope.selected(), "Imported", "search");
+  expect(search.selectedOutsideFilter).toBe(800);
+  expect(search.allFilteredSelected).toBe(false);
+  search.selectAllFiltered();
+  expect([...search.selected()]).toEqual(matches.map((p) => p.id));
+  expect(rosterSelection([], new Set()).allFilteredSelected).toBe(false);
+});
+
+test("selection controls expose scope selection and clearing without changing export permissions", () => {
+  expect(app).toContain("allVisibleSelected && !allFilteredSelected");
+  expect(app).toContain("onClick={selectAllFiltered}");
+  expect(app).toContain('aria-label="Clear selection" onClick={() => setSelected(new Set())}');
+  expect(app).toContain('q ? "matching profiles" : "profiles"');
+  expect(app).toContain('group === "all" ? "" :');
+  expect(app).toContain("const ids = [...selected];");
+  expect(app).toContain("await exportProfiles(ids, format, (progress) => setExportProgress(progress));");
+});
+
+test("export shows live progress, blocks duplicate exports, and always clears busy state", async () => {
+  const source = app
+    .slice(app.indexOf("const exportSelected = async"), app.indexOf("// ---- Transient success banner"))
+    .replace("(format: ExportFormat)", "(format)"); // strip the one TS annotation for plain-JS evaluation
+  expect(source).toContain("exportProfiles(ids, format, (progress) => setExportProgress(progress))");
+  const makeExportSelected = new Function(
+    "selected", "exportProgress", "exportProfiles", "setExportOpen", "setActionErr", "setExportProgress", "flash",
+    `${source}\nreturn (format) => exportSelected(format);`,
+  );
+  const ids = new Set(["a", "b", "c"]);
+  const progress: unknown[] = [];
+  let opened = false;
+  let err: string | null = "stale";
+  const flashes: string[] = [];
+  type ExportFn = (ids: string[], format: string, onProgress?: (p: { completed: number; total: number }) => void) => Promise<void>;
+  const run = (busy: unknown, impl: ExportFn): ((format: string) => Promise<void>) =>
+    makeExportSelected(ids, busy, impl, () => { opened = false; }, (e: string | null) => { err = e; }, (p: unknown) => { progress.push(p); }, (m: string) => { flashes.push(m); }) as (format: string) => Promise<void>;
+
+  await run(null, async (_ids, _format, onProgress) => {
+    onProgress?.({ completed: 3, total: 3 });
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  })("txt");
+  expect(progress).toEqual([{ completed: 0, total: 3 }, { completed: 3, total: 3 }, null]); // seeded → live → cleared
+  expect(opened).toBe(false); // the format menu closes before the request starts
+  expect(err).toBeNull(); // a stale action error is cleared, not left visible
+  expect(flashes).toEqual(["Exported 3 profiles as TXT"]);
+
+  progress.length = 0;
+  let called = 0;
+  await run({ completed: 0, total: 3 }, async () => { called++; })("txt"); // already exporting
+  expect(called).toBe(0); // a second export never starts while one is in flight
+
+  await run(null, async () => { throw new Error("Export interrupted"); })("txt");
+  expect(progress.at(-1)).toBeNull(); // busy state clears on failure too
+  expect(err).toBe("Error: Export interrupted");
+  expect(flashes).toEqual(["Exported 3 profiles as TXT"]); // no success banner for the failure
+});
+
+test("export progress banner renders counts, the build phase, and disables competing actions", () => {
+  expect(app).toContain('const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);');
+  expect(app).toContain('exportProgress.completed >= exportProgress.total');
+  expect(app).toContain('"Building export file…"');
+  expect(app).toContain("`Preparing export: ${exportProgress.completed.toLocaleString()} / ${exportProgress.total.toLocaleString()} profiles`");
+  expect(app).toContain('disabled={!selected.size || !!exportProgress}'); // export menu + file-update dialog
+  expect(app).toContain("{exportOpen && selected.size > 0 && !exportProgress && (");
+});
+
 test("header controls stay reachable and dismissable", () => {
   expect(app).toContain("function useDismiss<T extends HTMLElement>(open: boolean, close: () => void)");
   expect(app).toContain('document.addEventListener("mousedown", onDown);');

@@ -498,7 +498,11 @@ export class RemoteCoordinator {
    *  (the .txt export, which serializes cookies) overlays the hub's latest roamed
    *  session — the roster profile still carries the stale import-time cookies, so
    *  exporting it verbatim after any roaming would ship an out-of-date login. */
-  async getProfiles(ids: string[], withCookies = false): Promise<Profile[]> {
+  async getProfiles(
+    ids: string[],
+    withCookies = false,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<Profile[]> {
     const out: Profile[] = [];
     for (let i = 0; i < ids.length; i += 8) {
       const batch = await Promise.all(
@@ -513,6 +517,7 @@ export class RemoteCoordinator {
         }),
       );
       out.push(...batch);
+      onProgress?.(out.length, ids.length);
     }
     return out;
   }
