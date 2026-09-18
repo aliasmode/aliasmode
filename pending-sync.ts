@@ -846,7 +846,12 @@ export async function retryPendingSync(
       pending = queue.get(summary.id, accountId);
     } catch {
       // Retain unreadable sessions and their reopen block without stalling other profiles.
-      if (queue.markRetrying(summary.id, accountId, "local_read_failed")) result.failed++;
+      // A resavable one records the read failure instead, so an undecryptable
+      // capture cannot block its profile from opening forever.
+      const marked = resavable
+        ? queue.setConflictError(summary.id, accountId, "local_read_failed")
+        : queue.markRetrying(summary.id, accountId, "local_read_failed");
+      if (marked) result.failed++;
       continue;
     }
     if (!pending) continue;

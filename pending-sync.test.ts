@@ -868,3 +868,22 @@ test("a lapsed close without a device keeps the resavable conflict", async () =>
   expect(state.queue.get(id, "account1")).toMatchObject({ status: "conflict", error: "lease_expired" });
   state.queue.close();
 });
+
+test("an unreadable lease-expired capture stops blocking its profile", async () => {
+  const state = queue();
+  const id = enqueueLapsed(state);
+  expect(state.queue.markConflict(id, "account1", "version conflict (current version 2)")).toBe(true);
+  const read = spyOn(state.queue, "get").mockImplementation(() => {
+    throw new Error("unreadable");
+  });
+  const cloud = lapsedCloud();
+
+  expect(await retryPendingSync(state.queue, cloud, "account1", () => true, "device1"))
+    .toEqual({ accepted: 0, conflicts: 0, failed: 1 });
+  read.mockRestore();
+  expect(cloud.seen).toEqual([]);
+  const summary = state.queue.list("account1")[0]!;
+  expect(summary).toMatchObject({ status: "conflict", error: "local_read_failed" });
+  expect(isResavableConflict(summary)).toBe(false);
+  state.queue.close();
+});
