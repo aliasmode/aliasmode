@@ -2037,6 +2037,11 @@ function App() {
       return n;
     });
   const allVisibleSelected = visibleProfiles.length > 0 && visibleProfiles.every((p) => selected.has(p.id));
+  const selectedFilteredCount = filtered.filter((p) => selected.has(p.id)).length;
+  const selectedOutsideFilter = selected.size - selectedFilteredCount;
+  const allFilteredSelected = filtered.length > 0 && selectedFilteredCount === filtered.length && selectedOutsideFilter === 0;
+  const selectionScope = `${filtered.length.toLocaleString()} ${q ? "matching profiles" : "profiles"}${group === "all" ? "" : ` in “${group}”`}`;
+  const selectAllFiltered = () => setSelected(new Set(filtered.map((p) => p.id)));
   const toggleAll = () =>
     setSelected((s) => {
       const n = new Set(s);
@@ -3193,6 +3198,14 @@ function App() {
           </div>
         </div>
 
+        {allVisibleSelected && !allFilteredSelected && (
+          <div className="toolbar" role="status">
+            <span>All {visibleProfiles.length} profiles on this page are selected.</span>
+            <button type="button" className="tlink" onClick={selectAllFiltered}>Select all {selectionScope}</button>
+            {selectedOutsideFilter > 0 && <span className="muted">This replaces your selection, excluding {selectedOutsideFilter} outside this view.</span>}
+          </div>
+        )}
+
         {/* Bulk actions only exist once there is a selection to act on — an
             always-present strip of disabled buttons read as clutter. */}
         {selected.size > 0 && (
@@ -3201,6 +3214,7 @@ function App() {
             <Icon name="check" className="sm" />
             {selected.size} selected
           </span>
+          <button type="button" className="btn ghost" aria-label="Clear selection" onClick={() => setSelected(new Set())}>Clear selection</button>
           <button className="btn primary tip" data-tip="Open selected browsers" disabled={!selected.size} onClick={openSelected}>
             <Icon name="play" className="sm" />Open
           </button>
