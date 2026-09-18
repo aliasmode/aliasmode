@@ -3755,3 +3755,35 @@ test("Cloud roster reports a parked session for recovery", async () => {
   state.queue.close();
   state.store.close();
 });
+
+test("Cloud releaseAll closes several profiles at once", async () => {
+  const state = setup();
+  const ids = ["profile1", "profile2", "profile3", "profile4", "profile5", "profile6"];
+  for (const profileId of ids) {
+    state.queue.recordOpen({
+      accountId: "account1",
+      profileId,
+      registrationId: `registration-${profileId}`,
+      expectedVersion: 4,
+    });
+  }
+  let inFlight = 0;
+  let peak = 0;
+  const closed: string[] = [];
+  (state.coordinator as any).close = async (profileId: string) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await Bun.sleep(5);
+    state.queue.removeOpen(profileId, "account1");
+    closed.push(profileId);
+    inFlight--;
+    return { closed: true, sync: "complete" };
+  };
+
+  expect(await state.coordinator.releaseAll(true)).toBe(true);
+  expect(closed.sort()).toEqual([...ids].sort());
+  expect(peak).toBeGreaterThan(1);
+  expect(peak).toBeLessThanOrEqual(4);
+  state.queue.close();
+  state.store.close();
+});

@@ -159,6 +159,8 @@ const PENDING_SESSION_BASE_VERSION = -1;
 const PROXY_BACKFILL_BATCH = 8;
 /** How long a failed backfill fetch stays quiet before it is retried. */
 const PROXY_BACKFILL_RETRY_MS = 300_000;
+/** Parallel closes during a release, matching the dashboard lifecycle limit. */
+const RELEASE_CLOSE_LIMIT = 4;
 const DEFAULT_CHECKPOINT_DEBOUNCE_MS = 1_200;
 const DEFAULT_CHECKPOINT_MIN_INTERVAL_MS = 3_000;
 const CLOUD_PROFILE_OPEN_ERROR =
@@ -1997,16 +1999,25 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         const opens = queue.listOpens(accountId);
         if (opens.length === 0) break;
         let closedThisPass = 0;
-        for (const open of opens) {
-          try {
-            const result = await this.close(open.profileId);
-            const current = queue.getOpen(open.profileId, accountId);
-            if (!current || current.registrationId !== open.registrationId) closedThisPass++;
-            if (!result.closed) teardownConfirmed = false;
-          } catch {
-            teardownConfirmed = false;
+        // Each close captures and uploads a whole browser session, so closing
+        // them one at a time makes a shutdown budget scale with the profile
+        // count. Bounded like the dashboard's own bulk close.
+        const remaining = [...opens];
+        const closeNext = async (): Promise<void> => {
+          for (let open = remaining.shift(); open; open = remaining.shift()) {
+            try {
+              const result = await this.close(open.profileId);
+              const current = queue.getOpen(open.profileId, accountId);
+              if (!current || current.registrationId !== open.registrationId) closedThisPass++;
+              if (!result.closed) teardownConfirmed = false;
+            } catch {
+              teardownConfirmed = false;
+            }
           }
-        }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(RELEASE_CLOSE_LIMIT, remaining.length) }, closeNext),
+        );
         if (closedThisPass === 0) break;
       }
       if (this.options.accountId() === accountId) {
