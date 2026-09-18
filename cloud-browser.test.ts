@@ -3665,3 +3665,93 @@ test("Cloud close renews its lease through capture and confirmed teardown", asyn
     state.store.close();
   }
 });
+
+/** Park a session Cloud refused for a real version change, as a lost session is. */
+async function parkRejectedSession(state: ReturnType<typeof setup>) {
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  const options = (state.coordinator as any).options;
+  options.readSession = async () => JSON.stringify({
+    cookies: [{ name: "auth_token", value: "rescued-session", domain: ".x.com", path: "/" }],
+    origins: [],
+  });
+  expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "conflict" });
+  const parked = state.queue.list("account1")[0]!;
+  expect(parked).toMatchObject({ status: "conflict", expectedVersion: 4 });
+  return parked;
+}
+
+/** Cloud moved to version 5 while this device held the refused session. */
+function cloudMovedOn(state: ReturnType<typeof setup>) {
+  const options = (state.coordinator as any).options;
+  const current = payload();
+  current.profile.name = "Renamed in Cloud";
+  current.session.cookies[0]!.value = "current-cloud-session";
+  const saved: PortableProfileV1[] = [];
+  options.cloud.openProfile = async () => {
+    state.events.push("cloud-open");
+    return { ok: true, registrationId: "registration2", baseVersion: 5, payload: current, activeOpens: [] };
+  };
+  options.cloud.closeOpen = async (registrationId: string, request: { expectedVersion: number; payload: PortableProfileV1 }) => {
+    expect(registrationId).toBe("registration2");
+    expect(request.expectedVersion).toBe(5);
+    saved.push(structuredClone(request.payload));
+    return { ok: true, status: "accepted", version: 6 };
+  };
+  return saved;
+}
+
+test("Cloud browser restores a parked session onto the current Cloud copy", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  const saved = cloudMovedOn(state);
+
+  expect(await state.coordinator.restoreParkedSession("profile1")).toEqual({ ok: true, version: 6 });
+  expect(saved).toHaveLength(1);
+  expect(saved[0]!.session.cookies[0]!.value).toBe("rescued-session");
+  // Everything else stays as Cloud has it now.
+  expect(saved[0]!.profile.name).toBe("Renamed in Cloud");
+  expect(state.queue.get(parked.id, "account1")).toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser keeps a parked session when the restore is refused", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  const options = (state.coordinator as any).options;
+  options.cloud.openProfile = async () => {
+    throw new CloudApiError("open elsewhere", "profile_open", 409);
+  };
+
+  expect(await state.coordinator.restoreParkedSession("profile1")).toMatchObject({ ok: false });
+  expect(state.queue.get(parked.id, "account1")?.status).toBe("conflict");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud browser refuses to restore a parked session while the profile is open", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  cloudMovedOn(state);
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+
+  expect(await state.coordinator.restoreParkedSession("profile1")).toEqual({
+    ok: false,
+    error: "Close this profile's browser before restoring a saved session.",
+  });
+  expect(state.queue.get(parked.id, "account1")?.status).toBe("conflict");
+  state.queue.close();
+  state.store.close();
+});
+
+test("Cloud roster reports a parked session for recovery", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  const roster = await state.coordinator.listRoster();
+  expect(roster.profiles[0]).toMatchObject({
+    id: "profile1",
+    parkedSession: { savedAt: parked.createdAt },
+  });
+  state.queue.close();
+  state.store.close();
+});

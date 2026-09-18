@@ -229,7 +229,7 @@ export async function classifyLifecycleRequest(req: Request): Promise<Classified
     } catch {}
     return { kind: "cleanup", profileIds, protocol: "adspower" };
   }
-  const ui = url.pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/(open|close|clear-cache)$/);
+  const ui = url.pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/(open|close|clear-cache|restore-session)$/);
   if (!ui || req.method !== "POST") return null;
   let profileId = ui[1]!;
   try {
@@ -237,7 +237,10 @@ export async function classifyLifecycleRequest(req: Request): Promise<Classified
   } catch {}
   const action = ui[2]!;
   return {
-    kind: action === "open" ? "start" : action === "close" ? "stop" : "cleanup",
+    // A restore registers and closes a Cloud open, so it queues like a start.
+    kind: action === "open" || action === "restore-session"
+      ? "start"
+      : action === "close" ? "stop" : "cleanup",
     profileIds: normalizeProfileIds(profileId),
     protocol: "ui",
   };

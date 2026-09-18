@@ -49,6 +49,7 @@ export const CLOUD_DIAGNOSTIC_TYPES = [
   "browser_teardown_unconfirmed",
   "session_sync_conflict",
   "access_ended",
+  "parked_session_restored",
 ] as const;
 
 export type CloudDiagnosticType = typeof CLOUD_DIAGNOSTIC_TYPES[number];

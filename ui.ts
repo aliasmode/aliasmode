@@ -918,7 +918,8 @@ export async function handleUiRequest(
     (pathname === "/ui/api/profiles/update-file" && req.method === "POST") ||
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
-    (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies)$/.test(pathname));
+    (req.method === "POST" &&
+      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session)$/.test(pathname));
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
@@ -1756,6 +1757,21 @@ export async function handleUiRequest(
       const error = msg(e);
       const status = /currently open|in use/i.test(error) ? 409 : 500;
       return Response.json({ ok: false, error }, { status });
+    }
+  }
+
+  const restore = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/restore-session$/);
+  if (restore && req.method === "POST") {
+    if (!options.cloudBrowser) {
+      return Response.json({ ok: false, error: "Saved sessions are a Cloud feature" }, { status: 400 });
+    }
+    try {
+      const result = await options.cloudBrowser.restoreParkedSession(decodeURIComponent(restore[1]!));
+      return result.ok
+        ? Response.json({ ok: true, version: result.version })
+        : Response.json({ ok: false, error: result.error }, { status: 409 });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 500 });
     }
   }
 

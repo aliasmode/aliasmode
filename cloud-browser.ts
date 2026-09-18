@@ -1,6 +1,10 @@
 import { watch } from "node:fs";
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
-import type { CloudProfileSummary, ImportProfilesResponse } from "./contracts/cloud-v1.ts";
+import type {
+  CloudProfileSummary,
+  ImportProfilesResponse,
+  OpenProfileResponse,
+} from "./contracts/cloud-v1.ts";
 import {
   CloudDiagnostics,
   type CloudDiagnosticEvent,
@@ -16,6 +20,7 @@ import {
 import {
   isResavableConflict,
   type PendingClose,
+  type PendingCloseSummary,
   type PendingOpenSession,
   type PendingSyncQueue,
   retryPendingSync,
@@ -55,6 +60,16 @@ export type CloudBrowserCloseResult =
   | CloudBrowserClosedResult
   | { closed: false; reason: "teardown_unconfirmed" };
 
+export type CloudRestoreResult =
+  | { ok: true; version: number }
+  | { ok: false; error: string };
+
+/** A session Cloud refused for good, kept encrypted here for manual recovery. */
+export interface CloudParkedSession {
+  savedAt: number;
+  reason: string | null;
+}
+
 export interface CloudBrowserProfile {
   id: string;
   name: string;
@@ -77,6 +92,8 @@ export interface CloudBrowserProfile {
   lockedBy: string | null;
   permission: "view" | "edit";
   version: number;
+  /** Present while a refused session for this profile is recoverable here. */
+  parkedSession?: CloudParkedSession;
 }
 
 export interface CloudBrowserLifecycle {
@@ -92,6 +109,8 @@ export interface CloudBrowserLifecycle {
   importProfiles(destination: string, profiles: ProfileExport[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
   close(profileId: string): Promise<CloudBrowserCloseResult>;
+  /** Write this device's refused session back to Cloud as a new version. */
+  restoreParkedSession(profileId: string): Promise<CloudRestoreResult>;
   secureAfterAuthentication(current?: () => boolean): Promise<void>;
   resumeAfterAuthentication(current?: () => boolean): Promise<void>;
   retryPending(): Promise<void>;
@@ -262,6 +281,27 @@ export function observeBrowserTargets(
   };
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function openProfileError(error: unknown): string {
+  if (error instanceof CloudApiError && error.code === "profile_open") return CLOUD_PROFILE_OPEN_ERROR;
+  return errorMessage(error);
+}
+
+/** The most recent session Cloud refused for good, for this profile. */
+function newestParkedSession(
+  queue: PendingSyncQueue,
+  accountId: string,
+  profileId: string,
+): PendingCloseSummary | undefined {
+  return queue.list(accountId)
+    .filter((summary) => summary.profileId === profileId && summary.status === "conflict"
+      && summary.readyToSubmit && !isResavableConflict(summary))
+    .at(-1);
+}
+
 function errorCode(error: unknown): string {
   if (error instanceof CloudApiError) return error.code;
   if (error instanceof SessionRestoreError) return error.outcome;
@@ -417,6 +457,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         .map((profile) => {
           const launch = this.options.store.getLaunch(profile.id);
           const cached = this.options.store.getProfile(profile.id);
+          const parked = newestParkedSession(queue, accountId, profile.id);
           const localRegistrationIds = localRegistrations.get(profile.id);
           const otherActiveOpens = profile.activeOpens.filter(
             (open) => !localRegistrationIds?.has(open.registrationId),
@@ -442,6 +483,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
               : null,
             permission: profile.permission,
             version: profile.version,
+            ...(parked ? { parkedSession: { savedAt: parked.createdAt, reason: parked.error } } : {}),
           };
         }),
       healthSources: [],
@@ -921,6 +963,57 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         this.startupLeases.delete(profileId);
       }
     }
+  }
+
+  /**
+   * Write a parked session back to Cloud as a new version. A session is parked
+   * when Cloud refused its close for good — the profile changed elsewhere first
+   * — so only the operator can decide it is the state they want. Everything but
+   * the session keeps Cloud's current values, and the parked copy is released
+   * only once Cloud accepts it.
+   */
+  async restoreParkedSession(profileId: string): Promise<CloudRestoreResult> {
+    if (this.shuttingDown || this.draining) {
+      return { ok: false, error: "Cloud browser coordinator is shutting down" };
+    }
+    return this.withProfileTransition(profileId, async () => {
+      const { queue, accountId, deviceId } = this.requireContext(true);
+      if (queue.getOpen(profileId, accountId) || this.options.store.getLaunch(profileId)) {
+        return { ok: false, error: "Close this profile's browser before restoring a saved session." };
+      }
+      const summary = newestParkedSession(queue, accountId, profileId);
+      if (!summary) return { ok: false, error: "This profile has no saved session on this device." };
+      let parked: PendingClose | null;
+      try {
+        parked = queue.get(summary.id, accountId);
+      } catch {
+        return { ok: false, error: "The saved session on this device could not be decrypted." };
+      }
+      if (!parked) return { ok: false, error: "This profile has no saved session on this device." };
+
+      let opened: OpenProfileResponse;
+      try {
+        opened = await this.options.cloud.openProfile(profileId, { deviceId });
+      } catch (error) {
+        return { ok: false, error: openProfileError(error) };
+      }
+      try {
+        const response = await this.options.cloud.closeOpen(opened.registrationId, {
+          expectedVersion: opened.baseVersion,
+          payload: { ...opened.payload, session: parked.payload.session },
+        });
+        if (!response.ok) {
+          await this.options.cloud.abandon(opened.registrationId).catch(() => {});
+          return { ok: false, error: "Cloud changed while restoring. Try again." };
+        }
+        queue.remove(parked.id, accountId);
+        this.diagnosticEvents.record("parked_session_restored");
+        return { ok: true, version: response.version };
+      } catch (error) {
+        await this.options.cloud.abandon(opened.registrationId).catch(() => {});
+        return { ok: false, error: errorMessage(error) };
+      }
+    });
   }
 
   async close(profileId: string): Promise<CloudBrowserCloseResult> {

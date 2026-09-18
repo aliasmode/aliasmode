@@ -4029,3 +4029,40 @@ test("a profile that has never been probed carries no verdict", () => {
   expect(row.fpCapturedAt).toBe("");
   s.close();
 });
+
+test("Cloud restore-session route reports the restored version and refusals", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-restore-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const asked: string[] = [];
+  const cloudBrowser = {
+    restoreParkedSession: async (profileId: string) => {
+      asked.push(profileId);
+      return asked.length === 1
+        ? { ok: true as const, version: 12 }
+        : { ok: false as const, error: "Close this profile's browser before restoring a saved session." };
+    },
+  } as any;
+  const call = () => handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/restore-session", {
+      method: "POST",
+      headers: { origin: "http://x" },
+    }),
+    {} as any,
+    s,
+    null,
+    { appConfig, cloudBrowser },
+  );
+
+  const restored = await call();
+  expect(restored!.status).toBe(200);
+  expect(await restored!.json()).toEqual({ ok: true, version: 12 });
+
+  const refused = await call();
+  expect(refused!.status).toBe(409);
+  expect(await refused!.json()).toMatchObject({ ok: false });
+  expect(asked).toEqual(["k1d0cd11", "k1d0cd11"]);
+  s.close();
+  rmSync(root, { recursive: true, force: true });
+});
