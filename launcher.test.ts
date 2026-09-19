@@ -3707,7 +3707,7 @@ test("clearCache removes cache dirs, preserves the session, and skips a live bro
   await launcher.stop("k1d0cd11");
   expect(existsSync(cacheDir)).toBe(false);
   expect(existsSync(scriptCache)).toBe(false);
-  expect(existsSync(cacheStorage)).toBe(true);
+  expect(existsSync(cacheStorage)).toBe(false);
   expect(existsSync(cookies)).toBe(true);
   expect(existsSync(localStorage)).toBe(true);
   rmSync(dataRoot, { recursive: true, force: true });

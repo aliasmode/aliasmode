@@ -494,15 +494,18 @@ export function readSnapshotChildBounded(
 
 /**
  * Rebuildable caches safe to remove automatically after a browser has fully
- * stopped. Deliberately excludes CacheStorage: Chromium treats it as site
- * storage rather than ordinary disk cache, so it remains an explicit/manual
- * cleanup choice.
+ * stopped. The whole Service Worker tree goes: CacheStorage has no Chromium
+ * size cap and X.com's SW asset cache reached ~75 MB per profile (166 GB across
+ * 2267 Cloud profiles on one operator machine). Registrations, ScriptCache and
+ * CacheStorage are removed together so the SW database never points at cache
+ * names that no longer exist. Sites re-register on the next page load; cookies,
+ * Local Storage and IndexedDB carry the login and are untouched.
  */
 const POST_STOP_CACHE_DIRS = [
   "Default/Cache",
   "Default/Code Cache",
   "Default/GPUCache",
-  "Default/Service Worker/ScriptCache",
+  "Default/Service Worker",
   "Default/DawnCache",
   "Default/DawnGraphiteCache",
   "Default/DawnWebGPUCache",
@@ -517,10 +520,7 @@ const POST_STOP_CACHE_DIRS = [
  * Local Storage, Network, Preferences) — deleting those would log the account
  * out and defeat the persistent-session design the whole migration relies on.
  */
-const CACHE_DIRS = [
-  ...POST_STOP_CACHE_DIRS,
-  "Default/Service Worker/CacheStorage",
-];
+const CACHE_DIRS = POST_STOP_CACHE_DIRS;
 
 /**
  * Volatile per-profile stores that commonly get left half-written by an UNCLEAN kill (all leveldb-
