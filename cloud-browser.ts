@@ -298,10 +298,18 @@ function newestParkedSession(
   accountId: string,
   profileId: string,
 ): PendingCloseSummary | undefined {
-  return queue.list(accountId)
-    .filter((summary) => summary.profileId === profileId && summary.status === "conflict"
-      && summary.readyToSubmit && !isResavableConflict(summary))
-    .at(-1);
+  return newestParkedSessions(queue.list(accountId)).get(profileId);
+}
+
+/** Newest parked session per profile, from one queue read (the roster has ~14k profiles). */
+function newestParkedSessions(summaries: PendingCloseSummary[]): Map<string, PendingCloseSummary> {
+  const parked = new Map<string, PendingCloseSummary>();
+  for (const summary of summaries) {
+    if (summary.status === "conflict" && summary.readyToSubmit && !isResavableConflict(summary)) {
+      parked.set(summary.profileId, summary);
+    }
+  }
+  return parked;
 }
 
 function errorCode(error: unknown): string {
@@ -445,7 +453,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     for (const open of queue.listOpens(accountId)) {
       rememberRegistration(open.profileId, open.registrationId);
     }
-    for (const summary of queue.list(accountId)) {
+    const summaries = queue.list(accountId);
+    for (const summary of summaries) {
       try {
         const pending = queue.get(summary.id, accountId);
         if (pending) rememberRegistration(pending.profileId, pending.registrationId);
@@ -453,13 +462,14 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         // An unreadable registration cannot prove local ownership or hide a Cloud lock.
       }
     }
+    const parkedSessions = newestParkedSessions(summaries);
     return {
       profiles: response.profiles
         .filter((profile) => profile.trashedAt === null)
         .map((profile) => {
           const launch = this.options.store.getLaunch(profile.id);
           const cached = this.options.store.getProfile(profile.id);
-          const parked = newestParkedSession(queue, accountId, profile.id);
+          const parked = parkedSessions.get(profile.id);
           const localRegistrationIds = localRegistrations.get(profile.id);
           const otherActiveOpens = profile.activeOpens.filter(
             (open) => !localRegistrationIds?.has(open.registrationId),
