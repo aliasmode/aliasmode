@@ -4164,6 +4164,7 @@ test("buildArgs disables background throttling so minimized/occluded windows kee
   expect(args).toContain("--disable-background-timer-throttling");
   expect(args).toContain("--disable-backgrounding-occluded-windows");
   expect(args).toContain("--disable-renderer-backgrounding");
+  expect(args).toContain("--disk-cache-size=20971520");
   store.close();
 });
 

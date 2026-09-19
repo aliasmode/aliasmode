@@ -900,6 +900,10 @@ export class Launcher {
       `--disable-background-timer-throttling`,
       `--disable-backgrounding-occluded-windows`,
       `--disable-renderer-backgrounding`,
+      // Cap the per-profile HTTP disk cache. Chromium otherwise sizes it from free disk,
+      // and across thousands of Cloud profiles that reached 166 GB on one operator's
+      // machine. Cookies/site data are separate stores; this only trims asset caching.
+      `--disk-cache-size=${20 * 1024 * 1024}`,
       ...deriveFingerprintFlags(profile),
     ];
     if (profile.proxy) {
