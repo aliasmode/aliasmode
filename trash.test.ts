@@ -9,11 +9,20 @@ import { handleUiRequest, type UiRuntimeOptions } from "./ui.ts";
 import { importBuffers, ProfileImportError } from "./inbox.ts";
 import type { Launcher } from "./launcher.ts";
 
-const cleanup: Array<() => void> = [];
-afterEach(() => { for (const fn of cleanup.splice(0).reverse()) fn(); });
+const cleanup: Array<() => void | Promise<void>> = [];
+afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "aliasmode-trash-"));
-  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  cleanup.push(async () => {
+    for (let attempt = 0; ; attempt++) {
+      try { rmSync(dir, { recursive: true, force: true }); return; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10) throw error;
+        Bun.gc(true);
+        await Bun.sleep(100);
+      }
+    }
+  });
   const path = join(dir, "profiles.sqlite");
   const store = new ProfileStore(path); cleanup.push(() => store.close());
   const profile = { ...buildNewProfile({ name: "Retain me", group: "original" }, () => false), id: "p1", password: "fixture-password", cookies: [{ name: "session", value: "fixture-cookie", domain: ".example.com", path: "/" }] };
