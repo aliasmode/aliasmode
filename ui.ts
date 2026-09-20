@@ -33,6 +33,8 @@ import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import type { FingerprintVerdict, Profile, CookieRecord, ProxySpec } from "./types.ts";
 import { checkProxy as runProxyCheck, type ProxyCheckResult } from "./proxy-check.ts";
+import { handleProxyToolsRequest } from "./proxy-tools.ts";
+import { handleTrashRequest } from "./trash.ts";
 import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
@@ -565,6 +567,7 @@ export async function handleUiRequest(
     const config = options.appConfig?.read() ?? { version: 1 as const, mode: "local" as const, localAnalytics: false };
     return Response.json({
       ...config,
+      ...(remote ? { legacyRemote: true } : {}),
       ...(options.runtimeMode ? { restartRequired: config.mode !== options.runtimeMode } : {}),
     });
   }
@@ -991,6 +994,25 @@ export async function handleUiRequest(
     );
   }
 
+  if (pathname.startsWith("/ui/api/proxies/")) {
+    if (remote) return noStoreJson({ ok: false, error: "Bulk proxy tools are unavailable in legacy remote mode" }, 400);
+    if (req.method !== "POST") return noStoreJson({ ok: false, error: "POST is required" }, 405);
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    if (options.cloudBrowser && !options.cloudConnection) return noStoreJson({ ok: false, error: "Cloud connection is unavailable" }, 503);
+    return handleProxyToolsRequest(req, store, launcher, options);
+  }
+
+  if (pathname === "/ui/api/trash" || pathname.startsWith("/ui/api/trash/")) {
+    if (remote) return noStoreJson({ ok: false, error: "Trash is unavailable in legacy remote mode" }, 400);
+    if (req.method !== "GET") {
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+    }
+    if (options.cloudBrowser && !options.cloudConnection) return noStoreJson({ ok: false, error: "Cloud connection is unavailable" }, 503);
+    return handleTrashRequest(req, store, launcher, options);
+  }
+
   const cloudLifecycleRoute =
     (pathname === "/ui/api/profiles" && (req.method === "GET" || req.method === "POST")) ||
     (pathname === "/ui/api/profiles/move" && req.method === "POST") ||
@@ -1151,9 +1173,7 @@ export async function handleUiRequest(
       }
       let deleted = 0;
       for (const id of existing) {
-        launcher.removeUserDataDir(id);
-        store.deleteProfile(id);
-        deleted++;
+        if (store.trashProfile(id)) deleted++;
       }
       return Response.json({ ok: true, deleted, locked: [] });
     } catch (e) {

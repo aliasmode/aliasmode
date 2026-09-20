@@ -2216,7 +2216,7 @@ test("delete (standalone) keeps a mixed open and closed selection atomic", async
   s.close();
 });
 
-test("delete (standalone) removes a closed profile without calling stop", async () => {
+test("delete (standalone) trashes a closed profile without calling stop or removing data", async () => {
   const s = store();
   const calls: string[] = [];
   const launcher: any = {
@@ -2232,34 +2232,31 @@ test("delete (standalone) removes a closed profile without calling stop", async 
   );
 
   expect(await res!.json()).toMatchObject({ ok: true, deleted: 1, locked: [] });
-  expect(calls).toEqual(["k1d0cd11"]);
+  expect(calls).toEqual([]);
   expect(s.getProfile("k1d0cd11")).toBeNull();
+  expect(s.listTrashed().map((p) => p.id)).toEqual(["k1d0cd11"]);
   s.close();
 });
 
-test("delete (standalone) preserves a closed profile when data cleanup fails and allows retry", async () => {
+test("delete (standalone) keeps recoverable data without cleanup and is idempotent", async () => {
   const s = store();
-  let failCleanup = true;
   const launcher: any = {
     profileDeletionBlocked: () => false,
-    removeUserDataDir: () => {
-      if (failCleanup) throw new Error("cleanup failed");
-      return true;
-    },
+    removeUserDataDir: () => { throw new Error("Trash must not clean up saved data"); },
   };
   const request = () => new Request("http://x/ui/api/profiles/delete", {
     method: "POST", body: JSON.stringify({ ids: ["k1d0cd11"] }),
   });
 
-  const failed = await handleUiRequest(request(), launcher, s);
-  expect(failed!.status).toBe(500);
-  expect(s.getProfile("k1d0cd11")).not.toBeNull();
-
-  failCleanup = false;
+  const first = await handleUiRequest(request(), launcher, s);
+  expect(first!.status).toBe(200);
+  expect(await first!.json()).toMatchObject({ ok: true, deleted: 1 });
   const retried = await handleUiRequest(request(), launcher, s);
   expect(retried!.status).toBe(200);
-  expect(await retried!.json()).toMatchObject({ ok: true, deleted: 1 });
-  expect(s.getProfile("k1d0cd11")).toBeNull();
+  expect(await retried!.json()).toMatchObject({ ok: true, deleted: 0 });
+  expect(s.listTrashed()).toHaveLength(1);
+  expect(s.restoreProfile("k1d0cd11")).toBe(true);
+  expect(s.getProfile("k1d0cd11")).not.toBeNull();
   s.close();
 });
 

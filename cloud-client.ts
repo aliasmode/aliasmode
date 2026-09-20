@@ -32,6 +32,7 @@ import {
   type ListMcpConnectorsResponse,
   type ListMembersResponse,
   type ListProfilesResponse,
+  type ListProfileProxiesResponse,
   type ResendInvitationResponse,
   type MoveProfileRequest,
   type OpenHeartbeatResponse,
@@ -380,6 +381,10 @@ export class CloudClient {
         this.profileRoster = etag ? { etag, response: body } : undefined;
       },
     });
+  }
+
+  listProfileProxies(signal?: AbortSignal): Promise<ListProfileProxiesResponse> {
+    return this.call("/profiles/proxies", { cache: "no-store", signal });
   }
 
   getProfile(profileId: string): Promise<GetProfileResponse> {

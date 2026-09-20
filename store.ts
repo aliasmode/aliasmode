@@ -56,6 +56,11 @@ export class ProfileStore {
         last_open_at INTEGER NOT NULL DEFAULT 0
       );
     `);
+    try {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN trashed_at INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      /* column already exists */
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS launches (
         profile_id TEXT PRIMARY KEY,
@@ -117,7 +122,7 @@ export class ProfileStore {
     } catch {
       /* column already exists */
     }
-    this.db.exec(`INSERT OR IGNORE INTO groups (name) SELECT DISTINCT "group" FROM profiles WHERE "group" <> ''`);
+    this.db.exec(`INSERT OR IGNORE INTO groups (name) SELECT DISTINCT "group" FROM profiles WHERE "group" <> '' AND trashed_at = 0`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agent_temporary_profiles (
         profile_id TEXT PRIMARY KEY,
@@ -225,8 +230,9 @@ export class ProfileStore {
     const proxy = p.proxyError ? null : normalizeProxySpec(p.proxy);
     const proxyError = p.proxyError?.trim() ?? "";
     const existing = this.db
-      .query<{ seeded: number }, [string]>("SELECT seeded FROM profiles WHERE id = ?")
+      .query<{ seeded: number; trashed_at: number }, [string]>("SELECT seeded, trashed_at FROM profiles WHERE id = ?")
       .get(p.id);
+    if (existing?.trashed_at) throw new Error("Profile is in Trash; restore it before importing or editing it");
     const seeded = existing ? existing.seeded : p.seeded ? 1 : 0;
     this.db
       .query(
@@ -351,17 +357,47 @@ export class ProfileStore {
 
   getProfile(id: string): Profile | null {
     const row = this.db
-      .query<any, [string]>(`SELECT * FROM profiles WHERE id = ?`)
+      .query<any, [string]>(`SELECT * FROM profiles WHERE id = ? AND trashed_at = 0`)
       .get(id);
     return row ? rowToProfile(row) : null;
   }
 
   listProfiles(): Profile[] {
-    return this.db.query<any, []>(`SELECT * FROM profiles ORDER BY id`).all().map(rowToProfile);
+    return this.db.query<any, []>(`SELECT * FROM profiles WHERE trashed_at = 0 ORDER BY id`).all().map(rowToProfile);
   }
 
   count(): number {
-    return this.db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM profiles`).get()!.n;
+    return this.db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM profiles WHERE trashed_at = 0`).get()!.n;
+  }
+
+  isTrashed(id: string): boolean {
+    return !!this.db.query(`SELECT 1 FROM profiles WHERE id = ? AND trashed_at > 0`).get(id);
+  }
+
+  listTrashed(): Array<{ id: string; name: string; group: string; trashedAt: number }> {
+    return this.db.query<{ id: string; name: string; group: string; trashedAt: number }, []>(
+      `SELECT id, name, "group", trashed_at AS trashedAt FROM profiles WHERE trashed_at > 0 ORDER BY trashed_at DESC, id`,
+    ).all();
+  }
+
+  trashProfile(id: string): boolean {
+    return this.db.transaction(() => {
+      const changed = this.db.query(`UPDATE profiles SET trashed_at = ? WHERE id = ? AND trashed_at = 0`).run(Date.now(), id);
+      if (changed.changes) this.clearAgentTemporary(id);
+      return changed.changes > 0;
+    })();
+  }
+
+  restoreProfile(id: string): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.query<{ group: string }, [string]>(
+        `SELECT "group" FROM profiles WHERE id = ? AND trashed_at > 0`,
+      ).get(id);
+      if (!row) return false;
+      this.db.query(`UPDATE profiles SET trashed_at = 0 WHERE id = ?`).run(id);
+      this.registerGroup(row.group);
+      return true;
+    })();
   }
 
   markSeeded(id: string): void {
@@ -501,7 +537,7 @@ export class ProfileStore {
         this.db.query(`INSERT INTO groups (name, extension_defaults_json) VALUES (?, ?)`)
           .run(destination, JSON.stringify(this.getGroupExtensionDefaults(source)));
       }
-      const res = this.db.query(`UPDATE profiles SET "group" = ? WHERE "group" = ?`)
+      const res = this.db.query(`UPDATE profiles SET "group" = ? WHERE "group" = ? AND trashed_at = 0`)
         .run(destination, source);
       this.db.query(`DELETE FROM groups WHERE name = ?`).run(source);
       return Number(res.changes);
@@ -516,7 +552,7 @@ export class ProfileStore {
   deleteGroup(name: string): number {
     const n = name.trim();
     const remove = this.db.transaction(() => {
-      const res = this.db.query(`UPDATE profiles SET "group" = '' WHERE "group" = ?`).run(n);
+      const res = this.db.query(`UPDATE profiles SET "group" = '' WHERE "group" = ? AND trashed_at = 0`).run(n);
       this.db.query(`DELETE FROM groups WHERE name = ?`).run(n);
       return Number(res.changes);
     });
@@ -528,7 +564,7 @@ export class ProfileStore {
     return this.db
       .query<{ name: string }, []>(
         `SELECT name FROM groups WHERE name <> ''
-         UNION SELECT DISTINCT "group" FROM profiles WHERE "group" <> ''
+         UNION SELECT DISTINCT "group" FROM profiles WHERE "group" <> '' AND trashed_at = 0
          ORDER BY name`,
       )
       .all()
@@ -537,7 +573,7 @@ export class ProfileStore {
 
   /** Set a profile's display name (AdsPower user/update). No-op for unknown ids. */
   rename(id: string, name: string): void {
-    this.db.query(`UPDATE profiles SET name = ? WHERE id = ?`).run(name, id);
+    this.db.query(`UPDATE profiles SET name = ? WHERE id = ? AND trashed_at = 0`).run(name, id);
   }
 
   // --- Extensions ----------------------------------------------------------
@@ -632,7 +668,7 @@ export class ProfileStore {
       .query<any, []>(
         `SELECT id, name, "group" AS grp, created_at AS c, last_open_at AS l, rowid AS s,
                 fp_verdict_json AS fpv, fp_observed_json AS fpo
-           FROM profiles ORDER BY rowid`,
+           FROM profiles WHERE trashed_at = 0 ORDER BY rowid`,
       )
       .all()
       .map((r) => ({
@@ -664,7 +700,7 @@ export class ProfileStore {
     return new Map(
       this.db
         .query<{ id: string; s: number; c: number; l: number }, []>(
-          `SELECT id, rowid AS s, created_at AS c, last_open_at AS l FROM profiles`,
+          `SELECT id, rowid AS s, created_at AS c, last_open_at AS l FROM profiles WHERE trashed_at = 0`,
         )
         .all()
         .map((row) => [row.id, { serial: row.s, createdAt: row.c ?? 0, lastOpenAt: row.l ?? 0 }] as const),

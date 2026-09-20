@@ -54,6 +54,7 @@
     "mcpTunnel": "GET (WebSocket) /v1/mcp/tunnel",
     "remoteMcp": "GET|POST|DELETE /v1/mcp/devices/:deviceId",
     "profiles": "GET|POST /v1/profiles",
+    "profileProxies": "GET /v1/profiles/proxies",
     "replaceProfileProxies": "POST /v1/profiles/proxy-replacements",
     "profile": "GET|PATCH /v1/profiles/:id",
     "open": "POST /v1/profiles/:id/open",

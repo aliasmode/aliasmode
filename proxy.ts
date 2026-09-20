@@ -162,6 +162,14 @@ export function proxyHostPort(proxy: ProxySpec): string {
   return `${authorityHost(proxy.host)}:${proxy.port}`;
 }
 
+/** In-memory identity only; never include this credential-bearing key in responses. */
+export function proxyIdentityKey(input: ProxyInput | ProxySpec | null): string {
+  const proxy = normalizeProxySpec(input);
+  if (!proxy) return "null";
+  const host = new URL(`http://${authorityHost(proxy.host)}/`).hostname.toLowerCase();
+  return JSON.stringify([proxy.type, host, proxy.port, proxy.user, proxy.pass]);
+}
+
 /** AdsPower-compatible editable/export form, including optional credentials. */
 export function proxyLegacyString(proxy: ProxySpec): string {
   const base = proxyHostPort(proxy);

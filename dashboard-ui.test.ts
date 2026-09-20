@@ -341,7 +341,7 @@ test("Admin invitations are read-only for Admin viewers", () => {
 test("Cloud Delete requires edit permission for every selected profile", () => {
   expect(app).toContain('const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");');
   expect(app).toContain('{(!isCloudMode || selectedEditable) && (');
-  expect(app).toContain('<button className="btn danger tip" data-tip="Delete selected profiles" disabled={!selected.size} onClick={deleteSelected}>');
+  expect(app).toContain('data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size} onClick={deleteSelected}');
   expect(app).toContain('r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`');
 });
 
@@ -525,7 +525,7 @@ test("the dashboard typeface is bundled, never fetched at runtime", () => {
 });
 
 test("New profile and Edit are instant dialogs; Scripts, Settings and Extensions are pages", () => {
-  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions">("profiles")');
+  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash">("profiles")');
   expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
   expect(app).toContain('aria-labelledby="create-profile-title"');
   expect(app).toContain('aria-labelledby="edit-profile-title"');

@@ -45,6 +45,8 @@ type RelayFactory = (upstream: UpstreamProxy, options?: RelayOptions) => Promise
 export interface ProxyCheckOptions extends EgressLookupOptions {
   fetchFn?: typeof fetch;
   relayFactory?: RelayFactory;
+  /** Bulk runs share the direct-IP lookup, including a failed lookup (null). */
+  direct?: EgressInfo | null;
 }
 
 function safeFailureReason(logs: readonly string[]): ProxyConnectionFailureReason {
@@ -174,7 +176,7 @@ export async function checkProxy(
   const relayFactory = options.relayFactory ?? startProxyRelay;
   const lookupOptions = { endpoints: options.endpoints, timeoutMs: options.timeoutMs };
   const [direct, attempts] = await Promise.all([
-    fetchDirectEgress(lookupOptions, fetchFn),
+    options.direct === undefined ? fetchDirectEgress(lookupOptions, fetchFn) : options.direct,
     Promise.all(Array.from(
       { length: ATTEMPT_COUNT },
       () => proxyAttempt(proxy, { ...lookupOptions, fetchFn, relayFactory }),

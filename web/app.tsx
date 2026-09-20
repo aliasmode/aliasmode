@@ -2,6 +2,9 @@ import { Channel } from "@tauri-apps/api/core";
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import "./proxies.css";
+import { ProxiesPage } from "./proxies.tsx";
+import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
 import { THEME_KEY, readThemeChoice, themeCookie, type ThemeChoice } from "./theme.ts";
@@ -130,11 +133,13 @@ const REFRESH_MS = 3000;
 const PROFILE_PAGE_SIZE = 50;
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions", string> = {
+const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash", string> = {
   profiles: "Profiles",
   scripts: "Scripts",
   settings: "Settings",
   extensions: "Extensions",
+  proxies: "Proxies",
+  trash: "Trash",
 };
 
 const SETTINGS_TABS = [
@@ -1005,7 +1010,7 @@ function App() {
   // "profiles" is the roster; "settings" replaces it in the same content area
   // rather than opening a dialog — Settings outgrew a modal. New profile and
   // Edit stay dialogs: short forms, and a page felt like too much ceremony.
-  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions">("profiles");
+  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash">("profiles");
   const [scriptRunOpen, setScriptRunOpen] = useState(false);
   const [scriptRunProfiles, setScriptRunProfiles] = useState<UiProfile[]>([]);
   const [showCreate, setShowCreate] = useState(false);
@@ -2085,7 +2090,9 @@ function App() {
   const deleteSelected = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`Delete ${ids.length} profile(s)? This removes them from the roster (and any saved session). This can't be undone.`)) return;
+    if (!confirm(appMode?.legacyRemote
+      ? `Delete ${ids.length} profile(s)? This removes them from the roster (and any saved session). This can't be undone.`
+      : `Move ${ids.length} profile(s) to Trash? You can restore them with their saved data from Trash.`)) return;
     setActionErr(null);
     try {
       const r = await deleteProfiles(ids);
@@ -2943,6 +2950,14 @@ function App() {
             <Icon name="profiles" /><span className="navlabel">All profiles</span>
             <span className="cnt">{profiles.length}</span>
           </button>
+          {!appMode?.legacyRemote && <>
+            <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip="Proxies" title="Proxies" onClick={() => setView("proxies")}>
+              <Icon name="activity" /><span className="navlabel">Proxies</span>
+            </button>
+            <button type="button" className={`navitem${view === "trash" ? " active" : ""}`} data-tip="Trash" title="Trash" onClick={() => setView("trash")}>
+              <Icon name="trash" /><span className="navlabel">Trash</span>
+            </button>
+          </>}
           <button
             type="button"
             className={`navitem${view === "scripts" ? " active" : ""}`}
@@ -3225,6 +3240,12 @@ function App() {
         </div>
       )}
 
+      {!appMode?.legacyRemote && <>
+        <ProxiesPage key={`proxies:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
+          active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} onChanged={load} />
+        <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
+          active={view === "trash"} onChanged={load} />
+      </>}
       {view === "profiles" ? (
       <div className="workspace">
         <div className="filterbar">
@@ -3347,8 +3368,8 @@ function App() {
           )}
           <span className="spacer" />
           {(!isCloudMode || selectedEditable) && (
-            <button className="btn danger tip" data-tip="Delete selected profiles" disabled={!selected.size} onClick={deleteSelected}>
-              <Icon name="trash" className="sm" />Delete
+            <button className="btn danger tip" data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size} onClick={deleteSelected}>
+              <Icon name="trash" className="sm" />{appMode?.legacyRemote ? "Delete" : "Move to Trash"}
             </button>
           )}
           </>}

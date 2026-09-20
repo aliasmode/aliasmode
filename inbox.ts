@@ -202,8 +202,12 @@ export async function importBuffers(
   /** Optional hub-side lock/CAS guard, called synchronously immediately before the atomic write. */
   beforeCommit?: (profiles: readonly Profile[]) => void,
 ): Promise<InboxResult> {
-  const batch = await prepareImportBuffers(files, log, overrides, (id) => !!store.getProfile(id));
+  const batch = await prepareImportBuffers(files, log, overrides, (id) => !!store.getProfile(id) || store.isTrashed(id));
   const collected = batch.imports;
+  const trashedIds = collected.map((entry) => entry.profile.id).filter((id) => store.isTrashed(id));
+  if (trashedIds.length) throw unsafeImportError([
+    `profile(s) ${trashedIds.join(", ")} are in Trash; restore them before importing`,
+  ], 409);
   const problems: string[] = [];
 
   // Merge after the asynchronous lookup so the database snapshot cannot go

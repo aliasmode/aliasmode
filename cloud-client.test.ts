@@ -281,6 +281,27 @@ test("Cloud client replaces proxies and invalidates its roster only after apply"
   expect(rosterRequests).toEqual([null, '"roster-1"', null]);
 });
 
+test("Cloud proxy inventory bypasses roster caching and propagates cancellation", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const controller = new AbortController();
+  const cloud = client(async (url, init) => {
+    init?.signal?.throwIfAborted();
+    calls.push({ url: String(url), init });
+    return Response.json({ ok: true, profiles: [] }, { headers: { etag: '"roster-1"' } });
+  });
+  await cloud.listProfiles();
+  expect(await cloud.listProfileProxies(controller.signal)).toEqual({ ok: true, profiles: [] });
+  await cloud.listProfileProxies(controller.signal);
+  expect(calls.slice(1).map((c) => c.url)).toEqual(Array(2).fill("https://cloud.aliasmode.test/v1/profiles/proxies"));
+  for (const call of calls.slice(1)) {
+    expect(call.init?.cache).toBe("no-store");
+    expect(new Headers(call.init?.headers).get("if-none-match")).toBeNull();
+    expect(call.init?.signal).toBeDefined();
+  }
+  controller.abort();
+  await expect(cloud.listProfileProxies(controller.signal)).rejects.toThrow();
+});
+
 test("Cloud profile roster reuses its per-client ETag cache", async () => {
   const requests: Array<string | null> = [];
   const roster = { ok: true as const, profiles: [] };

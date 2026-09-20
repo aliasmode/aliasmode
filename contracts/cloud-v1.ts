@@ -168,6 +168,22 @@ export interface CloudProxy {
   pass: string;
 }
 
+export interface CloudProxyInventoryProfile {
+  id: string;
+  name: string;
+  group: string;
+  version: number;
+  permission: FolderPermission;
+  proxy: CloudProxy | null;
+  proxyError?: string;
+  activeOpens: CloudOpenWarning[];
+}
+
+export interface ListProfileProxiesResponse {
+  ok: true;
+  profiles: CloudProxyInventoryProfile[];
+}
+
 export type ProxyReplacementSelector =
   | { profileId: string; username?: never }
   | { username: string; profileId?: never };

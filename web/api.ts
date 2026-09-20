@@ -100,6 +100,7 @@ export interface AppModeConfig {
   cloudUrl?: string;
   localAnalytics: boolean;
   restartRequired?: boolean;
+  legacyRemote?: boolean;
 }
 
 export async function fetchAppMode(): Promise<AppModeConfig> {
