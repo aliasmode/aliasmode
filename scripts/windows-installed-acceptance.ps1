@@ -80,12 +80,12 @@ function Install-AcceptanceArtifact(
   $installerName = Split-Path $ResolvedInstallerPath -Leaf
   $nameMatch = [Text.RegularExpressions.Regex]::Match(
     $installerName,
-    '^AliasMode_(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)_x64-offline-setup\.exe$'
+    '^AliasMode_(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)_x64(?:-offline)?-setup\.exe$'
   )
-  if (-not $nameMatch.Success) { throw "full installer name is invalid" }
+  if (-not $nameMatch.Success) { throw "installer name is invalid" }
   $version = $nameMatch.Groups["version"].Value
   $semanticVersion = [Management.Automation.SemanticVersion]::Parse($version)
-  if ($semanticVersion.ToString() -ne $version) { throw "full installer version is not canonical" }
+  if ($semanticVersion.ToString() -ne $version) { throw "installer version is not canonical" }
 
   $checksums = Read-ChecksumManifest $ResolvedChecksumsPath
   if (-not $checksums.ContainsKey($installerName)) {
@@ -93,7 +93,7 @@ function Install-AcceptanceArtifact(
   }
   $actualInstallerHash = (Get-FileHash -LiteralPath $ResolvedInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($actualInstallerHash -ne $checksums[$installerName]) {
-    throw "candidate full installer SHA-256 mismatch"
+    throw "candidate installer SHA-256 mismatch"
   }
 
   try {
@@ -451,7 +451,7 @@ $checks = [ordered]@{
 
 try {
   Set-AcceptanceStage "validating-artifacts"
-  $resolvedInstaller = Resolve-InputFile $InstallerPath "full installer"
+  $resolvedInstaller = Resolve-InputFile $InstallerPath "installer"
   $resolvedChecksums = Resolve-InputFile $ChecksumsPath "checksum manifest"
   $resolvedMetadata = Resolve-InputFile $BrowserMetadataPath "browser metadata"
   New-Item -ItemType Directory -Force $runRoot | Out-Null
