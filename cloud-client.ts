@@ -45,6 +45,9 @@ import {
   type TrashProfileRequest,
   type UpdateProfileRequest,
   type UpdateProfileResponse,
+  type ScriptInput,
+  type ScriptRecord,
+  type ScriptSummary,
 } from "./contracts/cloud-v1.ts";
 
 export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -210,6 +213,28 @@ export class CloudClient {
 
   acceptLegal(request: AcceptLegalRequest): Promise<AcceptLegalResponse> {
     return this.call("/account/legal", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  listScripts(): Promise<{ ok: true; scripts: ScriptSummary[] }> {
+    return this.call("/account/scripts");
+  }
+
+  getScript(id: string): Promise<{ ok: true; script: ScriptRecord }> {
+    return this.call(`/account/scripts/${encodeURIComponent(id)}`);
+  }
+
+  createScript(input: ScriptInput): Promise<{ ok: true; script: ScriptRecord }> {
+    return this.call("/account/scripts", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateScript(id: string, input: ScriptInput & { expectedRevision: number }): Promise<{ ok: true; script: ScriptRecord }> {
+    return this.call(`/account/scripts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+  }
+
+  deleteScript(id: string, expectedRevision: number): Promise<{ ok: true; deleted: true }> {
+    return this.call(`/account/scripts/${encodeURIComponent(id)}`, {
+      method: "DELETE", body: JSON.stringify({ expectedRevision }),
+    });
   }
 
   listFolders(): Promise<ListFoldersResponse> {

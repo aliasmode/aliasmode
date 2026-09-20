@@ -17,7 +17,14 @@ function workspace(): string {
   mkdirSync(join(cwd, "src-tauri"), { recursive: true });
   writeFileSync(join(cwd, "playwright-worker.mjs"), "worker");
   mkdirSync(join(cwd, "agent"), { recursive: true });
-  for (const file of ["mcp-host.mjs", "playwright-proxy.mjs", "playwright-runner.mjs", "runtime-client.mjs"]) {
+  for (const file of [
+    "mcp-host.mjs",
+    "playwright-proxy.mjs",
+    "playwright-runner.mjs",
+    "script-runner.mjs",
+    "script-runner.py",
+    "runtime-client.mjs",
+  ]) {
     writeFileSync(join(cwd, "agent", file), file);
   }
   const dependencies: Record<string, { version: string; dependencies?: Record<string, string> }> = {
@@ -37,6 +44,13 @@ function workspace(): string {
     writeFileSync(join(root, "package.json"), JSON.stringify({ name: dependency, ...manifest }));
   }
   return cwd;
+}
+
+async function installPython(root: string): Promise<void> {
+  const python = join(root, "python");
+  mkdirSync(join(python, "Lib", "site-packages", "playwright", "driver"), { recursive: true });
+  writeFileSync(join(python, "python.exe"), "python");
+  writeFileSync(join(python, "Lib", "site-packages", "playwright", "driver", "node.exe"), "driver");
 }
 
 test("Windows bundle preparation packages the official runtime and records its hash", async () => {
@@ -59,6 +73,7 @@ test("Windows bundle preparation packages the official runtime and records its h
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
+      installPython,
       installBrowser: async (installCwd, cacheDir) => {
         expect(installCwd).toBe(staging);
         expect(cacheDir).toBe(browserCache);
@@ -82,6 +97,9 @@ test("Windows bundle preparation packages the official runtime and records its h
     expect(readFileSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chrome.dll"), "utf8")).toBe("dll");
     expect(existsSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chromedriver.exe"))).toBe(false);
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node", "node.exe"), "utf8")).toBe("node");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "python", "python.exe"), "utf8")).toBe("python");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "agent", "script-runner.mjs"), "utf8")).toBe("script-runner.mjs");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "agent", "script-runner.py"), "utf8")).toBe("script-runner.py");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "worker.mjs"), "utf8")).toBe("worker");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8")).version).toBe("1.58.2");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8")).version).toBe("8.21.0");
@@ -112,6 +130,7 @@ test("Windows bundle preparation rejects a non-Windows browser payload", async (
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
+      installPython,
       installBrowser: async (_staging, cacheDir) => {
         const runtime = join(cacheDir, "cloakbrowser");
         mkdirSync(runtime, { recursive: true });
@@ -142,6 +161,7 @@ test("Windows bundle preparation rejects installer paths outside its cache", asy
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
+      installPython,
       installBrowser: async () => ({ path: outside, sha256: sha256("browser") }),
     })).rejects.toThrow("outside its cache directory");
   } finally {
@@ -162,6 +182,7 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
         mkdirSync(join(root, "node"), { recursive: true });
         writeFileSync(join(root, "node", "node.exe"), "node");
       },
+      installPython,
       installBrowser: async (_staging, cacheDir) => {
         const runtime = join(cacheDir, "cloakbrowser");
         mkdirSync(runtime, { recursive: true });
@@ -171,6 +192,25 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
       },
       hashFile: async () => sha256("replaced"),
     })).rejects.toThrow("does not match the installed SHA-256");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Windows bundle preparation rejects a changed Python archive before extraction", async () => {
+  const cwd = workspace();
+  try {
+    await expect(prepareWindowsBundle({
+      cwd, platform: "win32", arch: "x64",
+      compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
+      installNode: async (root) => {
+        mkdirSync(join(root, "node"), { recursive: true });
+        writeFileSync(join(root, "node", "node.exe"), "node");
+      },
+      downloadPython: async () => new TextEncoder().encode("changed archive"),
+    })).rejects.toThrow("Python runtime SHA-256 mismatch");
+    expect(existsSync(join(cwd, "src-tauri", "resources", "playwright", "python"))).toBe(false);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

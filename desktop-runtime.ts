@@ -34,6 +34,7 @@ interface PendingCredentialRequest {
 
 interface ManagedServer {
   stop(closeActiveConnections?: boolean): void | Promise<void>;
+  stopScripts?(): Promise<void>;
 }
 
 interface ManagedStore {
@@ -235,6 +236,7 @@ export class ManagedDesktopRuntime {
         server,
         ...(automationServer ? [automationServer] : []),
       ]), deadline);
+      await beforeDeadline(server.stopScripts?.() ?? Promise.resolve(), deadline);
       try {
         await beforeDeadline(Promise.resolve(stopInbox()), deadline);
       } catch (error) {

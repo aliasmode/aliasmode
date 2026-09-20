@@ -17,6 +17,33 @@ export const NODE_WINDOWS_X64_VERSION = "22.23.2";
 export const NODE_WINDOWS_X64_SHA256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97";
 export const NODE_WINDOWS_X64_URL = `https://nodejs.org/dist/v${NODE_WINDOWS_X64_VERSION}/node-v${NODE_WINDOWS_X64_VERSION}-win-x64.zip`;
 
+export const PYTHON_WINDOWS_X64_VERSION = "3.13.7";
+export const PYTHON_WINDOWS_X64_URL = `https://www.python.org/ftp/python/${PYTHON_WINDOWS_X64_VERSION}/python-${PYTHON_WINDOWS_X64_VERSION}-embed-amd64.zip`;
+export const PYTHON_WINDOWS_X64_SHA256 = "f6cca216a359be84797cabb54149ce5e062afb16cc7567eb7fc51cacb2d86b65";
+
+const PYTHON_WHEELS = [
+  {
+    name: "playwright",
+    url: "https://files.pythonhosted.org/packages/41/f8/5ec599c5e59d2f2f336a05b4f318e733077cd5044f24adb6f86900c3e6a7/playwright-1.58.0-py3-none-win_amd64.whl",
+    sha256: "a2bf639d0ce33b3ba38de777e08697b0d8f3dc07ab6802e4ac53fb65e3907af8",
+  },
+  {
+    name: "pyee",
+    url: "https://files.pythonhosted.org/packages/9b/4d/b9add7c84060d4c1906abe9a7e5359f2a60f7a9a4f67268b2766673427d8/pyee-13.0.0-py3-none-any.whl",
+    sha256: "48195a3cddb3b1515ce0695ed76036b5ccc2ef3a9f963ff9f77aec0139845498",
+  },
+  {
+    name: "greenlet",
+    url: "https://files.pythonhosted.org/packages/1f/1b/54336d876186920e185066d8c3024ad55f21d7cc3683c856127ddb7b13ce/greenlet-3.1.1-cp313-cp313-win_amd64.whl",
+    sha256: "b42703b1cf69f2aa1df7d1030b9d77d3e584a70755674d60e710f0af570f3761",
+  },
+  {
+    name: "typing_extensions",
+    url: "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl",
+    sha256: "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
+  },
+] as const;
+
 export interface PreparedBrowserMetadata {
   executable: string;
   sha256: string;
@@ -33,11 +60,47 @@ export interface PrepareWindowsBundleOptions {
   hashFile?: (path: string) => Promise<string>;
   downloadNode?: () => Promise<Uint8Array>;
   installNode?: (playwrightRoot: string) => Promise<void>;
+  installPython?: (playwrightRoot: string) => Promise<void>;
+  downloadPython?: (url: string) => Promise<Uint8Array>;
+  downloadPythonWheel?: (url: string) => Promise<Uint8Array>;
 }
 
 async function sha256File(path: string): Promise<string> {
   const bytes = readFileSync(path);
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function downloadBytes(url: string, label: string): Promise<Uint8Array> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${label} download failed`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function installPythonRuntime(
+  playwrightRoot: string,
+  downloadPython: (url: string) => Promise<Uint8Array>,
+  downloadWheel: (url: string) => Promise<Uint8Array>,
+): Promise<void> {
+  const pythonRoot = join(playwrightRoot, "python");
+  const python = await downloadPython(PYTHON_WINDOWS_X64_URL);
+  const pythonHash = createHash("sha256").update(python).digest("hex");
+  if (pythonHash !== PYTHON_WINDOWS_X64_SHA256) throw new Error("official Python runtime SHA-256 mismatch");
+  await extractZipTo(python, pythonRoot);
+  if (!statSync(join(pythonRoot, "python.exe"), { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("official Python runtime archive is incomplete");
+  }
+
+  const pth = join(pythonRoot, "python313._pth");
+  const pthContents = readFileSync(pth, "utf8");
+  writeFileSync(pth, `${pthContents.trimEnd()}\nLib/site-packages\n`, "utf8");
+  const sitePackages = join(pythonRoot, "Lib", "site-packages");
+  mkdirSync(sitePackages, { recursive: true });
+  for (const wheel of PYTHON_WHEELS) {
+    const bytes = await downloadWheel(wheel.url);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    if (hash !== wheel.sha256) throw new Error(`official Python ${wheel.name} wheel SHA-256 mismatch`);
+    await extractZipTo(bytes, sitePackages);
+  }
 }
 
 function isWithin(parent: string, child: string): boolean {
@@ -173,6 +236,21 @@ export async function prepareWindowsBundle(
     cpSync(extractedNode, join(playwrightRoot, "node", "node.exe"));
   }
   if (!statSync(join(playwrightRoot, "node", "node.exe")).isFile()) throw new Error("official Node runtime is incomplete");
+  if (options.installPython) {
+    await options.installPython(playwrightRoot);
+  } else {
+    await installPythonRuntime(
+      playwrightRoot,
+      options.downloadPython ?? ((url) => downloadBytes(url, "official Python runtime")),
+      options.downloadPythonWheel ?? ((url) => downloadBytes(url, "official Python wheel")),
+    );
+  }
+  if (!statSync(join(playwrightRoot, "python", "python.exe"), { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("official Python runtime is incomplete");
+  }
+  if (!statSync(join(playwrightRoot, "python", "Lib", "site-packages", "playwright", "driver", "node.exe"), { throwIfNoEntry: false })?.isFile()) {
+    throw new Error("official Python Playwright wheel is incomplete");
+  }
   cpSync(join(cwd, "playwright-worker.mjs"), join(playwrightRoot, "worker.mjs"));
 
   const agentRoot = join(playwrightRoot, "agent");
@@ -181,6 +259,8 @@ export async function prepareWindowsBundle(
     "mcp-host.mjs",
     "playwright-proxy.mjs",
     "playwright-runner.mjs",
+    "script-runner.mjs",
+    "script-runner.py",
     "runtime-client.mjs",
   ]) {
     cpSync(join(cwd, "agent", file), join(agentRoot, file));

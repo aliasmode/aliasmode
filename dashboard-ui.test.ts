@@ -524,8 +524,8 @@ test("the dashboard typeface is bundled, never fetched at runtime", () => {
   expect(notice).toContain("Inter typeface");
 });
 
-test("New profile and Edit are instant dialogs; only Settings and Extensions are pages", () => {
-  expect(app).toContain('useState<"profiles" | "settings" | "extensions">("profiles")');
+test("New profile and Edit are instant dialogs; Scripts, Settings and Extensions are pages", () => {
+  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions">("profiles")');
   expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
   expect(app).toContain('aria-labelledby="create-profile-title"');
   expect(app).toContain('aria-labelledby="edit-profile-title"');

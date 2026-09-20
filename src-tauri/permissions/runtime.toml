@@ -2,3 +2,8 @@
 identifier = "allow-runtime-ready"
 description = "Allows the AliasMode UI to publish non-secret agent runtime readiness."
 commands.allow = ["agent_runtime_ready"]
+
+[[permission]]
+identifier = "allow-script-capability"
+description = "Allows the trusted AliasMode window to authenticate script operations."
+commands.allow = ["script_capability"]

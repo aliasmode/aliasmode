@@ -52,7 +52,7 @@ pub(crate) fn delete_cloud_credential(value: &str) -> Result<(), String> {
     }
 }
 
-fn authorize(window: &WebviewWindow, state: &CredentialOrigin) -> Result<(), String> {
+pub(crate) fn authorize(window: &WebviewWindow, state: &CredentialOrigin) -> Result<(), String> {
     if window.label() != "main" {
         return Err("credential bridge is available only to the main window".to_owned());
     }

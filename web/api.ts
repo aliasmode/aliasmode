@@ -1,5 +1,7 @@
 /** Typed client for the dashboard's /ui/api/* endpoints. */
 
+import type { ScriptLanguage, ScriptRecord, ScriptSummary } from "../contracts/cloud-v1.ts";
+import type { ScriptRun } from "../scripts.ts";
 import {
   CLOUD_DIAGNOSTIC_TYPES,
   type CloudDiagnosticEvent,
@@ -786,4 +788,76 @@ export async function deleteGroup(name: string): Promise<any> {
     body: JSON.stringify({ name }),
   });
   return apiJson(r, "/ui/api/groups/delete");
+}
+
+// ---- Local scripts ------------------------------------------------------------
+export type { ScriptLanguage, ScriptRecord, ScriptRun, ScriptSummary };
+
+type ScriptInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+export function scriptsDesktopAvailable(): boolean {
+  return typeof window !== "undefined" &&
+    typeof (window as any).__TAURI_INTERNALS__?.invoke === "function";
+}
+
+async function scriptRequest(path: string, init: RequestInit = {}): Promise<any> {
+  const invoke = (window as any).__TAURI_INTERNALS__?.invoke as ScriptInvoke | undefined;
+  if (!invoke) throw new Error("Scripts require the desktop app.");
+  const capability = await invoke("script_capability");
+  if (typeof capability !== "string" || !capability) throw new Error("Scripts are unavailable in this desktop app.");
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${capability}`);
+  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const response = await fetch(path, { ...init, headers });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Scripts request failed");
+  return body;
+}
+
+export async function fetchScripts(): Promise<ScriptSummary[]> {
+  const body = await scriptRequest("/ui/api/scripts");
+  if (!Array.isArray(body.scripts)) throw new Error("Scripts returned invalid data");
+  return body.scripts as ScriptSummary[];
+}
+
+export async function fetchScript(id: string): Promise<ScriptRecord> {
+  const body = await scriptRequest(`/ui/api/scripts/${encodeURIComponent(id)}`);
+  if (!body.script || typeof body.script !== "object") throw new Error("Script returned invalid data");
+  return body.script as ScriptRecord;
+}
+
+export async function createScript(input: Pick<ScriptRecord, "name" | "description" | "language" | "source">): Promise<ScriptRecord> {
+  return (await scriptRequest("/ui/api/scripts", { method: "POST", body: JSON.stringify(input) })).script as ScriptRecord;
+}
+
+export async function updateScript(id: string, input: Pick<ScriptRecord, "name" | "description" | "language" | "source" | "revision">): Promise<ScriptRecord> {
+  const { name, description, language, source, revision: expectedRevision } = input;
+  return (await scriptRequest(`/ui/api/scripts/${encodeURIComponent(id)}`, {
+    method: "PATCH", body: JSON.stringify({ name, description, language, source, expectedRevision }),
+  })).script as ScriptRecord;
+}
+
+export async function deleteScript(id: string, expectedRevision: number): Promise<void> {
+  await scriptRequest(`/ui/api/scripts/${encodeURIComponent(id)}`, {
+    method: "DELETE", body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export async function fetchScriptRun(): Promise<ScriptRun | null> {
+  const body = await scriptRequest("/ui/api/scripts/run");
+  return body.run === null ? null : body.run as ScriptRun;
+}
+
+export async function startScriptRun(input: { scriptId: string; profileIds: string[]; inputs: object; useCredentials: boolean }): Promise<ScriptRun> {
+  return (await scriptRequest("/ui/api/scripts/run", { method: "POST", body: JSON.stringify(input) })).run as ScriptRun;
+}
+
+export async function stopScriptRun(): Promise<ScriptRun> {
+  return (await scriptRequest("/ui/api/scripts/stop", { method: "POST", body: "{}" })).run as ScriptRun;
+}
+
+export async function fetchScriptLog(runId: string, offset: number): Promise<{ text: string; nextOffset: number }> {
+  const body = await scriptRequest(`/ui/api/scripts/log?runId=${encodeURIComponent(runId)}&offset=${offset}`);
+  if (typeof body.text !== "string" || !Number.isFinite(body.nextOffset)) throw new Error("Script log returned invalid data");
+  return { text: body.text, nextOffset: body.nextOffset };
 }

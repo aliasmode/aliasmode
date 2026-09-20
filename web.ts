@@ -27,6 +27,8 @@ import {
   type BrowserLifecycleContext,
 } from "./server.ts";
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
+import { ScriptLibrary, ScriptSupervisor } from "./scripts.ts";
+
 import { handleUserApi, type ProfileRoster } from "./adspower-users.ts";
 import {
   AGENT_CONTROL_MAX_MESSAGE_BYTES,
@@ -260,6 +262,14 @@ export function serveDashboard(opts: DashboardServerOptions) {
         log,
       })
     : undefined;
+  const library = agentNonce && opts.paths ? new ScriptLibrary(opts.paths.root, runtimeMode === "cloud", opts.cloudConnection) : undefined;
+  const scripts = library && agentNonce ? {
+    library, nonce: agentNonce,
+    runner: new ScriptSupervisor({
+      root: opts.paths!.root, library, launcher, store, admission,
+      remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
+    }),
+  } : undefined;
   const server = Bun.serve<AgentSocketData>({
     port,
     hostname,
@@ -281,6 +291,10 @@ export function serveDashboard(opts: DashboardServerOptions) {
     },
     fetch: async (req, server) => {
       const reqUrl = new URL(req.url);
+      if ((reqUrl.pathname === "/ui/api/scripts" || reqUrl.pathname.startsWith("/ui/api/scripts/"))
+        && !isLoopbackAddress(server.requestIP(req)?.address)) {
+        return Response.json({ ok: false, error: "loopback access only" }, { status: 403 });
+      }
       if (reqUrl.pathname === AGENT_CONTROL_PATH) {
         if (!isLoopbackAddress(server.requestIP(req)?.address)) {
           return Response.json({ ok: false, error: "loopback access only" }, { status: 403 });
@@ -325,6 +339,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
           cloudBrowser: opts.cloudBrowser,
           mcpTunnel: opts.mcpTunnel,
           health: opts.health,
+          scripts,
           runtimeMode,
         });
         if (ui) return ui;
@@ -339,5 +354,5 @@ export function serveDashboard(opts: DashboardServerOptions) {
   });
   void agentHub?.cleanupTemporaryProfiles();
   log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AliasMode Local API under /api; AdsPower-compatible)`);
-  return server;
+  return Object.assign(server, { stopScripts: () => scripts?.runner.shutdown() ?? Promise.resolve() });
 }

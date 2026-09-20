@@ -54,6 +54,8 @@ import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.
 import { addBrowserCookie } from "./session.ts";
 import { join, resolve } from "node:path";
 import { readdirSync, readFileSync } from "node:fs";
+import { validAgentAuthorization } from "./agent-control.ts";
+import { ScriptError, type ScriptLibrary, type ScriptSupervisor } from "./scripts.ts";
 
 /** Readiness metadata supplied by the desktop parent process. */
 export interface UiHealthMetadata {
@@ -429,6 +431,7 @@ function legalAcceptanceIsCurrent(legal: {
 }
 
 export interface UiRuntimeOptions {
+  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; nonce: string };
   appConfig?: AppConfigStore;
   paths?: StatePaths;
   defaultCloudUrl?: string;
@@ -459,6 +462,56 @@ export async function handleUiRequest(
 ): Promise<Response | null> {
   const { pathname } = new URL(req.url);
   if (!pathname.startsWith("/ui/api/")) return null;
+
+  if (pathname === "/ui/api/scripts" || pathname.startsWith("/ui/api/scripts/")) {
+    const scripts = options.scripts;
+    if (!scripts) return noStoreJson({ ok: false, error: "Scripts require the desktop app" }, 503);
+    if (!validAgentAuthorization(req.headers.get("authorization"), scripts.nonce)) {
+      return noStoreJson({ ok: false, error: "Script authorization failed" }, 401);
+    }
+    const origin = req.headers.get("origin");
+    if (origin && origin !== new URL(req.url).origin) return noStoreJson({ ok: false, error: "Cross-origin requests are forbidden" }, 403);
+    if (req.method !== "GET") {
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+    }
+    try {
+      if (pathname === "/ui/api/scripts/run") {
+        if (req.method === "GET") return noStoreJson({ ok: true, run: scripts.runner.status() });
+        if (req.method === "POST") return noStoreJson({ ok: true, run: scripts.runner.start(await req.json()) });
+      }
+      if (pathname === "/ui/api/scripts/stop" && req.method === "POST") {
+        return noStoreJson({ ok: true, run: await scripts.runner.stop() });
+      }
+      if (pathname === "/ui/api/scripts/log" && req.method === "GET") {
+        const params = new URL(req.url).searchParams;
+        return noStoreJson({ ok: true, ...scripts.runner.log(params.get("runId") ?? "", Number(params.get("offset") ?? 0)) });
+      }
+      if (pathname === "/ui/api/scripts") {
+        if (req.method === "GET") return noStoreJson({ ok: true, scripts: await scripts.library.list() });
+        if (req.method === "POST") return noStoreJson({ ok: true, script: await scripts.library.save(await req.json()) });
+      }
+      const match = pathname.match(/^\/ui\/api\/scripts\/([^/]+)$/);
+      if (match) {
+        const id = decodeURIComponent(match[1]!);
+        if (req.method === "GET") return noStoreJson({ ok: true, script: await scripts.library.get(id) });
+        if (req.method === "PATCH") {
+          const body = await req.json();
+          return noStoreJson({ ok: true, script: await scripts.library.save(body, id, body?.expectedRevision) });
+        }
+        if (req.method === "DELETE") {
+          const body = await req.json();
+          await scripts.library.delete(id, body?.expectedRevision);
+          return noStoreJson({ ok: true });
+        }
+      }
+      return noStoreJson({ ok: false, error: "Unknown script operation" }, 404);
+    } catch (error) {
+      const status = error instanceof ScriptError || error instanceof CloudApiError ? error.status
+        : error instanceof CloudRequestError ? 502 : error instanceof SyntaxError || error instanceof URIError ? 400 : 500;
+      return noStoreJson({ ok: false, error: error instanceof SyntaxError ? "Invalid JSON request" : msg(error) }, status);
+    }
+  }
 
   // Dependency-free readiness probe for the Windows updater. Unlike the
   // profile roster it does not touch CDP, the process scanner, SQLite rows, or
@@ -578,6 +631,7 @@ export async function handleUiRequest(
     const exitsAccount = pathname === "/ui/api/cloud-auth/signout" ||
       pathname === "/ui/api/cloud-auth/forget";
     const finishAccountExit = exitsAccount ? options.cloudAuth.beginExit() : undefined;
+    const resumeScripts = exitsAccount ? options.scripts?.runner.pause() : undefined;
     const authTransition = exitsAccount ? undefined : await options.cloudAuth.acquireTransition();
     const transitionCurrent = () => !authTransition || options.cloudAuth!.isTransitionCurrent(authTransition);
     try {
@@ -594,6 +648,7 @@ export async function handleUiRequest(
         resumeLifecycle?: unknown;
         code?: unknown;
       };
+      if (exitsAccount) await options.scripts?.runner.stop();
       if (pathname === "/ui/api/cloud-auth/signup") {
         if (typeof body.email !== "string" || typeof body.password !== "string") {
           return Response.json({ ok: false, error: "email and password are required" }, { status: 400 });
@@ -812,6 +867,7 @@ export async function handleUiRequest(
     } finally {
       authTransition?.release();
       finishAccountExit?.();
+      resumeScripts?.();
     }
   }
 

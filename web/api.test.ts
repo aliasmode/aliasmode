@@ -18,7 +18,10 @@ import {
   checkProxy,
   exportProfiles,
   fetchProfiles,
+  fetchScripts,
   openProfile,
+  scriptsDesktopAvailable,
+  startScriptRun,
   restoreCloudSession,
   selectAppMode,
   signInCloud,
@@ -478,4 +481,36 @@ test("app mode client sends Cloud selection with JSON", async () => {
   expect(input).toBe("/ui/api/app-mode");
   expect(init?.method).toBe("POST");
   expect(JSON.parse(String(init?.body))).toEqual({ mode: "cloud" });
+});
+
+test("scripts require the desktop capability and send it on every request", async () => {
+  const originalWindow = (globalThis as any).window;
+  const calls: string[] = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __TAURI_INTERNALS__: { invoke: async (command: string) => { calls.push(command); return "test-capability"; } } },
+  });
+  const requests: Array<{ path: RequestInfo | URL; init?: RequestInit }> = [];
+  globalThis.fetch = (async (path: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ path, init });
+    return Response.json(init?.method === "POST"
+      ? { ok: true, run: { id: "run-1", scriptName: "Check", status: "running", profiles: [] } }
+      : { ok: true, scripts: [] });
+  }) as unknown as typeof fetch;
+  try {
+    expect(scriptsDesktopAvailable()).toBe(true);
+    await fetchScripts();
+    await startScriptRun({ scriptId: "script-1", profileIds: ["profile-1"], inputs: {}, useCredentials: false });
+    expect(calls).toEqual(["script_capability", "script_capability"]);
+    expect(requests.map((request) => request.path)).toEqual(["/ui/api/scripts", "/ui/api/scripts/run"]);
+    expect(requests.map((request) => new Headers(request.init?.headers).get("Authorization"))).toEqual([
+      "Bearer test-capability", "Bearer test-capability",
+    ]);
+    expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({
+      scriptId: "script-1", profileIds: ["profile-1"], inputs: {}, useCredentials: false,
+    });
+  } finally {
+    if (originalWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+    else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
 });

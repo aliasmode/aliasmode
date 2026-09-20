@@ -374,6 +374,7 @@ pub fn run() {
             credential_set,
             credential_delete,
             runtime_descriptor::agent_runtime_ready,
+            runtime_descriptor::script_capability,
             shutdown::restart_after_mode_change,
             releases::check_for_updates,
             releases::last_update_result,
@@ -508,6 +509,7 @@ pub fn run() {
                     .remote(format!("{origin}/*"))
                     .permission("allow-credential-bridge")
                     .permission("allow-runtime-ready")
+                    .permission("allow-script-capability")
                     .permission("allow-update-bridge"),
             ) {
                 return Err(error.into());

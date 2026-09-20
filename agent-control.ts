@@ -213,7 +213,8 @@ export class AgentControlSession {
       case "browser.detach":
         return this.detachProfile(stringParam(params, "profileId"));
       case "browser.close":
-        return await this.closeProfile(stringParam(params, "profileId"));
+        return await this.closeProfile(stringParam(params, "profileId"),
+          params.expectedEndpoint === undefined ? undefined : stringParam(params, "expectedEndpoint"));
       case "mcp.connectors.create":
         return await this.createMcpConnector(stringParam(params, "label"));
       case "mcp.connectors.list":
@@ -461,7 +462,7 @@ export class AgentControlSession {
     };
   }
 
-  private async closeProfile(profileId: string): Promise<{
+  private async closeProfile(profileId: string, expectedEndpoint?: string): Promise<{
     profileId: string;
     closed: true;
     sync?: "complete" | "pending" | "conflict";
@@ -470,6 +471,10 @@ export class AgentControlSession {
     return await this.deps.admission.run(
       { kind: "stop", profileIds: [profileId] },
       async () => {
+        if (expectedEndpoint && this.deps.store.getLaunch(profileId)?.ws !== expectedEndpoint) {
+          this.openedByConnection.delete(profileId);
+          throw agentError("browser_changed", "The browser instance changed; the current browser was left open");
+        }
         let closed: boolean;
         let sync: "complete" | "pending" | "conflict" | undefined;
         if (this.deps.cloudBrowser) {

@@ -3,6 +3,7 @@ import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { parsePastedProxy } from "./proxy-input.ts";
+import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
 import { THEME_KEY, readThemeChoice, themeCookie, type ThemeChoice } from "./theme.ts";
 import {
   describeDesktopUpdateResult,
@@ -129,8 +130,9 @@ const REFRESH_MS = 3000;
 const PROFILE_PAGE_SIZE = 50;
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const PAGE_TITLES: Record<"profiles" | "settings" | "extensions", string> = {
+const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions", string> = {
   profiles: "Profiles",
+  scripts: "Scripts",
   settings: "Settings",
   extensions: "Extensions",
 };
@@ -1003,7 +1005,9 @@ function App() {
   // "profiles" is the roster; "settings" replaces it in the same content area
   // rather than opening a dialog — Settings outgrew a modal. New profile and
   // Edit stay dialogs: short forms, and a page felt like too much ceremony.
-  const [view, setView] = useState<"profiles" | "settings" | "extensions">("profiles");
+  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions">("profiles");
+  const [scriptRunOpen, setScriptRunOpen] = useState(false);
+  const [scriptRunProfiles, setScriptRunProfiles] = useState<UiProfile[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
   const [remoteMcp, setRemoteMcp] = useState<RemoteMcpSettings>({ state: "idle" });
@@ -2941,6 +2945,15 @@ function App() {
           </button>
           <button
             type="button"
+            className={`navitem${view === "scripts" ? " active" : ""}`}
+            data-tip="Scripts"
+            title="Scripts"
+            onClick={() => setView("scripts")}
+          >
+            <Icon name="file" /><span className="navlabel">Scripts</span>
+          </button>
+          <button
+            type="button"
             className={`navitem${view === "extensions" ? " active" : ""}`}
             data-tip="Manage extensions"
             title="Manage extensions"
@@ -3261,6 +3274,14 @@ function App() {
             <Icon name="power" className="sm" />Close
           </button>
           {(!isCloudMode || selectedEditable) && <>
+          <button
+            className="btn"
+            type="button"
+            onClick={() => {
+              setScriptRunProfiles(profiles.filter((profile) => selected.has(profile.id)));
+              setScriptRunOpen(true);
+            }}
+          ><Icon name="play" className="sm" />Run script</button>
           <span className="vsep" />
           {!isCloudMode && selectedMobileCount > 0 && (
             <button className="btn warn" onClick={convertSelectedMobile}>
@@ -3553,6 +3574,8 @@ function App() {
           </span>
         </footer>
       </div>
+      ) : view === "scripts" ? (
+      <ScriptsPage onViewRun={() => setScriptRunOpen(true)} />
       ) : view === "extensions" ? (
       <div className="workspace">
         <div className="settingspage">
@@ -4487,6 +4510,11 @@ function App() {
           </div>
         </div>
       )}
+      <ScriptRunPanel
+        open={scriptRunOpen}
+        selectedProfiles={scriptRunProfiles}
+        onClose={() => setScriptRunOpen(false)}
+      />
     </div>
   );
 }

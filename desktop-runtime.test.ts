@@ -182,6 +182,18 @@ test("desktop shutdown coalesces and closes both listeners before authoritative 
   expect(events.slice(2)).toEqual(["inbox", "stop:one", "stop:two", "store"]);
 });
 
+test("desktop shutdown stops script workers before browser capture and store close", async () => {
+  const events: string[] = [];
+  const runtime = new ManagedDesktopRuntime({
+    server: { stop: async () => { events.push("server"); }, stopScripts: async () => { events.push("scripts"); } },
+    admission: admission(),
+    store: { listLaunches: () => [{ profileId: "one" }], close: () => { events.push("store"); } },
+    launcher: { stop: async () => { events.push("browser"); return true; } },
+  });
+  await runtime.shutdown();
+  expect(events).toEqual(["server", "scripts", "browser", "store"]);
+});
+
 test("desktop shutdown attempts both listener stops when one fails", async () => {
   const events: string[] = [];
   const runtime = new ManagedDesktopRuntime({

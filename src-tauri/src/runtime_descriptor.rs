@@ -122,6 +122,16 @@ fn valid_nonce(value: &str) -> bool {
 }
 
 #[tauri::command]
+pub fn script_capability(
+    window: tauri::WebviewWindow,
+    origin: tauri::State<'_, crate::credentials::CredentialOrigin>,
+    state: tauri::State<'_, RuntimeDescriptorState>,
+) -> Result<String, String> {
+    crate::credentials::authorize(&window, &origin)?;
+    Ok(state.base.nonce.clone())
+}
+
+#[tauri::command]
 pub fn agent_runtime_ready(
     state: tauri::State<'_, RuntimeDescriptorState>,
     readiness: String,

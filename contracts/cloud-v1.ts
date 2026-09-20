@@ -27,6 +27,7 @@ export type CloudErrorCode =
   | "folder_access_denied"
   | "invitation_invalid"
   | "profile_not_found"
+  | "script_not_found"
   | "profile_trashed"
   | "profile_open"
   | "version_conflict"
@@ -513,5 +514,23 @@ export interface AnalyticsEventRequest {
   platform: CloudDevice["platform"];
   errorCategory?: string;
 }
+
+export type ScriptLanguage = "javascript" | "python";
+
+export interface ScriptInput {
+  name: string;
+  description: string;
+  language: ScriptLanguage;
+  source: string;
+}
+
+export interface ScriptRecord extends ScriptInput {
+  id: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ScriptSummary = Omit<ScriptRecord, "source">;
 
 export type CloudResult<T> = T | CloudError;

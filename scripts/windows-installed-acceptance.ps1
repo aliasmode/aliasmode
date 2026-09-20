@@ -278,6 +278,83 @@ function Disconnect-McpHost([Diagnostics.Process]$Process) {
   return $null
 }
 
+function Get-ProcessTreeIds([int]$RootId) {
+  $ids = [Collections.Generic.HashSet[int]]::new()
+  $pending = [Collections.Generic.Queue[int]]::new()
+  [void]$ids.Add($RootId)
+  $pending.Enqueue($RootId)
+  while ($pending.Count -gt 0) {
+    $parentId = $pending.Dequeue()
+    foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $parentId" -ErrorAction SilentlyContinue)) {
+      if ($ids.Add([int]$child.ProcessId)) { $pending.Enqueue([int]$child.ProcessId) }
+    }
+  }
+  return @($ids)
+}
+
+function Assert-ProcessIdsExited([int[]]$Ids, [string]$Description) {
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    $remaining = @($Ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remaining.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 250
+  }
+  throw "$Description processes survived: $($Ids -join ', ')"
+}
+
+function Invoke-CustomScriptRunner(
+  [string]$Executable,
+  [string]$Runner,
+  [string]$Script,
+  [string]$RunnerInput,
+  [string]$Ready,
+  [ValidateSet("success", "eof", "stop")][string]$Mode,
+  [string[]]$RuntimeArgs = @()
+) {
+  $start = [Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = $Executable
+  foreach ($argument in $RuntimeArgs) { $start.ArgumentList.Add($argument) }
+  $start.ArgumentList.Add($Runner)
+  $start.ArgumentList.Add($Script)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardInput = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $start
+  if (-not $process.Start()) { throw "installed $Mode custom script runner did not start" }
+  $tree = @()
+  try {
+    $stderr = $process.StandardError.ReadToEndAsync()
+    $process.StandardInput.WriteLine($RunnerInput)
+    $process.StandardInput.Flush()
+    $readiness = $process.StandardOutput.ReadLineAsync()
+    if (-not $readiness.Wait(60000) -or $readiness.Result -ne $Ready) {
+      throw "installed $Mode custom script runner did not report readiness"
+    }
+    $tree = Get-ProcessTreeIds $process.Id
+    if ($Mode -eq "stop") {
+      Stop-ProcessTree $process
+    } else {
+      if ($Mode -eq "eof") { $process.StandardInput.Close() }
+      if (-not $process.WaitForExit(60000)) {
+        Stop-ProcessTree $process
+        throw "installed $Mode custom script runner did not exit"
+      }
+      if (($Mode -eq "success" -and $process.ExitCode -ne 0) -or ($Mode -eq "eof" -and $process.ExitCode -ne 1)) {
+        throw "installed $Mode custom script runner exited with code $($process.ExitCode)"
+      }
+      if ($stderr.GetAwaiter().GetResult()) {
+        throw "installed $Mode custom script runner wrote to stderr"
+      }
+    }
+    Assert-ProcessIdsExited $tree "installed $Mode custom script runner"
+  } finally {
+    if (-not (Test-ProcessExited $process)) { Stop-ProcessTree $process }
+    $process.Dispose()
+  }
+}
+
 function Read-ValidRuntimeDescriptor([string]$Path, [string]$BundleVersion) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "background runtime descriptor is missing"
@@ -358,6 +435,7 @@ $checks = [ordered]@{
   eofTermination = $false
   degradedTermination = $false
   playwrightWorkerProtocol = $false
+  customScriptRunners = $false
   browserMetadataHash = $false
   nativeHeadfulLaunch = $false
   proxyMismatch = $false
@@ -483,6 +561,9 @@ public static class AliasModeWindow {
         $mcpHost,
         (Join-Path $playwrightRuntime "agent\playwright-proxy.mjs"),
         (Join-Path $playwrightRuntime "agent\playwright-runner.mjs"),
+        (Join-Path $playwrightRuntime "agent\script-runner.mjs"),
+        (Join-Path $playwrightRuntime "agent\script-runner.py"),
+        (Join-Path $playwrightRuntime "python\python.exe"),
         (Join-Path $playwrightRuntime "agent\runtime-client.mjs")
       )) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -731,6 +812,66 @@ public static class AliasModeWindow {
       if ($LASTEXITCODE -ne 0 -or -not $status.ok -or -not $status.result.running) {
         throw "installed JSON CLI did not report its browser as running: $($status.error)"
       }
+
+      Set-AcceptanceStage "runtime-desktop-custom-scripts"
+      if ($opened.result.port -le 0) { throw "installed JSON CLI did not return a browser CDP port" }
+      $scriptRoot = Join-Path $runRoot "custom-script-runners"
+      New-Item -ItemType Directory -Force $scriptRoot | Out-Null
+      $scriptInput = @{
+        endpoint = "http://127.0.0.1:$($opened.result.port)"
+        profile = @{ id = $profileId; name = "ci-agent"; group = ""; platform = "Windows" }
+        inputs = @{ profileId = $profileId }
+        credentials = $null
+      } | ConvertTo-Json -Compress -Depth 5
+      $nodeSuccess = Join-Path $scriptRoot "node-success.mjs"
+      $nodeEof = Join-Path $scriptRoot "node-eof.mjs"
+      $pythonSuccess = Join-Path $scriptRoot "python-success.py"
+      $pythonEof = Join-Path $scriptRoot "python-eof.py"
+      $pythonStop = Join-Path $scriptRoot "python-stop.py"
+      [IO.File]::WriteAllText($nodeSuccess, @'
+export default async ({ page, profile, inputs, credentials, log }) => {
+  if (profile.id !== inputs.profileId || credentials !== null) throw new Error("runner input mismatch");
+  await page.goto("data:text/html,AliasMode%20custom%20runner%20smoke");
+  log("node-success");
+};
+'@, [Text.UTF8Encoding]::new($false))
+      [IO.File]::WriteAllText($nodeEof, @'
+export default async ({ log }) => {
+  log("node-eof-ready");
+  await new Promise(() => {});
+};
+'@, [Text.UTF8Encoding]::new($false))
+      [IO.File]::WriteAllText($pythonSuccess, @'
+async def run(*, page, profile, inputs, credentials, log, **_):
+    if profile["id"] != inputs["profileId"] or credentials is not None:
+        raise RuntimeError("runner input mismatch")
+    await page.goto("data:text/html,AliasMode%20custom%20runner%20smoke")
+    log("python-success")
+'@, [Text.UTF8Encoding]::new($false))
+      [IO.File]::WriteAllText($pythonEof, @'
+import asyncio
+
+async def run(*, log, **_):
+    log("python-eof-ready")
+    await asyncio.Event().wait()
+'@, [Text.UTF8Encoding]::new($false))
+      [IO.File]::WriteAllText($pythonStop, @'
+import asyncio
+
+async def run(*, log, **_):
+    log("python-stop-ready")
+    await asyncio.Event().wait()
+'@, [Text.UTF8Encoding]::new($false))
+      $nodeRunner = Join-Path $playwrightRuntime "agent\script-runner.mjs"
+      $pythonRunner = Join-Path $playwrightRuntime "agent\script-runner.py"
+      $python = Join-Path $playwrightRuntime "python\python.exe"
+      Invoke-CustomScriptRunner $node $nodeRunner $nodeSuccess $scriptInput "node-success" "success"
+      Invoke-CustomScriptRunner $python $pythonRunner $pythonSuccess $scriptInput "python-success" "success" -RuntimeArgs @("-u", "-X", "utf8")
+      Invoke-CustomScriptRunner $node $nodeRunner $nodeEof $scriptInput "node-eof-ready" "eof"
+      Invoke-CustomScriptRunner $python $pythonRunner $pythonEof $scriptInput "python-eof-ready" "eof" -RuntimeArgs @("-u", "-X", "utf8")
+      Invoke-CustomScriptRunner $python $pythonRunner $pythonStop $scriptInput "python-stop-ready" "stop" -RuntimeArgs @("-u", "-X", "utf8")
+      $checks.customScriptRunners = $true
+
       $closed = & $helper browser close --profile $profileId | ConvertFrom-Json
       if ($LASTEXITCODE -ne 0 -or -not $closed.ok -or -not $closed.result.closed -or -not $closed.result.deleted) {
         throw "installed JSON CLI did not close and delete its temporary profile: $($closed.error)"
