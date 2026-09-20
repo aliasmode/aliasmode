@@ -9,22 +9,19 @@ import { handleUiRequest, type UiRuntimeOptions } from "./ui.ts";
 import { importBuffers, ProfileImportError } from "./inbox.ts";
 import type { Launcher } from "./launcher.ts";
 
-const cleanup: Array<() => void | Promise<void>> = [];
-afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
+const stores: ProfileStore[] = [];
+const roots: string[] = [];
+afterEach(() => {
+  while (stores.length) stores.pop()!.close();
+  // Bun's transaction statements release file handles only after collection.
+  Bun.gc(true);
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "aliasmode-trash-"));
-  cleanup.push(async () => {
-    for (let attempt = 0; ; attempt++) {
-      try { rmSync(dir, { recursive: true, force: true }); return; }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EBUSY" || attempt === 10) throw error;
-        Bun.gc(true);
-        await Bun.sleep(100);
-      }
-    }
-  });
+  roots.push(dir);
   const path = join(dir, "profiles.sqlite");
-  const store = new ProfileStore(path); cleanup.push(() => store.close());
+  const store = new ProfileStore(path); stores.push(store);
   const profile = { ...buildNewProfile({ name: "Retain me", group: "original" }, () => false), id: "p1", password: "fixture-password", cookies: [{ name: "session", value: "fixture-cookie", domain: ".example.com", path: "/" }] };
   store.upsertProfile(profile); store.saveSessionBundle("p1", "fixture-session");
   const data = join(dir, "p1"); mkdirSync(data); writeFileSync(join(data, "browser-data"), "retained");
@@ -45,7 +42,7 @@ test("existing databases migrate active profiles without changing their data", (
   const database = new Database(path);
   database.exec("ALTER TABLE profiles DROP COLUMN trashed_at");
   database.close();
-  const migrated = new ProfileStore(path); cleanup.push(() => migrated.close());
+  const migrated = new ProfileStore(path); stores.push(migrated);
   expect(migrated.getProfile("p1")).toEqual(before);
   expect(migrated.getSerial("p1")).toBe(serial);
   expect(migrated.listTrashed()).toEqual([]);
@@ -109,7 +106,7 @@ test("imports report a recoverable Trash conflict before the atomic write", asyn
 test("trash survives reopening the database without exposing retained secrets", () => {
   const { store, path } = fixture();
   store.trashProfile("p1");
-  const reopened = new ProfileStore(path); cleanup.push(() => reopened.close());
+  const reopened = new ProfileStore(path); stores.push(reopened);
   expect(reopened.listProfiles()).toEqual([]);
   const trash = reopened.listTrashed();
   expect(trash.map((p) => p.id)).toEqual(["p1"]);
