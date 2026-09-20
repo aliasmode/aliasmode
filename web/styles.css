@@ -1593,6 +1593,14 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .scripts-head, .script-actions { display: flex; align-items: center; gap: 10px; }
 .scripts-head { justify-content: space-between; margin-bottom: 14px; }
 .scripts-head .sect-title { margin-bottom: 3px; }
+.scripts-tabs { margin: 0 0 14px; }
+.scripts-library { display: grid; gap: 14px; }
+.scripts-library-search { display: flex; gap: 8px; }
+.scripts-library-search .input { flex: 1; }
+.script-publication { display: grid; gap: 10px; padding-top: 2px; }
+.script-publication-preview { display: grid; gap: 2px; padding: 10px; color: var(--muted); background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); font-size: var(--t-sm); }
+.script-publication-preview b { color: var(--ink); }
+.script-library-pager { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0 0; }
 .scripts-run-note { display: block; width: 100%; margin-bottom: 12px; padding: 8px 10px; color: var(--accent-ink); text-align: left; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--r-sm); cursor: pointer; font: inherit; font-size: var(--t-sm); }
 .scripts-run-note:hover { background: var(--accent-soft-hover); }
 .scripts-layout { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); gap: 14px; align-items: start; }
@@ -1611,4 +1619,4 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .script-profile { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; color: var(--muted); font-size: var(--t-sm); }
 .script-profile.running { color: var(--accent-ink); }.script-profile.failed { color: var(--danger-ink); }.script-profile.succeeded { color: var(--success-ink); }
 .script-profile small { grid-column: 1 / -1; color: var(--danger-ink); }.script-profile small.warning { color: var(--warn-ink); }
-@media (max-width: 700px) { .scripts-layout { grid-template-columns: 1fr; }.scripts-head { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 700px) { .scripts-layout { grid-template-columns: 1fr; }.scripts-head, .scripts-library-search { align-items: flex-start; flex-direction: column; }.scripts-library-search { align-items: stretch; } }

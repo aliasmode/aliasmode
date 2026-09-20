@@ -4,7 +4,8 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { join } from "node:path";
 import { AgentControlSession, AGENT_CONTROL_PROTOCOL, type AgentControlDeps } from "./agent-control.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
-import type { ScriptInput, ScriptLanguage, ScriptRecord, ScriptSummary } from "./contracts/cloud-v1.ts";
+import { CloudClient } from "./cloud-client.ts";
+import type { ScriptInput, ScriptLanguage, ScriptRecord, ScriptSummary, PublishedScript, PublishScriptInput, PublishedScriptsQuery, ListPublishedScriptsResponse } from "./contracts/cloud-v1.ts";
 import { resolvePlaywrightRuntime } from "./playwright-runtime.ts";
 
 export class ScriptError extends Error {
@@ -26,8 +27,10 @@ function revision(value: unknown): asserts value is number {
 
 export class ScriptLibrary {
   readonly directory: string;
-  constructor(root: string, readonly cloudMode: boolean, private readonly cloud?: CloudConnectionRuntime) {
+  private readonly catalog?: CloudClient;
+  constructor(root: string, readonly cloudMode: boolean, private readonly cloud?: CloudConnectionRuntime, catalogUrl?: string) {
     this.directory = join(root, "custom-scripts");
+    this.catalog = cloud?.client ?? (catalogUrl ? new CloudClient({ baseUrl: catalogUrl, accessToken: () => undefined }) : undefined);
   }
 
   scope(): string {
@@ -61,10 +64,50 @@ export class ScriptLibrary {
   }
 
   async list(): Promise<ScriptSummary[]> {
+    return (await this.info()).scripts;
+  }
+
+  async info(): Promise<{ scripts: ScriptSummary[]; canPublish: boolean; publicationDefaults?: { authorName: string } }> {
     const scope = this.scope();
-    const scripts = this.cloudMode ? (await this.cloud!.client.listScripts()).scripts : this.cached(scope);
+    const response = this.cloudMode ? await this.cloud!.client.listScripts() : { scripts: this.cached(scope), publicationDefaults: undefined };
     this.assertScope(scope);
-    return scripts.map(({ source: _source, ...summary }: ScriptRecord | (ScriptSummary & { source?: string })) => summary);
+    return {
+      scripts: response.scripts.map(({ source: _source, ...summary }: ScriptRecord | (ScriptSummary & { source?: string })) => summary),
+      canPublish: this.cloudMode && !!this.cloud?.accountId(),
+      ...(response.publicationDefaults ? { publicationDefaults: response.publicationDefaults } : {}),
+    };
+  }
+
+  async browse(query: PublishedScriptsQuery = {}): Promise<ListPublishedScriptsResponse> {
+    if (!this.catalog) throw new ScriptError("The public library URL is unavailable", 503);
+    return this.catalog.listPublishedScripts(query);
+  }
+
+  async viewPublished(id: string): Promise<PublishedScript> {
+    if (!this.catalog) throw new ScriptError("The public library URL is unavailable", 503);
+    return (await this.catalog.getPublishedScript(id)).script;
+  }
+
+  async importPublished(id: string): Promise<ScriptRecord> {
+    const scope = this.scope();
+    const script = await this.viewPublished(id);
+    this.assertScope(scope);
+    return this.save(scriptInput(script));
+  }
+
+  async publish(id: string, input: PublishScriptInput): Promise<PublishedScript> {
+    if (!this.cloudMode) throw new ScriptError("Sign in using Cloud mode to publish scripts", 403);
+    const scope = this.scope();
+    const response = await this.cloud!.client.publishScript(id, input);
+    this.assertScope(scope);
+    return response.script;
+  }
+
+  async unpublish(id: string): Promise<void> {
+    if (!this.cloudMode) throw new ScriptError("Sign in using Cloud mode to publish scripts", 403);
+    const scope = this.scope();
+    await this.cloud!.client.unpublishScript(id);
+    this.assertScope(scope);
   }
 
   async get(id: string): Promise<ScriptRecord> {

@@ -148,7 +148,7 @@ test("all script API operations require the desktop nonce and trusted origin", a
   const h = harness();
   const nonce = "a".repeat(64);
   const options = { scripts: { library: h.library, runner: h.supervisor, nonce } };
-  for (const [method, path] of [["GET", ""], ["POST", ""], ["GET", "/run"], ["POST", "/run"], ["POST", "/stop"], ["GET", "/log"], ["GET", "/id"], ["PATCH", "/id"], ["DELETE", "/id"]]) {
+  for (const [method, path] of [["GET", ""], ["POST", ""], ["GET", "/run"], ["POST", "/run"], ["POST", "/stop"], ["GET", "/log"], ["GET", "/id"], ["PATCH", "/id"], ["DELETE", "/id"], ["GET", "/library"], ["GET", "/library/id"], ["POST", "/library/id/import"], ["PUT", "/id/publication"], ["DELETE", "/id/publication"]]) {
     const response = await handleUiRequest(new Request(`http://127.0.0.1/ui/api/scripts${path}`, { method }), {} as any, {} as any, null, options);
     expect(response?.status).toBe(401);
   }
@@ -185,6 +185,135 @@ test("private Cloud methods use existing auth and revision contract", async () =
   expect(calls[2]?.url).toEndWith("/v1/account/scripts/id%2Fencoded");
   expect(calls[3]?.body.expectedRevision).toBe(1);
   expect(calls[4]?.body).toEqual({ expectedRevision: 2 });
+});
+
+const publication = { ...input, id: "published-script", authorName: "Example author", authorEmail: null, sourceRevision: 2, publishedAt: "2026-09-20T00:00:00.000Z", updatedAt: "2026-09-20T00:00:00.000Z" };
+
+test("public catalog requests are anonymous even with a signed-in client", async () => {
+  const calls: string[] = [];
+  const client = new CloudClient({
+    baseUrl: "https://cloud.example.test",
+    accessToken: () => { throw new Error("Public browsing must not read credentials"); },
+    deviceCredential: () => { throw new Error("Public browsing must not read device credentials"); },
+    fetchFn: async (url, init) => {
+      expect(new Headers(init?.headers).has("authorization")).toBe(false);
+      expect(new Headers(init?.headers).has("x-aliasmode-device")).toBe(false);
+      expect(init?.cache).toBe("no-store");
+      calls.push(url);
+      return Response.json({ ok: true, scripts: [], nextOffset: null, script: publication });
+    },
+  });
+  await client.listPublishedScripts({ q: "two words & symbols", language: "python", offset: 50 });
+  await client.getPublishedScript("id/encoded");
+  const query = new URL(calls[0]!).searchParams;
+  expect(query.get("q")).toBe("two words & symbols");
+  expect(query.get("language")).toBe("python");
+  expect(query.get("offset")).toBe("50");
+  expect(calls[1]).toEndWith("/v1/library/scripts/id%2Fencoded");
+});
+
+test("Local catalog imports create independent copies without executing", async () => {
+  let current = publication;
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ ok: true, script: current, scripts: [current], nextOffset: null }) });
+  try {
+    const library = new ScriptLibrary(root(), false, undefined, server.url.origin);
+    expect((await library.browse()).scripts[0]?.id).toBe(publication.id);
+    const first = await library.importPublished(publication.id);
+    const second = await library.importPublished(publication.id);
+    expect(first.id).not.toBe(publication.id);
+    expect(second.id).not.toBe(first.id);
+    expect(first.revision).toBe(1);
+    expect(first).not.toHaveProperty("authorName");
+    expect(first).not.toHaveProperty("sourceRevision");
+    current = { ...publication, source: "changed public source" };
+    expect((await library.get(first.id)).source).toBe(publication.source);
+    expect(await library.info()).toMatchObject({ canPublish: false, scripts: expect.any(Array) });
+    await expect(library.publish(first.id, { expectedRevision: 1, authorName: "Author", showEmail: false })).rejects.toThrow("Cloud");
+    await expect(library.unpublish(first.id)).rejects.toThrow("Cloud");
+  } finally { await server.stop(true); }
+});
+
+test("publication methods preserve authenticated revision and email consent", async () => {
+  const calls: Array<{ method: string; body: any }> = [];
+  const client = new CloudClient({
+    baseUrl: "https://cloud.example.test", accessToken: () => "test-token",
+    fetchFn: async (url, init) => {
+      expect(url).toEndWith("/v1/account/scripts/id%2Fencoded/publication");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-token");
+      calls.push({ method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return Response.json({ ok: true, script: publication, unpublished: true });
+    },
+  });
+  await client.publishScript("id/encoded", { expectedRevision: 2, authorName: "Author", showEmail: false });
+  await client.unpublishScript("id/encoded");
+  expect(calls).toEqual([
+    { method: "PUT", body: { expectedRevision: 2, authorName: "Author", showEmail: false } },
+    { method: "DELETE", body: undefined },
+  ]);
+});
+
+test("public import cannot save into an account that changed during download", async () => {
+  let account = "account-a";
+  let created = false;
+  const library = new ScriptLibrary(root(), true, { accountId: () => account, client: {
+    getPublishedScript: async () => { account = "account-b"; return { script: publication }; },
+    createScript: async () => { created = true; },
+  } } as any);
+  await expect(library.importPublished(publication.id)).rejects.toThrow("account changed");
+  expect(created).toBe(false);
+});
+
+test("script library info exposes publication metadata and last author only in its account", async () => {
+  let account: string | undefined = "account-a";
+  const library = new ScriptLibrary(root(), true, { accountId: () => account, client: {
+    listScripts: async () => ({ scripts: [{ ...input, id: "script", revision: 3, publishedRevision: 2 }], publicationDefaults: { authorName: "Author" } }),
+  } } as any);
+  expect(await library.info()).toMatchObject({ canPublish: true, publicationDefaults: { authorName: "Author" }, scripts: [expect.objectContaining({ publishedRevision: 2 })] });
+  expect(JSON.stringify(await library.info())).not.toContain(input.source);
+  account = undefined;
+  await expect(library.info()).rejects.toThrow("Sign in");
+});
+
+test("desktop library routes browse, import privately, publish, and unpublish without running", async () => {
+  let account: string | undefined = "importing-account";
+  const calls: string[] = [];
+  const copied = { ...input, id: "independent-copy", revision: 1, createdAt: publication.publishedAt, updatedAt: publication.updatedAt };
+  const client = new CloudClient({
+    baseUrl: "https://cloud.example.test", accessToken: () => account ? "test-token" : undefined,
+    fetchFn: async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${path}`);
+      if (path.startsWith("/v1/library/")) {
+        expect(new Headers(init?.headers).has("authorization")).toBe(false);
+        return Response.json({ ok: true, script: publication, scripts: [publication], nextOffset: null });
+      }
+      if (method === "POST") expect(JSON.parse(String(init?.body))).toEqual(input);
+      return Response.json({ ok: true, script: path.endsWith("/publication") ? publication : copied, scripts: [], unpublished: true });
+    },
+  });
+  const h = harness(undefined, { cloud: { accountId: () => account, client } });
+  const nonce = "b".repeat(64);
+  const request = async (path: string, method = "GET", body?: unknown) => {
+    const response = await handleUiRequest(new Request(`http://127.0.0.1/ui/api/scripts${path}`, {
+      method, headers: { authorization: `Bearer ${nonce}`, ...(method === "GET" ? {} : { "content-type": "application/json" }) },
+      ...(method === "GET" ? {} : { body: JSON.stringify(body ?? {}) }),
+    }), {} as any, {} as any, null, { scripts: { library: h.library, runner: h.supervisor, nonce } });
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("cache-control")).toBe("no-store");
+    return response!.json();
+  };
+  expect((await request("/library?q=example&language=javascript&offset=0")).scripts[0].id).toBe(publication.id);
+  expect((await request(`/library/${publication.id}`)).script.source).toBe(input.source);
+  expect((await request(`/library/${publication.id}/import`, "POST")).script).toEqual(copied);
+  expect((await request("/independent-copy/publication", "PUT", { expectedRevision: 1, authorName: "Author", showEmail: false })).script).toEqual(publication);
+  expect((await request("/independent-copy/publication", "DELETE")).unpublished).toBe(true);
+  expect((await request("")).canPublish).toBe(true);
+  expect(calls).toContain("POST /v1/account/scripts");
+  expect(h.events).toEqual([]);
+  expect(h.supervisor.status()).toBeNull();
+  account = undefined;
+  expect((await request("/library")).scripts[0].id).toBe(publication.id);
 });
 
 test("Cloud run status and logs remain account-scoped after switching accounts", async () => {

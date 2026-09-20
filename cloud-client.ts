@@ -48,6 +48,10 @@ import {
   type ScriptInput,
   type ScriptRecord,
   type ScriptSummary,
+  type PublishedScript,
+  type PublishScriptInput,
+  type PublishedScriptsQuery,
+  type ListPublishedScriptsResponse,
 } from "./contracts/cloud-v1.ts";
 
 export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -91,6 +95,7 @@ export interface CloudClientOptions {
 }
 
 interface CallResponseOptions<T> {
+  anonymous?: boolean;
   notModified?: () => T;
   received?: (response: Response, body: T) => void;
 }
@@ -112,14 +117,16 @@ export class CloudClient {
     init: RequestInit = {},
     responseOptions: CallResponseOptions<T> = {},
   ): Promise<T> {
-    const accessToken = await this.options.accessToken();
-    if (!accessToken) {
-      throw new CloudApiError("AliasMode Cloud authentication is required", "authentication_required", 401);
-    }
-    const deviceCredential = await this.options.deviceCredential?.();
     const headers = new Headers(init.headers);
-    headers.set("authorization", `Bearer ${accessToken}`);
-    if (deviceCredential) headers.set("x-aliasmode-device", deviceCredential);
+    if (!responseOptions.anonymous) {
+      const accessToken = await this.options.accessToken();
+      if (!accessToken) {
+        throw new CloudApiError("AliasMode Cloud authentication is required", "authentication_required", 401);
+      }
+      const deviceCredential = await this.options.deviceCredential?.();
+      headers.set("authorization", `Bearer ${accessToken}`);
+      if (deviceCredential) headers.set("x-aliasmode-device", deviceCredential);
+    }
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
 
     const controller = new AbortController();
@@ -215,7 +222,7 @@ export class CloudClient {
     return this.call("/account/legal", { method: "POST", body: JSON.stringify(request) });
   }
 
-  listScripts(): Promise<{ ok: true; scripts: ScriptSummary[] }> {
+  listScripts(): Promise<{ ok: true; scripts: ScriptSummary[]; publicationDefaults?: { authorName: string } }> {
     return this.call("/account/scripts");
   }
 
@@ -235,6 +242,26 @@ export class CloudClient {
     return this.call(`/account/scripts/${encodeURIComponent(id)}`, {
       method: "DELETE", body: JSON.stringify({ expectedRevision }),
     });
+  }
+
+  listPublishedScripts(query: PublishedScriptsQuery = {}): Promise<ListPublishedScriptsResponse> {
+    const params = new URLSearchParams();
+    if (query.q) params.set("q", query.q);
+    if (query.language) params.set("language", query.language);
+    if (query.offset !== undefined) params.set("offset", String(query.offset));
+    return this.call(`/library/scripts?${params}`, { cache: "no-store", credentials: "omit" }, { anonymous: true });
+  }
+
+  getPublishedScript(id: string): Promise<{ ok: true; script: PublishedScript }> {
+    return this.call(`/library/scripts/${encodeURIComponent(id)}`, { cache: "no-store", credentials: "omit" }, { anonymous: true });
+  }
+
+  publishScript(id: string, input: PublishScriptInput): Promise<{ ok: true; script: PublishedScript }> {
+    return this.call(`/account/scripts/${encodeURIComponent(id)}/publication`, { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  unpublishScript(id: string): Promise<{ ok: true; unpublished: true }> {
+    return this.call(`/account/scripts/${encodeURIComponent(id)}/publication`, { method: "DELETE" });
   }
 
   listFolders(): Promise<ListFoldersResponse> {

@@ -1,17 +1,29 @@
 import { useEffect, useRef, useState } from "react";
-import type { ScriptLanguage, ScriptRecord, ScriptSummary } from "../contracts/cloud-v1.ts";
+import type {
+  PublishedScript,
+  PublishedScriptSummary,
+  ScriptLanguage,
+  ScriptRecord,
+  ScriptSummary,
+} from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
 import type { UiProfile } from "./api.ts";
 import {
   createScript,
   deleteScript,
+  fetchPublishedScript,
+  fetchPublishedScripts,
   fetchScript,
+  fetchScriptLibraryInfo,
+  fetchScripts,
   fetchScriptLog,
   fetchScriptRun,
-  fetchScripts,
+  importPublishedScript,
+  publishScript,
   scriptsDesktopAvailable,
   startScriptRun,
   stopScriptRun,
+  unpublishScript,
   updateScript,
 } from "./api.ts";
 
@@ -30,19 +42,38 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type ScriptsTab = "mine" | "library";
+
+function languageName(language: ScriptLanguage): string {
+  return language === "python" ? "Python" : "JavaScript";
+}
+
+function publicationPending(script: ScriptRecord): boolean {
+  return script.publishedRevision !== null && script.publishedRevision !== undefined && script.publishedRevision !== script.revision;
+}
+
 export function ScriptsPage({ onViewRun }: { onViewRun: () => void }) {
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
   const [script, setScript] = useState<ScriptRecord | null>(null);
+  const [tab, setTab] = useState<ScriptsTab>("mine");
+  const [canPublish, setCanPublish] = useState(false);
+  const [publicationDefaultName, setPublicationDefaultName] = useState("");
+  const [publicationOpen, setPublicationOpen] = useState(false);
+  const [authorName, setAuthorName] = useState("");
+  const [showEmail, setShowEmail] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [currentRun, setCurrentRun] = useState<ScriptRun | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
+  const selectionRequest = useRef(0);
   const desktop = scriptsDesktopAvailable();
 
   const reload = async () => {
-    const [nextScripts, nextRun] = await Promise.all([fetchScripts(), fetchScriptRun()]);
-    setScripts(nextScripts);
+    const [info, nextRun] = await Promise.all([fetchScriptLibraryInfo(), fetchScriptRun()]);
+    setScripts(info.scripts);
+    setCanPublish(info.canPublish);
+    setPublicationDefaultName(info.publicationDefaults?.authorName ?? "");
     if (nextRun) setCurrentRun(nextRun);
   };
 
@@ -62,11 +93,19 @@ export function ScriptsPage({ onViewRun }: { onViewRun: () => void }) {
   }, [desktop, currentRun?.status]);
 
   const select = async (id: string) => {
+    const request = ++selectionRequest.current;
     setBusy(true);
     setError(null);
-    try { setScript(await fetchScript(id)); }
-    catch (nextError) { setError(errorText(nextError)); }
-    finally { setBusy(false); }
+    setScript(null);
+    setPublicationOpen(false);
+    try {
+      const nextScript = await fetchScript(id);
+      if (request === selectionRequest.current) setScript(nextScript);
+    } catch (nextError) {
+      if (request === selectionRequest.current) setError(errorText(nextError));
+    } finally {
+      if (request === selectionRequest.current) setBusy(false);
+    }
   };
 
   const importFile = async (file: File) => {
@@ -109,58 +148,221 @@ export function ScriptsPage({ onViewRun }: { onViewRun: () => void }) {
   };
 
   const remove = async () => {
-    if (!script || !window.confirm(`Delete ${script.name}?`)) return;
+    if (!script) return;
+    const alsoUnpublishes = script.publishedRevision !== null && script.publishedRevision !== undefined;
+    if (!window.confirm(`Delete ${script.name}?${alsoUnpublishes ? " This also removes its public listing." : ""}`)) return;
     setBusy(true);
     setError(null);
     try {
       await deleteScript(script.id, script.revision);
       setScript(null);
+      setPublicationOpen(false);
       await reload();
     } catch (nextError) { setError(errorText(nextError)); }
     finally { setBusy(false); }
+  };
+
+  const openPublication = () => {
+    setAuthorName(publicationDefaultName);
+    setShowEmail(false);
+    setPublicationOpen(true);
+  };
+
+  const publish = async () => {
+    if (!script) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await publishScript(script.id, { expectedRevision: script.revision, authorName, showEmail });
+      setPublicationOpen(false);
+      await reload();
+      await select(script.id);
+    } catch (nextError) { setError(errorText(nextError)); }
+    finally { setBusy(false); }
+  };
+
+  const unpublish = async () => {
+    if (!script) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await unpublishScript(script.id);
+      setPublicationOpen(false);
+      await reload();
+      await select(script.id);
+    } catch (nextError) { setError(errorText(nextError)); }
+    finally { setBusy(false); }
+  };
+
+  const imported = async (created: ScriptRecord) => {
+    ++selectionRequest.current;
+    setTab("mine");
+    setScript(created);
+    setPublicationOpen(false);
+    setError(null);
+    try { await reload(); }
+    catch (nextError) { setError(errorText(nextError)); }
   };
 
   if (!desktop) {
     return <div className="workspace scripts-page"><div className="emptystate"><b>Scripts require the desktop app.</b><p>Open AliasMode in the desktop app to manage local scripts.</p></div></div>;
   }
 
+  const isPublished = script?.publishedRevision !== null && script?.publishedRevision !== undefined;
+  const savedScript = scripts.find((item) => item.id === script?.id);
+  const detailsChanged = !!script && (script.name !== savedScript?.name || script.description !== savedScript?.description);
   return (
     <div className="workspace scripts-page">
       <div className="scripts-head">
         <div><h2 className="sect-title">Scripts</h2><p className="formnote">Private scripts sync with your account in Cloud mode. Runs and logs stay on this computer.</p></div>
-        <button className="btn primary" type="button" disabled={busy} onClick={() => importRef.current?.click()}>Import script</button>
+        {tab === "mine" && <button className="btn primary" type="button" disabled={busy} onClick={() => importRef.current?.click()}>Import script</button>}
+      </div>
+      <div className="tabs scripts-tabs" role="tablist" aria-label="Script library">
+        <button className={`tab${tab === "mine" ? " active" : ""}`} role="tab" aria-selected={tab === "mine"} type="button" onClick={() => setTab("mine")}>My scripts</button>
+        <button className={`tab${tab === "library" ? " active" : ""}`} role="tab" aria-selected={tab === "library"} type="button" onClick={() => setTab("library")}>Public library</button>
       </div>
       {error && <div className="modal-err" role="alert">{error}</div>}
-      {currentRun && <button className="scripts-run-note" type="button" onClick={onViewRun}>{currentRun.scriptName}: {currentRun.status}. View run</button>}
-      <div className="scripts-layout">
-        <div className="scripts-list" aria-label="Saved scripts">
-          {scripts.length === 0 ? <p className="formnote">No scripts yet.</p> : scripts.map((item) => (
-            <button className={`script-row${script?.id === item.id ? " active" : ""}`} type="button" key={item.id} disabled={busy} onClick={() => void select(item.id)}>
-              <b>{item.name}</b><span>{item.language === "python" ? "Python" : "JavaScript"}</span>
-              {item.description && <small>{item.description}</small>}
-            </button>
-          ))}
-        </div>
-        {script ? (
-          <section className="settings-card script-detail">
-            <header><h2>{script.name}</h2><span className="chip">{script.language === "python" ? "Python" : "JavaScript"}</span></header>
-            <div className="card-body">
-              <label className="fld"><span>Title</span><input className="input" value={script.name} onChange={(event) => setScript({ ...script, name: event.target.value })} /></label>
-              <label className="fld"><span>Description</span><input className="input" value={script.description} onChange={(event) => setScript({ ...script, description: event.target.value })} /></label>
-              <div className="script-actions">
-                <button className="btn primary" type="button" disabled={busy} onClick={() => void saveDetails()}>{busy ? "Saving…" : "Save details"}</button>
-                <button className="btn" type="button" disabled={busy} onClick={() => replaceRef.current?.click()}>Replace file</button>
-                <button className="btn danger" type="button" disabled={busy} onClick={() => void remove()}>Delete</button>
+      {tab === "library" ? <PublicLibrary onImported={imported} /> : <>
+        {currentRun && <button className="scripts-run-note" type="button" onClick={onViewRun}>{currentRun.scriptName}: {currentRun.status}. View run</button>}
+        <div className="scripts-layout">
+          <div className="scripts-list" aria-label="Saved scripts">
+            {scripts.length === 0 ? <p className="formnote">No scripts yet.</p> : scripts.map((item) => (
+              <button className={`script-row${script?.id === item.id ? " active" : ""}`} type="button" key={item.id} disabled={busy} onClick={() => void select(item.id)}>
+                <b>{item.name}</b><span>{languageName(item.language)}</span>
+                {item.description && <small>{item.description}</small>}
+              </button>
+            ))}
+          </div>
+          {script ? (
+            <section className="settings-card script-detail">
+              <header><h2>{script.name}</h2><span className="chip">{languageName(script.language)}</span>{isPublished && <span className="chip">{publicationPending(script) ? "Published, private changes pending" : "Published"}</span>}</header>
+              <div className="card-body">
+                <label className="fld"><span>Title</span><input className="input" value={script.name} onChange={(event) => setScript({ ...script, name: event.target.value })} /></label>
+                <label className="fld"><span>Description</span><input className="input" value={script.description} onChange={(event) => setScript({ ...script, description: event.target.value })} /></label>
+                <div className="script-actions">
+                  <button className="btn primary" type="button" disabled={busy} onClick={() => void saveDetails()}>{busy ? "Saving…" : "Save details"}</button>
+                  <button className="btn" type="button" disabled={busy} onClick={() => replaceRef.current?.click()}>Replace file</button>
+                  <button className="btn danger" type="button" disabled={busy} onClick={() => void remove()}>Delete</button>
+                </div>
+                <div className="script-actions">
+                  <button className="btn" type="button" disabled={busy || !canPublish || detailsChanged} onClick={openPublication}>{isPublished ? "Update publication" : "Publish"}</button>
+                  {isPublished && <button className="btn danger" type="button" disabled={busy || !canPublish} onClick={() => void unpublish()}>Unpublish</button>}
+                </div>
+                {canPublish && detailsChanged && <p className="formnote">Save details before publishing.</p>}
+                {!canPublish && <p className="formnote">Publishing is available after you sign in to Cloud mode.</p>}
+                {publicationOpen && <form className="script-publication" onSubmit={(event) => { event.preventDefault(); void publish(); }}>
+                  <label className="fld"><span>Author name</span><input className="input" value={authorName} onChange={(event) => setAuthorName(event.target.value)} disabled={busy} /></label>
+                  <label className="script-credentials"><input type="checkbox" checked={showEmail} onChange={(event) => setShowEmail(event.target.checked)} disabled={busy} />Show my account email</label>
+                  <div className="script-publication-preview"><b>{script.name}</b><span>{script.description || "No description"}</span><span>{languageName(script.language)}</span></div>
+                  <div className="script-actions"><button className="btn primary" type="submit" disabled={busy || detailsChanged}>{busy ? "Publishing…" : isPublished ? "Update publication" : "Publish"}</button><button className="btn" type="button" disabled={busy} onClick={() => setPublicationOpen(false)}>Cancel</button></div>
+                </form>}
+                <label className="fld"><span>Source</span><pre className="script-source">{script.source}</pre></label>
               </div>
-              <label className="fld"><span>Source</span><pre className="script-source">{script.source}</pre></label>
-            </div>
-          </section>
-        ) : <div className="emptystate"><b>Select a script</b><p>Import a .js, .mjs, or .py file to begin.</p></div>}
-      </div>
+            </section>
+          ) : <div className="emptystate"><b>Select a script</b><p>Import a .js, .mjs, or .py file to begin.</p></div>}
+        </div>
+      </>}
       <input ref={importRef} type="file" accept=".js,.mjs,.py,text/javascript,text/x-python" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importFile(file); event.target.value = ""; }} />
       <input ref={replaceRef} type="file" accept=".js,.mjs,.py,text/javascript,text/x-python" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void replaceFile(file); event.target.value = ""; }} />
     </div>
   );
+}
+
+function PublicLibrary({ onImported }: { onImported: (script: ScriptRecord) => Promise<void> }) {
+  const [queryInput, setQueryInput] = useState("");
+  const [query, setQuery] = useState("");
+  const [language, setLanguage] = useState<ScriptLanguage | "">("");
+  const [offset, setOffset] = useState(0);
+  const [scripts, setScripts] = useState<PublishedScriptSummary[]>([]);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [script, setScript] = useState<PublishedScript | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const searchRequest = useRef(0);
+  const detailRequest = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    const request = ++searchRequest.current;
+    ++detailRequest.current;
+    setBusy(true);
+    setError(null);
+    setScripts([]);
+    setNextOffset(null);
+    setScript(null);
+    void fetchPublishedScripts({ q: query, ...(language ? { language } : {}), offset }).then((result) => {
+      if (!active || request !== searchRequest.current) return;
+      setScripts(result.scripts);
+      setNextOffset(result.nextOffset);
+    }).catch((nextError) => {
+      if (active && request === searchRequest.current) setError(errorText(nextError));
+    }).finally(() => {
+      if (active && request === searchRequest.current) setBusy(false);
+    });
+    return () => { active = false; };
+  }, [query, language, offset]);
+
+  const search = () => {
+    setOffset(0);
+    setQuery(queryInput);
+  };
+
+  const select = async (id: string) => {
+    const request = ++detailRequest.current;
+    setBusy(true);
+    setError(null);
+    setScript(null);
+    try {
+      const nextScript = await fetchPublishedScript(id);
+      if (request === detailRequest.current) setScript(nextScript);
+    } catch (nextError) {
+      if (request === detailRequest.current) setError(errorText(nextError));
+    } finally {
+      if (request === detailRequest.current) setBusy(false);
+    }
+  };
+
+  const importScript = async () => {
+    if (!script) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await importPublishedScript(script.id);
+      await onImported(created);
+    } catch (nextError) { setError(errorText(nextError)); }
+    finally { setBusy(false); }
+  };
+
+  return <div className="scripts-library">
+    <form className="scripts-library-search" onSubmit={(event) => { event.preventDefault(); search(); }}>
+      <input className="input" aria-label="Search public scripts" placeholder="Search scripts" value={queryInput} onChange={(event) => setQueryInput(event.target.value)} />
+      <select className="select" aria-label="Script language" value={language} onChange={(event) => { setOffset(0); setLanguage(event.target.value as ScriptLanguage | ""); }}>
+        <option value="">All languages</option><option value="javascript">JavaScript</option><option value="python">Python</option>
+      </select>
+      <button className="btn primary" type="submit" disabled={busy}>Search</button>
+    </form>
+    {error && <div className="modal-err" role="alert">{error}</div>}
+    <div className="scripts-layout">
+      <div className="scripts-list" aria-label="Public scripts">
+        {busy && scripts.length === 0 ? <p className="formnote">Loading scripts…</p> : scripts.length === 0 ? <p className="formnote">No public scripts found.</p> : scripts.map((item) => (
+          <button className={`script-row${script?.id === item.id ? " active" : ""}`} type="button" key={item.id} disabled={busy} onClick={() => void select(item.id)}>
+            <b>{item.name}</b><span>{item.authorName} · {languageName(item.language)} · {new Date(item.updatedAt).toLocaleDateString()}</span>
+            {item.description && <small>{item.description}</small>}
+          </button>
+        ))}
+        <div className="script-library-pager"><button className="btn" type="button" disabled={busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</button><button className="btn" type="button" disabled={busy || nextOffset === null} onClick={() => setOffset(nextOffset ?? offset)}>Next</button></div>
+      </div>
+      {script ? <section className="settings-card script-detail">
+        <header><h2>{script.name}</h2><span className="chip">{languageName(script.language)}</span></header>
+        <div className="card-body">
+          <p>{script.description || "No description"}</p>
+          <p className="formnote">By {script.authorName}{script.authorEmail && <> · {script.authorEmail}</>} · {new Date(script.updatedAt).toLocaleDateString()}</p>
+          <button className="btn primary" type="button" disabled={busy} onClick={() => void importScript()}>Add to my scripts</button>
+          <label className="fld"><span>Source</span><pre className="script-source">{script.source}</pre></label>
+        </div>
+      </section> : <div className="emptystate"><b>Select a public script</b><p>Choose a script to view its details and source.</p></div>}
+    </div>
+  </div>;
 }
 
 export function ScriptRunPanel({ open, selectedProfiles, onClose }: {

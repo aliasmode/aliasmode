@@ -1,6 +1,13 @@
 /** Typed client for the dashboard's /ui/api/* endpoints. */
 
-import type { ScriptLanguage, ScriptRecord, ScriptSummary } from "../contracts/cloud-v1.ts";
+import type {
+  PublishScriptInput,
+  PublishedScript,
+  PublishedScriptSummary,
+  ScriptLanguage,
+  ScriptRecord,
+  ScriptSummary,
+} from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
 import {
   CLOUD_DIAGNOSTIC_TYPES,
@@ -814,10 +821,31 @@ async function scriptRequest(path: string, init: RequestInit = {}): Promise<any>
   return body;
 }
 
-export async function fetchScripts(): Promise<ScriptSummary[]> {
+export interface ScriptLibraryInfo {
+  scripts: ScriptSummary[];
+  canPublish: boolean;
+  publicationDefaults?: { authorName: string };
+}
+
+export async function fetchScriptLibraryInfo(): Promise<ScriptLibraryInfo> {
   const body = await scriptRequest("/ui/api/scripts");
-  if (!Array.isArray(body.scripts)) throw new Error("Scripts returned invalid data");
-  return body.scripts as ScriptSummary[];
+  if (!Array.isArray(body.scripts)) {
+    throw new Error("Scripts returned invalid data");
+  }
+  if (body.publicationDefaults !== undefined && (
+    !body.publicationDefaults || typeof body.publicationDefaults.authorName !== "string"
+  )) {
+    throw new Error("Scripts returned invalid publication defaults");
+  }
+  return {
+    scripts: body.scripts as ScriptSummary[],
+    canPublish: body.canPublish === true,
+    ...(body.publicationDefaults ? { publicationDefaults: body.publicationDefaults } : {}),
+  };
+}
+
+export async function fetchScripts(): Promise<ScriptSummary[]> {
+  return (await fetchScriptLibraryInfo()).scripts;
 }
 
 export async function fetchScript(id: string): Promise<ScriptRecord> {
@@ -841,6 +869,49 @@ export async function deleteScript(id: string, expectedRevision: number): Promis
   await scriptRequest(`/ui/api/scripts/${encodeURIComponent(id)}`, {
     method: "DELETE", body: JSON.stringify({ expectedRevision }),
   });
+}
+
+export async function fetchPublishedScripts(input: {
+  q?: string;
+  language?: ScriptLanguage;
+  offset?: number;
+} = {}): Promise<{ scripts: PublishedScriptSummary[]; nextOffset: number | null }> {
+  const query = new URLSearchParams();
+  if (input.q) query.set("q", input.q);
+  if (input.language) query.set("language", input.language);
+  if (input.offset) query.set("offset", String(input.offset));
+  const suffix = query.size ? `?${query}` : "";
+  const body = await scriptRequest(`/ui/api/scripts/library${suffix}`);
+  if (!Array.isArray(body.scripts) || (body.nextOffset !== null && !Number.isFinite(body.nextOffset))) {
+    throw new Error("Public library returned invalid data");
+  }
+  return { scripts: body.scripts as PublishedScriptSummary[], nextOffset: body.nextOffset };
+}
+
+export async function fetchPublishedScript(id: string): Promise<PublishedScript> {
+  const body = await scriptRequest(`/ui/api/scripts/library/${encodeURIComponent(id)}`);
+  if (!body.script || typeof body.script !== "object" || typeof body.script.source !== "string") {
+    throw new Error("Public script returned invalid data");
+  }
+  return body.script as PublishedScript;
+}
+
+export async function importPublishedScript(id: string): Promise<ScriptRecord> {
+  const body = await scriptRequest(`/ui/api/scripts/library/${encodeURIComponent(id)}/import`, { method: "POST", body: "{}" });
+  if (!body.script || typeof body.script !== "object") throw new Error("Imported script returned invalid data");
+  return body.script as ScriptRecord;
+}
+
+export async function publishScript(id: string, input: PublishScriptInput): Promise<PublishedScript> {
+  const body = await scriptRequest(`/ui/api/scripts/${encodeURIComponent(id)}/publication`, {
+    method: "PUT", body: JSON.stringify(input),
+  });
+  if (!body.script || typeof body.script !== "object") throw new Error("Published script returned invalid data");
+  return body.script as PublishedScript;
+}
+
+export async function unpublishScript(id: string): Promise<void> {
+  await scriptRequest(`/ui/api/scripts/${encodeURIComponent(id)}/publication`, { method: "DELETE", body: "{}" });
 }
 
 export async function fetchScriptRun(): Promise<ScriptRun | null> {

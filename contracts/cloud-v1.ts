@@ -529,8 +529,43 @@ export interface ScriptRecord extends ScriptInput {
   revision: number;
   createdAt: string;
   updatedAt: string;
+  publishedRevision?: number | null;
 }
 
 export type ScriptSummary = Omit<ScriptRecord, "source">;
+
+export interface PublishedScriptSummary {
+  id: string;
+  name: string;
+  description: string;
+  language: ScriptLanguage;
+  authorName: string;
+  authorEmail: string | null;
+  sourceRevision: number;
+  publishedAt: string;
+  updatedAt: string;
+}
+
+export interface PublishedScript extends PublishedScriptSummary {
+  source: string;
+}
+
+export interface PublishScriptInput {
+  expectedRevision: number;
+  authorName: string;
+  showEmail: boolean;
+}
+
+export interface PublishedScriptsQuery {
+  q?: string;
+  language?: ScriptLanguage;
+  offset?: number;
+}
+
+export interface ListPublishedScriptsResponse {
+  ok: true;
+  scripts: PublishedScriptSummary[];
+  nextOffset: number | null;
+}
 
 export type CloudResult<T> = T | CloudError;

@@ -487,8 +487,33 @@ export async function handleUiRequest(
         const params = new URL(req.url).searchParams;
         return noStoreJson({ ok: true, ...scripts.runner.log(params.get("runId") ?? "", Number(params.get("offset") ?? 0)) });
       }
+      if (pathname === "/ui/api/scripts/library" && req.method === "GET") {
+        const params = new URL(req.url).searchParams;
+        const language = params.get("language") || undefined;
+        if (language !== undefined && language !== "javascript" && language !== "python") throw new ScriptError("Unsupported script language");
+        return noStoreJson(await scripts.library.browse({
+          q: params.get("q") ?? undefined,
+          language: language || undefined,
+          offset: params.has("offset") ? Number(params.get("offset")) : undefined,
+        }));
+      }
+      const publicMatch = pathname.match(/^\/ui\/api\/scripts\/library\/([^/]+)(\/import)?$/);
+      if (publicMatch) {
+        const id = decodeURIComponent(publicMatch[1]!);
+        if (!publicMatch[2] && req.method === "GET") return noStoreJson({ ok: true, script: await scripts.library.viewPublished(id) });
+        if (publicMatch[2] && req.method === "POST") return noStoreJson({ ok: true, script: await scripts.library.importPublished(id) });
+      }
+      const publicationMatch = pathname.match(/^\/ui\/api\/scripts\/([^/]+)\/publication$/);
+      if (publicationMatch) {
+        const id = decodeURIComponent(publicationMatch[1]!);
+        if (req.method === "PUT") return noStoreJson({ ok: true, script: await scripts.library.publish(id, await req.json()) });
+        if (req.method === "DELETE") {
+          await scripts.library.unpublish(id);
+          return noStoreJson({ ok: true, unpublished: true });
+        }
+      }
       if (pathname === "/ui/api/scripts") {
-        if (req.method === "GET") return noStoreJson({ ok: true, scripts: await scripts.library.list() });
+        if (req.method === "GET") return noStoreJson({ ok: true, ...await scripts.library.info() });
         if (req.method === "POST") return noStoreJson({ ok: true, script: await scripts.library.save(await req.json()) });
       }
       const match = pathname.match(/^\/ui\/api\/scripts\/([^/]+)$/);

@@ -18,10 +18,16 @@ import {
   checkProxy,
   exportProfiles,
   fetchProfiles,
+  fetchPublishedScript,
+  fetchPublishedScripts,
+  fetchScriptLibraryInfo,
   fetchScripts,
+  importPublishedScript,
   openProfile,
+  publishScript,
   scriptsDesktopAvailable,
   startScriptRun,
+  unpublishScript,
   restoreCloudSession,
   selectAppMode,
   signInCloud,
@@ -509,6 +515,53 @@ test("scripts require the desktop capability and send it on every request", asyn
     expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({
       scriptId: "script-1", profileIds: ["profile-1"], inputs: {}, useCredentials: false,
     });
+  } finally {
+    if (originalWindow === undefined) Reflect.deleteProperty(globalThis, "window");
+    else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });
+  }
+});
+
+test("public script library calls use the desktop capability and exact contracts", async () => {
+  const originalWindow = (globalThis as any).window;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { __TAURI_INTERNALS__: { invoke: async () => "test-capability" } },
+  });
+  const requests: Array<{ path: RequestInfo | URL; init?: RequestInit }> = [];
+  const publication = { id: "public-1", name: "Public", description: "", language: "python", authorName: "Author", authorEmail: null, sourceRevision: 2, publishedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
+  globalThis.fetch = (async (path: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ path, init });
+    const url = String(path);
+    if (url.includes("/library?") || url.endsWith("/library")) return Response.json({ ok: true, scripts: [publication], nextOffset: null });
+    if (url.endsWith("/import")) return Response.json({ ok: true, script: { ...publication, source: "print('copy')", revision: 1, createdAt: publication.publishedAt } });
+    if (url.includes("/library/")) return Response.json({ ok: true, script: { ...publication, source: "print('source')" } });
+    if (url.endsWith("/publication")) return Response.json({ ok: true, ...(init?.method === "DELETE" ? { unpublished: true } : { script: { ...publication, source: "print('source')" } }) });
+    return Response.json({ ok: true, scripts: [], canPublish: true, publicationDefaults: { authorName: "Author" } });
+  }) as typeof fetch;
+  try {
+    await expect(fetchScriptLibraryInfo()).resolves.toEqual({ scripts: [], canPublish: true, publicationDefaults: { authorName: "Author" } });
+    await expect(fetchScripts()).resolves.toEqual([]);
+    await expect(fetchPublishedScripts({ q: "hello world", language: "python", offset: 50 })).resolves.toMatchObject({ scripts: [publication], nextOffset: null });
+    await expect(fetchPublishedScript("public/id")).resolves.toMatchObject({ ...publication, source: "print('source')" });
+    await expect(importPublishedScript("public/id")).resolves.toMatchObject({ id: "public-1", source: "print('copy')" });
+    await expect(publishScript("private/id", { expectedRevision: 2, authorName: "Author", showEmail: false })).resolves.toMatchObject(publication);
+    await expect(unpublishScript("private/id")).resolves.toBeUndefined();
+    expect(requests.map((request) => request.path)).toEqual([
+      "/ui/api/scripts",
+      "/ui/api/scripts",
+      "/ui/api/scripts/library?q=hello+world&language=python&offset=50",
+      "/ui/api/scripts/library/public%2Fid",
+      "/ui/api/scripts/library/public%2Fid/import",
+      "/ui/api/scripts/private%2Fid/publication",
+      "/ui/api/scripts/private%2Fid/publication",
+    ]);
+    expect(requests.map((request) => new Headers(request.init?.headers).get("Authorization"))).toEqual([
+      "Bearer test-capability", "Bearer test-capability", "Bearer test-capability", "Bearer test-capability", "Bearer test-capability", "Bearer test-capability", "Bearer test-capability",
+    ]);
+    expect(requests.map((request) => request.init?.method)).toEqual([undefined, undefined, undefined, undefined, "POST", "PUT", "DELETE"]);
+    expect(JSON.parse(String(requests[5]?.init?.body))).toEqual({ expectedRevision: 2, authorName: "Author", showEmail: false });
+    expect(new Headers(requests[6]?.init?.headers).get("Content-Type")).toBe("application/json");
+    expect(requests[6]?.init?.body).toBe("{}");
   } finally {
     if (originalWindow === undefined) Reflect.deleteProperty(globalThis, "window");
     else Object.defineProperty(globalThis, "window", { configurable: true, value: originalWindow });

@@ -262,7 +262,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
         log,
       })
     : undefined;
-  const library = agentNonce && opts.paths ? new ScriptLibrary(opts.paths.root, runtimeMode === "cloud", opts.cloudConnection) : undefined;
+  const library = agentNonce && opts.paths ? new ScriptLibrary(opts.paths.root, runtimeMode === "cloud", opts.cloudConnection, opts.defaultCloudUrl) : undefined;
   const scripts = library && agentNonce ? {
     library, nonce: agentNonce,
     runner: new ScriptSupervisor({
