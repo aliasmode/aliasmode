@@ -28,11 +28,14 @@ use tauri_plugin_shell::ShellExt;
 
 const IMPORT_RESTRICTION: &str = "Windows DPAPI protects persisted browser secrets, so this import works only for the same Windows machine and account. Persisted persona fields are preserved, but runtime or browser differences can change the account-visible fingerprint.";
 
-const ALLOWED_EXTERNAL_URLS: [&str; 4] = [
+const ALLOWED_EXTERNAL_URLS: [&str; 7] = [
     "https://aliasmode.com/terms/",
     "https://aliasmode.com/privacy/",
     "https://aliasmode.com/acceptable-use/",
     "https://nobleproxy.com/t/aliasmode",
+    "https://t.me/aliasmode",
+    "https://github.com/aliasmode/aliasmode",
+    "https://xreacher.com/",
 ];
 
 const WINDOWS_ACCEPTANCE_BROWSER_ARGS: &str =
@@ -268,6 +271,9 @@ mod tests {
             "https://aliasmode.com/privacy/",
             "https://aliasmode.com/acceptable-use/",
             "https://nobleproxy.com/t/aliasmode",
+            "https://t.me/aliasmode",
+            "https://github.com/aliasmode/aliasmode",
+            "https://xreacher.com/",
         ] {
             assert!(allowed_external_url(url));
         }

@@ -612,6 +612,8 @@ test("the Action column stays reachable while the roster scrolls sideways", () =
   // A sticky cell has no row behind it, so every row state repaints its own.
   expect(styles).toContain(".profile-table tbody tr.selected td.col-action { background: var(--accent-soft); }");
   expect(styles).toContain(".profile-table thead th.col-action { z-index: 3; background: var(--surface-sunken); }");
+  // Hover labels must paint above the next row's sticky Action cell.
+  expect(styles).toContain(".profile-table tbody tr:hover td.col-action { background: var(--surface-sunken); z-index: 2; }");
   // The edge shadow only appears once there is content underneath it.
   expect(app).toContain("onScroll={(event) => setTableScrolled(event.currentTarget.scrollLeft > 0)}");
   expect(styles).toContain(".tablewrap.scrolled td.col-action::before");

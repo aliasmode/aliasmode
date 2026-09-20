@@ -855,7 +855,7 @@ th.col-action, td.col-action {
   background: var(--surface);
 }
 .profile-table thead th.col-action { z-index: 3; background: var(--surface-sunken); }
-.profile-table tbody tr:hover td.col-action { background: var(--surface-sunken); }
+.profile-table tbody tr:hover td.col-action { background: var(--surface-sunken); z-index: 2; }
 .profile-table tbody tr.selected td.col-action { background: var(--accent-soft); }
 .profile-table tbody tr.selected:hover td.col-action { background: var(--accent-soft-hover); }
 /* Only cast the edge shadow while there is something scrolled underneath. */
