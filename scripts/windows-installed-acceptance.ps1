@@ -862,12 +862,14 @@ async def run(*, log, **_):
     log("python-stop-ready")
     await asyncio.Event().wait()
 '@, [Text.UTF8Encoding]::new($false))
+      $node = Join-Path $playwrightRuntime "node\node.exe"
       $nodeRunner = Join-Path $playwrightRuntime "agent\script-runner.mjs"
       $pythonRunner = Join-Path $playwrightRuntime "agent\script-runner.py"
       $python = Join-Path $playwrightRuntime "python\python.exe"
       Invoke-CustomScriptRunner $node $nodeRunner $nodeSuccess $scriptInput "node-success" "success"
       Invoke-CustomScriptRunner $python $pythonRunner $pythonSuccess $scriptInput "python-success" "success" -RuntimeArgs @("-u", "-X", "utf8")
       Invoke-CustomScriptRunner $node $nodeRunner $nodeEof $scriptInput "node-eof-ready" "eof"
+      Invoke-CustomScriptRunner $node $nodeRunner $nodeEof $scriptInput "node-eof-ready" "stop"
       Invoke-CustomScriptRunner $python $pythonRunner $pythonEof $scriptInput "python-eof-ready" "eof" -RuntimeArgs @("-u", "-X", "utf8")
       Invoke-CustomScriptRunner $python $pythonRunner $pythonStop $scriptInput "python-stop-ready" "stop" -RuntimeArgs @("-u", "-X", "utf8")
       $checks.customScriptRunners = $true
