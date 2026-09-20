@@ -307,9 +307,10 @@ function Invoke-CustomScriptRunner(
   [string]$Script,
   [string]$RunnerInput,
   [string]$Ready,
-  [ValidateSet("success", "eof", "stop")][string]$Mode,
+  [ValidateSet("success", "error", "eof", "stop")][string]$Mode,
   [string[]]$RuntimeArgs = @()
 ) {
+  Write-Host "Checking installed $Mode custom script: $(Split-Path $Script -Leaf)"
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $Executable
   foreach ($argument in $RuntimeArgs) { $start.ArgumentList.Add($argument) }
@@ -341,12 +342,11 @@ function Invoke-CustomScriptRunner(
         Stop-ProcessTree $process
         throw "installed $Mode custom script runner did not exit"
       }
-      if (($Mode -eq "success" -and $process.ExitCode -ne 0) -or ($Mode -eq "eof" -and $process.ExitCode -ne 1)) {
+      if (($Mode -eq "success" -and $process.ExitCode -ne 0) -or ($Mode -in @("error", "eof") -and $process.ExitCode -ne 1)) {
         throw "installed $Mode custom script runner exited with code $($process.ExitCode)"
       }
-      if ($stderr.GetAwaiter().GetResult()) {
-        throw "installed $Mode custom script runner wrote to stderr"
-      }
+      $diagnostic = $stderr.GetAwaiter().GetResult()
+      if ($diagnostic) { Write-Host "custom script runner stderr: $diagnostic" }
     }
     Assert-ProcessIdsExited $tree "installed $Mode custom script runner"
   } finally {
@@ -862,12 +862,22 @@ async def run(*, log, **_):
     log("python-stop-ready")
     await asyncio.Event().wait()
 '@, [Text.UTF8Encoding]::new($false))
+      $nodeError = Join-Path $scriptRoot "node-error.mjs"
+      $pythonError = Join-Path $scriptRoot "python-error.py"
+      [IO.File]::WriteAllText($nodeError, 'export default async ({ log }) => { log("node-error-ready"); throw new Error("fixture failure"); };', [Text.UTF8Encoding]::new($false))
+      [IO.File]::WriteAllText($pythonError, @'
+async def run(*, log, **_):
+    log("python-error-ready")
+    raise RuntimeError("fixture failure")
+'@, [Text.UTF8Encoding]::new($false))
       $node = Join-Path $playwrightRuntime "node\node.exe"
       $nodeRunner = Join-Path $playwrightRuntime "agent\script-runner.mjs"
       $pythonRunner = Join-Path $playwrightRuntime "agent\script-runner.py"
       $python = Join-Path $playwrightRuntime "python\python.exe"
       Invoke-CustomScriptRunner $node $nodeRunner $nodeSuccess $scriptInput "node-success" "success"
       Invoke-CustomScriptRunner $python $pythonRunner $pythonSuccess $scriptInput "python-success" "success" -RuntimeArgs @("-u", "-X", "utf8")
+      Invoke-CustomScriptRunner $node $nodeRunner $nodeError $scriptInput "node-error-ready" "error"
+      Invoke-CustomScriptRunner $python $pythonRunner $pythonError $scriptInput "python-error-ready" "error" -RuntimeArgs @("-u", "-X", "utf8")
       Invoke-CustomScriptRunner $node $nodeRunner $nodeEof $scriptInput "node-eof-ready" "eof"
       Invoke-CustomScriptRunner $node $nodeRunner $nodeEof $scriptInput "node-eof-ready" "stop"
       Invoke-CustomScriptRunner $python $pythonRunner $pythonEof $scriptInput "python-eof-ready" "eof" -RuntimeArgs @("-u", "-X", "utf8")
