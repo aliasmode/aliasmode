@@ -14,6 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -47,11 +48,88 @@ jobs:
       - run: bun run typecheck
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
+  windows_firefox:
+    name: Pinned AliasMode Firefox runtime
+    runs-on: windows-latest
+    outputs:
+      archive_sha256: ${{ steps.verify.outputs.archive_sha256 }}
+      executable_sha256: ${{ steps.verify.outputs.executable_sha256 }}
+    steps:
+      - name: Verify source build provenance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/35581784648 | ConvertFrom-Json
+          if (
+            $run.name -cne "Build and Release" -or
+            $run.path -cne ".github/workflows/build.yml" -or
+            $run.repository.full_name -cne "aliasmode/aliasmode-firefox" -or
+            $run.head_repository.full_name -cne "aliasmode/aliasmode-firefox" -or
+            $run.status -cne "completed" -or
+            $run.conclusion -cne "success" -or
+            $run.event -cne "push" -or
+            $run.head_branch -cne "firefox-engine" -or
+            $run.head_sha -cne "0897f6e5404bc74646dd6e457d42ac6f0e19dcd4"
+          ) {
+            throw "AliasMode Firefox source build provenance is invalid"
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: AliasModeBuilds-windows-x86_64
+          path: artifacts/firefox
+          github-token: ${{ github.token }}
+          repository: aliasmode/aliasmode-firefox
+          run-id: "35581784648"
+      - name: Verify owned AliasMode Firefox artifact
+        id: verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = Resolve-Path ".\artifacts\firefox"
+          $entries = @(Get-ChildItem -LiteralPath $root -Force)
+          $archiveName = "aliasmode-152.0.4-beta.30-win.x86_64.zip"
+          if (
+            $entries.Count -ne 1 -or
+            $entries[0].PSIsContainer -or
+            (($entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            $entries[0].Name -cne $archiveName
+          ) {
+            throw "AliasMode Firefox artifact must contain exactly the approved archive"
+          }
+          $archive = $entries[0].FullName
+          $archiveSha = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($archiveSha -notmatch '^[a-f0-9]{64}$') { throw "AliasMode Firefox archive SHA-256 is invalid" }
+          $extracted = Join-Path $env:RUNNER_TEMP "aliasmode-firefox-runtime"
+          Expand-Archive -LiteralPath $archive -DestinationPath $extracted -Force
+          $executables = @(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter "aliasmode.exe")
+          if ($executables.Count -ne 1) { throw "AliasMode Firefox archive must contain exactly one aliasmode.exe" }
+          $executable = $executables[0].FullName
+          $executableSha = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($executableSha -notmatch '^[a-f0-9]{64}$') { throw "AliasMode Firefox executable SHA-256 is invalid" }
+          $version = (& $executable --version) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
+            throw "owned AliasMode Firefox did not report Firefox 152.0.4"
+          }
+          "archive_sha256=$archiveSha" | Add-Content $env:GITHUB_OUTPUT
+          "executable_sha256=$executableSha" | Add-Content $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aliasmode-firefox-windows-x64
+          path: artifacts/firefox
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   windows_cache:
     name: Windows cache and provenance
+    needs: windows_firefox
     runs-on: windows-latest
     outputs:
       baseline_bun_sha: ${{ steps.provenance.outputs.baseline_bun_sha }}
+      firefox_archive_sha256: ${{ steps.provenance.outputs.firefox_archive_sha256 }}
+      firefox_executable_sha256: ${{ steps.provenance.outputs.firefox_executable_sha256 }}
       cache_hit: ${{ steps.cache_status.outputs.cache_hit }}
       product_key: ${{ steps.provenance.outputs.product_key }}
       source: ${{ steps.provenance.outputs.source }}
@@ -68,6 +146,9 @@ jobs:
       - name: Compute Windows product provenance
         id: provenance
         shell: pwsh
+        env:
+          FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_firefox.outputs.archive_sha256 }}
+          FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_firefox.outputs.executable_sha256 }}
         run: |
           $ErrorActionPreference = "Stop"
           $baselineUrl = "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip"
@@ -104,6 +185,11 @@ jobs:
           $version = [string](Get-Content ".\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).version
           if ([string]::IsNullOrWhiteSpace($version)) { throw "Tauri bundle version is missing" }
           if ([string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) { throw "GitHub source identity is missing" }
+          foreach ($name in @("FIREFOX_ARCHIVE_SHA256", "FIREFOX_EXECUTABLE_SHA256")) {
+            if ([Environment]::GetEnvironmentVariable($name) -notmatch '^[a-f0-9]{64}$') {
+              throw "AliasMode Firefox provenance output is invalid: $name"
+            }
+          }
 
           $toolchainIdentity = @(
             "setup-bun=1.2.21:$setupBunSha"
@@ -120,6 +206,10 @@ jobs:
             "cloakbrowser-version=146.0.7680.177.5"
             "cloakbrowser-archive-sha256=b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe"
             "cloakbrowser-executable-sha256=03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80"
+            "aliasmode-firefox-source=aliasmode/aliasmode-firefox@0897f6e5404bc74646dd6e457d42ac6f0e19dcd4"
+            "aliasmode-firefox-version=152.0.4-beta.30"
+            "aliasmode-firefox-archive-sha256=$env:FIREFOX_ARCHIVE_SHA256"
+            "aliasmode-firefox-executable-sha256=$env:FIREFOX_EXECUTABLE_SHA256"
           ) -join "`n"
           $keyOutput = @(
             & bun scripts/windows-product-key.ts `
@@ -135,6 +225,8 @@ jobs:
           if ($productKey -notmatch '^[a-f0-9]{64}$') { throw "Windows product key is invalid" }
 
           "baseline_bun_sha=$baselineSha" | Add-Content $env:GITHUB_OUTPUT
+          "firefox_archive_sha256=$env:FIREFOX_ARCHIVE_SHA256" | Add-Content $env:GITHUB_OUTPUT
+          "firefox_executable_sha256=$env:FIREFOX_EXECUTABLE_SHA256" | Add-Content $env:GITHUB_OUTPUT
           "product_key=$productKey" | Add-Content $env:GITHUB_OUTPUT
           "source=$env:GITHUB_SHA" | Add-Content $env:GITHUB_OUTPUT
           "version=$version" | Add-Content $env:GITHUB_OUTPUT
@@ -294,6 +386,10 @@ jobs:
         with:
           path: src-tauri/target/cloakbrowser-cache
           key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-firefox-windows-x64
+          path: artifacts/firefox
       - run: bun install --frozen-lockfile
       - name: Build and verify unsigned synthetic successor
         shell: pwsh
@@ -301,6 +397,9 @@ jobs:
           WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
           WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
           WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-152.0.4-beta.30-win.x86_64.zip
+          ALIASMODE_FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_cache.outputs.firefox_archive_sha256 }}
+          ALIASMODE_FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_cache.outputs.firefox_executable_sha256 }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -400,6 +499,7 @@ jobs:
               throw "unsigned synthetic successor must contain exactly two regular files"
             }
           } finally {
+            Remove-Item -LiteralPath ".\artifacts\firefox" -Recurse -Force -ErrorAction SilentlyContinue
             & git checkout -- .
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor source restoration failed" }
             $checkedOut = (& git rev-parse HEAD).Trim()
@@ -435,11 +535,18 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-firefox-windows-x64
+          path: artifacts/firefox
       - run: bun install --frozen-lockfile
       - name: Prepare bundle with verified official baseline Bun
         shell: pwsh
         env:
           EXPECTED_BASELINE_SHA: ${{ needs.windows_cache.outputs.baseline_bun_sha }}
+          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-152.0.4-beta.30-win.x86_64.zip
+          ALIASMODE_FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_cache.outputs.firefox_archive_sha256 }}
+          ALIASMODE_FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_cache.outputs.firefox_executable_sha256 }}
         run: |
           $ErrorActionPreference = "Stop"
           $pinnedSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
@@ -528,11 +635,18 @@ jobs:
         with:
           path: src-tauri/target/cloakbrowser-cache
           key: cloakbrowser-windows-x64-v1-146.0.7680.177.5-b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe-03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80
+      - uses: actions/download-artifact@v4
+        with:
+          name: aliasmode-firefox-windows-x64
+          path: artifacts/firefox
       - run: bun install --frozen-lockfile
       - name: Prepare bundle with verified official baseline Bun
         shell: pwsh
         env:
           EXPECTED_BASELINE_SHA: ${{ needs.windows_cache.outputs.baseline_bun_sha }}
+          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-152.0.4-beta.30-win.x86_64.zip
+          ALIASMODE_FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_cache.outputs.firefox_archive_sha256 }}
+          ALIASMODE_FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_cache.outputs.firefox_executable_sha256 }}
         run: |
           $ErrorActionPreference = "Stop"
           $pinnedSha = "23f2df1f40d963e5b6104e1a565df992aab8968da5004f460617073843b8b8be"
@@ -709,6 +823,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "prepared-input manifest verification failed" }
           & tar.exe -xf ".\artifacts\windows-prepared\windows-prepared.zip" -C ".\src-tauri"
           if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
+      - name: Verify owned AliasMode Firefox runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = Get-Content ".\src-tauri\generated\browser.json" -Raw | ConvertFrom-Json
+          if (
+            $metadata.firefox.version -cne "152.0.4-beta.30" -or
+            [string]$metadata.firefox.sha256 -notmatch '^[a-f0-9]{64}$' -or
+            [string]$metadata.firefox.archiveSha256 -notmatch '^[a-f0-9]{64}$' -or
+            [string]::IsNullOrWhiteSpace([string]$metadata.firefox.executable)
+          ) {
+            throw "AliasMode Firefox metadata is invalid"
+          }
+          $firefox = Resolve-Path (Join-Path ".\src-tauri\resources\firefox" $metadata.firefox.executable)
+          $actualSha = (Get-FileHash -LiteralPath $firefox -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha -cne $metadata.firefox.sha256) {
+            throw "packaged AliasMode Firefox SHA-256 mismatch"
+          }
+          $version = (& $firefox --version) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
+            throw "owned AliasMode Firefox did not report Firefox 152.0.4"
+          }
       - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
         shell: pwsh
@@ -1125,6 +1261,7 @@ jobs:
   windows:
     name: Windows NSIS installer
     needs:
+      - windows_firefox
       - windows_cache
       - windows_synthetic_successor
       - windows_prepare
@@ -1140,6 +1277,7 @@ jobs:
     steps:
       - name: Enforce Windows DAG result
         env:
+          FIREFOX_RESULT: ${{ needs.windows_firefox.result }}
           CACHE_HIT: ${{ needs.windows_cache.outputs.cache_hit }}
           CACHE_RESULT: ${{ needs.windows_cache.result }}
           SUCCESSOR_RESULT: ${{ needs.windows_synthetic_successor.result }}
@@ -1163,6 +1301,7 @@ jobs:
             fi
           }
 
+          require_result windows_firefox "$FIREFOX_RESULT" success
           require_result windows_cache "$CACHE_RESULT" success
           require_result windows_synthetic_successor "$SUCCESSOR_RESULT" success
           require_result windows_prepare "$PREPARE_RESULT" success

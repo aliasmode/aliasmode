@@ -30,6 +30,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -44,18 +45,60 @@ jobs:
         with:
           node-version: 22.23.2
       - run: bun install --frozen-lockfile
-      - name: Download verified browser
+      - name: Verify owned Firefox source build
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/35581784648 | ConvertFrom-Json
+          if (
+            $run.name -cne "Build and Release" -or
+            $run.path -cne ".github/workflows/build.yml" -or
+            $run.repository.full_name -cne "aliasmode/aliasmode-firefox" -or
+            $run.head_repository.full_name -cne "aliasmode/aliasmode-firefox" -or
+            $run.status -cne "completed" -or
+            $run.conclusion -cne "success" -or
+            $run.event -cne "push" -or
+            $run.head_branch -cne "firefox-engine" -or
+            $run.head_sha -cne "0897f6e5404bc74646dd6e457d42ac6f0e19dcd4"
+          ) {
+            throw "AliasMode Firefox source build provenance is invalid"
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: AliasModeBuilds-windows-x86_64
+          path: artifacts/firefox
+          github-token: ${{ github.token }}
+          repository: aliasmode/aliasmode-firefox
+          run-id: "35581784648"
+      - name: Extract verified owned browser
         shell: pwsh
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'camoufox.zip'
-          Invoke-WebRequest 'https://github.com/daijro/camoufox/releases/download/v152.0.4-beta.30/camoufox-152.0.4-beta.30-win.x86_64.zip' -OutFile $archive
-          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne 'ea52a02fb1cfb1813ef6a326bea03fb2b650c9774143d953a94a27bfc8f10072') { throw 'Camoufox archive checksum mismatch' }
-          Expand-Archive $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'camoufox')
+          $ErrorActionPreference = "Stop"
+          $root = Resolve-Path ".\artifacts\firefox"
+          $entries = @(Get-ChildItem -LiteralPath $root -Force)
+          if (
+            $entries.Count -ne 1 -or
+            $entries[0].PSIsContainer -or
+            (($entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            $entries[0].Name -cne "aliasmode-152.0.4-beta.30-win.x86_64.zip"
+          ) {
+            throw "AliasMode Firefox artifact must contain exactly the approved archive"
+          }
+          $destination = Join-Path $env:RUNNER_TEMP "aliasmode-firefox"
+          Expand-Archive -LiteralPath $entries[0].FullName -DestinationPath $destination -Force
+          $executables = @(Get-ChildItem -LiteralPath $destination -Recurse -File -Filter "aliasmode.exe")
+          if ($executables.Count -ne 1) { throw "AliasMode Firefox archive must contain exactly one aliasmode.exe" }
+          $version = (& $executables[0].FullName --version) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
+            throw "owned AliasMode Firefox did not report Firefox 152.0.4"
+          }
+          "ALIASMODE_FIREFOX_BINARY_PATH=$($executables[0].FullName)" | Add-Content $env:GITHUB_ENV
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: pwsh
         run: |
-          $browser = Join-Path $env:RUNNER_TEMP 'camoufox/camoufox.exe'
+          $browser = $env:ALIASMODE_FIREFOX_BINARY_PATH
           node scripts/firefox-compatibility-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-headless-proof')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/firefox-compatibility-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-headed-proof') --headed

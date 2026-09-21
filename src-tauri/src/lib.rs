@@ -428,7 +428,9 @@ pub fn run() {
 
             let resource_dir = app.path().resource_dir()?;
             let mut browser = browser::verify_browser_resource(&resource_dir).map_err(boxed)?;
+            let mut firefox = browser::verify_firefox_resource(&resource_dir).map_err(boxed)?;
             browser.executable = cli_compatible_windows_path(&browser.executable);
+            firefox.executable = cli_compatible_windows_path(&firefox.executable);
             let playwright_runtime = cli_compatible_windows_path(
                 &resource_dir
                     .join("playwright")
@@ -445,10 +447,14 @@ pub fn run() {
                 .join("package.json");
             let node_executable = playwright_runtime.join("node").join("node.exe");
             let worker_script = playwright_runtime.join("worker.mjs");
+            let firefox_worker_script = playwright_runtime.join("firefox-worker.mjs");
+            let playwright_worker_script = playwright_runtime.join("playwright-worker.mjs");
             let agent_root = playwright_runtime.join("agent");
             if !playwright_manifest.is_file()
                 || !node_executable.is_file()
                 || !worker_script.is_file()
+                || !firefox_worker_script.is_file()
+                || !playwright_worker_script.is_file()
                 || !agent_root.join("mcp-host.mjs").is_file()
                 || !agent_root.join("playwright-proxy.mjs").is_file()
                 || !agent_root.join("playwright-runner.mjs").is_file()
@@ -484,6 +490,7 @@ pub fn run() {
                 &handle,
                 &data_dir,
                 &browser,
+                &firefox,
                 &playwright_runtime,
                 &nonce,
                 &agent_nonce,
