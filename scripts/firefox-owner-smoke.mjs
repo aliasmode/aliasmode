@@ -102,7 +102,7 @@ try {
   const run = await runBridge(bridge.endpoint, "write");
   assert.equal(run.stored, "saved");
   assert.equal(typeof run.identity.userAgent, "string");
-  assert.deepEqual(run.identity.screen, [1920, 1080]);
+  assert.deepEqual(run.identity.screen, [savedConfig.config["screen.width"], savedConfig.config["screen.height"]]);
   const hung = await holdBridge(bridge.endpoint);
   const duringHang = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
   assert.equal(duringHang.hasPages, true, "owner remains responsive while an external runner is hung");
