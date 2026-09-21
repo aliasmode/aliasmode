@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
 import { Launcher } from "../launcher.ts";
 import { createFirefoxProfileConfig } from "../firefox-config.ts";
@@ -22,9 +22,11 @@ const binary = resolve(binaryArg);
 const root = resolve(rootArg);
 const localDataRoot = join(root, "local-data");
 const cloudDataRoot = join(root, "cloud-data");
+await mkdir(root, { recursive: false });
 const localStore = new ProfileStore(join(root, "local.sqlite"));
 const cloudStore = new ProfileStore(join(root, "cloud.sqlite"));
 let server: ReturnType<typeof createServer> | undefined;
+let proxyServer: ReturnType<typeof createServer> | undefined;
 let localLauncher: Launcher | undefined;
 let cloudLauncher: Launcher | undefined;
 
@@ -39,14 +41,16 @@ async function stop(launcher: Launcher | undefined, profileId: string): Promise<
 }
 
 async function ownerScript(
-  _launcher: Launcher,
+  launcher: Launcher,
   profileId: string,
   scriptPath: string,
   input: Record<string, unknown>,
   language: "javascript" | "python" = "javascript",
 ): Promise<{ result: unknown; logs: string[] }> {
-  const launch = localStore.getLaunch(profileId) ?? cloudStore.getLaunch(profileId);
-  const profile = localStore.getProfile(profileId) ?? cloudStore.getProfile(profileId);
+  const store = launcher === localLauncher ? localStore : launcher === cloudLauncher ? cloudStore : undefined;
+  assert.ok(store, "Firefox script uses its launcher's ProfileStore");
+  const launch = store.getLaunch(profileId);
+  const profile = store.getProfile(profileId);
   assert.equal(launch?.engine, "firefox", "Firefox launch is stored as Firefox");
   assert.ok(launch?.firefoxOwner, "Firefox launch has a Node owner");
   assert.ok(profile, "Firefox script has a saved profile");
@@ -112,7 +116,6 @@ function profile(id: string, config: ReturnType<typeof createFirefoxProfileConfi
 }
 
 try {
-  await mkdir(root, { recursive: false });
   assert.equal(await sha256File(binary), expectedSha256, "CI passes the approved Firefox executable hash");
 
   server = createServer((request, response) => {
@@ -124,25 +127,53 @@ try {
     server!.listen(0, "127.0.0.1", done);
   });
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const proxyUser = "acceptance-user";
+  const proxyPassword = "acceptance-password";
+  const expectedProxyAuthorization = `Basic ${Buffer.from(`${proxyUser}:${proxyPassword}`).toString("base64")}`;
+  let proxyRequests = 0;
+  let proxyFixtureRequests = 0;
+  let proxyFailure: string | undefined;
+  proxyServer = createServer((request, response) => {
+    if (request.headers["proxy-authorization"] !== expectedProxyAuthorization) {
+      proxyFailure = "Firefox did not authenticate through the Launcher proxy relay";
+      response.writeHead(407, { "proxy-authenticate": "Basic realm=AliasMode" });
+      response.end();
+      return;
+    }
+    let target: URL;
+    try { target = new URL(request.url ?? ""); }
+    catch {
+      proxyFailure = "Firefox did not send an absolute URL to the Launcher proxy relay";
+      response.writeHead(400);
+      response.end();
+      return;
+    }
+    proxyRequests++;
+    if (target.origin === origin) proxyFixtureRequests++;
+    const headers = { ...request.headers, host: target.host };
+    delete headers["proxy-authorization"];
+    const upstream = httpRequest(target, { method: request.method, headers }, (upstreamResponse) => {
+      response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+      upstreamResponse.pipe(response);
+    });
+    upstream.once("error", () => {
+      proxyFailure = "Launcher proxy relay could not reach the loopback fixture";
+      response.writeHead(502);
+      response.end();
+    });
+    request.pipe(upstream);
+  });
+  await new Promise<void>((done, fail) => {
+    proxyServer!.once("error", fail);
+    proxyServer!.listen(0, "127.0.0.1", done);
+  });
+  const proxyPort = (proxyServer.address() as { port: number }).port;
   const telegramOrigin = "https://web.telegram.org";
   const firstTab = `${origin}/first`;
   const secondTab = `${origin}/second`;
   const telegramTab = `${telegramOrigin}/k/`;
   const mutator = join(root, "mutate.mjs");
   const verifier = join(root, "verify.mjs");
-  const interceptor = join(root, "intercept-telegram.mjs");
-  await writeFile(interceptor, `
-import { writeFile } from "node:fs/promises";
-export default async ({ context, inputs, log }) => {
-  await context.route("https://web.telegram.org/**", (route) => route.fulfill({
-    status: 200,
-    contentType: "text/html",
-    body: "<!doctype html><title>AliasMode Telegram fixture</title>",
-  }));
-  await writeFile(inputs.resultPath, "{}\\n");
-  log("Telegram fixture route installed");
-};
-`);
   await writeFile(mutator, `
 import { writeFile } from "node:fs/promises";
 export default async ({ context, inputs, log }) => {
@@ -228,7 +259,7 @@ export default async ({ context, inputs, log }) => {
     };
   }));
   await telegram.close();
-  const stored = await page.evaluate(() => new Promise((resolve, reject) => {
+  const stored = inputs.verifyGenericIndexedDB ? await page.evaluate(() => new Promise((resolve, reject) => {
     const request = indexedDB.open("launcher-proof", 1);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
@@ -239,7 +270,7 @@ export default async ({ context, inputs, log }) => {
       transaction.oncomplete = () => database.close();
       transaction.onerror = () => reject(transaction.error);
     };
-  }));
+  })) : null;
   const result = {
     identity: await page.evaluate(() => ({
       userAgent: navigator.userAgent,
@@ -279,7 +310,10 @@ async def run(*, context, inputs, log, **_kwargs):
 
   const profileId = "firefoxlaunchproof";
   const generatedConfig = createFirefoxProfileConfig(1440, 900);
-  const savedProfile = profile(profileId, generatedConfig);
+  const savedProfile: Profile = {
+    ...profile(profileId, generatedConfig),
+    proxy: { type: "http", host: "127.0.0.1", port: String(proxyPort), user: proxyUser, pass: proxyPassword },
+  };
   localStore.upsertProfile(savedProfile);
   assert.deepEqual(localStore.getProfile(profileId)?.firefox, generatedConfig, "generated Firefox identity persists in ProfileStore");
 
@@ -293,12 +327,16 @@ async def run(*, context, inputs, log, **_kwargs):
   });
   const initial = await localLauncher.start(profileId, [], { autoNavigate: false });
   const initialLaunch = localStore.getLaunch(profileId)!;
+  const localOwnerGeneration = initialLaunch.firefoxOwner?.generation;
+  assert.ok(localOwnerGeneration, "local Firefox owner has a generation");
   assert.equal(initialLaunch.binarySha256, expectedSha256, "Launcher stores the approved Firefox executable hash");
   assert.ok(initialLaunch.firefoxOwner && initialLaunch.firefoxOwner.pid > 0 && initialLaunch.firefoxOwner.browserPid > 0, "Launcher starts a real Node owner and browser");
   assert.equal(await localLauncher.certifiedActive(profileId), true, "Launcher certifies the owned Firefox process");
   const mutationRun = await ownerScript(localLauncher, profileId, mutator, { origin, firstTab, secondTab, telegramTab });
   assert.ok(mutationRun.logs.includes("Fixture state saved"), "external JavaScript runner returns fixture logs");
   const mutated = mutationRun.result as { identity: unknown; tabs: string[] };
+  assert.equal(proxyFailure, undefined, "Launcher relays Firefox through the authenticated proxy");
+  assert.ok(proxyRequests > 0 && proxyFixtureRequests > 0, "Firefox reaches the loopback fixture through the Launcher proxy relay");
   assert.ok(mutated.tabs.includes(firstTab) && mutated.tabs.includes(secondTab), "fixture opens two local tabs");
 
   // Do not save a portable bundle before this stop. Local reopen must use Firefox's
@@ -306,7 +344,7 @@ async def run(*, context, inputs, log, **_kwargs):
   assert.equal(await localLauncher.stop(profileId), true, "Launcher stops the owned Firefox process");
   const reopened = await localLauncher.start(profileId, [], { autoNavigate: false });
   assert.equal(await localLauncher.certifiedActive(profileId), true, "Launcher certifies Firefox after local reopen");
-  const localVerification = await ownerScript(localLauncher, profileId, verifier, { origin, firstTab, telegramTab });
+  const localVerification = await ownerScript(localLauncher, profileId, verifier, { origin, firstTab, telegramTab, verifyGenericIndexedDB: true });
   assert.ok(localVerification.logs.includes("Fixture state verified"), "external JavaScript runner returns verification logs");
   const localState = localVerification.result;
   assert.deepEqual((localState as any).identity, mutated.identity, "local reopen keeps the generated Firefox identity");
@@ -346,14 +384,20 @@ async def run(*, context, inputs, log, **_kwargs):
   });
   const cloud = await cloudLauncher.start(profileId, [], { autoNavigate: false });
   assert.equal(await cloudLauncher.certifiedActive(profileId), true, "cloud handoff owner is certified");
-  await ownerScript(cloudLauncher, profileId, interceptor, {});
-  await applySessionToEndpoint(cloud.ws, handoff.sessionBundle, []);
+  assert.notEqual(cloudStore.getLaunch(profileId)?.firefoxOwner?.generation, localOwnerGeneration, "cloud handoff uses a distinct Firefox owner");
+  const handoffSession = JSON.parse(handoff.sessionBundle) as { tabs?: unknown };
+  const handoffTabs = Array.isArray(handoffSession.tabs)
+    ? handoffSession.tabs.filter((tab): tab is string => typeof tab === "string")
+    : [];
+  assert.ok(handoffTabs.includes(firstTab) && handoffTabs.includes(secondTab), "portable handoff keeps fixture tabs");
+  delete handoffSession.tabs;
+  await applySessionToEndpoint(cloud.ws, JSON.stringify(handoffSession), handoffTabs);
   const cloudVerification = await ownerScript(cloudLauncher, profileId, verifier, { origin, firstTab, telegramTab });
   assert.ok(cloudVerification.logs.includes("Fixture state verified"), "cloud external JavaScript runner returns logs");
   const cloudState = cloudVerification.result;
   assert.deepEqual((cloudState as any).identity, mutated.identity, "cloud handoff keeps the generated Firefox identity");
   assert.equal((cloudState as any).localStorage, "saved", "cloud handoff applies Local Storage");
-  assert.equal((cloudState as any).indexedDB, "saved", "cloud handoff applies IndexedDB");
+  assert.equal((cloudState as any).indexedDB, null, "cloud handoff does not fabricate unsupported generic IndexedDB");
   assert.equal((cloudState as any).telegramAuth, "synthetic-auth", "cloud handoff applies selected Telegram IndexedDB auth");
   assert.ok((cloudState as any).cookies.some((cookie: { name: string; value: string }) => cookie.name === "launcher-proof" && cookie.value === "saved"), "cloud handoff applies cookies");
   assert.ok((cloudState as any).tabs.includes(firstTab) && (cloudState as any).tabs.includes(secondTab), "cloud handoff applies portable tabs");
@@ -371,6 +415,7 @@ async def run(*, context, inputs, log, **_kwargs):
   await stop(localLauncher, "firefoxlaunchproof");
   cloudStore.close();
   localStore.close();
+  await new Promise<void>((done) => proxyServer?.close(() => done()) ?? done());
   await new Promise<void>((done) => server?.close(() => done()) ?? done());
   await rm(root, { recursive: true, force: true });
 }
