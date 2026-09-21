@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { firefox } from "playwright-core";
 
 const [origin, mode] = process.argv.slice(2);
-if (!origin || !["write", "verify", "hold"].includes(mode)) throw new Error("Firefox bridge smoke runner input is missing");
+if (!origin || !["write", "verify", "clear", "hold"].includes(mode)) throw new Error("Firefox bridge smoke runner input is missing");
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -36,6 +36,7 @@ try {
       await context.addCookies([{ name: "owner-proof", value: "saved", url: origin }]);
       await page.evaluate(() => localStorage.setItem("owner-proof", "saved"));
     }
+    if (mode === "clear") await page.evaluate(() => localStorage.clear());
     const result = await page.evaluate(() => ({
       stored: localStorage.getItem("owner-proof"),
       identity: { userAgent: navigator.userAgent, screen: [screen.width, screen.height] },

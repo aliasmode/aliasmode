@@ -627,7 +627,10 @@ async function nativeOriginStorage(context, origin) {
     }
     const state = await context.storageState({ indexedDB: origin === TELEGRAM_ORIGIN });
     const found = state?.origins?.find((candidate) => candidate?.origin === origin);
-    if (!found) return undefined;
+    if (!found) {
+      if (!savedOrigins) return undefined;
+      return { localStorage: [] };
+    }
     return {
       localStorage: Array.isArray(found.localStorage) ? found.localStorage : [],
       ...(origin === TELEGRAM_ORIGIN && Array.isArray(found.indexedDB)

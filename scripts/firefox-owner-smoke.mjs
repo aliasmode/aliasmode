@@ -134,6 +134,22 @@ try {
   const restored = await runBridge(bridge.endpoint, "verify");
   assert.equal(restored.stored, "saved");
 
+  stage("capture-empty");
+  assert.equal((await runBridge(bridge.endpoint, "clear")).stored, null);
+  const beforeEmptyCapture = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.ok(beforeEmptyCapture.pageTargets.every((target) => new URL(target.url).origin !== origin), "empty capture fixture origin must have no live page");
+  const emptySession = JSON.parse(await callFirefoxOwner(owner, "session-capture", {
+    captureSeed: { origins: [origin] },
+  }, { timeoutMs: 30_000 }));
+  assert.deepEqual(emptySession.origins.find((entry) => entry.origin === origin)?.localStorage, []);
+  const afterEmptyCapture = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.deepEqual(afterEmptyCapture.pageTargets, beforeEmptyCapture.pageTargets, "native closed-empty capture must not publish a page");
+
+  stage("restore-empty");
+  assert.equal((await runBridge(bridge.endpoint, "write")).stored, "saved");
+  await callFirefoxOwner(owner, "session-restore", { bundle: JSON.stringify(emptySession), urls: [] }, { timeoutMs: 30_000 });
+  assert.equal((await runBridge(bridge.endpoint, "verify")).stored, null, "native restore applies empty localStorage");
+
   stage("close");
   await closeFirefoxOwner(owner, { timeoutMs: 30_000 });
   await requireExit(status.pid);
@@ -150,7 +166,7 @@ try {
   const restartBridge = await callFirefoxOwner(owner, "playwright-endpoint", {}, { timeoutMs: 30_000 });
   const restarted = await runBridge(restartBridge.endpoint, "verify");
   assert.deepEqual(restarted.identity, run.identity);
-  assert.equal(restarted.stored, "saved");
+  assert.equal(restarted.stored, null, "empty native restore persists across owner restart");
   stage("close");
   await closeFirefoxOwner(owner, { timeoutMs: 30_000 });
   await requireExit(restartStatus.pid);

@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 import {
   playwrightWorkerCommand,
   playwrightWorkerEnvironment,
@@ -327,6 +328,27 @@ test("native closed-origin capture scopes storageState to the requested origin",
   ]);
 });
 
+test("native closed-origin capture records a scoped successful empty state", async () => {
+  const origins = new Set<string>();
+  const context = {
+    pages: () => [],
+    _connection: {
+      toImpl() {
+        return { _origins: origins, addVisitedOrigin: (origin: string) => origins.add(origin) };
+      },
+    },
+    async cookies() { return []; },
+    async storageState() {
+      expect([...origins]).toEqual(["https://closed.example"]);
+      return { origins: [] };
+    },
+  };
+  const result = JSON.parse(await captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://closed.example"] },
+  }, { nativeStorage: true }));
+  expect(result.origins).toEqual([{ origin: "https://closed.example", localStorage: [] }]);
+});
+
 test("native closed-origin capture uses IndexedDB only for Telegram", async () => {
   const origins = new Set<string>();
   const context = {
@@ -391,9 +413,10 @@ test("native closed-origin capture restores tracked origins after storageState f
   ]);
 });
 
-test("native capture fails when storageState lacks a closed observed origin", async () => {
+test("native capture fails when native origin tracking cannot scope a closed observed origin", async () => {
   const context = {
     pages: () => [],
+    _connection: { toImpl() { return {}; } },
     async cookies() { return []; },
     async storageState() { return { origins: [] }; },
     async newPage() { throw new Error("native capture must not create a visible page"); },
@@ -436,6 +459,42 @@ test("native restore does not call Firefox CDP methods", async () => {
     urls: [],
   }, { nativeStorage: true });
   expect(closed).toBe(true);
+});
+
+test("native restore applies an explicit empty localStorage capture", async () => {
+  let handler: ((route: { fulfill: () => Promise<void> }) => Promise<void>) | undefined;
+  let currentUrl = "about:blank";
+  const localStorage = { stale: "value" } as Record<string, unknown>;
+  Object.defineProperties(localStorage, {
+    getItem: { value(name: string) { return typeof this[name] === "string" ? this[name] : null; } },
+    setItem: { value(name: string, value: string) { this[name] = value; } },
+    clear: { value() { for (const name of Object.keys(this)) delete this[name]; } },
+  });
+  const page = {
+    async goto(url: string) {
+      currentUrl = url;
+      await handler?.({ fulfill: async () => {} });
+    },
+    url: () => currentUrl,
+    async evaluate(script: (input: unknown) => Promise<void>, input: unknown) {
+      await runInNewContext(`(${script.toString()})(input)`, { input, localStorage });
+    },
+    async close() {},
+  };
+  const context = {
+    pages: () => [],
+    async newPage() { return page; },
+    async route(_url: string, value: typeof handler) { handler = value; },
+    async unroute() { handler = undefined; },
+    async clearCookies() {},
+    async addCookies() {},
+  };
+  await restoreSession({}, context, {
+    bundle: JSON.stringify({ cookies: [], origins: [{ origin: "https://restored.example", localStorage: [] }] }),
+    urls: [],
+  }, { nativeStorage: true });
+  expect(Object.keys(localStorage)).toEqual([]);
+  expect(localStorage.stale).toBeUndefined();
 });
 
 bunAsNodeTest("worker imports all sites without replacing existing cookies and restores complete Cloud jars", async () => {
