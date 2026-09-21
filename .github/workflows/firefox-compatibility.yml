@@ -14,6 +14,11 @@ on:
       - firefox-config.ts
       - firefox-runtime.ts
       - firefox-install.ts
+      - browser-install.ts
+      - cli.ts
+      - scripts.ts
+      - agent/script-runner.mjs
+      - agent/script-runner.py
       - session.ts
       - store.ts
       - types.ts
@@ -36,6 +41,11 @@ on:
       - firefox-config.ts
       - firefox-runtime.ts
       - firefox-install.ts
+      - browser-install.ts
+      - cli.ts
+      - scripts.ts
+      - agent/script-runner.mjs
+      - agent/script-runner.py
       - session.ts
       - store.ts
       - types.ts
