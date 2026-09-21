@@ -9,7 +9,7 @@ import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 const CAPABILITIES = ["core", "core-tabs", "vision", "pdf", "testing", "tracing"];
 const FILTERED_TOOLS = new Set(["browser_close", "browser_install"]);
 
-async function connectOfficial(version, contextGetter) {
+export async function connectOfficial(version, contextGetter) {
   const server = await createConnection({ capabilities: CAPABILITIES }, contextGetter);
   const client = new Client(
     { name: "aliasmode-playwright-proxy", version },
@@ -37,7 +37,7 @@ async function connectOfficial(version, contextGetter) {
   }
 }
 
-function nonClosingContext(context) {
+export function nonClosingContext(context) {
   return new Proxy(context, {
     get(target, property) {
       if (property === "close") return async () => {};
