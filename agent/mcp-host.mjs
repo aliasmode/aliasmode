@@ -292,10 +292,11 @@ export async function createAliasModeMcp(options = {}) {
   const selectBrowser = async (profileId, knownStatus) => {
     const status = knownStatus ?? await runtime.call("browser.status", { profileId });
     if (!status.running) throw new Error("open this AliasMode profile before selecting it");
+    const wasChromium = selectedEngine === "chromium";
     selectedProfileId = undefined;
     selectedEngine = undefined;
     selectedFirefoxTools = [];
-    await playwright.detach();
+    if (wasChromium) await playwright.detach();
     if (status.engine === "firefox") {
       const result = await runtime.call("firefox.tools.list", { profileId });
       selectedFirefoxTools = firefoxTools(result.tools ?? []);
