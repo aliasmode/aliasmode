@@ -28,6 +28,8 @@ function firstInputLine() {
 }
 
 async function run(input) {
+  if (typeof input?.endpoint !== "string" || !input.endpoint) throw new Error("runner input is missing");
+  if (input.endpoint.startsWith("firefox://")) throw new Error("Firefox scripts run through the AliasMode manager");
   let browser;
   try {
     browser = await chromium.connectOverCDP(input.endpoint, { timeout: 30_000 });

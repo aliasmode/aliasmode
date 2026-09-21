@@ -8,7 +8,7 @@ class FakeRuntime {
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   closed = false;
 
-  async call(method: string, params: Record<string, unknown> = {}) {
+  async call(method: string, params: Record<string, unknown> = {}): Promise<any> {
     this.events.push(`${method}:${params.profileId ?? ""}`);
     this.calls.push({ method, params: structuredClone(params) });
     if (method === "profiles.list") return { profiles: [] };
@@ -49,6 +49,31 @@ class FakeRuntime {
   close() {
     this.closed = true;
     this.events.push("runtime.close:");
+  }
+}
+
+class FirefoxRuntime extends FakeRuntime {
+  override async call(method: string, params: Record<string, unknown> = {}) {
+    this.events.push(`${method}:${params.profileId ?? ""}`);
+    this.calls.push({ method, params: structuredClone(params) });
+    if (method === "browser.open") return {
+      profileId: params.profileId, engine: "firefox", capabilities: ["firefox-native", "mcp"],
+      headless: false, alreadyOpen: false, ownedByConnection: true,
+    };
+    if (method === "browser.status") return {
+      profileId: params.profileId, running: true, engine: "firefox", capabilities: ["firefox-native", "mcp"], headless: false,
+    };
+    if (method === "firefox.tools.list") return {
+      tools: [
+        { name: "browser_snapshot", description: "native snapshot", inputSchema: { type: "object" } },
+        { name: "browser_pdf_save", description: "PDF", inputSchema: { type: "object" } },
+        { name: "browser_install", description: "install", inputSchema: { type: "object" } },
+        { name: "browser_close", description: "close", inputSchema: { type: "object" } },
+      ],
+    };
+    if (method === "firefox.tools.call") return { content: [{ type: "text", text: "native snapshot" }] };
+    if (method === "browser.close") return { profileId: params.profileId, closed: true, deleted: false, engine: "firefox" };
+    return await super.call(method, params);
   }
 }
 
@@ -267,6 +292,30 @@ test("MCP host exposes Playwright tools before selection and uses safe close", a
   await client.close();
   await host.close();
   expect(runtime.closed).toBe(true);
+});
+
+test("MCP host relays Firefox native tools without transport, PDF, or lifecycle tools", async () => {
+  const runtime = new FirefoxRuntime();
+  const host = await createAliasModeMcp({ discovered: { client: runtime }, playwright: new FakePlaywright() });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const opened = await client.callTool({ name: "aliasmode_browser_open", arguments: { profileId: "firefox" } });
+  expect(opened.isError).not.toBe(true);
+  expect(JSON.stringify(opened)).toContain('"engine":"firefox"');
+  expect(JSON.stringify(opened)).not.toContain('"port"');
+  expect(JSON.stringify(opened)).not.toContain('"ws"');
+  const tools = (await client.listTools()).tools.map((tool) => tool.name);
+  expect(tools).toContain("browser_snapshot");
+  expect(tools).not.toContain("browser_pdf_save");
+  expect(tools).not.toContain("browser_install");
+  const snapshot = await client.callTool({ name: "browser_snapshot", arguments: {} });
+  expect(snapshot.content).toEqual([{ type: "text", text: "native snapshot" }]);
+  expect(runtime.calls.some((call) => call.method === "firefox.tools.call" && call.params.name === "browser_snapshot")).toBe(true);
+
+  await client.close();
+  await host.close();
 });
 
 test("MCP shutdown closes owned browsers but preserves pre-existing browsers", async () => {

@@ -1,5 +1,5 @@
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
-import { attachTimezones } from "./geoip.ts";
+import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudApiError } from "./cloud-client.ts";
 import {
@@ -40,10 +40,27 @@ export interface AgentControlDeps {
   launcher: Launcher;
   store: ProfileStore;
   admission: LifecycleAdmissionController;
+  firefoxCall?: (owner: FirefoxOwner, operation: string, payload: Record<string, unknown>) => Promise<unknown>;
   remote?: RemoteCoordinator | null;
   cloudBrowser?: CloudBrowserLifecycle;
   cloudConnection?: CloudConnectionRuntime;
   log?: (message: string) => void;
+}
+
+const FIREFOX_CAPABILITIES = ["firefox-native", "cookies", "navigation", "sessions", "mcp", "scripts"] as const;
+
+type FirefoxLaunch = { engine?: "chromium" | "firefox"; firefoxOwner?: FirefoxOwner };
+
+function isFirefoxEngine(launch: unknown): launch is FirefoxLaunch & { engine: "firefox" } {
+  return (launch as FirefoxLaunch | null)?.engine === "firefox";
+}
+
+function isFirefoxLaunch(launch: unknown): launch is FirefoxLaunch & { engine: "firefox"; firefoxOwner: FirefoxOwner } {
+  return isFirefoxEngine(launch) && !!launch.firefoxOwner;
+}
+
+function firefoxPublicFields(): { engine: "firefox"; capabilities: readonly string[] } {
+  return { engine: "firefox", capabilities: FIREFOX_CAPABILITIES };
 }
 
 type SafeProfile = {
@@ -53,6 +70,8 @@ type SafeProfile = {
   platform: string;
   tags: string[];
   running: boolean;
+  engine?: "firefox";
+  capabilities?: readonly string[];
   debugPort?: number;
   headless?: boolean;
   expectedVersion?: number;
@@ -150,6 +169,7 @@ export function validAgentAuthorization(header: string | null, nonce: string): b
 
 export class AgentControlSession {
   private readonly openedByConnection = new Set<string>();
+  private readonly openedEndpoints = new Map<string, string>();
   private readonly attachedExisting = new Set<string>();
   private closed = false;
   private queue: Promise<unknown> = Promise.resolve();
@@ -210,6 +230,15 @@ export class AgentControlSession {
         return await this.openProfile(params);
       case "browser.status":
         return await this.profileStatus(stringParam(params, "profileId"));
+      case "firefox.tools.list":
+        return { tools: await this.firefoxCall(stringParam(params, "profileId"), "mcp-list", {}) };
+      case "firefox.tools.call":
+        return await this.firefoxCall(stringParam(params, "profileId"), "mcp-call", {
+          name: stringParam(params, "name"),
+          ...(params.arguments === undefined ? {} : { arguments: object(params.arguments) }),
+        });
+      case "firefox.script.run":
+        return await this.runFirefoxScript(params);
       case "browser.detach":
         return this.detachProfile(stringParam(params, "profileId"));
       case "browser.close":
@@ -299,6 +328,22 @@ export class AgentControlSession {
     }
   }
 
+  private async firefoxCall(profileId: string, operation: string, payload: Record<string, unknown>): Promise<unknown> {
+    const launch = this.deps.store.getLaunch(profileId) as (ReturnType<ProfileStore["getLaunch"]> & FirefoxLaunch) | null;
+    if (!isFirefoxLaunch(launch)) throw agentError("browser_not_firefox", "This profile is not running in Firefox");
+    if (!(await this.deps.launcher.certifiedActive(profileId).catch(() => false))) {
+      throw agentError("browser_not_running", "This Firefox profile is not safely running");
+    }
+    return await (this.deps.firefoxCall ?? callFirefoxOwner)(launch.firefoxOwner, operation, payload);
+  }
+
+  private async runFirefoxScript(params: Record<string, unknown>): Promise<unknown> {
+    const profileId = stringParam(params, "profileId");
+    const scriptPath = stringParam(params, "scriptPath");
+    const input = object(params.input ?? {});
+    return await this.firefoxCall(profileId, "run-script", { scriptPath, input });
+  }
+
   private async listProfiles(): Promise<SafeProfile[]> {
     await this.deps.launcher.reconcileOrphans();
     if (this.deps.cloudBrowser) {
@@ -314,7 +359,7 @@ export class AgentControlSession {
           expectedVersion: profile.version,
           permission: profile.permission,
           running: !!launch,
-          ...(launch ? { debugPort: launch.debugPort, headless: launch.headless } : {}),
+          ...(launch ? { ...(isFirefoxEngine(launch) ? firefoxPublicFields() : { debugPort: launch.debugPort }), headless: launch.headless } : {}),
         };
       });
     }
@@ -329,7 +374,7 @@ export class AgentControlSession {
           platform: profile.platform ?? "",
           tags: profile.tags ?? [],
           running: !!launch,
-          ...(launch ? { debugPort: launch.debugPort, headless: launch.headless } : {}),
+          ...(launch ? { ...(isFirefoxEngine(launch) ? firefoxPublicFields() : { debugPort: launch.debugPort }), headless: launch.headless } : {}),
         };
       });
     }
@@ -342,7 +387,7 @@ export class AgentControlSession {
         platform: profile.platform ?? "",
         tags: profile.tags ?? [],
         running: !!launch,
-        ...(launch ? { debugPort: launch.debugPort, headless: launch.headless } : {}),
+        ...(launch ? { ...(isFirefoxEngine(launch) ? firefoxPublicFields() : { debugPort: launch.debugPort }), headless: launch.headless } : {}),
       };
     });
   }
@@ -355,7 +400,6 @@ export class AgentControlSession {
       id = (await this.deps.remote.createProfile(input as NewProfileInput)).id;
     } else {
       const profile = buildNewProfile(input as NewProfileInput, (candidate) => !!this.deps.store.getProfile(candidate));
-      if (profile.proxy) await attachTimezones([profile]).catch(() => {});
       if (this.deps.cloudBrowser) {
         id = (await this.deps.cloudBrowser.create(profile)).id;
       } else {
@@ -367,14 +411,7 @@ export class AgentControlSession {
     return { id, temporary };
   }
 
-  private async openProfile(params: Record<string, unknown>): Promise<{
-    profileId: string;
-    ws: string;
-    port: number;
-    headless: boolean;
-    alreadyOpen: boolean;
-    ownedByConnection: boolean;
-  }> {
+  private async openProfile(params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const profileId = stringParam(params, "profileId");
     const options: BrowserOpenOptions = {};
     if (params.headless !== undefined) {
@@ -425,12 +462,18 @@ export class AgentControlSession {
     );
 
     if (opened.alreadyOpen) this.attachedExisting.add(profileId);
-    else this.openedByConnection.add(profileId);
+    else {
+      this.openedByConnection.add(profileId);
+      this.openedEndpoints.set(profileId, opened.ws);
+    }
     if (this.closed && !opened.alreadyOpen) await this.closeProfile(profileId);
+    const launch = this.deps.store.getLaunch(profileId) as (ReturnType<ProfileStore["getLaunch"]> & FirefoxLaunch) | null;
+    const firefox = isFirefoxEngine(launch) || opened.ws.startsWith("firefox://");
     return {
       profileId,
-      ws: opened.ws,
-      port: opened.port,
+      ...(firefox
+        ? firefoxPublicFields()
+        : { ws: opened.ws, port: opened.port }),
       headless: opened.headless,
       alreadyOpen: opened.alreadyOpen,
       ownedByConnection: !opened.alreadyOpen,
@@ -441,6 +484,7 @@ export class AgentControlSession {
     if (!this.openedByConnection.delete(profileId)) {
       throw agentError("not_owned", "this agent connection does not own the browser");
     }
+    this.openedEndpoints.delete(profileId);
     this.attachedExisting.add(profileId);
     return { profileId, detached: true };
   }
@@ -452,11 +496,11 @@ export class AgentControlSession {
       profileId,
       running,
       state: running ? "running" : launch ? "uncertain" : "closed",
-      ...(running && launch ? {
-        ws: launch.ws,
-        port: launch.debugPort,
-        headless: launch.headless ?? false,
-      } : {}),
+      ...(running && launch ? (
+        isFirefoxEngine(launch)
+          ? { ...firefoxPublicFields(), headless: launch.headless ?? false }
+          : { ws: launch.ws, port: launch.debugPort, headless: launch.headless ?? false }
+      ) : {}),
       ownedByConnection: this.openedByConnection.has(profileId),
       attachedExisting: this.attachedExisting.has(profileId),
     };
@@ -471,8 +515,10 @@ export class AgentControlSession {
     return await this.deps.admission.run(
       { kind: "stop", profileIds: [profileId] },
       async () => {
-        if (expectedEndpoint && this.deps.store.getLaunch(profileId)?.ws !== expectedEndpoint) {
+        const expected = expectedEndpoint ?? this.openedEndpoints.get(profileId);
+        if (expected && this.deps.store.getLaunch(profileId)?.ws !== expected) {
           this.openedByConnection.delete(profileId);
+          this.openedEndpoints.delete(profileId);
           throw agentError("browser_changed", "The browser instance changed; the current browser was left open");
         }
         let closed: boolean;
@@ -489,6 +535,7 @@ export class AgentControlSession {
         if (!closed) throw agentError("close_unconfirmed", `browser teardown is unconfirmed: ${profileId}`);
 
         this.openedByConnection.delete(profileId);
+        this.openedEndpoints.delete(profileId);
         this.attachedExisting.delete(profileId);
         const temporary = this.deps.store.listAgentTemporary().includes(profileId);
         let deleted = false;

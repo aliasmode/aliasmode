@@ -11,6 +11,7 @@
  */
 
 import type { Launcher } from "./launcher.ts";
+import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
@@ -19,7 +20,7 @@ import {
   type LifecycleAdmissionController,
   type LifecycleState,
 } from "./lifecycle-admission.ts";
-import { harvestCookies } from "./session.ts";
+import { harvestCookies, parseCapturedSessionBundle, sessionCaptureSeed } from "./session.ts";
 import { isSafeProfileId } from "./profile-id.ts";
 import type { AutomationHealthEntry } from "./remote-types.ts";
 
@@ -28,6 +29,37 @@ function ok(data?: unknown) {
 }
 function fail(msg: string) {
   return Response.json({ code: -1, msg, data: {} });
+}
+
+const FIREFOX_CAPABILITIES = ["firefox-native", "cookies", "navigation", "sessions", "mcp", "scripts"] as const;
+
+type FirefoxLaunch = { engine?: "chromium" | "firefox"; firefoxOwner?: FirefoxOwner };
+
+function isFirefoxEngine(launch: unknown): launch is FirefoxLaunch & { engine: "firefox" } {
+  return (launch as FirefoxLaunch | null)?.engine === "firefox";
+}
+
+function isFirefoxLaunch(launch: unknown): launch is FirefoxLaunch & { engine: "firefox"; firefoxOwner: FirefoxOwner } {
+  return isFirefoxEngine(launch) && !!launch.firefoxOwner;
+}
+
+function firefoxPublicFields() {
+  return { engine: "firefox" as const, capabilities: FIREFOX_CAPABILITIES };
+}
+
+async function captureFirefoxSession(store: ProfileStore, profileId: string, owner: FirefoxOwner): Promise<void> {
+  try {
+    const bundle = await callFirefoxOwner<string>(owner, "session-capture", {
+      captureSeed: sessionCaptureSeed(store.getSessionBundle(profileId) ?? ""),
+    });
+    parseCapturedSessionBundle(bundle);
+    const current = store.getLaunch(profileId);
+    if (isFirefoxLaunch(current) && current.firefoxOwner.generation === owner.generation) {
+      store.saveSessionBundle(profileId, bundle);
+    }
+  } catch {
+    // Preserve the last saved session when capture cannot be confirmed.
+  }
 }
 
 export interface BrowserLifecycleContext {
@@ -63,6 +95,9 @@ async function activeResponse(
   if (afterState) return ok({ status: "Active", lifecycle: afterState });
 
   const launch = store.getLaunch(profileId);
+  if (alive && isFirefoxEngine(launch)) {
+    return ok({ status: "Active", lifecycle: "running", ...firefoxPublicFields() });
+  }
   if (alive && launch?.ws) {
     return ok({ status: "Active", lifecycle: "running", ws: { puppeteer: launch.ws, selenium: "" } });
   }
@@ -184,6 +219,7 @@ export async function handleRequest(
     try {
       const launchArgs = parseLaunchArgs(searchParams.get("launch_args"));
       const { ws, port } = await launcher.start(userId, launchArgs);
+      if (isFirefoxEngine(store.getLaunch(userId)) || ws.startsWith("firefox://")) return ok(firefoxPublicFields());
       return ok({
         ws: { puppeteer: ws, selenium: "" },
         debug_port: String(port),
@@ -197,7 +233,9 @@ export async function handleRequest(
   if (pathname === "/api/v1/browser/stop") {
     if (!userId) return fail("missing user_id");
     const launch = store.getLaunch(userId);
-    await launcher.captureLocalSession(userId);
+    if (isFirefoxEngine(launch)) {
+      if (isFirefoxLaunch(launch)) await captureFirefoxSession(store, userId, launch.firefoxOwner);
+    } else await launcher.captureLocalSession(userId);
     return (await launcher.stop(userId, launch ?? undefined))
       ? ok()
       : fail(`browser teardown unconfirmed: ${userId}`);
@@ -212,13 +250,17 @@ export async function handleRequest(
     if (!userId) return fail("missing user_id");
     if (!(await launcher.certifiedActive(userId))) return fail(`profile not safely running: ${userId}`);
     const launch = store.getLaunch(userId);
-    if (!launch || !launch.ws) return fail(`profile not running: ${userId}`);
+    if (!launch) return fail(`profile not running: ${userId}`);
     const urlsParam = searchParams.get("urls");
     const urls = urlsParam
       ? urlsParam.split(",").map((u) => u.trim()).filter(Boolean)
       : ["https://x.com", "https://twitter.com"];
     try {
-      const cookies = await harvestCookies(launch.ws, urls);
+      const cookies = isFirefoxEngine(launch)
+        ? isFirefoxLaunch(launch)
+          ? await callFirefoxOwner(launch.firefoxOwner, "cookie-harvest", { urls })
+          : (() => { throw new Error("Firefox owner is unavailable"); })()
+        : launch.ws ? await harvestCookies(launch.ws, urls) : (() => { throw new Error("profile not running"); })();
       return ok({ cookies });
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));

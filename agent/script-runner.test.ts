@@ -118,6 +118,23 @@ test("Node script runner passes the CDP objects and user data without a completi
   }
 });
 
+test("Node script runner rejects private Firefox locators", async () => {
+  const root = workspace();
+  try {
+    const runner = nodeRuntime(root);
+    const child = Bun.spawn(["node", runner, "unused.mjs"], {
+      stdin: "pipe", stdout: "pipe", stderr: "pipe",
+    });
+    child.stdin.write(`${JSON.stringify({ ...input, endpoint: "firefox://127.0.0.1:9000/generation" })}\n`);
+    const result = await output(child);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Firefox scripts run through the AliasMode manager");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Node script runner exits when its parent closes stdin", async () => {
   const root = workspace();
   try {
