@@ -275,7 +275,7 @@ test("native capture reads closed observed origins through storageState without 
     async cookies() { return []; },
     async storageState(options: unknown) {
       storageStateCalls++;
-      expect(options).toEqual({ indexedDB: true });
+      expect(options).toEqual({ indexedDB: false });
       return {
         origins: [{
           origin: "https://closed.example",
@@ -296,6 +296,99 @@ test("native capture reads closed observed origins through storageState without 
     origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value: "fresh" }] }],
     tabs: [],
   });
+});
+
+test("native closed-origin capture scopes storageState to the requested origin", async () => {
+  const origins = new Set(["https://live.example"]);
+  const context = {
+    pages: () => [],
+    _connection: {
+      toImpl(value: unknown) {
+        expect(value).toBe(context);
+        return { _origins: origins, addVisitedOrigin: (origin: string) => origins.add(origin) };
+      },
+    },
+    async cookies() { return []; },
+    async storageState(options: unknown) {
+      expect(options).toEqual({ indexedDB: false });
+      expect([...origins]).toEqual(["https://closed.example"]);
+      origins.add("https://observed-during-capture.example");
+      return { origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value: "fresh" }] }] };
+    },
+    async newCDPSession() { throw new Error("Firefox capture must not use CDP"); },
+  };
+  await captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://closed.example"] },
+  }, { nativeStorage: true });
+  expect([...origins]).toEqual([
+    "https://live.example",
+    "https://closed.example",
+    "https://observed-during-capture.example",
+  ]);
+});
+
+test("native closed-origin capture uses IndexedDB only for Telegram", async () => {
+  const origins = new Set<string>();
+  const context = {
+    pages: () => [],
+    _connection: {
+      toImpl() {
+        return { _origins: origins, addVisitedOrigin: (origin: string) => origins.add(origin) };
+      },
+    },
+    async cookies() { return []; },
+    async storageState(options: unknown) {
+      expect(options).toEqual({ indexedDB: true });
+      return {
+        origins: [{
+          origin: "https://web.telegram.org",
+          localStorage: [],
+          indexedDB: [{
+            name: "tweb-common",
+            version: 1,
+            stores: [{
+              name: "localStorage__encrypted",
+              autoIncrement: false,
+              indexes: [],
+              records: [{ key: "data", value: "synthetic-auth" }],
+            }],
+          }],
+        }],
+      };
+    },
+  };
+  const result = JSON.parse(await captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://web.telegram.org"], telegramClient: "k" },
+  }, { nativeStorage: true }));
+  expect(result.origins[0].indexedDB).toHaveLength(1);
+});
+
+test("native closed-origin capture restores tracked origins after storageState fails", async () => {
+  const origins = new Set(["https://live.example"]);
+  const context = {
+    pages: () => [],
+    _connection: {
+      toImpl() {
+        return { _origins: origins, addVisitedOrigin: (origin: string) => origins.add(origin) };
+      },
+    },
+    async cookies() { return []; },
+    async storageState() {
+      origins.add("https://observed-during-capture.example");
+      throw new Error("storage failed");
+    },
+  };
+  await expect(captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://closed.example"] },
+  }, { nativeStorage: true })).rejects.toMatchObject({
+    code: "operation_failed",
+    details: { operation: "origin_storage", outcome: "failed" },
+  });
+  expect([...origins]).toEqual([
+    "https://live.example",
+    "https://closed.example",
+    "https://observed-during-capture.example",
+  ]);
 });
 
 test("native capture fails when storageState lacks a closed observed origin", async () => {

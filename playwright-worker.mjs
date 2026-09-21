@@ -617,15 +617,31 @@ async function createReadOnlyStorageReader(browser, context) {
 }
 
 async function nativeOriginStorage(context, origin) {
-  const state = await context.storageState({ indexedDB: true });
-  const found = state?.origins?.find((candidate) => candidate?.origin === origin);
-  if (!found) return undefined;
-  return {
-    localStorage: Array.isArray(found.localStorage) ? found.localStorage : [],
-    ...(origin === TELEGRAM_ORIGIN && Array.isArray(found.indexedDB)
-      ? { indexedDB: filterTelegramIndexedDB(found.indexedDB) }
-      : {}),
-  };
+  const native = context?._connection?.toImpl?.(context);
+  const trackedOrigins = native?._origins;
+  const savedOrigins = trackedOrigins instanceof Set ? [...trackedOrigins] : undefined;
+  try {
+    if (savedOrigins) {
+      trackedOrigins.clear();
+      trackedOrigins.add(origin);
+    }
+    const state = await context.storageState({ indexedDB: origin === TELEGRAM_ORIGIN });
+    const found = state?.origins?.find((candidate) => candidate?.origin === origin);
+    if (!found) return undefined;
+    return {
+      localStorage: Array.isArray(found.localStorage) ? found.localStorage : [],
+      ...(origin === TELEGRAM_ORIGIN && Array.isArray(found.indexedDB)
+        ? { indexedDB: filterTelegramIndexedDB(found.indexedDB) }
+        : {}),
+    };
+  } finally {
+    if (savedOrigins) {
+      const observedDuringCapture = [...trackedOrigins];
+      trackedOrigins.clear();
+      for (const savedOrigin of savedOrigins) trackedOrigins.add(savedOrigin);
+      for (const observedOrigin of observedDuringCapture) trackedOrigins.add(observedOrigin);
+    }
+  }
 }
 
 function registerNativeOrigins(context, origins) {
