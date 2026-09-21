@@ -383,6 +383,15 @@ async def run(*, context, inputs, log, **_kwargs):
   const handoff = decodePortableProfile(portable);
   assert.equal(handoff.profile.engine, "firefox", "portable profile keeps the Firefox engine");
   assert.deepEqual(handoff.profile.firefox, generatedConfig, "portable profile keeps the exact generated Firefox identity");
+
+  assert.equal(await localLauncher.stop(profileId), true, "Launcher stops Firefox before disabled native reopen");
+  const nativeRestoreDisabled = await localLauncher.start(profileId, [], { autoNavigate: false, restoreLastSession: false });
+  const disabledLaunch = localStore.getLaunch(profileId)!;
+  const disabledStatus = await callFirefoxOwner<{ pageTargets: Array<{ url: string }> }>(disabledLaunch.firefoxOwner!, "status", {});
+  assert.equal(nativeRestoreDisabled.nativeSessionRestored, false, "disabled Local reopen does not report native restoration");
+  assert.ok(!disabledStatus.pageTargets.some((target) => target.url === firstTab || target.url === secondTab), "disabled Local reopen does not restore native tabs");
+  assert.equal(await localLauncher.stop(profileId), true, "Launcher stops Firefox after disabled native reopen");
+
   cloudStore.upsertProfile(handoff.profile);
 
   cloudLauncher = new Launcher({
