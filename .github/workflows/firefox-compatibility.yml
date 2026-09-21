@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
+      - scripts/firefox-cli-source-smoke.mjs
       - scripts/firefox-launcher-acceptance.ts
       - scripts/firefox-owner-smoke.mjs
       - scripts/firefox-owner-bridge-smoke-runner.mjs
@@ -12,6 +13,7 @@ on:
       - launcher.ts
       - firefox-config.ts
       - firefox-runtime.ts
+      - firefox-install.ts
       - session.ts
       - store.ts
       - types.ts
@@ -25,6 +27,7 @@ on:
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
+      - scripts/firefox-cli-source-smoke.mjs
       - scripts/firefox-launcher-acceptance.ts
       - scripts/firefox-owner-smoke.mjs
       - scripts/firefox-owner-bridge-smoke-runner.mjs
@@ -32,6 +35,7 @@ on:
       - launcher.ts
       - firefox-config.ts
       - firefox-runtime.ts
+      - firefox-install.ts
       - session.ts
       - store.ts
       - types.ts
@@ -161,3 +165,158 @@ jobs:
             Write-Host "Firefox compatibility result ($($report.Directory.Name)): $result"
             (@("", "### $($report.Directory.Name)", "", '```json', $result, '```') -join "`n") | Add-Content $env:GITHUB_STEP_SUMMARY
           }
+
+  native:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            platform: linux
+            architecture: x86_64
+            artifact: AliasModeBuilds-linux-x86_64
+          - name: macOS arm64
+            runner: macos-15
+            platform: darwin
+            architecture: arm64
+            artifact: AliasModeBuilds-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check "playwright==1.58.0"
+      - run: bun install --frozen-lockfile
+      - name: Verify owned Firefox source build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run="$(gh api repos/aliasmode/aliasmode-firefox/actions/runs/35634556842)"
+          node -e '
+            const run = JSON.parse(process.argv[1]);
+            const expected = {
+              name: "Build and Release",
+              path: ".github/workflows/build.yml",
+              status: "completed",
+              conclusion: "success",
+              event: "push",
+              head_branch: "firefox-runtime-macos-linux",
+              head_sha: "1b8bc1c055e05ee9cace4a5491d58efcdd1c4837",
+            };
+            for (const [key, value] of Object.entries(expected)) {
+              if (run[key] !== value) throw new Error(`invalid source build ${key}`);
+            }
+            if (run.repository?.full_name !== "aliasmode/aliasmode-firefox" || run.head_repository?.full_name !== "aliasmode/aliasmode-firefox") {
+              throw new Error("invalid AliasMode Firefox source repository");
+            }
+          ' "$run"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/firefox
+          github-token: ${{ github.token }}
+          repository: aliasmode/aliasmode-firefox
+          run-id: "35634556842"
+      - name: Install verified owned browser
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s dotglob nullglob
+          entries=(artifacts/firefox/*)
+          shopt -u dotglob
+          if (( ${#entries[@]} != 1 )) || [[ ! -f "${entries[0]}" || -L "${entries[0]}" || "${entries[0]}" != *.zip ]]; then
+            printf '%s\n' "AliasMode Firefox artifact must contain exactly one regular ZIP archive" >&2
+            exit 1
+          fi
+          install_root="$(mktemp -d "$RUNNER_TEMP/firefox-install-${{ matrix.platform }}-XXXXXX")"
+          installed="$(ALIASMODE_FIREFOX_ARCHIVE="${entries[0]}" ALIASMODE_FIREFOX_INSTALL_ROOT="$install_root" bun -e '
+            import { installFirefox } from "./firefox-install.ts";
+            const result = await installFirefox({
+              archive: process.env.ALIASMODE_FIREFOX_ARCHIVE,
+              cwd: process.env.ALIASMODE_FIREFOX_INSTALL_ROOT,
+            });
+            console.log(JSON.stringify(result));
+          ')"
+          browser="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).path)' "$installed")"
+          sha256="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).sha256)' "$installed")"
+          [[ "$browser" == "$install_root/"* && -x "$browser" && "$sha256" =~ ^[a-f0-9]{64}$ ]]
+          {
+            printf 'ALIASMODE_FIREFOX_BINARY_PATH=%s\n' "$browser"
+            printf 'ALIASMODE_FIREFOX_BINARY_SHA256=%s\n' "$sha256"
+          } >> "$GITHUB_ENV"
+      - name: Verify native browser architecture and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == "${{ matrix.architecture }}" ]]
+          binary_info="$(file -b "$ALIASMODE_FIREFOX_BINARY_PATH")"
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            grep -Eq 'ELF 64-bit.*x86-64' <<<"$binary_info"
+          else
+            grep -Eq 'Mach-O.*arm64' <<<"$binary_info"
+          fi
+          version="$("$ALIASMODE_FIREFOX_BINARY_PATH" --version 2>&1)"
+          [[ "$version" =~ 152\.0\.4 ]]
+          printf 'Firefox native binary: %s\n' "$binary_info"
+          printf 'Firefox version: %s\n' "$version"
+      - name: Prove persistent contexts, MCP, scripts, and storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headless-proof"
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            xvfb-run -a node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed
+          else
+            node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed
+          fi
+      - name: Prove detached Firefox owner lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun scripts/firefox-owner-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-owner-headless-proof"
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            xvfb-run -a bun scripts/firefox-owner-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-owner-headed-proof" --headed
+          else
+            bun scripts/firefox-owner-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-owner-headed-proof" --headed
+          fi
+      - name: Prove Launcher persistence and portable handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/firefox-launcher-source-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          bun scripts/firefox-launcher-acceptance.ts "$ALIASMODE_FIREFOX_BINARY_PATH" "$proof" "$ALIASMODE_FIREFOX_BINARY_SHA256"
+      - name: Prove source CLI and script runners
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun scripts/firefox-cli-source-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-cli-source-proof" "$ALIASMODE_FIREFOX_BINARY_SHA256"
+      - name: Report compatibility results
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          reports=()
+          while IFS= read -r -d '' report; do reports+=("$report"); done < <(find "$RUNNER_TEMP" -type f -name result.json -path '*/firefox-*-proof/result.json' -print0)
+          if (( ${#reports[@]} == 0 )); then
+            printf '## Firefox compatibility results\n\nNo result reports were produced.\n' >> "$GITHUB_STEP_SUMMARY"
+            printf 'No Firefox compatibility result reports were produced\n'
+            exit 0
+          fi
+          printf '## Firefox compatibility results\n' >> "$GITHUB_STEP_SUMMARY"
+          for report in "${reports[@]}"; do
+            result="$(<"$report")"
+            name="$(basename "$(dirname "$report")")"
+            printf 'Firefox compatibility result (%s): %s\n' "$name" "$result"
+            printf '\n### %s\n\n```json\n%s\n```\n' "$name" "$result" >> "$GITHUB_STEP_SUMMARY"
+          done
