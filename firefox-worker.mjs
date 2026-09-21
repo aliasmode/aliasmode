@@ -48,6 +48,15 @@ function validConfig(value) {
   return value && typeof value === "object" && !Array.isArray(value);
 }
 
+export function observedFirefoxCaptureUrl(value) {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:")
+      || url.searchParams.has("__aliasmode_fingerprint__")) return undefined;
+    return url;
+  } catch {}
+}
+
 function cleanCamouConfig(config) {
   for (const key of Object.keys(process.env)) {
     if (/^CAMOU_CONFIG(?:_\d+)?$/i.test(key)) delete process.env[key];
@@ -187,15 +196,13 @@ async function run() {
   const observedOrigins = new Set();
   let observedTelegramClient;
   const observeUrl = (value) => {
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "http:" && url.protocol !== "https:") return;
-      observedOrigins.add(url.origin);
-      if (url.origin === "https://web.telegram.org") {
-        if (url.pathname === "/a" || url.pathname.startsWith("/a/")) observedTelegramClient = "a";
-        if (url.pathname === "/k" || url.pathname.startsWith("/k/")) observedTelegramClient = "k";
-      }
-    } catch {}
+    const url = observedFirefoxCaptureUrl(value);
+    if (!url) return;
+    observedOrigins.add(url.origin);
+    if (url.origin === "https://web.telegram.org") {
+      if (url.pathname === "/a" || url.pathname.startsWith("/a/")) observedTelegramClient = "a";
+      if (url.pathname === "/k" || url.pathname.startsWith("/k/")) observedTelegramClient = "k";
+    }
   };
   const observePage = (page) => {
     try { observeUrl(page.url()); } catch {}

@@ -240,7 +240,7 @@ export async function startFirefoxOwner(
     child = spawn(runtime.nodeExecutable, [workerPath, `--aliasmode-firefox-owner=${reservation.generation}`], {
       detached: true,
       windowsHide: true,
-      stdio: ["pipe", "pipe", process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS === "1" ? "inherit" : "ignore"],
+      stdio: ["pipe", "pipe", "ignore"],
       env: playwrightWorkerEnvironment(),
     });
   } catch {

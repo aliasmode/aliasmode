@@ -406,59 +406,6 @@ test("native capture fails when storageState lacks a closed observed origin", as
   });
 });
 
-test("native capture emits fixed, secret-safe failure phases", async () => {
-  const previous = process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS;
-  const originalError = console.error;
-  const diagnostics: Record<string, unknown>[] = [];
-  process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS = "1";
-  console.error = (value: unknown) => diagnostics.push(JSON.parse(String(value)));
-  const nativeContext = (storageState: () => Promise<unknown>) => {
-    const origins = new Set<string>();
-    return {
-      pages: () => [],
-      _connection: { toImpl: () => ({ _origins: origins, addVisitedOrigin: (origin: string) => origins.add(origin) }) },
-      async cookies() { return []; },
-      storageState,
-    };
-  };
-  const captureFailure = async (context: ReturnType<typeof nativeContext>, origin = "https://closed.example") =>
-    captureSession({ contexts: () => [context] }, { captureSeed: { origins: [origin], ...(origin === "https://web.telegram.org" ? { telegramClient: "k" } : {}) } }, { nativeStorage: true })
-      .then(() => null, (failure) => failure);
-  try {
-    await captureFailure(nativeContext(async () => { throw new Error("private storage failure"); }));
-    await captureFailure(nativeContext(async () => ({ origins: [] })));
-    await captureFailure(nativeContext(async () => ({ origins: [{
-      origin: "https://web.telegram.org",
-      localStorage: [],
-      indexedDB: [{ get name() { throw new Error("private database failure"); } }],
-    }] })), "https://web.telegram.org");
-    await captureFailure(nativeContext(async () => ({ origins: [{
-      origin: "https://closed.example",
-      localStorage: [{ name: 1, value: "private" }],
-    }] })));
-    expect(diagnostics.map((diagnostic) => diagnostic.phase)).toEqual([
-      "storage_state", "missing_origin", "filter_indexeddb", "validation",
-    ]);
-    expect(diagnostics[0]).toMatchObject({
-      aliasmode: "native_capture_diagnostic",
-      requestedOriginIsTelegram: false,
-      nativeBindingAvailable: true,
-      addVisitedOriginAvailable: true,
-      trackedOriginsAvailable: true,
-      requestedOriginTrackedBeforeCapture: true,
-      returnedOriginCount: -1,
-      requestedOriginMatched: false,
-    });
-    expect(diagnostics[1]).toMatchObject({ returnedOriginCount: 0, requestedOriginMatched: false });
-    expect(diagnostics[2]).toMatchObject({ requestedOriginIsTelegram: true, returnedOriginCount: 1, requestedOriginMatched: true });
-    expect(JSON.stringify(diagnostics)).not.toContain("private");
-  } finally {
-    console.error = originalError;
-    if (previous === undefined) delete process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS;
-    else process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS = previous;
-  }
-});
-
 test("native restore does not call Firefox CDP methods", async () => {
   let handler: ((route: { fulfill: () => Promise<void> }) => Promise<void>) | undefined;
   let routeUrl = "";

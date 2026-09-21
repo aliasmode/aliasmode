@@ -9,7 +9,7 @@ import {
   type FirefoxOwner,
 } from "./firefox-runtime.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
-import { firefoxLaunchOptions } from "./firefox-worker.mjs";
+import { firefoxLaunchOptions, observedFirefoxCaptureUrl } from "./firefox-worker.mjs";
 
 async function ownerServer(handler: RequestListener) {
   const server = createServer(handler);
@@ -43,6 +43,12 @@ test("Firefox owner passes native proxy preferences", () => {
   });
   expect(firefoxLaunchOptions({ executablePath: "firefox.exe", proxy })).not.toHaveProperty("firefoxUserPrefs.browser.startup.page");
   expect(firefoxLaunchOptions({ executablePath: "firefox.exe" })).not.toHaveProperty("firefoxUserPrefs");
+});
+
+test("Firefox owner excludes its temporary fingerprint page from capture history", () => {
+  expect(observedFirefoxCaptureUrl("https://fingerprint.aliasmode.invalid/?__aliasmode_fingerprint__=1")).toBeUndefined();
+  expect(observedFirefoxCaptureUrl("http://aliasmode-fixture.test:8080/first")?.origin).toBe("http://aliasmode-fixture.test:8080");
+  expect(observedFirefoxCaptureUrl("about:blank")).toBeUndefined();
 });
 
 test("Firefox owner preserves pre-readiness worker error codes", () => {
