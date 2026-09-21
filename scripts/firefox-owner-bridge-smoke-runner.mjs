@@ -9,6 +9,14 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const { endpoint } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 if (typeof endpoint !== "string") throw new Error("Firefox bridge endpoint is missing");
 
+function safeError(error) {
+  return String(error instanceof Error ? error.message : error)
+    .replaceAll(endpoint, "private Firefox endpoint")
+    .replaceAll(/wss?:\/\/[^\s'"]+/g, "private Firefox endpoint")
+    .replaceAll(/127\.0\.0\.1:\d+/g, "private Firefox endpoint")
+    .slice(0, 500);
+}
+
 let phase = "connect";
 let browser;
 try {
@@ -32,11 +40,10 @@ try {
       stored: localStorage.getItem("owner-proof"),
       identity: { userAgent: navigator.userAgent, screen: [screen.width, screen.height] },
     }));
-    await page.close();
     process.stdout.write(JSON.stringify(result));
   }
 } catch (error) {
-  if (mode === "hold") process.stdout.write(`${JSON.stringify({ failed: phase })}\n`);
+  if (mode === "hold") process.stdout.write(`${JSON.stringify({ failed: phase, error: safeError(error) })}\n`);
   throw error;
 } finally {
   await browser?.close();
