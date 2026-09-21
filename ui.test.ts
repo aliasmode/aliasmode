@@ -40,6 +40,20 @@ function store(): ProfileStore {
   return s;
 }
 
+function firefoxProfile(s: ProfileStore, id: string): Profile {
+  const base = s.getProfile("k1d0cd11")!;
+  return {
+    ...base,
+    id,
+    engine: "firefox",
+    firefox: {
+      version: 1,
+      runtimeVersion: "test-firefox",
+      config: { timezone: "UTC" },
+    },
+  };
+}
+
 function timezoneFetch(timezones: Record<string, string>, calls?: string[][]) {
   return async (_url: string, init: RequestInit) => {
     const queries = (JSON.parse(String(init.body)) as Array<{ query: string }>).map((item) => item.query);
@@ -304,6 +318,22 @@ test("open/close routes call the launcher", async () => {
   const close = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/close", { method: "POST" }), launcher, s);
   expect((await close!.json()).ok).toBe(true);
   expect(calls).toEqual(["start:k1d0cd11", "capture:k1d0cd11", "stop:k1d0cd11"]);
+  s.close();
+});
+
+test("Firefox open responses do not expose the internal port", async () => {
+  const s = store();
+  s.upsertProfile(firefoxProfile(s, "firefox-open"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/firefox-open/open", { method: "POST" }),
+    { start: async () => ({ port: 9333 }) } as any,
+    s,
+  );
+  expect(await response!.json()).toEqual({
+    ok: true,
+    engine: "firefox",
+    capabilities: { cdp: false, pdf: false, chromeExtensions: false },
+  });
   s.close();
 });
 
@@ -1323,6 +1353,28 @@ test("an explicit timezone action updates a Local proxy timezone", async () => {
   expect(await res!.json()).toMatchObject({ ok: true, timezone: "Europe/London" });
   expect(calls).toEqual([["1.2.3.4"]]);
   expect(s.getProfile("k1d0cd11")!.timezone).toBe("Europe/London");
+  s.close();
+});
+
+test("an explicit timezone action updates Firefox configuration", async () => {
+  const s = store();
+  s.upsertProfile(firefoxProfile(s, "firefox-timezone"));
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/firefox-timezone/timezone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }),
+    {} as any,
+    s,
+    null,
+    { timezoneFetch: timezoneFetch({ "1.2.3.4": "Europe/London" }) },
+  );
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("firefox-timezone")!).toMatchObject({
+    timezone: "Europe/London",
+    firefox: { config: { timezone: "Europe/London" } },
+  });
   s.close();
 });
 
@@ -3754,12 +3806,14 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
   const appConfig = new AppConfigStore(join(root, "config.json"));
   appConfig.setMode("cloud", "https://cloud.aliasmode.test");
   const calls: string[] = [];
+  let createdProfile: Profile | undefined;
   const cloudBrowser = {
     async listRoster() {
       calls.push("list");
       return { profiles: [{ id: "cloud1", name: "Cloud profile" }], healthSources: [] };
     },
-    async create(profile: { id: string; name: string }) {
+    async create(profile: Profile) {
+      createdProfile = profile;
       calls.push(`create:${profile.name}`);
       return { id: profile.id };
     },
@@ -3798,7 +3852,7 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
     new Request("http://x/ui/api/profiles", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "New Cloud profile" }),
+      body: JSON.stringify({ name: "New Cloud profile", engine: "firefox" }),
     }),
     {} as any,
     s,
@@ -3809,7 +3863,26 @@ test("Cloud profile routes use the Cloud browser coordinator without local fallb
   const createdBody = await created!.json();
   expect(createdBody).toMatchObject({ ok: true, id: expect.any(String) });
   expect(calls).toEqual(["list", "open:cloud1", "create:New Cloud profile"]);
+  expect(createdProfile).toMatchObject({ engine: "firefox", firefox: expect.any(Object) });
   expect(s.getProfile(createdBody.id)).toBeNull();
+  s.close();
+});
+
+test("Cloud Firefox open responses do not expose the internal port", async () => {
+  const s = store();
+  s.upsertProfile(firefoxProfile(s, "cloud-firefox"));
+  const response = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/cloud-firefox/open", { method: "POST" }),
+    {} as any,
+    s,
+    null,
+    { cloudBrowser: { open: async () => ({ ok: true, port: 9222 }) } as any },
+  );
+  expect(await response!.json()).toEqual({
+    ok: true,
+    engine: "firefox",
+    capabilities: { cdp: false, pdf: false, chromeExtensions: false },
+  });
   s.close();
 });
 

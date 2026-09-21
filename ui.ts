@@ -114,6 +114,30 @@ function profileEngine(profile: unknown): "chromium" | "firefox" {
     : "chromium";
 }
 
+function syncFirefoxTimezone(profile: Profile): void {
+  if (profileEngine(profile) !== "firefox") return;
+  if (!profile.firefox) throw new Error("Firefox profile is missing its saved configuration");
+  const { timezone: _timezone, ...config } = profile.firefox.config;
+  profile.firefox = {
+    ...profile.firefox,
+    config: { ...config, ...(profile.timezone ? { timezone: profile.timezone } : {}) },
+  };
+}
+
+function openResponse(
+  profile: unknown,
+  result: { port?: number; warning?: string },
+): Response {
+  const engine = profileEngine(profile);
+  return Response.json({
+    ok: true,
+    ...(engine === "firefox"
+      ? { engine, capabilities: { cdp: false, pdf: false, chromeExtensions: false } }
+      : { port: result.port }),
+    ...(result.warning === undefined ? {} : { warning: result.warning }),
+  });
+}
+
 /**
  * Map the store into redacted UiProfiles joined with running state. Status comes
  * from the launches table, which is authoritative for every browser THIS manager
@@ -1113,7 +1137,10 @@ export async function handleUiRequest(
       if (!options.cloudBrowser) store.applyGroupExtensionDefaults(profile, null, false);
       // Cloud keeps its existing server-side identity flow. Local profiles only
       // resolve proxy geography after the operator explicitly requests it.
-      if (options.cloudBrowser && profile.proxy) await attachTimezones([profile], options.timezoneFetch).catch(() => {});
+      if (options.cloudBrowser && profile.proxy) {
+        await attachTimezones([profile], options.timezoneFetch).catch(() => {});
+        syncFirefoxTimezone(profile);
+      }
       if (options.cloudBrowser) {
         return Response.json({ ok: true, ...await options.cloudBrowser.create(profile) });
       }
@@ -1738,6 +1765,7 @@ export async function handleUiRequest(
       if (!profile) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
       if (!profile.proxy) return Response.json({ ok: false, error: "profile has no proxy" }, { status: 400 });
       await attachTimezones([profile], options.timezoneFetch);
+      syncFirefoxTimezone(profile);
       store.upsertProfile(profile);
       return Response.json({ ok: true, timezone: profile.timezone });
     } catch (error) {
@@ -1903,8 +1931,10 @@ export async function handleUiRequest(
           const liveProxyChanged = applyEdits(live, set);
           if (liveProxyChanged && live.proxy) {
             await attachTimezones([live], options.timezoneFetch).catch(() => {});
+            syncFirefoxTimezone(live);
           } else if (liveProxyChanged) {
             live.timezone = "";
+            syncFirefoxTimezone(live);
           }
           const committed = await (options.cloudBrowser.commitLiveEdit?.(live) ?? Promise.resolve(false));
           if (!committed) {
@@ -2012,7 +2042,7 @@ export async function handleUiRequest(
         if (action[2] === "open") {
           const result = await options.cloudBrowser.open(id);
           return result.ok
-            ? Response.json({ ok: true, port: result.port, warning: result.warning })
+            ? openResponse(store.getProfile(id), result)
             : Response.json({ ok: false, error: result.error ?? "open failed" }, { status: 500 });
         }
         if (action[2] === "close") {
@@ -2027,8 +2057,11 @@ export async function handleUiRequest(
       try {
         if (action[2] === "open") {
           const force = new URL(req.url).searchParams.get("force") === "1";
+          const profile = remote.getProfile
+            ? await remote.getProfile(id).catch(() => null)
+            : null;
           const r = await remote.open(id, [], force);
-          if (r.ok) return Response.json({ ok: true, port: r.port, warning: r.warning });
+          if (r.ok) return openResponse(profile, r);
           return Response.json(
             { ok: false, error: r.lockedBy ? `in use by ${r.lockedBy}` : (r.error ?? "open failed"), lockedBy: r.lockedBy },
             { status: r.lockedBy ? 409 : 500 },
@@ -2044,11 +2077,12 @@ export async function handleUiRequest(
         return Response.json({ ok: false, error: msg(e) }, { status: 500 });
       }
     }
-    if (!store.getProfile(id)) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    const profile = store.getProfile(id);
+    if (!profile) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
     try {
       if (action[2] === "open") {
         const r = await launcher.start(id);
-        return Response.json({ ok: true, port: r.port });
+        return openResponse(profile, r);
       }
       if (action[2] === "close") {
         const launch = store.getLaunch(id);

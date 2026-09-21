@@ -2339,7 +2339,7 @@ function App() {
     try {
       const r = await createProfile({
         name: form.name,
-        ...(!isCloudMode ? { engine: form.engine } : {}),
+        engine: form.engine,
         group: form.group,
         platform: form.platform,
         screen: form.screen,
@@ -4176,16 +4176,14 @@ function App() {
                   </label>
                 )}
               </div>
-              {!isCloudMode && (
-                <label className="fld">
-                  <span>Browser</span>
-                  <select value={form.engine} onChange={(e) => setF("engine", e.target.value)}>
-                    <option value="chromium">Chromium (CloakBrowser)</option>
-                    <option value="firefox">Firefox (AliasMode Firefox)</option>
-                  </select>
-                  <small>Firefox uses a native profile. CDP, PDF, and Chrome extensions are unavailable.</small>
-                </label>
-              )}
+              <label className="fld">
+                <span>Browser</span>
+                <select value={form.engine} onChange={(e) => setF("engine", e.target.value)}>
+                  <option value="chromium">Chromium (CloakBrowser)</option>
+                  <option value="firefox">Firefox (AliasMode Firefox)</option>
+                </select>
+                <small>Firefox uses a native profile. CDP, PDF, and Chrome extensions are unavailable.</small>
+              </label>
               <div className="fld-row">
                 <label className="fld grow">
                   <span>Folder</span>
