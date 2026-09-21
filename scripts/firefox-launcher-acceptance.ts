@@ -14,6 +14,7 @@ import { ProfileStore } from "../store.ts";
 import type { Profile } from "../types.ts";
 
 const [binaryArg, rootArg, expectedSha256] = process.argv.slice(2);
+process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS = "1";
 if (!binaryArg || !rootArg || !/^[a-f0-9]{64}$/.test(expectedSha256 ?? "")) {
   throw new Error("usage: bun scripts/firefox-launcher-acceptance.ts <aliasmode.exe> <new-directory> <sha256>");
 }

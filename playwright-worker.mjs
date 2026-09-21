@@ -616,24 +616,69 @@ async function createReadOnlyStorageReader(browser, context) {
   };
 }
 
-async function nativeOriginStorage(context, origin) {
-  const native = context?._connection?.toImpl?.(context);
+function nativeCaptureFacts(context, origin) {
+  let native;
+  try { native = context?._connection?.toImpl?.(context); } catch {}
   const trackedOrigins = native?._origins;
+  return {
+    native,
+    trackedOrigins,
+    requestedOriginIsTelegram: origin === TELEGRAM_ORIGIN,
+    nativeBindingAvailable: !!native,
+    addVisitedOriginAvailable: typeof native?.addVisitedOrigin === "function",
+    trackedOriginsAvailable: trackedOrigins instanceof Set,
+    requestedOriginTrackedBeforeCapture: trackedOrigins instanceof Set && trackedOrigins.has(origin),
+  };
+}
+
+function emitNativeCaptureDiagnostic(phase, facts, state) {
+  if (process.env.TEST_ALIASMODE_SESSION_DIAGNOSTICS !== "1") return;
+  const origins = Array.isArray(state?.origins) ? state.origins : undefined;
+  console.error(JSON.stringify({
+    aliasmode: "native_capture_diagnostic",
+    phase,
+    requestedOriginIsTelegram: facts.requestedOriginIsTelegram,
+    nativeBindingAvailable: facts.nativeBindingAvailable,
+    addVisitedOriginAvailable: facts.addVisitedOriginAvailable,
+    trackedOriginsAvailable: facts.trackedOriginsAvailable,
+    requestedOriginTrackedBeforeCapture: facts.requestedOriginTrackedBeforeCapture,
+    returnedOriginCount: origins?.length ?? -1,
+    requestedOriginMatched: origins?.some((candidate) => candidate?.origin === facts.origin) ?? false,
+  }));
+}
+
+async function nativeOriginStorage(context, origin) {
+  const facts = { ...nativeCaptureFacts(context, origin), origin };
+  const { trackedOrigins } = facts;
   const savedOrigins = trackedOrigins instanceof Set ? [...trackedOrigins] : undefined;
   try {
     if (savedOrigins) {
       trackedOrigins.clear();
       trackedOrigins.add(origin);
     }
-    const state = await context.storageState({ indexedDB: origin === TELEGRAM_ORIGIN });
+    let state;
+    try {
+      state = await context.storageState({ indexedDB: origin === TELEGRAM_ORIGIN });
+    } catch (error) {
+      emitNativeCaptureDiagnostic("storage_state", facts);
+      throw error;
+    }
     const found = state?.origins?.find((candidate) => candidate?.origin === origin);
-    if (!found) return undefined;
-    return {
-      localStorage: Array.isArray(found.localStorage) ? found.localStorage : [],
-      ...(origin === TELEGRAM_ORIGIN && Array.isArray(found.indexedDB)
-        ? { indexedDB: filterTelegramIndexedDB(found.indexedDB) }
-        : {}),
-    };
+    if (!found) {
+      emitNativeCaptureDiagnostic("missing_origin", facts, state);
+      return undefined;
+    }
+    try {
+      return {
+        localStorage: Array.isArray(found.localStorage) ? found.localStorage : [],
+        ...(origin === TELEGRAM_ORIGIN && Array.isArray(found.indexedDB)
+          ? { indexedDB: filterTelegramIndexedDB(found.indexedDB) }
+          : {}),
+      };
+    } catch (error) {
+      emitNativeCaptureDiagnostic("filter_indexeddb", facts, state);
+      throw error;
+    }
   } finally {
     if (savedOrigins) {
       const observedDuringCapture = [...trackedOrigins];
@@ -693,7 +738,13 @@ export async function captureSession(browser, payload, options = {}) {
           storage = await sessionStep("origin_storage", () => reader.read(origin));
         }
       }
-      const captured = await sessionStep("validation", () => capturedWebOriginStorage(origin, storage));
+      let captured;
+      try {
+        captured = await sessionStep("validation", () => capturedWebOriginStorage(origin, storage));
+      } catch (error) {
+        if (options.nativeStorage) emitNativeCaptureDiagnostic("validation", { ...nativeCaptureFacts(context, origin), origin });
+        throw error;
+      }
       if (captured) byOrigin.set(origin, captured);
     }
 
