@@ -237,6 +237,7 @@ export async function verifyScriptRuntime(language: ScriptLanguage, options: Scr
 export const executeScript: ScriptExecution = async ({ scriptPath, language, input, logFd, signal }) => {
   signal.throwIfAborted();
   const { executable, runner } = await verifyScriptRuntime(language);
+  signal.throwIfAborted();
   const child = spawn(executable, [...(language === "python" ? ["-u", "-X", "utf8"] : []), runner, scriptPath], {
     windowsHide: true, detached: process.platform !== "win32", env: scriptRunnerEnvironment(), stdio: ["pipe", logFd, logFd],
   });
