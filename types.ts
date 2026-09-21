@@ -165,11 +165,17 @@ export interface FingerprintVerdict {
   differences: FingerprintDifference[];
 }
 
-/** What a launched browser exposes back to automation. Mirrors AdsPower. */
+/** Internal launch ownership. Only Chromium's control address is public CDP. */
 export interface LaunchInfo {
   profileId: string;
+  engine?: "chromium" | "firefox";
+  /** Private Firefox owner authentication; never export this record to clients. */
+  firefoxOwner?: import("./firefox-runtime.ts").FirefoxOwner;
+  ownerBinaryPath?: string;
   pid: number;
+  /** CDP port for Chromium; private owner RPC port for Firefox. */
   debugPort: number;
+  /** Chromium CDP URL or token-free internal Firefox control locator. */
   ws: string;
   startedAt: number;
   /** Loopback port of the auth-injecting proxy relay for this launch, if it has an authed proxy.
