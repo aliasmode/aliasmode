@@ -20,8 +20,6 @@ const WINDOWS_ARCHIVE_URLS = [
   `https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
   `https://cloakbrowser.dev/chromium-v${CLOAKBROWSER_VERSION}/${WINDOWS_ARCHIVE_NAME}`,
 ];
-const PATH_KEY = "CLOAKBROWSER_BINARY_PATH";
-const HASH_KEY = "CLOAKBROWSER_BINARY_SHA256";
 
 export interface BrowserInstallOptions {
   cwd?: string;
@@ -31,7 +29,7 @@ export interface BrowserInstallOptions {
   hashFile?: (path: string) => Promise<string>;
 }
 
-async function sha256File(path: string): Promise<string> {
+export async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");
   await new Promise<void>((resolveDone, reject) => {
     const stream = createReadStream(path);
@@ -121,12 +119,14 @@ function installedPath(output: string, exists: (path: string) => boolean): strin
   return lines.reverse().find((line) => exists(line)) ?? null;
 }
 
-export function browserEnvText(current: string, binaryPath: string, sha256: string, newline = "\n"): string {
-  const owned = new RegExp(`^\\s*(?:${PATH_KEY}|${HASH_KEY})\\s*=.*$`, "i");
+export function browserEnvText(current: string, binaryPath: string, sha256: string, newline = "\n", prefix: "CLOAKBROWSER" | "ALIASMODE_FIREFOX" = "CLOAKBROWSER"): string {
+  const pathKey = `${prefix}_BINARY_PATH`;
+  const hashKey = `${prefix}_BINARY_SHA256`;
+  const owned = new RegExp(`^\\s*(?:${pathKey}|${hashKey})\\s*=.*$`, "i");
   const kept = current.split(/\r?\n/).filter((line) => !owned.test(line));
   while (kept.length && !kept.at(-1)?.trim()) kept.pop();
   if (kept.length) kept.push("");
-  kept.push(`${PATH_KEY}=${binaryPath}`, `${HASH_KEY}=${sha256.toLowerCase()}`, "");
+  kept.push(`${pathKey}=${binaryPath}`, `${hashKey}=${sha256.toLowerCase()}`, "");
   return kept.join(newline);
 }
 

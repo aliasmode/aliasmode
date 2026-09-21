@@ -11,6 +11,7 @@
  *
  * Other commands:
  *   bun cli.ts install-browser     # download, verify, and pin CloakBrowser
+ *   bun cli.ts install-browser --engine firefox --archive <owned-build.zip>
  *   bun cli.ts import [file|dir]   # default: import the inbox
  *   bun cli.ts serve   [--port 50400] [--headless]
  *   bun cli.ts list
@@ -71,6 +72,7 @@ import net from "node:net";
 import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault, type SearchProviderSetupResult } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
+import { installFirefox } from "./firefox-install.ts";
 import { resolveEgressEndpoints } from "./egress.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
 import {
@@ -2623,6 +2625,29 @@ async function main() {
       break;
     }
     case "install-browser": {
+      const engine = flag(rest, "engine") ?? (has(rest, "engine") ? "" : "chromium");
+      if (engine === "firefox") {
+        const archive = flag(rest, "archive");
+        if (!archive || archive.startsWith("--")) {
+          console.error("Usage: bun cli.ts install-browser --engine firefox --archive <owned-build.zip>");
+          process.exitCode = 1;
+          break;
+        }
+        try {
+          const installed = await installFirefox({ archive, cwd: paths.root });
+          console.log(`AliasMode Firefox installed and pinned:\n${installed.path}\nSHA-256 ${installed.sha256}`);
+          console.log("Restart AliasMode to use it.");
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : "AliasMode Firefox installation failed");
+          process.exitCode = 1;
+        }
+        break;
+      }
+      if (engine !== "chromium") {
+        console.error("Browser engine must be chromium or firefox");
+        process.exitCode = 1;
+        break;
+      }
       console.log("Installing the official CloakBrowser binary (one-time download)...");
       const installed = await installCloakBrowser({ cwd: paths.root });
       console.log(`CloakBrowser installed and pinned:\n${installed.path}\nSHA-256 ${installed.sha256}`);
