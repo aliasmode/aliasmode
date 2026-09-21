@@ -7,6 +7,7 @@ on:
       - scripts/firefox-compatibility-smoke.mjs
       - scripts/firefox-launcher-acceptance.ts
       - scripts/firefox-owner-smoke.mjs
+      - scripts/firefox-owner-bridge-smoke-runner.mjs
       - scripts/firefox-owner-smoke-manager.mjs
       - launcher.ts
       - firefox-config.ts
@@ -26,6 +27,7 @@ on:
       - scripts/firefox-compatibility-smoke.mjs
       - scripts/firefox-launcher-acceptance.ts
       - scripts/firefox-owner-smoke.mjs
+      - scripts/firefox-owner-bridge-smoke-runner.mjs
       - scripts/firefox-owner-smoke-manager.mjs
       - launcher.ts
       - firefox-config.ts

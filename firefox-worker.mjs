@@ -1,14 +1,16 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { promisify, format } from "node:util";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connectOfficial, nonClosingContext } from "./agent/playwright-proxy.mjs";
 import { MAX_BYTES, VERSION, operatePersistentContext } from "./playwright-worker.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
+const require = createRequire(import.meta.url);
 const ERROR_MESSAGES = {
   invalid_request: "Firefox owner request is invalid",
   invalid_response: "Firefox owner response is invalid",
@@ -211,6 +213,61 @@ async function run() {
     await current?.client.close().catch(() => {});
     await current?.server.close().catch(() => {});
   };
+  let playwrightServer;
+  let playwrightEndpoint;
+  let serverContext;
+  let restoreContextClose;
+  const protectContextClose = (candidate) => {
+    let BrowserContextDispatcher;
+    try { ({ BrowserContextDispatcher } = require(join(ROOT, "node_modules", "playwright-core", "lib", "server", "dispatchers", "browserContextDispatcher.js"))); }
+    catch { throw typed("runtime_unavailable"); }
+    const close = BrowserContextDispatcher.prototype.close;
+    BrowserContextDispatcher.prototype.close = async function(params, progress) {
+      if (this._object === candidate) throw new Error("The owner persistent context cannot be closed by an external runner");
+      return close.call(this, params, progress);
+    };
+    restoreContextClose = () => { BrowserContextDispatcher.prototype.close = close; };
+  };
+  const closePlaywrightServer = async () => {
+    const current = playwrightServer;
+    playwrightServer = undefined;
+    playwrightEndpoint = undefined;
+    await current?.close();
+  };
+  const initializePlaywrightServer = async () => {
+    if (playwrightEndpoint) return playwrightEndpoint;
+    serverContext = context?._connection?.toImpl?.(context);
+    const serverBrowser = serverContext?._browser;
+    if (!serverBrowser) throw typed("runtime_unavailable");
+    let PlaywrightServer;
+    try { ({ PlaywrightServer } = require(join(ROOT, "node_modules", "playwright-core", "lib", "remote", "playwrightServer.js"))); }
+    catch { throw typed("runtime_unavailable"); }
+    protectContextClose(serverContext);
+    const bridge = new PlaywrightServer({
+      mode: "launchServerShared",
+      path: `/${randomBytes(32).toString("hex")}`,
+      maxConnections: Infinity,
+      preLaunchedBrowser: serverBrowser,
+    });
+    try {
+      playwrightEndpoint = await bridge.listen(0, "127.0.0.1");
+      playwrightServer = bridge;
+      return playwrightEndpoint;
+    } catch (error) {
+      await bridge.close().catch(() => {});
+      restoreContextClose?.();
+      restoreContextClose = undefined;
+      throw error;
+    }
+  };
+  const closePersistentContext = async () => {
+    const current = serverContext;
+    serverContext = undefined;
+    restoreContextClose?.();
+    restoreContextClose = undefined;
+    if (current) await current.close({ reason: "Firefox owner stopped" });
+    else await context.close();
+  };
   let server;
   const closeServer = () => !server
     ? Promise.resolve()
@@ -221,7 +278,8 @@ async function run() {
     closed = true;
     try {
       await closeOfficial();
-      await context.close();
+      await closePlaywrightServer().catch(() => {});
+      await closePersistentContext();
     } catch (error) {
       closing = false;
       closed = false;
@@ -232,6 +290,7 @@ async function run() {
     try {
       await stopContext();
     } finally {
+      await closePlaywrightServer().catch(() => {});
       await closeServer().catch(() => {});
     }
   };
@@ -292,30 +351,7 @@ async function run() {
       await closeOfficial();
       return null;
     }
-    if (name === "run-script") {
-      if (typeof payload.scriptPath !== "string" || !payload.scriptPath || !payload.input || typeof payload.input !== "object") {
-        throw typed("invalid_request");
-      }
-      const module = await import(pathToFileURL(payload.scriptPath).href);
-      if (typeof module.default !== "function") throw typed("invalid_request");
-      const page = context.pages()[0] ?? await context.newPage();
-      const logs = [];
-      const log = (...values) => logs.push(format(...values));
-      const previousLog = console.log;
-      console.log = log;
-      try {
-        const result = await module.default({
-          browser,
-          context,
-          page,
-          profile: payload.input.profile,
-          inputs: payload.input.inputs,
-          credentials: payload.input.credentials ?? null,
-          log,
-        });
-        return { result: result ?? null, logs };
-      } finally { console.log = previousLog; }
-    }
+    if (name === "playwright-endpoint") return { endpoint: await initializePlaywrightServer() };
     return operatePersistentContext(browser, context, name, payload, { nativeStorage: true });
   };
 
