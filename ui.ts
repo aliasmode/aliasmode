@@ -26,7 +26,6 @@ import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
 import { EmailVerificationRequiredError, SupabaseAuthRequestError } from "./supabase-auth.ts";
 import {
   CloudProfileEditor,
-  CloudProfileEditorError,
   cloudProfileEditorErrorStatus,
 } from "./cloud-profile-editor.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
@@ -1133,27 +1132,41 @@ export async function handleUiRequest(
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
       if (ids.length === 0) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
       if (options.cloudBrowser) {
-        const editor = new CloudProfileEditor(options.cloudConnection!.client, store, options.timezoneFetch);
-        const locked: string[] = [];
-        const failed: string[] = [];
-        let deleted = 0;
-        for (const id of ids) {
-          try {
-            const expectedVersion = await editor.closedProfileVersion(id);
-            await options.cloudConnection!.client.trashProfile(id, { expectedVersion });
-            deleted++;
-          } catch (error) {
-            if (
-              error instanceof CloudProfileEditorError && error.status === 409 ||
-              error instanceof CloudApiError && error.status === 409 && error.code === "profile_open"
-            ) {
-              locked.push(id);
-            } else {
-              failed.push(id);
+        const cloud = options.cloudConnection!.client;
+        const transition = await options.cloudAuth?.acquireTransition();
+        try {
+          const accountId = options.cloudConnection!.accountId();
+          const current = () => !req.signal.aborted && (!transition || options.cloudAuth!.isTransitionCurrent(transition)) &&
+            options.cloudConnection!.accountId() === accountId;
+          if (!current()) return noStoreJson({ ok: false, error: "Account changed; reload profiles" }, 409);
+          const summaries = new Map((await cloud.listProfiles()).profiles.map((profile) => [profile.id, profile]));
+          const uniqueIds = [...new Set(ids)];
+          const outcomes: Array<"deleted" | "locked" | "failed"> = [];
+          let cursor = 0;
+          const worker = async () => {
+            while (cursor < uniqueIds.length) {
+              const index = cursor++, id = uniqueIds[index]!;
+              outcomes[index] = "failed";
+              if (!current()) continue;
+              const profile = summaries.get(id);
+              if (!profile || profile.trashedAt !== null || profile.permission !== "edit" || !isSafeProfileId(id)) continue;
+              if (profile.activeOpens.length || launcher.profileDeletionBlocked(id)) { outcomes[index] = "locked"; continue; }
+              try {
+                await cloud.trashProfile(id, { expectedVersion: profile.version });
+                outcomes[index] = "deleted";
+              } catch (error) {
+                if (error instanceof CloudApiError && error.status === 409 && error.code === "profile_open") outcomes[index] = "locked";
+              }
             }
-          }
-        }
-        return Response.json({ ok: true, deleted, locked, failed });
+          };
+          await Promise.all(Array.from({ length: Math.min(4, uniqueIds.length) }, worker));
+          if (!current()) return noStoreJson({ ok: false, error: "Operation interrupted; reload profiles before retrying" }, 409);
+          return noStoreJson({
+            ok: true, deleted: outcomes.filter((outcome) => outcome === "deleted").length,
+            locked: uniqueIds.filter((_, index) => outcomes[index] === "locked"),
+            failed: uniqueIds.filter((_, index) => outcomes[index] === "failed"),
+          });
+        } finally { transition?.release(); }
       }
       if (remote) {
         const r = await remote.deleteProfiles(ids);

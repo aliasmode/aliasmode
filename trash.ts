@@ -8,11 +8,12 @@ import type { TrashMutationResult, TrashProfileView } from "./proxy-tools-types.
 export async function handleTrashRequest(req: Request, store: ProfileStore, launcher: Launcher, options: UiRuntimeOptions): Promise<Response> {
   const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
   const cloud = options.cloudBrowser ? options.cloudConnection?.client : undefined;
-  const transition = cloud ? await options.cloudAuth?.acquireTransition() : undefined;
+  const transition = cloud && req.method !== "GET" ? await options.cloudAuth?.acquireTransition() : undefined;
+  const accountId = cloud ? options.cloudConnection!.accountId() : undefined;
   try {
     const status = cloud ? await cloud.status() : undefined;
     const current = () => !req.signal.aborted && (!transition || options.cloudAuth!.isTransitionCurrent(transition)) &&
-      (!status || options.cloudConnection?.accountId() === status.account.id);
+      (!status || (options.cloudConnection?.accountId() === accountId && status.account.id === accountId));
     if (!current()) return json({ ok: false, error: "Account changed; reload Trash" }, 409);
     const profiles: TrashProfileView[] = cloud
       ? (await cloud.listProfiles()).profiles.filter((p) => p.trashedAt !== null).map((p) => ({
@@ -28,29 +29,38 @@ export async function handleTrashRequest(req: Request, store: ProfileStore, laun
     if (!Array.isArray(body?.ids) || !body.ids.length || body.ids.some((id: unknown) => typeof id !== "string" || !isSafeProfileId(id))) return json({ ok: false, error: "Select profiles in Trash" }, 400);
     const purge = path.endsWith("/purge");
     const byId = new Map(profiles.map((p) => [p.id, p]));
+    const ids = [...new Set<string>(body.ids)];
     const results: TrashMutationResult["results"] = [];
-    for (const id of new Set<string>(body.ids)) {
-      if (!current()) { results.push({ id, status: "failed", code: "cancelled" }); continue; }
+    const mutate = async (id: string): Promise<TrashMutationResult["results"][number]> => {
+      if (!current()) return { id, status: "failed", code: "cancelled" };
       const profile = byId.get(id);
-      if (!profile) { results.push({ id, status: "failed", code: "not_in_trash" }); continue; }
-      if (purge ? !profile.canPurge : !profile.canRestore) { results.push({ id, status: "failed", code: "permission_denied" }); continue; }
-      if (launcher.profileDeletionBlocked(id)) { results.push({ id, status: "failed", code: "profile_open" }); continue; }
+      if (!profile) return { id, status: "failed", code: "not_in_trash" };
+      if (purge ? !profile.canPurge : !profile.canRestore) return { id, status: "failed", code: "permission_denied" };
+      if (launcher.profileDeletionBlocked(id)) return { id, status: "failed", code: "profile_open" };
       try {
         if (cloud) {
           if (purge) await cloud.purgeProfile(id, profile.version!);
           else await cloud.restoreProfile(id, { expectedVersion: profile.version! });
         } else if (purge) {
-          if (!store.isTrashed(id)) { results.push({ id, status: "failed", code: "not_in_trash" }); continue; }
+          if (!store.isTrashed(id)) return { id, status: "failed", code: "not_in_trash" };
           if (!launcher.removeUserDataDir(id)) throw new Error("cleanup refused");
           store.deleteProfile(id);
         } else if (!store.restoreProfile(id)) {
-          results.push({ id, status: "failed", code: "not_in_trash" }); continue;
+          return { id, status: "failed", code: "not_in_trash" };
         }
-        results.push({ id, status: purge ? "purged" : "restored" });
+        return { id, status: purge ? "purged" : "restored" };
       } catch (error) {
-        results.push({ id, status: "failed", code: error instanceof CloudApiError ? error.code : "operation_failed" });
+        return { id, status: "failed", code: error instanceof CloudApiError ? error.code : "operation_failed" };
       }
-    }
+    };
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < ids.length) {
+        const index = cursor++;
+        results[index] = await mutate(ids[index]!);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(cloud ? 4 : 1, ids.length) }, worker));
     if (!current()) return json({ ok: false, error: "Account changed; reload Trash" }, 409);
     return json({ ok: true, results } satisfies TrashMutationResult);
   } catch {

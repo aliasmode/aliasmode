@@ -3854,10 +3854,12 @@ test("Cloud bulk delete keeps closed profiles, rejects opens, and continues afte
   appConfig.setMode("cloud", "https://cloud.aliasmode.test");
   const deleted: string[] = [];
   const cloudConnection = {
+    accountId: () => "account",
     client: {
-      async getProfile(id: string) {
-        if (id === "open") return { profile: { version: 1, activeOpens: [{}] } };
-        return { profile: { version: 1, activeOpens: [] } };
+      async listProfiles() {
+        return { profiles: ["closed", "open", "raced", "broken"].map((id) => ({
+          id, version: 1, activeOpens: id === "open" ? [{}] : [], permission: "edit", trashedAt: null,
+        })) };
       },
       async trashProfile(id: string) {
         if (id === "raced") throw new CloudApiError("profile is open", "profile_open", 409);
@@ -3871,7 +3873,7 @@ test("Cloud bulk delete keeps closed profiles, rejects opens, and continues afte
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ ids: ["closed", "open", "raced", "broken"] }),
     }),
-    {} as any,
+    { profileDeletionBlocked: () => false } as any,
     s,
     null,
     { appConfig, cloudBrowser: {} as any, cloudConnection },

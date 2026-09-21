@@ -16,6 +16,9 @@ const CHECK_LABELS: Record<ProxyCheckView["status"], string> = {
   working: "Alive", failed: "Dead", unstable: "Unstable", unavailable: "Unknown",
   missing: "Missing proxy", invalid: "Invalid proxy", unsupported: "Unsupported",
 };
+const REPLACEMENT_LABELS: Record<ProxyReplacementView["status"], string> = {
+  ready: "Ready", updated: "Updated", unchanged: "No change", missing: "No match", skipped: "Skipped", failed: "Failed",
+};
 const REASONS: Record<string, string> = {
   authentication_failed: "Authentication failed", timeout: "Timed out", dns_failed: "DNS lookup failed",
   unreachable: "Cannot connect", connection_failed: "Connection failed", intermittent: "Intermittent connection",
@@ -171,7 +174,8 @@ export function ProxiesPage({ groups, onChanged, active }: {
 }) {
   const [all, setAll] = useState(true);
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
-  const [mode, setMode] = useState<ProxyReplacementMode>("profileId");
+  const [task, setTask] = useState<"check" | "replace">("check");
+  const [mode, setMode] = useState<ProxyReplacementMode>("list");
   const [input, setInput] = useState("");
   const [preview, setPreview] = useState<ProxyPreview | null>(null);
   const [checks, setChecks] = useState<ProxyCheckView[]>([]);
@@ -289,84 +293,95 @@ export function ProxiesPage({ groups, onChanged, active }: {
   };
 
   return <div className="workspace proxy-page" hidden={!active}>
-    <h2 className="sect-title">Proxies</h2>
-    <p className="cardnote">Replace or check proxies across complete folders. Shared proxies are checked once, including their login settings.</p>
-    <section className="settings-card">
-      <header><h2>Folders</h2></header>
-      <div className="card-body">
-        <label className="proxy-choice"><input type="checkbox" checked={all} disabled={!!busy} onChange={(event) => { setAll(event.target.checked); invalidateScope(); }} />All folders</label>
-        <div className="proxy-folder-list">
-          {folderNames.map((name) => <label className="proxy-choice" key={name}>
-            <input type="checkbox" checked={all || selectedGroups.includes(name)} disabled={!!busy || all} onChange={(event) => {
-              setSelectedGroups((previous) => event.target.checked ? [...previous, name] : previous.filter((group) => group !== name));
-              invalidateScope();
-            }} />{name || "Ungrouped"}
-          </label>)}
-        </div>
-        <p className="cardnote">{all ? "All accessible profiles are included, not just the current table page." : `${selectedGroups.length} folders selected.`}</p>
+    <div className="tools-intro"><div><span className="tools-eyebrow">PROXY TOOLS</span><h2>Keep your profiles connected.</h2><p>Check saved connections or replace proxies across entire folders.</p></div></div>
+    <div className="tools-tabs" aria-label="Proxy tools">
+      <button className={task === "check" ? "selected" : ""} aria-pressed={task === "check"} onClick={() => setTask("check")}>Check proxies <small>Find connection problems</small></button>
+      <button className={task === "replace" ? "selected" : ""} aria-pressed={task === "replace"} onClick={() => setTask("replace")}>Replace proxies <small>Assign new connections</small></button>
+    </div>
+    <section className="tools-panel proxy-scope">
+      <div className="tools-panel-head"><div><h3>{task === "replace" && <span className="tools-step">1</span>}Choose folders</h3><p>Includes every profile in these folders, across all pages.</p></div><span className="tools-folder-tag">{all ? "All folders" : `${selectedGroups.length} selected`}</span></div>
+      <div className="proxy-folder-list">
+        <label className={`folder-chip${all ? " selected" : ""}`}><input type="checkbox" checked={all} disabled={!!busy} onChange={(event) => { setAll(event.target.checked); setSelectedGroups([]); invalidateScope(); }} />All folders</label>
+        {folderNames.map((name) => <label className={`folder-chip${!all && selectedGroups.includes(name) ? " selected" : ""}`} key={name}>
+          <input type="checkbox" checked={all || selectedGroups.includes(name)} disabled={!!busy} onChange={(event) => {
+            setSelectedGroups(all ? folderNames.filter((group) => group !== name) : event.target.checked ? [...selectedGroups, name] : selectedGroups.filter((group) => group !== name));
+            setAll(false); invalidateScope();
+          }} />{name || "Ungrouped"}
+        </label>)}
       </div>
+      {!scopeReady && <p className="tools-hint">Select at least one folder to continue.</p>}
     </section>
-    {error && <div className="modal-err" role="alert">{error}</div>}
-    {notice && <p className="formnote" role="status">{notice}</p>}
-    {busy && <div className="proxy-actions" role="status">
-      <span>{progress ? `${progress.phase === "loading" ? "Loading profiles" : progress.phase === "checking" ? "Checking proxies" : "Applying replacements"}: ${progress.completed.toLocaleString()} / ${progress.total.toLocaleString()}` : "Preparing…"}</span>
-      <button type="button" className="btn" onClick={() => controller.current?.abort()}>Cancel</button>
+    {error && <div className="tools-alert" role="alert">{error}</div>}
+    {notice && <div className="tools-notice" role="status">{notice}</div>}
+    {busy && <div className="tools-progress" role="status">
+      <div className="proxy-actions"><strong>{progress ? `${progress.phase === "loading" ? "Loading profiles" : progress.phase === "checking" ? "Checking proxies" : "Applying changes"}: ${progress.completed.toLocaleString()} / ${progress.total.toLocaleString()}` : "Preparing…"}</strong>
+        <button type="button" className="btn" onClick={() => controller.current?.abort()}>Cancel</button></div>
+      <progress aria-label="Proxy operation progress" {...(progress && progress.total > 0 ? { value: progress.completed, max: progress.total } : {})} />
     </div>}
-    <section className="settings-card">
-      <header><h2>Bulk replacement</h2></header>
-      <div className="card-body">
-        <label className="fld"><span>Match replacements</span>
-          <select value={mode} disabled={!!busy} onChange={(event) => { setMode(event.target.value as ProxyReplacementMode); invalidatePreview(); }}>
-            <option value="profileId">By profile ID</option><option value="oldProxy">By old proxy</option><option value="list">Assign a proxy list</option>
-          </select>
-        </label>
-        <p className="cardnote">{mode === "profileId" ? <>CSV headers: <code>profileId,type,host,port,user,pass</code>.</>
-          : mode === "oldProxy" ? <>CSV headers: <code>oldProxy,newProxy</code>. Use full proxy URLs or <code>host:port:user:password</code>.</>
-          : "One proxy per line. Profiles are matched in profile-ID order. Review the exact assignments before applying."}</p>
-        <label className="fld"><span>Replacement input</span><textarea rows={5} value={input} disabled={!!busy} spellCheck={false} autoComplete="off" onChange={(event) => { setInput(event.target.value); invalidatePreview(); }} /></label>
-        <div className="proxy-actions">
-          <label className="proxy-upload">Upload a CSV or text file<input type="file" accept=".csv,.txt,text/csv,text/plain" disabled={!!busy} onChange={(event) => {
-            const file = event.target.files?.[0]; event.target.value = ""; if (file) void loadFile(file);
-          }} /></label>
-          <button type="button" className="btn" disabled={!!busy || !scopeReady || !input.trim()} onClick={() => void makePreview()}>Preview replacements</button>
-          <button type="button" className="btn primary" disabled={!!busy || !ready} onClick={() => void apply()}>Apply {ready.toLocaleString()} ready replacements</button>
+    {task === "check" ? <>
+      <section className="tools-panel">
+        <div className="tools-panel-head"><div><h3>Check your connections</h3><p>Shared proxies are checked once. No browsers open and no settings change.</p></div>
+          <button type="button" className="btn primary" disabled={!!busy || !scopeReady} onClick={() => void runChecks()}>{busy === "check" ? "Checking…" : "Check proxies"}</button></div>
+        {checkSummary && <div className="tools-stats">
+          <div><strong>{checkSummary.selectedProfiles.toLocaleString()}</strong><span>Profiles included</span></div>
+          <div><strong>{checkSummary.uniqueProxies.toLocaleString()}</strong><span>Unique proxies</span></div>
+          <div><strong>{checkSummary.duplicatesSkipped.toLocaleString()}</strong><span>Duplicate checks avoided</span></div>
+          <div><strong>{checks.filter((row) => row.status === "working").length.toLocaleString()}</strong><span>Alive</span></div>
+        </div>}
+        {checks.length > 0 ? <>
+          <div className="tools-result-bar"><h3>Check results</h3><div className="proxy-actions">
+            <label className="proxy-choice"><input type="checkbox" checked={checkFailures} onChange={(event) => { setCheckFailures(event.target.checked); setCheckPage(0); }} />Only problems</label>
+            <button type="button" className="btn" disabled={!!busy || !failedChecks.length} onClick={() => void runChecks(true)}>Retry failed checks</button>
+          </div></div>
+          <div className="proxy-table-wrap"><table className="profile-table proxy-table"><thead><tr><th>Proxy address</th><th>Connection</th><th>Exit IP</th><th>Used by</th><th>Checked</th></tr></thead>
+            <tbody>{checkResults.items.map((row) => <tr key={`${row.key}-${row.profiles[0]?.id}`}>
+              <td className="tools-mono">{row.proxy || "No proxy assigned"}</td><td><span className={`tools-status ${row.status}`}>{CHECK_LABELS[row.status]}</span><small>{row.reason ? REASONS[row.reason] || "Check could not complete" : ""}</small></td>
+              <td className="tools-mono">{row.ip || "—"}{row.country && <small>{row.country}</small>}</td><td><AffectedProfiles profiles={row.profiles} /></td>
+              <td>{new Date(row.checkedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</td>
+            </tr>)}</tbody></table></div>
+          {!checkResults.total && <p className="tools-hint tools-result-empty">No problems found in the completed checks.</p>}
+          <Pager {...checkResults} onPage={setCheckPage} />
+        </> : <div className="tools-empty"><span className="tools-empty-symbol" aria-hidden="true">↗</span><h3>{busy === "check" ? "Checking selected folders…" : "Ready when you are"}</h3><p>Choose your folders above, then check which proxies are alive, dead, or need attention.</p></div>}
+      </section>
+      <p className="tools-footnote">Supports HTTP and SOCKS5. HTTPS checks are not supported. Unknown means a result could not be confirmed.</p>
+    </> : <>
+      <section className="tools-panel proxy-input-panel">
+        <div className="tools-panel-head"><div><h3><span className="tools-step">2</span>Add replacement proxies</h3><p>Nothing changes until you review and apply the assignments.</p></div></div>
+        <div className="tools-panel-body">
+          <label className="fld"><span>Assignment method</span><select value={mode} disabled={!!busy} onChange={(event) => { setMode(event.target.value as ProxyReplacementMode); invalidatePreview(); }}>
+            <option value="list">One proxy per profile — paste a list</option><option value="profileId">Match specific profile IDs — CSV</option><option value="oldProxy">Replace matching old proxies — CSV</option>
+          </select></label>
+          <p className="tools-hint">{mode === "profileId" ? <>Include a header row: <code>profileId,type,host,port,user,pass</code>.</>
+            : mode === "oldProxy" ? <>Include a header row: <code>oldProxy,newProxy</code>. Each old proxy is replaced wherever it appears in the selected folders.</>
+            : "Paste one proxy per line. We match them to profiles in profile-ID order, without reusing entries. You will see every assignment next."}</p>
+          <label className="fld"><span>{mode === "list" ? "Your new proxy list" : "Your replacement CSV"}</span><textarea aria-label="Replacement input" rows={5} value={input} disabled={!!busy} spellCheck={false} autoComplete="off" placeholder={mode === "list" ? "proxy.example.com:8080:username:password\nsocks5://username:password@proxy.example.com:1080" : mode === "profileId" ? "profileId,type,host,port,user,pass" : "oldProxy,newProxy"} onChange={(event) => { setInput(event.target.value); invalidatePreview(); }} /></label>
+          <div className="tools-result-bar"><label className="proxy-upload">Or upload a file<input type="file" accept=".csv,.txt,text/csv,text/plain" disabled={!!busy} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void loadFile(file); }} /></label>
+            <button type="button" className="btn primary" disabled={!!busy || !scopeReady || !input.trim()} onClick={() => void makePreview()}>{busy === "preview" ? "Preparing preview…" : "Preview changes"}</button></div>
         </div>
-        {preview && <>
-          <div className="proxy-actions">
-            <span>{preview.rows.length.toLocaleString()} assignments · {preview.unusedProxies.toLocaleString()} unused proxies</span>
+      </section>
+      <section className="tools-panel">
+        <div className="tools-panel-head"><div><h3><span className="tools-step">3</span>Review changes</h3><p>Check the old and new proxy for each profile. Open profiles are skipped.</p></div>
+          {preview && <button type="button" className="btn primary" disabled={!!busy || !ready} onClick={() => void apply()}>{busy === "apply" ? "Applying…" : `Apply ${ready.toLocaleString()} changes`}</button>}</div>
+        {preview ? <>
+          <div className="tools-stats">
+            <div><strong>{ready.toLocaleString()}</strong><span>Ready to apply</span></div>
+            <div><strong>{preview.rows.filter((row) => row.status === "updated").length.toLocaleString()}</strong><span>Updated</span></div>
+            <div><strong>{preview.rows.filter((row) => ["skipped", "failed", "missing"].includes(row.status)).length.toLocaleString()}</strong><span>Need attention</span></div>
+            <div><strong>{preview.rows.filter((row) => row.status === "unchanged").length.toLocaleString()}</strong><span>Unchanged</span></div>
+          </div>
+          <div className="tools-result-bar"><span className="tools-hint">{preview.rows.length.toLocaleString()} assignments · {preview.unusedProxies.toLocaleString()} unused proxies</span><div className="proxy-actions">
             <label className="proxy-choice"><input type="checkbox" checked={replacementFailures} onChange={(event) => { setReplacementFailures(event.target.checked); setReplacementPage(0); }} />Only problems</label>
             <button type="button" className="btn" disabled={!!busy || !retries.length} onClick={() => void makePreview(true)}>Preview failed rows again</button>
-          </div>
-          <div className="proxy-table-wrap"><table className="profile-table proxy-table"><thead><tr><th>Profile</th><th>Folder</th><th>Current proxy</th><th>Replacement</th><th>Result</th></tr></thead>
+          </div></div>
+          <div className="proxy-table-wrap"><table className="profile-table proxy-table"><thead><tr><th>Profile</th><th>Folder</th><th>Current proxy</th><th>New proxy</th><th>Status</th></tr></thead>
             <tbody>{replacements.items.map((row) => <tr key={row.index}>
-              <td>{row.name || row.profileId || `Input row ${row.index + 1}`}<small>{row.name ? row.profileId : ""}</small></td>
-              <td>{row.group === undefined ? "—" : row.group || "Ungrouped"}</td><td>{row.previousProxy || "—"}</td><td>{row.proxy || "—"}</td>
-              <td>{row.status}<small>{row.code ? REASONS[row.code] || "Could not apply this row" : ""}</small></td>
+              <td><strong>{row.name || row.profileId || `Input row ${row.index + 1}`}</strong><small className="tools-mono">{row.name ? row.profileId : ""}</small></td>
+              <td>{row.group === undefined ? "—" : row.group || "Ungrouped"}</td><td className="tools-mono">{row.previousProxy || "—"}</td><td className="tools-mono">{row.proxy || "—"}</td>
+              <td><span className={`tools-status ${row.status}`}>{REPLACEMENT_LABELS[row.status]}</span><small>{row.code ? REASONS[row.code] || "Could not apply this row" : ""}</small></td>
             </tr>)}</tbody></table></div>
           <Pager {...replacements} onPage={setReplacementPage} />
-        </>}
-      </div>
-    </section>
-    <section className="settings-card">
-      <header><h2>Bulk proxy check</h2></header>
-      <div className="card-body">
-        <p className="cardnote">Checks saved HTTP and SOCKS5 proxies without opening browsers. HTTPS checks are unsupported. This does not change assignments.</p>
-        <div className="proxy-actions">
-          <button type="button" className="btn primary" disabled={!!busy || !scopeReady} onClick={() => void runChecks()}>Check selected folders</button>
-          <button type="button" className="btn" disabled={!!busy || !failedChecks.length} onClick={() => void runChecks(true)}>Retry failed checks</button>
-          <label className="proxy-choice"><input type="checkbox" checked={checkFailures} onChange={(event) => { setCheckFailures(event.target.checked); setCheckPage(0); }} />Only problems</label>
-        </div>
-        {checkSummary && <p className="cardnote">Last check batch: {checkSummary.selectedProfiles.toLocaleString()} profiles · {checkSummary.uniqueProxies.toLocaleString()} unique proxies · {checkSummary.duplicatesSkipped.toLocaleString()} duplicates skipped</p>}
-        {!!checks.length && <>
-          <div className="proxy-table-wrap"><table className="profile-table proxy-table"><thead><tr><th>Proxy</th><th>Result</th><th>Exit IP</th><th>Profiles</th><th>Checked</th></tr></thead>
-            <tbody>{checkResults.items.map((row) => <tr key={`${row.key}-${row.profiles[0]?.id}`}>
-              <td>{row.proxy || "—"}</td><td>{CHECK_LABELS[row.status]}<small>{row.reason ? REASONS[row.reason] || "Check could not complete" : ""}</small></td>
-              <td>{row.ip || "—"}{row.country && <small>{row.country}</small>}</td><td><AffectedProfiles profiles={row.profiles} /></td>
-              <td>{new Date(row.checkedAt).toLocaleString()}</td>
-            </tr>)}</tbody></table></div>
-          <Pager {...checkResults} onPage={setCheckPage} />
-        </>}
-      </div>
-    </section>
+        </> : <div className="tools-empty compact"><p>Your preview will appear here. Saved sessions and fingerprints stay unchanged.</p></div>}
+      </section>
+    </>}
   </div>;
 }

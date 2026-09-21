@@ -7,6 +7,7 @@ import { ProfileStore } from "./store.ts";
 import { buildNewProfile } from "./create.ts";
 import { handleUiRequest, type UiRuntimeOptions } from "./ui.ts";
 import { importBuffers, ProfileImportError } from "./inbox.ts";
+import { CloudApiError } from "./cloud-client.ts";
 import type { Launcher } from "./launcher.ts";
 
 const stores: ProfileStore[] = [];
@@ -194,4 +195,118 @@ test("Cloud Trash uses authoritative summaries and owner-only purge", async () =
   role = "owner"; version = 8;
   await request("trash/purge", { ids: ["cloud1"] }, options);
   expect(calls.at(-1)).toEqual(["cloud1", 8]);
+});
+
+test("Cloud Trash listing does not wait for mutation transitions and discards account changes", async () => {
+  const { request } = fixture();
+  let account = "account", switchAccount = false;
+  const options = {
+    cloudAuth: { acquireTransition: async () => { throw new Error("GET must not queue behind a proxy run"); } },
+    cloudBrowser: {}, cloudConnection: {
+      accountId: () => account, client: {
+        status: async () => ({ account: { id: account }, workspace: { role: "owner" } }),
+        listProfiles: async () => {
+          if (switchAccount) account = "different";
+          return { profiles: [{ id: "cloud1", name: "Deleted", group: "Sales", trashedAt: 100, permission: "edit", version: 7 }] };
+        },
+      },
+    },
+  } as unknown as UiRuntimeOptions;
+  expect((await request("trash", undefined, options)).status).toBe(200);
+  switchAccount = true;
+  const response = await request("trash", undefined, options);
+  expect(response.status).toBe(409);
+  expect(JSON.stringify(await response.json())).not.toContain("cloud1");
+});
+
+test("900 Local profiles move to Trash and restore in one request each", async () => {
+  const { store, profile, request } = fixture();
+  const ids = Array.from({ length: 900 }, (_, i) => `bulk${i}`);
+  for (const id of ids) store.upsertProfile({ ...profile, id });
+  expect(await (await request("profiles/delete", { ids })).json()).toMatchObject({ ok: true, deleted: 900 });
+  expect(store.listTrashed()).toHaveLength(900);
+  const restored = await (await request("trash/restore", { ids })).json();
+  expect(restored.results).toEqual(ids.map((id) => ({ id, status: "restored" })));
+  expect(store.listTrashed()).toHaveLength(0);
+  expect(store.count()).toBe(901);
+});
+
+for (const action of ["delete", "restore", "purge"] as const) {
+  test(`Cloud bulk ${action} processes 900 IDs concurrently from one summary read`, async () => {
+    const { request } = fixture();
+    const ids = Array.from({ length: 900 }, (_, i) => `bulk${i}`);
+    let rosterReads = 0, fullReads = 0, active = 0, peak = 0;
+    const calls: string[] = [];
+    const mutate = async (id: string, input: { expectedVersion: number } | number) => {
+      expect(typeof input === "number" ? input : input.expectedVersion).toBe(7);
+      peak = Math.max(peak, ++active);
+      await Bun.sleep(1);
+      active--; calls.push(id);
+    };
+    const options = {
+      cloudBrowser: {}, cloudConnection: {
+        accountId: () => "account", client: {
+          status: async () => ({ account: { id: "account" }, workspace: { role: "owner" } }),
+          listProfiles: async () => { rosterReads++; return { profiles: ids.map((id) => ({ id, name: id, group: "Sales", version: 7, permission: "edit", activeOpens: [], trashedAt: action === "delete" ? null : 100 })) }; },
+          getProfile: async () => { fullReads++; throw new Error("Full payload must not be downloaded"); },
+          trashProfile: mutate, restoreProfile: mutate, purgeProfile: mutate,
+        },
+      },
+    } as unknown as UiRuntimeOptions;
+    const result = await (await request(action === "delete" ? "profiles/delete" : `trash/${action}`, { ids: [...ids, ids[0]] }, options)).json();
+    expect(result.ok).toBe(true);
+    if (action === "delete") expect(result).toEqual({ ok: true, deleted: 900, locked: [], failed: [] });
+    else expect(result.results).toEqual(ids.map((id) => ({ id, status: action === "restore" ? "restored" : "purged" })));
+    expect(new Set(calls)).toEqual(new Set(ids));
+    expect(calls).toHaveLength(900);
+    expect(rosterReads).toBe(1); expect(fullReads).toBe(0);
+    expect(peak).toBe(4);
+  });
+
+  test(`Cloud bulk ${action} stops scheduling after an account transition`, async () => {
+    const { request } = fixture();
+    let current = true, released = false;
+    const calls: string[] = [];
+    const ids = Array.from({ length: 20 }, (_, i) => `bulk${i}`);
+    const mutate = async (id: string) => {
+      calls.push(id); await Bun.sleep(1); current = false;
+    };
+    const options = {
+      cloudAuth: { acquireTransition: async () => ({ release: () => { released = true; } }), isTransitionCurrent: () => current },
+      cloudBrowser: {}, cloudConnection: {
+        accountId: () => "account", client: {
+          status: async () => ({ account: { id: "account" }, workspace: { role: "owner" } }),
+          listProfiles: async () => ({ profiles: ids.map((id) => ({ id, version: 7, permission: "edit", activeOpens: [], trashedAt: action === "delete" ? null : 100 })) }),
+          trashProfile: mutate, restoreProfile: mutate, purgeProfile: mutate,
+        },
+      },
+    } as unknown as UiRuntimeOptions;
+    const response = await request(action === "delete" ? "profiles/delete" : `trash/${action}`, { ids }, options);
+    expect(response.status).toBe(409);
+    expect(calls).toEqual(ids.slice(0, 4));
+    expect(released).toBe(true);
+  });
+}
+
+test("Cloud bulk delete retains local/remote locks, permissions, and version-conflict outcomes", async () => {
+  const { request, blocked } = fixture();
+  blocked.add("local");
+  const ids = ["closed", "local", "remote", "stale", "view", "trashed", "missing"];
+  const calls: string[] = [];
+  const options = {
+    cloudBrowser: {}, cloudConnection: {
+      accountId: () => "account", client: {
+        listProfiles: async () => ({ profiles: ids.filter((id) => id !== "missing").map((id) => ({
+          id, version: 7, permission: id === "view" ? "view" : "edit", activeOpens: id === "remote" ? [{}] : [], trashedAt: id === "trashed" ? 100 : null,
+        })) }),
+        trashProfile: async (id: string, input: { expectedVersion: number }) => {
+          expect(input.expectedVersion).toBe(7); calls.push(id);
+          if (id === "stale") throw new CloudApiError("Changed", "version_conflict", 409);
+        },
+      },
+    },
+  } as unknown as UiRuntimeOptions;
+  const result = await (await request("profiles/delete", { ids }, options)).json();
+  expect(result).toEqual({ ok: true, deleted: 1, locked: ["local", "remote"], failed: ["stale", "view", "trashed", "missing"] });
+  expect(calls).toEqual(["closed", "stale"]);
 });

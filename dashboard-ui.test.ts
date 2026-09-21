@@ -341,8 +341,8 @@ test("Admin invitations are read-only for Admin viewers", () => {
 test("Cloud Delete requires edit permission for every selected profile", () => {
   expect(app).toContain('const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");');
   expect(app).toContain('{(!isCloudMode || selectedEditable) && (');
-  expect(app).toContain('data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size} onClick={deleteSelected}');
-  expect(app).toContain('r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`');
+  expect(app).toContain('data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size || deleting} onClick={deleteSelected}');
+  expect(app).toContain('setSelected(new Set([...(r.locked ?? []), ...(r.failed ?? [])]));');
 });
 
 test("the roster numbers every profile and prefers a custom NO. over the serial", () => {
@@ -432,7 +432,8 @@ test("folder and search scope selection replaces unrelated hidden selections", (
 });
 
 test("selection controls expose scope selection and clearing without changing export permissions", () => {
-  expect(app).toContain("allVisibleSelected && !allFilteredSelected");
+  expect(app).not.toContain("allVisibleSelected && !allFilteredSelected");
+  expect(app).toContain("disabled={deleting || allFilteredSelected}");
   expect(app).toContain("onClick={selectAllFiltered}");
   expect(app).toContain('aria-label="Clear selection" onClick={() => setSelected(new Set())}');
   expect(app).toContain('q ? "matching profiles" : "profiles"');

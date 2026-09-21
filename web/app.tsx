@@ -1074,6 +1074,8 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null); // transient success banner
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const deleteInFlight = useRef(false);
   // Active profile export: null when idle, otherwise how far the server-side
   // collection has progressed ({completed: total} = file being built).
   const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
@@ -2089,26 +2091,34 @@ function App() {
 
   const deleteSelected = async () => {
     const ids = [...selected];
-    if (ids.length === 0) return;
+    if (ids.length === 0 || deleteInFlight.current) return;
     if (!confirm(appMode?.legacyRemote
       ? `Delete ${ids.length} profile(s)? This removes them from the roster (and any saved session). This can't be undone.`
-      : `Move ${ids.length} profile(s) to Trash? You can restore them with their saved data from Trash.`)) return;
+      : `Move all ${ids.length.toLocaleString()} selected profiles to Trash? This includes every selected page. You can restore them with their saved data.`)) return;
+    deleteInFlight.current = true;
+    setDeleting(true);
     setActionErr(null);
+    const generation = authGeneration.current;
     try {
       const r = await deleteProfiles(ids);
+      if (generation !== authGeneration.current) return;
       if (r.ok === false) {
         setActionErr(r.error || "delete failed");
         return;
       }
       const problems = [
-        r.locked?.length && `${r.locked.length} in use, not deleted: ${r.locked.join(", ")}`,
-        r.failed?.length && `${r.failed.length} failed: ${r.failed.join(", ")}`,
+        r.locked?.length && `${r.locked.length} in use, not deleted`,
+        r.failed?.length && `${r.failed.length} failed`,
       ].filter(Boolean);
-      if (problems.length) setActionErr(problems.join("; "));
-      setSelected(new Set());
+      if (problems.length) setActionErr(`${problems.join("; ")}. These profiles remain selected.`);
+      setSelected(new Set([...(r.locked ?? []), ...(r.failed ?? [])]));
+      flash(`${r.deleted.toLocaleString()} profiles ${appMode?.legacyRemote ? "deleted" : "moved to Trash"}`);
       await load();
     } catch (e) {
-      setActionErr(String(e));
+      if (generation === authGeneration.current) setActionErr(String(e));
+    } finally {
+      deleteInFlight.current = false;
+      setDeleting(false);
     }
   };
 
@@ -3271,11 +3281,13 @@ function App() {
           </div>
         </div>
 
-        {allVisibleSelected && !allFilteredSelected && (
+        {filtered.length > 0 && (
           <div className="toolbar" role="status">
-            <span>All {visibleProfiles.length} profiles on this page are selected.</span>
-            <button type="button" className="tlink" onClick={selectAllFiltered}>Select all {selectionScope}</button>
-            {selectedOutsideFilter > 0 && <span className="muted">This replaces your selection, excluding {selectedOutsideFilter} outside this view.</span>}
+            <button type="button" className="btn" disabled={deleting || allFilteredSelected} onClick={selectAllFiltered}>
+              {allFilteredSelected ? `All ${selectionScope} selected` : `Select all ${selectionScope}`}
+            </button>
+            <span className="muted">{deleting ? "Moving selected profiles…" : "Across all pages"}</span>
+            {!allFilteredSelected && selectedOutsideFilter > 0 && <span className="muted">This replaces your selection, excluding {selectedOutsideFilter} outside this view.</span>}
           </div>
         )}
 
@@ -3368,8 +3380,8 @@ function App() {
           )}
           <span className="spacer" />
           {(!isCloudMode || selectedEditable) && (
-            <button className="btn danger tip" data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size} onClick={deleteSelected}>
-              <Icon name="trash" className="sm" />{appMode?.legacyRemote ? "Delete" : "Move to Trash"}
+            <button className="btn danger tip" data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size || deleting} onClick={deleteSelected}>
+              <Icon name="trash" className="sm" />{deleting ? "Processing…" : appMode?.legacyRemote ? "Delete" : `Move ${selected.size.toLocaleString()} to Trash`}
             </button>
           )}
           </>}
