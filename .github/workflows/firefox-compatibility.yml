@@ -159,5 +159,5 @@ jobs:
           foreach ($report in $reports) {
             $result = Get-Content -LiteralPath $report.FullName -Raw
             Write-Host "Firefox compatibility result ($($report.Directory.Name)): $result"
-            "`n### $($report.Directory.Name)`n`n```json`n$result`n```" | Add-Content $env:GITHUB_STEP_SUMMARY
+            (@("", "### $($report.Directory.Name)", "", '```json', $result, '```') -join "`n") | Add-Content $env:GITHUB_STEP_SUMMARY
           }
