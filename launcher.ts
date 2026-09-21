@@ -41,6 +41,7 @@ import { applySessionToEndpoint, bundleTabUrls, bundleTelegramClient, canonicalU
 import { resolvePlaywrightRuntime, runPlaywrightWorker } from "./playwright-runtime.ts";
 import { callFirefoxOwner, closeFirefoxOwner, firefoxEndpoint, forgetFirefoxOwner, reserveFirefoxOwner, startFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
+import { FIREFOX_RUNTIME_VERSION } from "./firefox-config.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
 // onAuthRequired (whose service worker can't answer reliably during a page-load burst), the browser
@@ -859,7 +860,9 @@ export class Launcher {
 
   private assertHostCompatibility(profile: Profile): void {
     if (profile.engine === "firefox") {
-      if (!profile.firefox || profile.firefox.version !== 1) throw new Error("Firefox profile configuration is missing or unsupported");
+      if (!profile.firefox || profile.firefox.version !== 1 || profile.firefox.runtimeVersion !== FIREFOX_RUNTIME_VERSION) {
+        throw new Error("Firefox profile configuration is missing or unsupported by this runtime");
+      }
       if (profile.extensions?.length) throw new Error("Chrome extensions are not supported by Firefox profiles");
       if (this.enforceHostCompatibility && (this.hostPlatform !== "win32" || this.hostArch !== "x64")) {
         throw new Error("AliasMode Firefox requires Windows x64");

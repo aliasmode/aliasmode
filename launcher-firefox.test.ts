@@ -102,6 +102,15 @@ test("owner crash never permits duplicate Firefox and stop targets only exact pr
   expect(f.killed).toEqual([202]);
 });
 
+test("Firefox refuses unsupported saved runtime identities without regenerating them", async () => {
+  const f = fixture();
+  const profile = { ...f.profile, firefox: { ...f.profile.firefox!, runtimeVersion: "unsupported-runtime" } };
+  f.store.upsertProfile(profile);
+  await expect(f.launcher.start(profile.id)).rejects.toBeInstanceOf(BrowserLaunchError);
+  expect(f.launches()).toBe(0);
+  expect(f.store.getProfile(profile.id)?.firefox).toEqual(profile.firefox);
+});
+
 test("Firefox cache cleanup preserves native storage and lock files", async () => {
   const f = fixture();
   const root = f.launcher.userDataDir(f.profile.id);
