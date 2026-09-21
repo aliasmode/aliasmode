@@ -14,11 +14,11 @@ try {
   const context = browser.contexts()[0];
   assert.ok(context, "shared owner context is available to the external runner");
   const page = context.pages()[0] ?? await context.newPage();
-  await page.goto(origin);
   if (mode === "hold") {
     process.stdout.write("{\"ready\":true}\n");
     await page.evaluate(() => new Promise(() => {}));
   } else {
+    await page.goto(origin);
     if (mode === "write") {
       await context.addCookies([{ name: "owner-proof", value: "saved", url: origin }]);
       await page.evaluate(() => localStorage.setItem("owner-proof", "saved"));
