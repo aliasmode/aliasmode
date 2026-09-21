@@ -76,6 +76,12 @@ function writeFirefoxStartupPage(userDataDir: string, restoreLastSession: boolea
   writeFileSync(path, `${preserved}${preserved ? "\n" : ""}user_pref("browser.startup.page", ${restoreLastSession ? 3 : 0});\n`);
 }
 
+function supportsFirefoxHost(platform: NodeJS.Platform, arch: string): boolean {
+  return (platform === "darwin" && arch === "arm64")
+    || (platform === "linux" && arch === "x64")
+    || (platform === "win32" && arch === "x64");
+}
+
 export type BrowserLaunchFailure =
   | "preflight"
   | "mode_conflict"
@@ -873,8 +879,8 @@ export class Launcher {
         throw new Error("Firefox profile configuration is missing or unsupported by this runtime");
       }
       if (profile.extensions?.length) throw new Error("Chrome extensions are not supported by Firefox profiles");
-      if (this.enforceHostCompatibility && (this.hostPlatform !== "win32" || this.hostArch !== "x64")) {
-        throw new Error("AliasMode Firefox requires Windows x64");
+      if (this.enforceHostCompatibility && !supportsFirefoxHost(this.hostPlatform, this.hostArch)) {
+        throw new Error("AliasMode Firefox requires macOS arm64, Linux x64, or Windows x64");
       }
       return;
     }

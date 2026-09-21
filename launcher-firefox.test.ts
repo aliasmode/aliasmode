@@ -9,7 +9,7 @@ import type { Profile } from "./types.ts";
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const run of cleanup.splice(0).reverse()) run(); });
 
-function fixture() {
+function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   const root = mkdtempSync(join(tmpdir(), "aliasmode-firefox-launch-"));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const store = new ProfileStore(":memory:");
@@ -33,13 +33,13 @@ function fixture() {
   const snapshots = (): HostProcessSnapshot => ({
     incomplete: false,
     records: [
-      ...(browserAlive ? [{ pid: 202, executablePath: "/fake/firefox.exe", argv: ["/fake/firefox.exe", "-profile", join(root, profile.id), "-juggler-pipe"] }] : []),
-      ...(ownerAlive ? [{ pid: 201, executablePath: "node", argv: ["node", "firefox-worker.mjs", `--aliasmode-firefox-owner=${reservation.generation}`] }] : []),
+      ...(browserAlive ? [{ pid: 202, parentPid: 201, processGroupId: 201, startTime: "202", executablePath: "/fake/firefox.exe", argv: ["/fake/firefox.exe", "-profile", join(root, profile.id), "-juggler-pipe"] }] : []),
+      ...(ownerAlive ? [{ pid: 201, parentPid: 1, processGroupId: 201, startTime: "201", executablePath: "node", argv: ["node", "firefox-worker.mjs", `--aliasmode-firefox-owner=${reservation.generation}`] }] : []),
     ],
   });
   const options: LauncherOptions = {
     store, dataRoot: root, firefoxBinaryPath: "/fake/firefox.exe", unsafeDisableIdentityGates: true,
-    hostPlatform: "win32", hostArch: "x64", captureFingerprint: async () => null,
+    enforceHostCompatibility: true, hostPlatform, hostArch, captureFingerprint: async () => null,
     navigate: async (_endpoint, urls) => { navigated.push([...urls]); }, ensureCookies: async () => ({ injected: false }),
     applySession: async () => {}, log: () => {},
     readProcessSnapshot: async () => snapshots(),
@@ -95,6 +95,32 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
 });
 
+test("Firefox supports Darwin arm64 and Linux x64 personas without changing saved config", async () => {
+  for (const [platform, arch] of [["darwin", "arm64"], ["linux", "x64"]] as const) {
+    const f = fixture(platform, arch);
+    const savedConfig = structuredClone(f.profile.firefox!);
+    const opened = await f.launcher.start(f.profile.id);
+    expect(f.config()).toEqual(savedConfig.config);
+    expect(f.store.getLaunch(f.profile.id)?.firefoxOwner).toMatchObject({ pid: 201, browserPid: 202 });
+    const restarted = new Launcher(f.options);
+    expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false });
+    expect(await restarted.certifiedActive(f.profile.id)).toBe(true);
+    expect(f.launches()).toBe(1);
+    expect(await restarted.stop(f.profile.id)).toBe(true);
+    expect(f.store.getProfile(f.profile.id)?.firefox).toEqual(savedConfig);
+  }
+});
+
+test("Firefox rejects unsupported host tuples without changing saved config", async () => {
+  for (const [platform, arch] of [["darwin", "x64"], ["linux", "arm64"], ["win32", "arm64"]] as const) {
+    const f = fixture(platform, arch);
+    const savedConfig = structuredClone(f.profile.firefox!);
+    await expect(f.launcher.start(f.profile.id)).rejects.toBeInstanceOf(BrowserLaunchError);
+    expect(f.launches()).toBe(0);
+    expect(f.store.getProfile(f.profile.id)?.firefox).toEqual(savedConfig);
+  }
+});
+
 test("owner crash never permits duplicate Firefox and stop targets only exact processes", async () => {
   const f = fixture();
   await f.launcher.start(f.profile.id);
@@ -105,6 +131,19 @@ test("owner crash never permits duplicate Firefox and stop targets only exact pr
   expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
   expect(await restarted.stop(f.profile.id)).toBe(true);
   expect(f.killed).toEqual([202]);
+});
+
+test("Darwin and Linux Firefox ownership remains exact after an owner crash", async () => {
+  for (const [platform, arch] of [["darwin", "arm64"], ["linux", "x64"]] as const) {
+    const f = fixture(platform, arch);
+    await f.launcher.start(f.profile.id);
+    f.crashOwner();
+    const restarted = new Launcher(f.options);
+    await expect(restarted.start(f.profile.id)).rejects.toBeInstanceOf(BrowserLaunchError);
+    expect(f.launches()).toBe(1);
+    expect(await restarted.stop(f.profile.id)).toBe(true);
+    expect(f.killed).toEqual([202]);
+  }
 });
 
 test("Firefox enables native tab restore in the owned profile before spawn", async () => {
