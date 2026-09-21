@@ -215,19 +215,6 @@ async function run() {
   };
   let playwrightServer;
   let playwrightEndpoint;
-  let serverContext;
-  let restoreContextClose;
-  const protectContextClose = (candidate) => {
-    let BrowserContextDispatcher;
-    try { ({ BrowserContextDispatcher } = require(join(ROOT, "node_modules", "playwright-core", "lib", "server", "dispatchers", "browserContextDispatcher.js"))); }
-    catch { throw typed("runtime_unavailable"); }
-    const close = BrowserContextDispatcher.prototype.close;
-    BrowserContextDispatcher.prototype.close = async function(params, progress) {
-      if (this._object === candidate) throw new Error("The owner persistent context cannot be closed by an external runner");
-      return close.call(this, params, progress);
-    };
-    restoreContextClose = () => { BrowserContextDispatcher.prototype.close = close; };
-  };
   const closePlaywrightServer = async () => {
     const current = playwrightServer;
     playwrightServer = undefined;
@@ -236,13 +223,12 @@ async function run() {
   };
   const initializePlaywrightServer = async () => {
     if (playwrightEndpoint) return playwrightEndpoint;
-    serverContext = context?._connection?.toImpl?.(context);
+    const serverContext = context?._connection?.toImpl?.(context);
     const serverBrowser = serverContext?._browser;
     if (!serverBrowser) throw typed("runtime_unavailable");
     let PlaywrightServer;
     try { ({ PlaywrightServer } = require(join(ROOT, "node_modules", "playwright-core", "lib", "remote", "playwrightServer.js"))); }
     catch { throw typed("runtime_unavailable"); }
-    protectContextClose(serverContext);
     const bridge = new PlaywrightServer({
       mode: "launchServerShared",
       path: `/${randomBytes(32).toString("hex")}`,
@@ -255,18 +241,8 @@ async function run() {
       return playwrightEndpoint;
     } catch (error) {
       await bridge.close().catch(() => {});
-      restoreContextClose?.();
-      restoreContextClose = undefined;
       throw error;
     }
-  };
-  const closePersistentContext = async () => {
-    const current = serverContext;
-    serverContext = undefined;
-    restoreContextClose?.();
-    restoreContextClose = undefined;
-    if (current) await current.close({ reason: "Firefox owner stopped" });
-    else await context.close();
   };
   let server;
   const closeServer = () => !server
@@ -279,7 +255,7 @@ async function run() {
     try {
       await closeOfficial();
       await closePlaywrightServer().catch(() => {});
-      await closePersistentContext();
+      await context.close();
     } catch (error) {
       closing = false;
       closed = false;
