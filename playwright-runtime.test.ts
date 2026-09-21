@@ -34,6 +34,15 @@ test("resolves source workers beside the Bun entrypoint under Node from PATH", (
   });
 });
 
+test("resolves source workers beside the runtime module, not the command entrypoint", () => {
+  expect(resolvePlaywrightRuntime({ env: {} })).toEqual({
+    kind: "source",
+    root: import.meta.dir,
+    nodeExecutable: "node",
+    workerPath: join(import.meta.dir, "playwright-worker.mjs"),
+  });
+});
+
 test("worker inherits normal environment without Node hooks or app secrets", () => {
   expect(playwrightWorkerEnvironment({
     SystemRoot: "C:\\Windows",
