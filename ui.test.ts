@@ -1785,6 +1785,41 @@ test("create (local mode) does not look up a proxy timezone", async () => {
   s.close();
 });
 
+test("blank Local creation and edit do not request timezones for either browser", async () => {
+  for (const engine of ["chromium", "firefox"] as const) {
+    const s = new ProfileStore(":memory:");
+    const calls: string[][] = [];
+    const created = await handleUiRequest(
+      new Request("http://x/ui/api/profiles", {
+        method: "POST",
+        body: JSON.stringify({ engine }),
+      }),
+      {} as any,
+      s,
+      null,
+      { timezoneFetch: timezoneFetch({ "1.2.3.4": "Europe/London" }, calls) },
+    );
+    const body = await created!.json();
+    expect(body.ok).toBe(true);
+    expect(calls).toEqual([]);
+
+    const edited = await handleUiRequest(
+      new Request(`http://x/ui/api/profiles/${body.id}/update`, {
+        method: "POST",
+        body: JSON.stringify({ set: { name: `${engine}-edited` } }),
+      }),
+      {} as any,
+      s,
+      null,
+      { timezoneFetch: timezoneFetch({ "1.2.3.4": "Europe/London" }, calls) },
+    );
+    expect((await edited!.json()).ok).toBe(true);
+    expect(calls).toEqual([]);
+    expect(s.getProfile(body.id)).toMatchObject({ engine, name: `${engine}-edited` });
+    s.close();
+  }
+});
+
 test("create (local mode) adds a new profile", async () => {
   const s = new ProfileStore(":memory:");
   const res = await handleUiRequest(

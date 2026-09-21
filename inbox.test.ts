@@ -155,6 +155,36 @@ test("Firefox re-imports preserve the saved config and reject identity replaceme
   store.close();
 });
 
+test("sparse Local imports preserve timezones for Chromium and Firefox", async () => {
+  const store = new ProfileStore(":memory:");
+  const chromium = { ...parseExport(REC("chromium-import")).profiles[0]!, timezone: "America/New_York" };
+  const firefox = {
+    ...parseExport(REC("firefox-import-timezone")).profiles[0]!,
+    engine: "firefox" as const,
+    timezone: "Europe/London",
+    firefox: {
+      version: 1 as const,
+      runtimeVersion: "152.0.4-beta.30",
+      config: { timezone: "Europe/London" },
+    },
+  };
+  store.upsertProfiles([chromium, firefox]);
+  const logs: string[] = [];
+
+  await importBuffers(store, [{
+    name: "sparse.txt",
+    bytes: new TextEncoder().encode([
+      `id=${chromium.id}\nname=chromium-updated`,
+      `id=${firefox.id}\nname=firefox-updated`,
+    ].join("\n******************\n") + "\n******************"),
+  }], (message) => logs.push(message));
+
+  expect(store.getProfile(chromium.id)).toMatchObject({ name: "chromium-updated", timezone: "America/New_York" });
+  expect(store.getProfile(firefox.id)).toMatchObject({ name: "firefox-updated", timezone: "Europe/London" });
+  expect(logs).toEqual([]);
+  store.close();
+});
+
 test("same-id re-import updates explicit portable identity fields", async () => {
   const store = new ProfileStore(":memory:");
   const original = {
