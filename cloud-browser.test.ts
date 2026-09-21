@@ -337,6 +337,62 @@ function setup(options: {
   };
 }
 
+test("Firefox Cloud checkpoints use owner polling and preserve V2 through offline close", async () => {
+  let cdpObservers = 0;
+  let polls = 0;
+  const state = setup({
+    closeTransportFailure: true,
+    dirtyMonitorMs: 2_000,
+    setIntervalFn: () => ({}),
+    clearIntervalFn: () => {},
+    observeTargets: () => { cdpObservers++; return { close() {} }; },
+  });
+  const options = (state.coordinator as any).options;
+  const legacy = payload();
+  const firefoxPayload = {
+    ...legacy,
+    schemaVersion: 2,
+    profile: {
+      ...legacy.profile,
+      engine: "firefox",
+      firefox: { version: 1, runtimeVersion: "152.0.4-beta.30", config: { timezone: "UTC" } },
+    },
+  };
+  options.cloud.openProfile = async () => ({
+    ok: true, registrationId: "registration1", baseVersion: 4,
+    payload: firefoxPayload, activeOpens: [],
+  });
+  const start = options.launcher.start;
+  const endpoint = "firefox://127.0.0.1:9222/generation";
+  options.launcher.start = async (...args: unknown[]) => {
+    const result = await start(...args);
+    state.store.recordLaunch({ ...state.store.getLaunch("profile1")!, engine: "firefox", ws: endpoint });
+    return { ...result, ws: endpoint };
+  };
+  options.launcher.pageTargetFingerprint = async () => { polls++; return "[]"; };
+  options.applySession = async (ws: string) => { expect(ws).toBe(endpoint); };
+  const session = { ...legacy.session, tabs: ["https://x.com/messages"], origins: [] };
+  options.readSession = async (ws: string) => { expect(ws).toBe(endpoint); return JSON.stringify(session); };
+  try {
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    expect(cdpObservers).toBe(0);
+    expect(polls).toBeGreaterThan(0);
+    const roster = await state.coordinator.listRoster();
+    expect(roster.profiles[0]?.engine).toBe("firefox");
+    expect(roster.profiles[0]).not.toHaveProperty("debugPort");
+    expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
+    const pending = state.queue.get(state.queue.list("account1")[0]!.id, "account1")!;
+    expect(pending.readyToSubmit).toBe(true);
+    expect(pending.payload.schemaVersion).toBe(2);
+    expect(pending.payload.profile).toEqual(firefoxPayload.profile);
+    expect(pending.payload.session).toEqual(session);
+  } finally {
+    await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
 test("Cloud browser creates a portable profile without a local-only fallback", async () => {
   const state = setup();
   const profile = decodePortableProfile(payload()).profile;

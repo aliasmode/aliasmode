@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ProfileStore } from "./store.ts";
 import { importBuffers, importInbox, prepareImportBuffers } from "./inbox.ts";
-import { parseExport } from "./parse.ts";
+import { parseExport, serializeAdsTxt } from "./parse.ts";
 
 const REC = (id: string) => `id=${id}
 name=acct-${id}
@@ -118,6 +118,43 @@ test("sparse same-id re-import updates only present fields and preserves identit
   store.close();
 });
 
+test("Firefox re-imports preserve the saved config and reject identity replacement", async () => {
+  const store = new ProfileStore(":memory:");
+  const original = {
+    ...parseExport(REC("firefox-import")).profiles[0]!,
+    engine: "firefox" as const,
+    firefox: {
+      version: 1 as const,
+      runtimeVersion: "152.0.4-beta.30",
+      config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", nested: { value: true } },
+    },
+  };
+  store.upsertProfile(original);
+
+  await importBuffers(
+    store,
+    [{ name: "firefox.txt", bytes: new TextEncoder().encode(`id=${original.id}\nname=renamed\n******************`) }],
+    () => {},
+  );
+  expect(store.getProfile(original.id)).toMatchObject({ name: "renamed", engine: "firefox", firefox: original.firefox });
+
+  const changed = {
+    ...original,
+    firefox: { ...original.firefox, config: { ...original.firefox.config, nested: { value: false } } },
+  };
+  await expect(importBuffers(
+    store,
+    [{ name: "changed.txt", bytes: new TextEncoder().encode(serializeAdsTxt([changed])) }],
+    () => {},
+  )).rejects.toThrow("Firefox config cannot change through import");
+  await expect(importBuffers(
+    store,
+    [{ name: "missing.txt", bytes: new TextEncoder().encode(`id=${original.id}\nengine=firefox\n******************`) }],
+    () => {},
+  )).rejects.toThrow("Firefox profiles require a Firefox config");
+  store.close();
+});
+
 test("same-id re-import updates explicit portable identity fields", async () => {
   const store = new ProfileStore(":memory:");
   const original = {
@@ -159,7 +196,7 @@ test("same-id re-import updates explicit portable identity fields", async () => 
   store.close();
 });
 
-test("an explicit imported timezone skips proxy GeoIP enrichment", async () => {
+test("an explicit imported timezone is retained without a lookup", async () => {
   const logs: string[] = [];
   const batch = await prepareImportBuffers(
     [{
@@ -173,6 +210,24 @@ test("an explicit imported timezone skips proxy GeoIP enrichment", async () => {
 
   expect(batch.profiles[0]!.timezone).toBe("Europe/London");
   expect(logs.some((message) => message.includes("resolved timezone"))).toBe(false);
+});
+
+test("a proxy import preserves an existing timezone without a lookup", async () => {
+  const store = new ProfileStore(":memory:");
+  const original = parseExport(REC("existing")).profiles[0]!;
+  original.timezone = "America/Los_Angeles";
+  store.upsertProfile(original);
+
+  await importBuffers(store, [{
+    name: "proxy.txt",
+    bytes: new TextEncoder().encode(`id=${original.id}\nproxytype=http\nproxy=8.8.8.8:8080:user:pass\n******************`),
+  }], () => {});
+
+  expect(store.getProfile(original.id)).toMatchObject({
+    proxy: { host: "8.8.8.8", port: "8080" },
+    timezone: "America/Los_Angeles",
+  });
+  store.close();
 });
 
 test("sparse re-import preserves a quarantined legacy proxy for later repair", async () => {

@@ -238,7 +238,7 @@ export interface ProxyReplacementsResponse {
   missingUsernames: string[];
 }
 
-/** Complete portable state. The server stores this only as an encrypted envelope. */
+/** Complete portable Chromium state. The server stores it only as an encrypted envelope. */
 export interface PortableProfileV1 {
   schemaVersion: 1;
   profile: {
@@ -266,6 +266,33 @@ export interface PortableProfileV1 {
   };
   session: PortableSessionV1;
 }
+
+/** Recursive JSON data stored in a portable Camoufox configuration. */
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export interface FirefoxProfileConfig {
+  version: 1;
+  runtimeVersion: string;
+  config: Record<string, JsonValue>;
+}
+
+/** Firefox portable state. V1 Chromium payloads remain unchanged. */
+export interface PortableProfileV2 {
+  schemaVersion: 2;
+  profile: PortableProfileV1["profile"] & {
+    engine: "firefox";
+    firefox: FirefoxProfileConfig;
+  };
+  session: PortableSessionV1;
+}
+
+export type PortableProfile = PortableProfileV1 | PortableProfileV2;
 
 export interface CloudProfileSummary {
   id: string;
@@ -409,7 +436,7 @@ export interface ListProfilesResponse {
 
 export interface CreateProfileRequest {
   migrationId?: string;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
 }
 
 export interface CreateProfileResponse {
@@ -420,7 +447,7 @@ export interface CreateProfileResponse {
 
 export interface ImportProfilesRequest {
   destination: string;
-  profiles: PortableProfileV1[];
+  profiles: PortableProfile[];
 }
 
 export interface ImportProfilesResponse {
@@ -432,7 +459,7 @@ export interface ImportProfilesResponse {
 export interface GetProfileResponse {
   ok: true;
   profile: CloudProfileSummary;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
   payloadDigest: string;
 }
 
@@ -444,7 +471,7 @@ export interface UpdateProfileResponse {
 
 export interface UpdateProfileRequest {
   expectedVersion: number;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
 }
 
 export interface OpenProfileRequest {
@@ -455,7 +482,7 @@ export interface OpenProfileResponse {
   ok: true;
   registrationId: string;
   baseVersion: number;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
   activeOpens: CloudOpenWarning[];
 }
 
@@ -467,7 +494,7 @@ export interface OpenHeartbeatResponse {
 
 export interface CloseOpenRequest {
   expectedVersion: number;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
 }
 
 export interface CloseOpenResponse {

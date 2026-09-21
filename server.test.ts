@@ -433,6 +433,24 @@ test("active returns the live ws endpoint while running (AdsPower parity)", asyn
   expect(body.data.ws.puppeteer.startsWith("ws://")).toBe(true);
 });
 
+test("Firefox active status is usable without exposing an owner locator", async () => {
+  const h = harness();
+  await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
+  const launch = h.store.getLaunch("k1d0cd11")!;
+  h.store.recordLaunch({
+    ...launch,
+    engine: "firefox",
+    firefoxOwner: { endpoint: "http://127.0.0.1:9444/", token: "private-token", pid: 12, browserPid: 13, generation: "generation" },
+  } as any);
+  h.launcher.certifiedActive = async () => true;
+
+  const body = await (await handleRequest(req("/api/v1/browser/active?user_id=k1d0cd11"), h.launcher, h.store)).json();
+  expect(body.data).toMatchObject({ status: "Active", lifecycle: "running", engine: "firefox", capabilities: expect.any(Array) });
+  expect(JSON.stringify(body)).not.toContain("ws");
+  expect(JSON.stringify(body)).not.toContain("9444");
+  expect(JSON.stringify(body)).not.toContain("private-token");
+});
+
 test("active bypasses occupied admission and reports queued/admitted lifecycle conservatively", async () => {
   const h = harness();
   const admission = new LifecycleAdmissionController({ limit: 1 });

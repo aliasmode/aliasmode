@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AgentControlSession, AGENT_CONTROL_PROTOCOL, type AgentControlDeps } from "./agent-control.ts";
+import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudClient } from "./cloud-client.ts";
 import type { ScriptInput, ScriptLanguage, ScriptRecord, ScriptSummary, PublishedScript, PublishScriptInput, PublishedScriptsQuery, ListPublishedScriptsResponse } from "./contracts/cloud-v1.ts";
@@ -158,6 +159,7 @@ export interface ScriptRun {
 interface RunRequest { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean }
 interface RunnerInput {
   endpoint: string;
+  engine?: "firefox";
   profile: { id: string; name: string; group: string; platform: string };
   inputs: Record<string, unknown>;
   credentials: Record<string, string> | null;
@@ -335,7 +337,7 @@ export class ScriptSupervisor {
           signal.throwIfAborted();
           this.options.library.assertScope(run.scope);
           item.status = "running";
-          const opened = await call("browser.open");
+          const opened = await call("browser.open") as { ws?: string; engine?: string; ownedByConnection: boolean };
           owned = opened.ownedByConnection;
           endpoint = opened.ws;
           signal.throwIfAborted();
@@ -344,15 +346,26 @@ export class ScriptSupervisor {
           if (!profile) throw new ScriptError("Profile not found", 404);
           item.name = profile.name;
           writeFileSync(fd, `\n--- ${profile.name || item.id} ---\n`);
-          await (this.options.execute ?? executeScript)({
-            scriptPath: path, language: script.language, logFd: fd, signal,
-            input: {
-              endpoint: opened.ws,
-              profile: { id: item.id, name: profile.name, group: profile.group, platform: profile.platform ?? "" },
-              inputs: request.inputs,
-              credentials: request.useCredentials ? Object.fromEntries(["username", "password", "email", "emailPassword", "twofa"].map((key) => [key, (profile as unknown as Record<string, string>)[key] ?? ""])) : null,
-            },
-          });
+          const input = {
+            profile: { id: item.id, name: profile.name, group: profile.group, platform: profile.platform ?? "" },
+            inputs: request.inputs,
+            credentials: request.useCredentials ? Object.fromEntries(["username", "password", "email", "emailPassword", "twofa"].map((key) => [key, (profile as unknown as Record<string, string>)[key] ?? ""])) : null,
+          };
+          if (opened.engine === "firefox") {
+            const launch = this.options.store.getLaunch(item.id) as { firefoxOwner?: FirefoxOwner } | null;
+            if (!launch?.firefoxOwner) throw new ScriptError("Firefox browser owner is unavailable", 503);
+            const { endpoint } = await callFirefoxOwner<{ endpoint?: unknown }>(launch.firefoxOwner, "playwright-endpoint", {}, { signal });
+            if (typeof endpoint !== "string" || !endpoint) throw new ScriptError("Firefox browser endpoint is unavailable", 503);
+            await (this.options.execute ?? executeScript)({
+              scriptPath: path, language: script.language, logFd: fd, signal,
+              input: { endpoint, engine: "firefox", ...input },
+            });
+          } else {
+            await (this.options.execute ?? executeScript)({
+              scriptPath: path, language: script.language, logFd: fd, signal,
+              input: { endpoint: opened.ws!, ...input },
+            });
+          }
           item.status = signal.aborted ? "cancelled" : "succeeded";
         } catch (error) {
           item.status = signal.aborted ? "cancelled" : "failed";

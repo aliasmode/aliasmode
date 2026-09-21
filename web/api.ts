@@ -21,6 +21,8 @@ export type HealthStatus = "suspended" | "alive" | "no_data";
 export interface UiProfile {
   id: string;
   name: string;
+  /** Browser family. Legacy profiles without a value are Chromium. */
+  engine: "chromium" | "firefox";
   group: string;
   /** Canonical account platform domain, or "" (none). */
   platform: string;
@@ -383,7 +385,14 @@ export async function fetchProfiles(): Promise<UiRoster> {
   const body = await apiJson(r, path);
   if (!Array.isArray(body.profiles)) throw new Error(body.error || "AliasMode API returned no profile roster");
   return {
-    profiles: body.profiles,
+    profiles: body.profiles.map((profile: UiProfile) => {
+      const engine = profile.engine === "firefox" ? "firefox" : "chromium";
+      if (engine === "firefox") {
+        const { debugPort: _debugPort, ...firefoxProfile } = profile;
+        return { ...firefoxProfile, engine };
+      }
+      return { ...profile, engine };
+    }),
     healthSources: Array.isArray(body.healthSources) ? body.healthSources : [],
     groups: Array.isArray(body.groups) ? body.groups.filter((name: unknown) => typeof name === "string") : [],
   };
@@ -607,6 +616,8 @@ export async function checkProxy(proxy: ProxyCheckInput): Promise<ProxyCheckResu
 
 export interface NewProfileInput {
   name?: string;
+  /** Browser family selected for a new Local profile. */
+  engine?: "chromium" | "firefox";
   group?: string;
   platform?: string;
   proxy?: ProxyCheckInput | null;
@@ -639,6 +650,7 @@ export async function fetchDiagnose(): Promise<DiagnoseReport | null> {
 export interface EditProfile {
   id: string;
   name: string;
+  engine: "chromium" | "firefox";
   group: string;
   platform: string;
   proxyType: string;
@@ -658,6 +670,8 @@ export interface EditProfile {
   tags: string;
   /** Operator-chosen "custom NO."; "" falls back to the store serial. Local mode only. */
   customNo?: string;
+  /** Stored timezone. It changes only through the explicit Local lookup action. */
+  timezone: string;
   cookieCount: number;
   seeded: boolean;
   mobilePersona: boolean;
@@ -699,6 +713,20 @@ export async function updateProfile(id: string, set: Record<string, unknown>, ex
   });
   const body = await apiJson(r, `/ui/api/profiles/${encodeURIComponent(id)}/update`);
   return { ...body, status: r.status };
+}
+
+export async function refreshProfileTimezone(id: string): Promise<{ timezone: string }> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/timezone`;
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true || typeof body.timezone !== "string") {
+    throw new Error(body.error || "timezone lookup failed");
+  }
+  return { timezone: body.timezone };
 }
 
 export async function convertMobileProfile(id: string): Promise<any> {

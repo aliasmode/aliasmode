@@ -72,6 +72,7 @@ export interface CloudParkedSession {
 
 export interface CloudBrowserProfile {
   id: string;
+  engine?: "chromium" | "firefox";
   name: string;
   group: string;
   platform: string;
@@ -476,6 +477,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           );
           return {
             id: profile.id,
+            ...(cached?.engine === "firefox" ? { engine: "firefox" as const } : {}),
             name: profile.name,
             group: profile.group,
             platform: profile.platform,
@@ -488,7 +490,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
             screen: "",
             has2fa: false,
             running: !!launch,
-            debugPort: launch?.debugPort,
+            ...(launch?.engine === "firefox" ? {} : { debugPort: launch?.debugPort }),
             startedAt: launch?.startedAt,
             lockedBy: otherActiveOpens.length > 0
               ? `${otherActiveOpens.length} other session(s)`
@@ -2102,10 +2104,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (origin) checkpoint.origins.add(origin);
       onDirty();
     };
-    try {
-      monitor.targetObserver = (this.options.observeTargets ?? observeBrowserTargets)(launch.ws, onTarget);
-    } catch {
-      // Filesystem watching and target polling remain active when observation is unavailable.
+    if (launch.engine !== "firefox") {
+      try {
+        monitor.targetObserver = (this.options.observeTargets ?? observeBrowserTargets)(launch.ws, onTarget);
+      } catch {
+        // Filesystem watching and target polling remain active when observation is unavailable.
+      }
     }
     this.startStorageWatchers(profileId, monitor);
     if (monitor.watchers.length === 0) this.diagnosticEvents.record("dirty_monitor_unavailable");

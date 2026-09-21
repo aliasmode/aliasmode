@@ -79,7 +79,8 @@ async function readConfig() {
     || typeof input.owner.generation !== "string" || !input.owner.generation
     || (input.proxy !== undefined && (!validConfig(input.proxy) || typeof input.proxy.server !== "string" || !input.proxy.server))
     || (input.args !== undefined && (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string")))
-    || (input.headless !== undefined && typeof input.headless !== "boolean")) {
+    || (input.headless !== undefined && typeof input.headless !== "boolean")
+    || (input.restoreLastSession !== undefined && typeof input.restoreLastSession !== "boolean")) {
     throw typed("invalid_request");
   }
   return input;
@@ -141,6 +142,24 @@ function send(response, status, body) {
   response.end(body);
 }
 
+export function firefoxLaunchOptions(input) {
+  return {
+    executablePath: input.executablePath,
+    viewport: null,
+    ...(input.proxy ? { proxy: input.proxy } : {}),
+    firefoxUserPrefs: {
+      "browser.startup.page": input.restoreLastSession ? 3 : 0,
+      ...(input.proxy ? {
+        "media.peerconnection.ice.proxy_only": true,
+        "media.peerconnection.ice.default_address_only": true,
+        "media.peerconnection.ice.no_host": true,
+      } : {}),
+    },
+    ...(input.headless === undefined ? {} : { headless: input.headless }),
+    ...(input.args ? { args: input.args } : {}),
+  };
+}
+
 async function launchOwner(input) {
   if (await sha256File(input.executablePath) !== input.executableSha256) throw typed("operation_failed");
   cleanCamouConfig(input.config);
@@ -148,20 +167,7 @@ async function launchOwner(input) {
   try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
   if (!runtime.firefox) throw typed("runtime_unavailable");
   try {
-    return await runtime.firefox.launchPersistentContext(input.userDataDir, {
-      executablePath: input.executablePath,
-      viewport: null,
-      ...(input.proxy ? { proxy: input.proxy } : {}),
-      ...(input.proxy ? {
-        firefoxUserPrefs: {
-          "media.peerconnection.ice.proxy_only": true,
-          "media.peerconnection.ice.default_address_only": true,
-          "media.peerconnection.ice.no_host": true,
-        },
-      } : {}),
-      ...(input.headless === undefined ? {} : { headless: input.headless }),
-      ...(input.args ? { args: input.args } : {}),
-    });
+    return await runtime.firefox.launchPersistentContext(input.userDataDir, firefoxLaunchOptions(input));
   } catch {
     throw typed("operation_failed");
   }
@@ -372,10 +378,12 @@ async function run() {
   context.once?.("close", () => { if (!closing) void shutdown(); });
 }
 
-try {
-  await run();
-} catch (error) {
-  const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
-  process.stdout.write(`${JSON.stringify({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code] } })}\n`);
-  process.exitCode = 1;
+if (process.argv.some((argument) => argument.startsWith("--aliasmode-firefox-owner="))) {
+  try {
+    await run();
+  } catch (error) {
+    const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
+    process.stdout.write(`${JSON.stringify({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code] } })}\n`);
+    process.exitCode = 1;
+  }
 }

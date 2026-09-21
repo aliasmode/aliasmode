@@ -1,5 +1,5 @@
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
-import type { PortableProfileV1 } from "./contracts/cloud-v1.ts";
+import type { PortableProfile } from "./contracts/cloud-v1.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseStrictProxy, parseStrictResolution } from "./parse.ts";
@@ -14,6 +14,7 @@ type CloudProfileEditorStore = Pick<ProfileStore, "getLaunch">;
 
 export interface CloudProfileEditView {
   id: string;
+  engine?: "chromium" | "firefox";
   name: string;
   group: string;
   platform: string;
@@ -56,6 +57,7 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
   const conversion = isMobileUserAgent(profile.ua) ? convertMobilePersonaToDesktop(profile) : null;
   return {
     id: profile.id,
+    ...(profile.engine === "firefox" ? { engine: "firefox" as const } : {}),
     name: profile.name,
     group: profile.group,
     platform: profile.platform ?? "",
@@ -85,6 +87,9 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
 }
 
 function applyEdits(profile: Profile, set: Record<string, unknown>): boolean {
+  if ("engine" in set && set.engine !== (profile.engine ?? "chromium")) {
+    throw new CloudProfileEditorError("profile engine cannot be changed", 400);
+  }
   let proxyChanged = false;
   if ("name" in set) profile.name = String(set.name ?? "");
   if ("group" in set) profile.group = String(set.group ?? "");
@@ -96,6 +101,9 @@ function applyEdits(profile: Profile, set: Record<string, unknown>): boolean {
   if ("twofa" in set) profile.twofa = String(set.twofa ?? "");
   if ("resolution" in set) {
     const resolution = parseStrictResolution(set.resolution);
+    if (profile.engine === "firefox" && (resolution.width !== profile.screenWidth || resolution.height !== profile.screenHeight)) {
+      throw new CloudProfileEditorError("Firefox fingerprint settings are fixed when the profile is created", 400);
+    }
     profile.screenWidth = resolution.width;
     profile.screenHeight = resolution.height;
   }
@@ -110,10 +118,14 @@ function applyEdits(profile: Profile, set: Record<string, unknown>): boolean {
       previousProxy?.pass !== nextProxy?.pass;
     profile.proxy = nextProxy;
     delete profile.proxyError;
-    if (proxyChanged) profile.timezone = "";
+    if (proxyChanged && profile.engine !== "firefox") profile.timezone = "";
   }
   if ("extensions" in set) {
-    profile.extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
+    const extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
+    if (profile.engine === "firefox" && extensions.length) {
+      throw new CloudProfileEditorError("Chrome extensions are not supported by Firefox profiles", 400);
+    }
+    profile.extensions = extensions;
   }
   if ("tags" in set) {
     profile.tags = Array.isArray(set.tags)
@@ -181,7 +193,7 @@ export class CloudProfileEditor {
       if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
     }
     const proxyChanged = applyEdits(profile, set);
-    if (proxyChanged && profile.proxy) {
+    if (proxyChanged && profile.proxy && profile.engine !== "firefox") {
       await attachTimezones([profile], this.timezoneFetch).catch(() => {});
     }
 
@@ -197,7 +209,7 @@ export class CloudProfileEditor {
       ...encoded,
       profile: encodedProfile,
       session: authoritative.payload.session,
-    } as PortableProfileV1;
+    } as PortableProfile;
     await this.cloud.updateProfile(profileId, { expectedVersion: updateVersion, payload });
   }
 

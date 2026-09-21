@@ -20,6 +20,7 @@
     "externalBin": ["binaries/aliasmode-sidecar", "binaries/aliasmode-mcp"],
     "resources": {
       "resources/cloakbrowser/": "cloakbrowser/",
+      "resources/firefox/": "firefox/",
       "resources/playwright/": "playwright/"
     },
     "windows": {

@@ -11,10 +11,13 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function root() { const dir = mkdtempSync(join(tmpdir(), "aliasmode-scripts-")); roots.push(dir); return dir; }
 const input = { name: "Visit", description: "Example", language: "javascript" as const, source: "export default async () => {};" };
 
-function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; cloud?: any } = {}) {
+function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; cloud?: any; firefoxOwner?: any } = {}) {
   const directory = root();
   const events: string[] = [];
-  const launches = new Map((options.active ?? []).map((id) => [id, { ws: `ws://test/${id}`, debugPort: 9000 }]));
+  const launch = (id: string) => options.firefoxOwner
+    ? { ws: `firefox://127.0.0.1:9000/${options.firefoxOwner.generation}`, debugPort: 9000, engine: "firefox", firefoxOwner: options.firefoxOwner }
+    : { ws: `ws://test/${id}`, debugPort: 9000 };
+  const launches = new Map((options.active ?? []).map((id) => [id, launch(id)]));
   const profiles = ["a", "b", "c"].map((id) => ({ id, name: id, group: "", platform: "", username: `user-${id}`, password: `test-password-${id}`, twofa: "" }));
   const library = new ScriptLibrary(directory, !!options.cloud, options.cloud);
   const supervisor = new ScriptSupervisor({
@@ -22,7 +25,7 @@ function harness(execute: ScriptExecution = async () => {}, options: { active?: 
     store: { getProfile: (id: string) => profiles.find((p) => p.id === id), getLaunch: (id: string) => launches.get(id), listAgentTemporary: () => [] } as any,
     launcher: {
       certifiedActive: async (id: string) => launches.has(id),
-      start: async (id: string) => { events.push(`open:${id}`); launches.set(id, { ws: `ws://test/${id}`, debugPort: 9000 }); return { ws: `ws://test/${id}`, port: 9000 }; },
+      start: async (id: string) => { events.push(`open:${id}`); const value = launch(id); launches.set(id, value); return { ws: value.ws, port: 9000 }; },
       stop: async (id: string) => { events.push(`close:${id}`); launches.delete(id); return true; },
     } as any,
     admission: { run: async (_: unknown, work: () => Promise<unknown>) => work() } as any,
@@ -56,6 +59,75 @@ test("runs only selected profiles sequentially and closes only job-opened browse
   expect(h.events).toEqual(["open:b", "close:b"]);
   expect(h.launches.has("a")).toBe(true);
   expect(h.supervisor.status()?.profiles.map((p) => p.status)).toEqual(["succeeded", "succeeded"]);
+});
+
+test("Firefox scripts use a private Playwright endpoint in the external runner", async () => {
+  const requests: any[] = [];
+  const executions: any[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      requests.push(await request.json());
+      return Response.json({ version: 1, ok: true, result: { endpoint: "ws://127.0.0.1:9223/private" } });
+    },
+  });
+  const owner = {
+    endpoint: `http://127.0.0.1:${server.port}/`, token: "private-token", pid: 12, browserPid: 13, generation: "generation",
+  };
+  const h = harness(async (options) => { executions.push(options); }, { firefoxOwner: owner });
+  try {
+    const script = await h.library.save(input);
+    h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: { url: "https://example.test" }, useCredentials: false });
+    await h.supervisor.settled();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      operation: "playwright-endpoint",
+      payload: { ownerGeneration: "generation" },
+    });
+    expect(executions).toHaveLength(1);
+    expect(executions[0].input).toMatchObject({
+      endpoint: "ws://127.0.0.1:9223/private", engine: "firefox",
+      profile: { id: "a" }, inputs: { url: "https://example.test" }, credentials: null,
+    });
+    expect(h.supervisor.status()?.profiles[0]?.status).toBe("succeeded");
+    expect(h.supervisor.log(h.supervisor.status()!.id, 0).text).not.toContain("9223/private");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("Firefox script cancellation aborts the external runner before browser cleanup", async () => {
+  const requests: any[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      requests.push(await request.json());
+      return Response.json({ version: 1, ok: true, result: { endpoint: "ws://127.0.0.1:9223/private" } });
+    },
+  });
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  const h = harness(async ({ signal }) => {
+    started();
+    await new Promise<void>((_, reject) => signal.addEventListener("abort", () => reject(new Error("stopped")), { once: true }));
+  }, { firefoxOwner: {
+    endpoint: `http://127.0.0.1:${server.port}/`, token: "private-token", pid: 12, browserPid: 13, generation: "generation",
+  } });
+  try {
+    const script = await h.library.save(input);
+    h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: {}, useCredentials: false });
+    await ready;
+    await h.supervisor.stop();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].operation).toBe("playwright-endpoint");
+    expect(h.events).toEqual(["open:a", "close:a"]);
+    expect(h.supervisor.status()?.profiles[0]?.status).toBe("cancelled");
+  } finally {
+    server.stop(true);
+  }
 });
 
 test("a browser reopened outside the run is not closed by script cleanup", async () => {

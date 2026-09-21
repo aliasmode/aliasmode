@@ -10,6 +10,10 @@ if (!endpoint || !scriptPath) {
   process.stdout.write(`${JSON.stringify({ ok: false, error: "runner input is missing" })}\n`);
   process.exit(1);
 }
+if (endpoint.startsWith("firefox://")) {
+  process.stdout.write(`${JSON.stringify({ ok: false, error: "Firefox scripts run through the AliasMode manager" })}\n`);
+  process.exit(1);
+}
 
 let browser;
 try {

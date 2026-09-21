@@ -38,7 +38,10 @@ import { assertSafeProfileId } from "./profile-id.ts";
 import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
 import type { FingerprintSample } from "./diagnose.ts";
 import { applySessionToEndpoint, bundleTabUrls, bundleTelegramClient, canonicalUserPageUrl, parseCapturedSessionBundle, readSessionInSubprocess, sessionCaptureSeed, SessionRestoreError } from "./session.ts";
-import { runPlaywrightWorker } from "./playwright-runtime.ts";
+import { resolvePlaywrightRuntime, runPlaywrightWorker } from "./playwright-runtime.ts";
+import { callFirefoxOwner, closeFirefoxOwner, firefoxEndpoint, forgetFirefoxOwner, reserveFirefoxOwner, startFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
+import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
+import { FIREFOX_RUNTIME_VERSION } from "./firefox-config.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
 // onAuthRequired (whose service worker can't answer reliably during a page-load burst), the browser
@@ -244,6 +247,15 @@ export interface LauncherOptions {
    * $CLOAKBROWSER_BINARY_SHA256 and is required before a production spawn.
    */
   expectedBinarySha256?: string;
+  firefoxBinaryPath?: string;
+  expectedFirefoxBinarySha256?: string;
+  /** Injectable owner transport for deterministic Firefox lifecycle tests. */
+  firefoxRuntime?: {
+    reserve: typeof reserveFirefoxOwner;
+    start: typeof startFirefoxOwner;
+    call: typeof callFirefoxOwner;
+    close: typeof closeFirefoxOwner;
+  };
   /** Root for persistent per-profile user-data dirs. */
   dataRoot?: string;
   headless?: boolean;
@@ -521,6 +533,7 @@ const POST_STOP_CACHE_DIRS = [
  * out and defeat the persistent-session design the whole migration relies on.
  */
 const CACHE_DIRS = POST_STOP_CACHE_DIRS;
+const FIREFOX_CACHE_DIRS = ["cache2", "startupCache", "shader-cache"];
 
 /**
  * Volatile per-profile stores that commonly get left half-written by an UNCLEAN kill (all leveldb-
@@ -548,6 +561,9 @@ export class Launcher {
   private autofill?: AutofillBridge;
   private binaryPath: string;
   private expectedBinarySha256: string;
+  private firefoxBinaryPath: string;
+  private expectedFirefoxBinarySha256: string;
+  private firefoxRuntime: NonNullable<LauncherOptions["firefoxRuntime"]>;
   private unsafeDisableIdentityGates: boolean;
   private verifiedBinaryCache?: { key: string; path: string; sha256: string };
   private binaryVerificationInFlight?: {
@@ -638,6 +654,14 @@ export class Launcher {
       ?? process.env.CLOAKBROWSER_BINARY_SHA256
       ?? ""
     ).trim().toLowerCase();
+    this.firefoxBinaryPath = opts.firefoxBinaryPath ?? process.env.ALIASMODE_FIREFOX_BINARY_PATH ?? "";
+    this.expectedFirefoxBinarySha256 = (opts.expectedFirefoxBinarySha256 ?? process.env.ALIASMODE_FIREFOX_BINARY_SHA256 ?? "").trim().toLowerCase();
+    this.firefoxRuntime = opts.firefoxRuntime ?? {
+      reserve: reserveFirefoxOwner, start: startFirefoxOwner, call: callFirefoxOwner, close: closeFirefoxOwner,
+    };
+    for (const launch of this.store.listLaunches()) {
+      if (launch.engine === "firefox" && launch.firefoxOwner) firefoxEndpoint(launch.firefoxOwner);
+    }
     this.dataRoot = opts.dataRoot ?? DEFAULT_DATA_ROOT;
     this.headless = opts.headless ?? false;
     this.portRange = opts.portRange ?? { start: 9333, end: 9999 };
@@ -711,45 +735,35 @@ export class Launcher {
   }
 
   /** Validate the deployment pin without reading the configured binary. */
-  private approvedBinarySha256(): string {
+  private approvedBinarySha256(engine: "chromium" | "firefox" = "chromium"): string {
+    const expected = engine === "firefox" ? this.expectedFirefoxBinarySha256 : this.expectedBinarySha256;
     if (this.unsafeDisableIdentityGates) {
-      return /^[a-f0-9]{64}$/.test(this.expectedBinarySha256)
-        ? this.expectedBinarySha256
-        : "0".repeat(64);
+      return /^[a-f0-9]{64}$/.test(expected) ? expected : "0".repeat(64);
     }
-    if (!/^[a-f0-9]{64}$/.test(this.expectedBinarySha256)) {
-      throw new Error(
-        "approved CloakBrowser kernel hash is not configured; set " +
-        "CLOAKBROWSER_BINARY_SHA256 to the 64-character SHA-256 of the deployed binary",
-      );
+    if (!/^[a-f0-9]{64}$/.test(expected)) {
+      throw new Error(`approved ${engine} kernel hash is not configured`);
     }
-    return this.expectedBinarySha256;
+    return expected;
   }
 
   /** Hash and canonicalize the exact executable before every fresh generation. */
-  private async verifyConfiguredBinary(forceHash = false): Promise<{ path: string; sha256: string }> {
-    const expected = this.approvedBinarySha256();
-    if (this.unsafeDisableIdentityGates) return { path: this.binaryPath, sha256: expected };
-    if (!this.binaryPath) {
-      throw new Error(
-        "CloakBrowser binary path not set. Set CLOAKBROWSER_BINARY_PATH or pass binaryPath.",
-      );
-    }
+  private async verifyConfiguredBinary(forceHash = false, engine: "chromium" | "firefox" = "chromium"): Promise<{ path: string; sha256: string }> {
+    const expected = this.approvedBinarySha256(engine);
+    const binaryPath = engine === "firefox" ? this.firefoxBinaryPath : this.binaryPath;
+    if (this.unsafeDisableIdentityGates) return { path: binaryPath, sha256: expected };
+    if (!binaryPath) throw new Error(`${engine} binary path is not configured`);
 
     let path: string;
     let stat: ReturnType<typeof statSync>;
     try {
-      path = realpathSync(this.binaryPath);
+      path = realpathSync(binaryPath);
       stat = statSync(path);
-    } catch (error) {
-      throw new Error(
-        `approved CloakBrowser binary cannot be read at ${JSON.stringify(this.binaryPath)}: ` +
-        (error instanceof Error ? error.message : String(error)),
-      );
+    } catch {
+      throw new Error(`approved ${engine} binary cannot be read`);
     }
-    if (!stat.isFile()) throw new Error(`CloakBrowser binary is not a regular file: ${path}`);
+    if (!stat.isFile()) throw new Error(`${engine} binary is not a regular file`);
 
-    const key = [path, stat.dev, stat.ino, stat.size, stat.mtimeMs].join(":");
+    const key = [expected, path, stat.dev, stat.ino, stat.size, stat.mtimeMs].join(":");
     if (!forceHash && this.verifiedBinaryCache?.key === key) return this.verifiedBinaryCache;
     if (!forceHash && this.binaryVerificationInFlight?.key === key) return this.binaryVerificationInFlight.promise;
 
@@ -762,7 +776,7 @@ export class Launcher {
         let finalPath: string;
         let finalStat: ReturnType<typeof statSync>;
         try {
-          finalPath = realpathSync(this.binaryPath);
+          finalPath = realpathSync(binaryPath);
           finalStat = statSync(path);
         } catch (error) {
           throw new Error(
@@ -770,7 +784,7 @@ export class Launcher {
             (error instanceof Error ? error.message : String(error)),
           );
         }
-        const finalKey = [finalPath, finalStat.dev, finalStat.ino, finalStat.size, finalStat.mtimeMs].join(":");
+        const finalKey = [expected, finalPath, finalStat.dev, finalStat.ino, finalStat.size, finalStat.mtimeMs].join(":");
         if (finalPath !== path || finalKey !== key || !finalStat.isFile()) {
           throw new Error("approved CloakBrowser binary changed while it was being verified; refusing to launch");
         }
@@ -801,6 +815,7 @@ export class Launcher {
     }));
     const serialized = JSON.stringify({
       schema: 2,
+      ...(profile.engine === "firefox" ? { engine: "firefox", firefox: profile.firefox } : {}),
       binarySha256,
       host: [this.hostPlatform, this.hostArch],
       headless,
@@ -820,6 +835,9 @@ export class Launcher {
 
   /** A survivor is reusable only with its exact launch-time kernel and persona. */
   private assertStoredLaunchPersona(profile: Profile, launch: LaunchInfo, approvedSha256: string): void {
+    if ((profile.engine ?? "chromium") !== (launch.engine ?? "chromium")) {
+      throw new Error("live browser engine differs from the stored profile");
+    }
     if (!launch.binaryPath || !launch.userDataDir) {
       throw new Error("legacy launch is missing its executable or user-data identity");
     }
@@ -841,6 +859,16 @@ export class Launcher {
   }
 
   private assertHostCompatibility(profile: Profile): void {
+    if (profile.engine === "firefox") {
+      if (!profile.firefox || profile.firefox.version !== 1 || profile.firefox.runtimeVersion !== FIREFOX_RUNTIME_VERSION) {
+        throw new Error("Firefox profile configuration is missing or unsupported by this runtime");
+      }
+      if (profile.extensions?.length) throw new Error("Chrome extensions are not supported by Firefox profiles");
+      if (this.enforceHostCompatibility && (this.hostPlatform !== "win32" || this.hostArch !== "x64")) {
+        throw new Error("AliasMode Firefox requires Windows x64");
+      }
+      return;
+    }
     if (!this.enforceHostCompatibility) return;
     if (isMobileUserAgent(profile.ua)) {
       throw new Error(
@@ -965,6 +993,9 @@ export class Launcher {
     const launch = this.store.getLaunch(profileId);
     if (!profile || !launch) return null;
     return JSON.stringify([
+      profile.engine,
+      profile.firefox,
+      launch.firefoxOwner?.generation,
       profile.ua,
       profile.proxy,
       profile.proxyError ?? null,
@@ -1181,7 +1212,8 @@ export class Launcher {
         );
       }
       this.assertHostCompatibility(profile);
-      approvedBinarySha256 = this.approvedBinarySha256();
+      if (profile.engine === "firefox" && chromeArgs.length) throw new Error("Chromium launch arguments are not supported by Firefox profiles");
+      approvedBinarySha256 = this.approvedBinarySha256(profile.engine);
     } catch (error) {
       return await this.rejectUnsafeExistingLaunch(profileId, "host/persona verification", error);
     }
@@ -1237,7 +1269,8 @@ export class Launcher {
           // Exact scan proved the recorded launch is gone; continue to a fresh
           // allocation (the unrelated responding port remains OS-reserved).
         } else if (
-          !headless
+          profile.engine !== "firefox"
+          && !headless
           && !trackedProc
           && existing.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
         ) {
@@ -1330,6 +1363,10 @@ export class Launcher {
         }
         existing = null;
       }
+    }
+
+    if (profile.engine === "firefox") {
+      return this.startFreshFirefox(profile, startupUrls, opts, pendingSession);
     }
 
     // A fresh generation is never spawned until the configured executable has
@@ -1782,6 +1819,167 @@ export class Launcher {
     }
   }
 
+  private async startFreshFirefox(
+    profile: Profile,
+    startupUrls: string[],
+    opts: LaunchStartOptions,
+    pendingSession: string | null,
+  ): Promise<LaunchStartResult> {
+    const profileId = profile.id;
+    const headless = opts.headless ?? this.headless;
+    let snapshot = JSON.stringify(profile);
+    let binary: { path: string; sha256: string };
+    try { binary = await this.verifyConfiguredBinary(true, "firefox"); }
+    catch { throw new BrowserLaunchError("binary_verification"); }
+    const userDataDir = this.userDataDir(profileId);
+    const runtime = resolvePlaywrightRuntime();
+    const ownerBinaryPath = this.unsafeDisableIdentityGates
+      ? runtime.nodeExecutable
+      : realpathSync(Bun.which(runtime.nodeExecutable) ?? runtime.nodeExecutable);
+    const reservation = await this.firefoxRuntime.reserve();
+    const owner: FirefoxOwner = { ...reservation, pid: 0, browserPid: 0 };
+    const port = Number(new URL(owner.endpoint).port);
+    const launch: LaunchInfo = {
+      profileId, engine: "firefox", pid: 0, debugPort: port, ws: firefoxEndpoint(owner),
+      startedAt: Date.now(), firefoxOwner: owner, ownerBinaryPath,
+      binaryPath: binary.path, binarySha256: binary.sha256, userDataDir, headless,
+      personaDigest: this.launchPersonaDigest(profile, binary.sha256, headless),
+      sessionBaseVersion: opts.sessionBaseVersion,
+    };
+    if (existsSync(userDataDir)) {
+      const processes = await this.firefoxProcesses(launch);
+      if (!processes || processes.browsers.length || processes.owners.length) {
+        forgetFirefoxOwner(owner);
+        throw new BrowserLaunchError("profile_directory");
+      }
+    }
+    mkdirSync(userDataDir, { recursive: true });
+    let reserved = false;
+    try {
+      if (needsProxyRelay(profile)) {
+        const proxy = profile.proxy!;
+        const relay = await startProxyRelay({
+          type: proxy.type === "socks5" ? "socks5" : "http",
+          host: proxy.host, port: Number(proxy.port), user: proxy.user, pass: proxy.pass,
+        }, {});
+        this.closeRelay(profileId);
+        this.relays.set(profileId, relay);
+        launch.relayPort = relay.port;
+      }
+      this.requireUnchangedProfile(profileId, snapshot, "Firefox spawn");
+      this.store.recordLaunch(launch);
+      reserved = true;
+      this.liveReserved.add(port);
+      const proxy = launch.relayPort
+        ? { server: `http://127.0.0.1:${launch.relayPort}` }
+        : profile.proxy ? { server: `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port}` } : undefined;
+      const running = await this.firefoxRuntime.start({
+        profileId, executablePath: binary.path, executableSha256: binary.sha256,
+        userDataDir, config: profile.firefox!.config, proxy, headless, timeoutMs: this.cdpReadyTimeoutMs,
+      }, {
+        reservation,
+        onSpawn: (spawned) => {
+          launch.firefoxOwner = { ...owner, ...spawned };
+          this.store.recordLaunch(launch);
+        },
+        onReady: (ready) => {
+          launch.firefoxOwner = ready;
+          launch.pid = ready.browserPid;
+          launch.ws = firefoxEndpoint(ready);
+          this.store.recordLaunch(launch);
+        },
+      });
+      launch.firefoxOwner = running;
+      launch.pid = running.browserPid;
+      launch.ws = firefoxEndpoint(running);
+      this.store.recordLaunch(launch);
+      profile = this.requireUnchangedProfile(profileId, snapshot, "Firefox startup");
+      await this.firefoxStatus(launch);
+      const captured = await recordCapture({
+        profile, capture: () => this.captureFingerprintFn(launch.ws),
+        save: (id, observed, verdict) => this.store.saveObservedFingerprint(id, observed, verdict),
+        log: (msg) => this.log(msg), webrtc: profile.proxy ? "disable_non_proxied_udp" : "",
+      });
+      if (captured) {
+        profile = this.store.getProfile(profileId)!;
+        snapshot = JSON.stringify(profile);
+      }
+      if (!this.skipDefaultWindowLabel) {
+        const displayNo = profileDisplayNo(profile.customNo, this.store.getSerial(profileId));
+        await this.labelWindowFn(launch.ws, buildWindowLabel(profile.name, displayNo)).catch(() => {});
+      }
+      if (pendingSession) {
+        const home = platformHomeUrl(profile.platform, bundleTelegramClient(pendingSession));
+        const urls = (opts.autoNavigate ?? true)
+          ? startupUrls.length ? startupUrls : !bundleTabUrls(pendingSession).length && home ? [home] : []
+          : [];
+        try { await this.applySessionFn(launch.ws, pendingSession, urls); }
+        catch (error) {
+          if (!(error instanceof SessionRestoreError) || error.operation !== "navigation") throw error;
+          this.log(`${profileId}: session restored, but startup navigation failed; open the site manually`);
+        }
+      } else {
+        const cookies = profile.cookies.filter(cookieIsCurrent);
+        if (cookies.length) await this.ensureCookiesFn(launch.ws, cookies);
+        if (opts.autoNavigate ?? true) {
+          const savedTabs = opts.restoreLastSession === false ? [] : bundleTabUrls(this.store.getSessionBundle(profileId) ?? "");
+          const home = platformHomeUrl(profile.platform);
+          const urls = startupUrls.length ? startupUrls : savedTabs.length ? savedTabs : home ? [home] : [];
+          await this.navigate(launch.ws, urls).catch(() => {
+            this.log(`${profileId}: startup navigation failed; open the site manually`);
+          });
+        }
+      }
+      this.requireUnchangedProfile(profileId, snapshot, "Firefox launch commit");
+      this.markIdentityCertified(profileId);
+      if (pendingSession) this.store.markSessionRestored(profileId, pendingSession);
+      return { ws: launch.ws, port, nativeSessionRestored: false };
+    } catch (error) {
+      if (reserved) {
+        const stopped = await this.doStop(profileId, launch).catch(() => false);
+        if (!stopped) this.rememberFailedStartGeneration(error, launch);
+      } else {
+        this.closeRelay(profileId);
+        forgetFirefoxOwner(owner);
+      }
+      throw error;
+    }
+  }
+
+  private async firefoxStatus(launch: LaunchInfo): Promise<{
+    generation: string; directory: string; executablePath: string;
+    browserPid: number; pid: number; profileId: string;
+    hasPages: boolean; pageTargets: Array<{ id: string; url: string }>;
+  }> {
+    if (!launch.firefoxOwner) throw new Error("Firefox owner is missing");
+    const status = await this.firefoxRuntime.call<any>(launch.firefoxOwner, "status", {}, { timeoutMs: 800 });
+    if (status.generation !== launch.firefoxOwner.generation || status.profileId !== launch.profileId
+      || status.directory !== launch.userDataDir || status.executablePath !== launch.binaryPath
+      || !Number.isInteger(status.browserPid) || status.browserPid <= 0
+      || !Number.isInteger(status.pid) || status.pid <= 0
+      || (launch.firefoxOwner.pid > 0 && status.pid !== launch.firefoxOwner.pid)
+      || (launch.pid > 0 && status.browserPid !== launch.pid)) {
+      throw new Error("Firefox owner identity does not match the launch");
+    }
+    if (!this.launchGenerationMatches(launch.profileId, launch)) throw new Error("Firefox launch generation changed");
+    if (launch.pid <= 0) {
+      const current = this.store.getLaunch(launch.profileId)!;
+      const owner = { ...launch.firefoxOwner, pid: status.pid, browserPid: status.browserPid };
+      this.store.recordLaunch({ ...current, pid: status.browserPid, firefoxOwner: owner });
+      firefoxEndpoint(owner);
+    }
+    return status;
+  }
+
+  private async firefoxProcesses(launch: LaunchInfo): Promise<{ browsers: number[]; owners: number[] } | null> {
+    if (!launch.binaryPath || !launch.userDataDir || !launch.ownerBinaryPath || !launch.firefoxOwner) return null;
+    const snapshot = await this.readProcessSnapshotFn?.();
+    return snapshot ? matchFirefoxProcesses({
+      binaryPath: launch.binaryPath, userDataDir: launch.userDataDir,
+      ownerBinaryPath: launch.ownerBinaryPath, generation: launch.firefoxOwner.generation,
+    }, snapshot, this.hostPlatform === "win32") : null;
+  }
+
   /**
    * Inspect the two independent browser-liveness signals with one policy used
    * by start(), stop(), and reconciliation. A PID 0 is never process-alive:
@@ -1798,6 +1996,14 @@ export class Launcher {
   ): Promise<LaunchLiveness> {
     const cdpWs = await this.probeLaunchCdp(launch);
     const cdpAlive = cdpWs !== null;
+    if (launch.engine === "firefox") {
+      const processes = await this.firefoxProcesses(launch);
+      const ownedPids = processes ? [...processes.browsers, ...processes.owners] : [];
+      return {
+        cdpAlive, cdpWs, pid: processes?.browsers[0] ?? launch.pid, ownedPids,
+        process: processes === null ? "unknown" : ownedPids.length ? "alive" : "dead",
+      };
+    }
     const trackedPid = (proc?.pid ?? 0) > 0 ? proc!.pid : launch.pid;
 
     // signal-0 is only a hint, even for an in-memory handle: the process can be
@@ -2114,6 +2320,7 @@ export class Launcher {
     // Delete durable ownership first. If SQLite refuses the write, leave every
     // in-memory resource intact so a later retry still knows what it owns.
     this.store.clearLaunch(profileId);
+    if (launch.firefoxOwner) forgetFirefoxOwner(launch.firefoxOwner);
     this.autofill?.retire(profileId, launch);
     this.liveReserved.delete(launch.debugPort);
     this.closeRelay(profileId);
@@ -2129,6 +2336,10 @@ export class Launcher {
   }
 
   private async exactOwnedPids(profileId: string, launch: LaunchInfo): Promise<number[] | null> {
+    if (launch.engine === "firefox") {
+      const processes = await this.firefoxProcesses(launch);
+      return processes ? [...processes.browsers, ...processes.owners] : null;
+    }
     if (this.skipDefaultOwnedBrowserScan) {
       const proc = this.procs.get(profileId);
       const trackedPid = proc?.pid ?? 0;
@@ -2479,7 +2690,10 @@ export class Launcher {
       if (wasAlive && hasLinuxTreeProof && launch?.ws) {
         if (!this.launchGenerationMatches(profileId, launch)) return false;
         try {
-          if (await this.browserCloseFn(launch.ws, this.gracefulStopMs)) {
+          const closed = launch.engine === "firefox" && launch.firefoxOwner
+            ? await this.firefoxRuntime.close(launch.firefoxOwner, { timeoutMs: this.gracefulStopMs }).then(() => true)
+            : await this.browserCloseFn(launch.ws, this.gracefulStopMs);
+          if (closed) {
             if (await this.confirmLaunchStopped(profileId, launch, linuxProof ?? undefined, true)) {
               if (this.forgetLaunch(profileId, launch)) return true;
               this.log(`stop ${profileId}: launch generation changed after graceful close; leaving the replacement owned`);
@@ -2552,6 +2766,7 @@ export class Launcher {
     const launch = this.store.getLaunch(profileId);
     if (!launch) return false;
     try {
+      if (launch.engine === "firefox") return (await this.firefoxStatus(launch)).hasPages;
       const response = await this.fetchFn(`http://127.0.0.1:${launch.debugPort}/json/list`);
       if (!response.ok) return true;
       const targets = await response.json() as Array<{ type?: unknown }>;
@@ -2574,6 +2789,14 @@ export class Launcher {
     const launch = this.store.getLaunch(profileId);
     if (!launch || launch.debugPort !== expected.debugPort || launch.startedAt !== expected.startedAt) return null;
     try {
+      if (launch.engine === "firefox") {
+        const status = await this.firefoxStatus(launch);
+        const targets = status.pageTargets.flatMap((target) => {
+          const url = canonicalUserPageUrl(target.url);
+          return url ? [{ id: target.id, url }] : [];
+        }).sort((left, right) => left.id.localeCompare(right.id) || left.url.localeCompare(right.url));
+        return JSON.stringify(targets);
+      }
       const response = await this.fetchFn(`http://127.0.0.1:${launch.debugPort}/json/list`);
       if (!response.ok) return null;
       const raw = await response.json();
@@ -2593,6 +2816,7 @@ export class Launcher {
 
   browserStorageWatchPaths(profileId: string): string[] {
     const root = this.store.getLaunch(profileId)?.userDataDir ?? this.userDataDir(profileId);
+    if (this.store.getProfile(profileId)?.engine === "firefox") return [root, join(root, "storage", "default")];
     return [
       join(root, "Default", "Network"),
       join(root, "Default", "Local Storage", "leveldb"),
@@ -2715,13 +2939,14 @@ export class Launcher {
     if (!profile) throw new Error(`cannot verify survivor ${profileId}: profile is missing`);
     const snapshot = JSON.stringify(profile);
     this.assertHostCompatibility(profile);
-    const approvedBinarySha256 = this.approvedBinarySha256();
+    const approvedBinarySha256 = this.approvedBinarySha256(profile.engine);
     if (!(await this.active(profileId))) throw new Error(`cannot verify survivor ${profileId}: browser identity/CDP is unavailable`);
 
     const launch = this.store.getLaunch(profileId);
     if (!launch) throw new Error(`cannot verify survivor ${profileId}: launch record is missing`);
     if (
-      launch.headless !== true
+      launch.engine !== "firefox"
+      && launch.headless !== true
       && !this.procs.has(profileId)
       && launch.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
     ) {
@@ -2754,12 +2979,13 @@ export class Launcher {
       const profile = this.store.getProfile(profileId);
       if (!profile) throw new Error(`cannot verify survivor ${profileId}: profile is missing`);
       this.assertHostCompatibility(profile);
-      const approvedBinarySha256 = this.approvedBinarySha256();
+      const approvedBinarySha256 = this.approvedBinarySha256(profile.engine);
       const launch = this.store.getLaunch(profileId);
       if (!launch || `${launch.debugPort}:${launch.startedAt}` !== generation) return null;
       this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
       if (
-        launch.headless !== true
+        launch.engine !== "firefox"
+        && launch.headless !== true
         && !this.procs.has(profileId)
         && launch.searchBootstrapRevision !== SEARCH_PROVIDER_BOOTSTRAP_REVISION
       ) {
@@ -2904,6 +3130,9 @@ export class Launcher {
   }
 
   private async probeLaunchCdp(launch: LaunchInfo): Promise<string | null> {
+    if (launch.engine === "firefox") {
+      try { await this.firefoxStatus(launch); return launch.ws; } catch { return null; }
+    }
     try {
       const res = await this.fetchFn(`http://127.0.0.1:${launch.debugPort}/json/version`);
       if (!res.ok) return null;
@@ -2928,6 +3157,9 @@ export class Launcher {
   async diagnoseCdp(profileId: string): Promise<string> {
     const launch = this.store.getLaunch(profileId);
     if (!launch) return "no launch record";
+    if (launch.engine === "firefox") {
+      return `engine=firefox pid=${launch.pid} owner=${await this.probeLaunchCdp(launch) ? "reachable" : "unreachable"}`;
+    }
     const parts: string[] = [`pid=${launch.pid}`, `port=${launch.debugPort}`];
     try {
       process.kill(launch.pid, 0); // signal 0 = existence check (throws if the process is gone)
@@ -2961,6 +3193,11 @@ export class Launcher {
   async bringToFront(profileId: string): Promise<void> {
     const launch = this.store.getLaunch(profileId);
     if (!launch) throw new Error("profile is not running");
+    if (launch.engine === "firefox" && launch.firefoxOwner) {
+      await this.firefoxStatus(launch);
+      await this.firefoxRuntime.call(launch.firefoxOwner, "bring-to-front", {});
+      return;
+    }
     await raiseWindow(launch.ws);
   }
 
@@ -2974,11 +3211,13 @@ export class Launcher {
    * deleting them under a running Chrome risks corruption. Never throws.
    */
   async clearCache(profileId: string): Promise<{ cleared: boolean }> {
-    return this.clearCacheDirs(profileId, CACHE_DIRS, "clearCache");
+    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_CACHE_DIRS : CACHE_DIRS;
+    return this.clearCacheDirs(profileId, dirs, "clearCache");
   }
 
   private clearPostStopCache(profileId: string): void {
-    const { cleared } = this.clearCacheDirs(profileId, POST_STOP_CACHE_DIRS, "post-stop cache cleanup");
+    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_CACHE_DIRS : POST_STOP_CACHE_DIRS;
+    const { cleared } = this.clearCacheDirs(profileId, dirs, "post-stop cache cleanup");
     if (cleared) this.log(`${profileId}: rebuildable disk caches cleared after confirmed stop`);
   }
 

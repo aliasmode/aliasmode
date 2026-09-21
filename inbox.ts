@@ -12,7 +12,6 @@ import { join } from "node:path";
 import type { ParsedProfileImport } from "./parse.ts";
 import { parseImportFile } from "./import-formats.ts";
 import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
-import { attachTimezones } from "./geoip.ts";
 import type { Profile } from "./types.ts";
 import type { ProfileStore } from "./store.ts";
 
@@ -89,6 +88,10 @@ function unsafeImportError(problems: string[], status = 400): ProfileImportError
   return new ProfileImportError(`unsafe import rejected; no profiles were changed: ${problems.join("; ")}`, status);
 }
 
+function sameFirefoxConfig(a: Profile["firefox"], b: Profile["firefox"]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 /** Merge only fields actually present in an AdsPower re-export. */
 function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
   const p = incoming.profile;
@@ -129,9 +132,6 @@ function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
       ? { ...p.proxy, type: existing.proxy.type }
       : p.proxy;
     delete out.proxyError;
-    // A resolved timezone was attached to the supplied proxy. If resolution
-    // failed, store persistence keeps it only when the canonical proxy is equal.
-    out.timezone = p.timezone;
   }
   return out;
 }
@@ -145,7 +145,7 @@ export interface PreparedImportBatch {
 /** Decode, parse, validate, override, and enrich uploaded profile exports. */
 export async function prepareImportBuffers(
   files: { name: string; bytes: Uint8Array }[],
-  log: (msg: string) => void = console.log,
+  _log: (msg: string) => void = console.log,
   overrides: ImportOverrides = {},
   exists: (id: string) => boolean = () => false,
 ): Promise<PreparedImportBatch> {
@@ -176,12 +176,6 @@ export async function prepareImportBuffers(
   }
   if (problems.length) throw unsafeImportError(problems);
 
-  const toResolve = collected
-    .filter((entry) => entry.presentFields.includes("proxy") && entry.profile.proxy && !entry.profile.timezone)
-    .map((entry) => entry.profile);
-  const { resolved } = await attachTimezones(toResolve);
-  if (toResolve.length) log(`import: resolved timezone for ${resolved}/${toResolve.length} supplied proxy/proxies`);
-
   return {
     imports: collected,
     profiles: collected.map((entry) => entry.profile),
@@ -210,8 +204,8 @@ export async function importBuffers(
   ], 409);
   const problems: string[] = [];
 
-  // Merge after the asynchronous lookup so the database snapshot cannot go
-  // stale while awaiting the network. No await occurs between here and commit.
+  // All parsing and validation completed before this point. No await occurs
+  // between reading the current rows and committing the merged batch.
   const prepared: Profile[] = [];
   for (const entry of collected) {
     const existing = store.getProfile(entry.profile.id);
@@ -220,6 +214,13 @@ export async function importBuffers(
       continue;
     }
     const present = new Set(entry.presentFields);
+    if (present.has("engine") || present.has("firefox_config")) {
+      if ((entry.profile.engine ?? "chromium") !== (existing.engine ?? "chromium")) {
+        problems.push(`${entry.source}: profile ${entry.profile.id}: profile engine cannot change in place`);
+      } else if (existing.engine === "firefox" && !sameFirefoxConfig(existing.firefox, entry.profile.firefox)) {
+        problems.push(`${entry.source}: profile ${entry.profile.id}: Firefox config cannot change through import`);
+      }
+    }
     if (present.has("proxy") && !entry.profile.proxy && (existing.proxy || existing.proxyError)) {
       problems.push(`${entry.source}: profile ${entry.profile.id}: blank proxy would erase the stored proxy; use profile edit to remove it explicitly`);
     }
@@ -290,8 +291,8 @@ export function watchInbox(
   let inFlight = Promise.resolve();
 
   // Signature of the inbox's .txt files (name+size). Used to skip re-importing
-  // — and re-running the geoip batch — when a watch event didn't actually change
-  // any export (e.g. a null-filename directory event on Linux inotify).
+  // when a watch event did not actually change an export (for example, a
+  // null-filename directory event on Linux inotify).
   const inboxSig = () =>
     readdirSync(dir)
       .filter((f) => f.toLowerCase().endsWith(".txt"))

@@ -82,13 +82,17 @@ function escapeHtml(s: unknown): string {
 
 /**
  * AdsPower-style identity card for one profile: Name / Profile-No / Group / Platform /
- * Proxy, plus the live egress IP + geo (fetched by the page THROUGH the browser's proxy,
- * so it shows the account's real exit IP). Served over loopback, which Chromium reaches
- * directly (localhost bypasses the proxy), while ip-api goes out through the proxy.
+ * Proxy and stored identity data only. This page never makes an egress lookup:
+ * the operator can use the dashboard's explicit proxy check when needed.
  */
 function renderProfileCard(store: ProfileStore, id: string): Response {
   const p = store.getProfile(id);
   if (!p) return new Response("unknown profile", { status: 404, headers: { "content-type": "text/plain" } });
+  const engine = typeof p === "object" && "engine" in p && p.engine === "firefox" ? "firefox" : "chromium";
+  const browser = engine === "firefox" ? "AliasMode Firefox" : "CloakBrowser";
+  const capabilities = engine === "firefox"
+    ? "Native Firefox profile · no CDP, PDF, or Chrome extensions"
+    : "CDP, PDF, and Chrome extensions";
   // Same number the browser window title and identity bookmark show: the
   // operator's custom NO. first, the store serial as fallback.
   const no = profileDisplayNo(p.customNo, store.getSerial(id)) ?? "?";
@@ -98,31 +102,24 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
 <style>
   body{font-family:'Segoe UI',system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}
   .hero{background:linear-gradient(135deg,#1d4ed8,#2563eb);padding:26px;text-align:center}
-  .ip{font-size:32px;font-weight:700;letter-spacing:.5px} .geo{opacity:.9;margin-top:4px}
+  .browser{font-size:22px;font-weight:700;letter-spacing:.5px} .capabilities{opacity:.9;margin-top:4px}
   .card{max-width:640px;margin:22px auto;background:#1e293b;border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.3)}
   h2{padding:16px 20px 6px;margin:0;font-size:15px;letter-spacing:.5px;opacity:.6;text-transform:uppercase}
   .row{display:flex;justify-content:space-between;gap:16px;padding:13px 20px;border-top:1px solid #334155}
   .k{opacity:.65} .v{font-weight:600;text-align:right;word-break:break-all}
 </style></head>
 <body>
-  <div class="hero"><div class="ip" id="ip">…</div><div class="geo" id="geo">checking egress IP…</div></div>
+  <div class="hero"><div class="browser">${escapeHtml(browser)}</div><div class="capabilities">${escapeHtml(capabilities)}</div></div>
   <div class="card">
     <h2>Account</h2>
     <div class="row"><span class="k">Name</span><span class="v">${escapeHtml(p.name)}</span></div>
     <div class="row"><span class="k">Profile No / ID</span><span class="v">${escapeHtml(no)} / ${escapeHtml(id)}</span></div>
     <div class="row"><span class="k">Group</span><span class="v">${escapeHtml(p.group) || "—"}</span></div>
     <div class="row"><span class="k">Platform</span><span class="v">${escapeHtml(p.platform) || "—"}</span></div>
+    <div class="row"><span class="k">Browser</span><span class="v">${escapeHtml(browser)}</span></div>
+    <div class="row"><span class="k">Timezone</span><span class="v">${escapeHtml(p.timezone) || "—"}</span></div>
     <div class="row"><span class="k">Proxy</span><span class="v">${escapeHtml(proxy)}</span></div>
   </div>
-  <script>
-    fetch("http://ip-api.com/json/?fields=query,country,regionName,city")
-      .then(function(r){return r.json()})
-      .then(function(d){
-        document.getElementById('ip').textContent = d.query || 'unknown';
-        document.getElementById('geo').textContent = [d.country,d.regionName,d.city].filter(Boolean).join(' / ') || '';
-      })
-      .catch(function(){ document.getElementById('ip').textContent='—'; document.getElementById('geo').textContent='(could not read egress IP)'; });
-  </script>
 </body></html>`;
   return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 }

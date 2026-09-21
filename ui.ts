@@ -69,6 +69,8 @@ export interface UiHealthMetadata {
 export interface UiProfile {
   id: string;
   name: string;
+  /** Browser family. Legacy profiles without a value are Chromium. */
+  engine: "chromium" | "firefox";
   group: string;
   /** Account platform: "x.com", "telegram.org", or "" (none). */
   platform: string;
@@ -106,6 +108,36 @@ export interface UiProfile {
   fpCapturedAt: string;
 }
 
+function profileEngine(profile: unknown): "chromium" | "firefox" {
+  return typeof profile === "object" && profile !== null && "engine" in profile && profile.engine === "firefox"
+    ? "firefox"
+    : "chromium";
+}
+
+function syncFirefoxTimezone(profile: Profile): void {
+  if (profileEngine(profile) !== "firefox") return;
+  if (!profile.firefox) throw new Error("Firefox profile is missing its saved configuration");
+  const { timezone: _timezone, ...config } = profile.firefox.config;
+  profile.firefox = {
+    ...profile.firefox,
+    config: { ...config, ...(profile.timezone ? { timezone: profile.timezone } : {}) },
+  };
+}
+
+function openResponse(
+  profile: unknown,
+  result: { port?: number; warning?: string },
+): Response {
+  const engine = profileEngine(profile);
+  return Response.json({
+    ok: true,
+    ...(engine === "firefox"
+      ? { engine, capabilities: { cdp: false, pdf: false, chromeExtensions: false } }
+      : { port: result.port }),
+    ...(result.warning === undefined ? {} : { warning: result.warning }),
+  });
+}
+
 /**
  * Map the store into redacted UiProfiles joined with running state. Status comes
  * from the launches table, which is authoritative for every browser THIS manager
@@ -119,6 +151,7 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
     return {
       id: p.id,
       name: p.name,
+      engine: profileEngine(p),
       group: p.group,
       platform: p.platform ?? "",
       tags: p.tags ?? [],
@@ -135,7 +168,7 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
       customNo: p.customNo ?? "",
       mobilePersona: isMobileUserAgent(p.ua),
       running: !!l,
-      debugPort: l?.debugPort,
+      ...(profileEngine(p) === "chromium" ? { debugPort: l?.debugPort } : {}),
       startedAt: l?.startedAt,
       // null when nothing was imported to check this profile against.
       fpVerdict: p.fpVerdict ?? null,
@@ -355,7 +388,7 @@ function profileEditView(p: Profile) {
   const proxy = px ? proxyLegacyString(px) : "";
   const conversion = isMobileUserAgent(p.ua) ? convertMobilePersonaToDesktop(p) : null;
   return {
-    id: p.id, name: p.name, group: p.group, platform: p.platform ?? "",
+    id: p.id, name: p.name, engine: profileEngine(p), group: p.group, platform: p.platform ?? "",
     proxyType: px?.type ?? "http", proxy,
     ...(p.proxyError ? { proxyError: p.proxyError } : {}),
     username: p.username, password: p.password,
@@ -364,6 +397,7 @@ function profileEditView(p: Profile) {
     extensions: p.extensions ?? [],
     tags: (p.tags ?? []).join(", "),
     customNo: p.customNo ?? "",
+    timezone: p.timezone,
     cookieCount: p.cookies.length, seeded: p.seeded,
     mobilePersona: !!conversion,
     ...(conversion ? {
@@ -393,6 +427,9 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
   if ("twofa" in set) p.twofa = String(set.twofa ?? "");
   if ("resolution" in set) {
     const r = parseStrictResolution(set.resolution);
+    if (profileEngine(p) === "firefox" && (p.screenWidth !== r.width || p.screenHeight !== r.height)) {
+      throw new Error("Firefox screen settings cannot be changed");
+    }
     p.screenWidth = r.width;
     p.screenHeight = r.height;
   }
@@ -407,10 +444,13 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
       previousProxy?.pass !== nextProxy?.pass;
     p.proxy = nextProxy;
     delete p.proxyError;
-    if (proxyChanged) p.timezone = "";
   }
   if ("extensions" in set) {
-    p.extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
+    const extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
+    if (profileEngine(p) === "firefox" && extensions.length > 0) {
+      throw new Error("Chrome extensions are unavailable for Firefox profiles");
+    }
+    p.extensions = extensions;
   }
   if ("tags" in set) {
     p.tags = Array.isArray(set.tags)
@@ -1061,8 +1101,10 @@ export async function handleUiRequest(
         await launcher.reconcileOrphans();
         const roster = await remote.listRoster();
         const profiles = roster.profiles.map((p) => {
+          const { debugPort: _debugPort, ...profile } = p as typeof p & { debugPort?: number };
           const l = store.getLaunch(p.id);
-          return { ...p, running: !!l, debugPort: l?.debugPort };
+          const engine = profileEngine(p);
+          return { ...profile, engine, running: !!l, ...(engine === "chromium" ? { debugPort: l?.debugPort } : {}) };
         });
         return Response.json({ profiles, healthSources: roster.healthSources });
       }
@@ -1093,7 +1135,12 @@ export async function handleUiRequest(
       }
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
       if (!options.cloudBrowser) store.applyGroupExtensionDefaults(profile, null, false);
-      if (profile.proxy) await attachTimezones([profile], options.timezoneFetch).catch(() => {}); // best-effort tz
+      // Cloud keeps its existing server-side identity flow. Local profiles only
+      // resolve proxy geography after the operator explicitly requests it.
+      if (options.cloudBrowser && profile.proxy) {
+        await attachTimezones([profile], options.timezoneFetch).catch(() => {});
+        syncFirefoxTimezone(profile);
+      }
       if (options.cloudBrowser) {
         return Response.json({ ok: true, ...await options.cloudBrowser.create(profile) });
       }
@@ -1427,7 +1474,6 @@ export async function handleUiRequest(
       const errors: Array<{ id: string; error: string }> = [];
       const pending = new Map<string, Profile>();
       const cloudPending = new Map<string, Record<string, string>>();
-      const proxyChanged = new Set<string>();
       for (const [, value] of form) {
         if (!(value instanceof File)) continue;
         const bytes = new Uint8Array(await value.arrayBuffer());
@@ -1454,7 +1500,7 @@ export async function handleUiRequest(
           if (!p) { notFound.push(u.id); continue; }
           try {
             const previousGroup = p.group;
-            if (applyEdits(p, u.set)) proxyChanged.add(u.id);
+            applyEdits(p, u.set);
             store.applyGroupExtensionDefaults(p, previousGroup, "extensions" in u.set);
             pending.set(u.id, p);
           } catch (error) {
@@ -1491,12 +1537,6 @@ export async function handleUiRequest(
           { ok: false, error: `profile(s) ${liveIds.join(", ")} are currently open; no profiles were changed` },
           { status: 409 },
         );
-      }
-      const changedProxies = [...proxyChanged]
-        .map((id) => pending.get(id))
-        .filter((profile): profile is Profile => !!profile?.proxy);
-      if (changedProxies.length > 0) {
-        await attachTimezones(changedProxies, options.timezoneFetch).catch(() => {});
       }
       store.upsertProfiles([...pending.values()]);
       updated = pending.size;
@@ -1693,6 +1733,10 @@ export async function handleUiRequest(
       const extId = String(body.extensionId ?? "").trim();
       const add = body.op !== "remove";
       if (!ids.length || !extId) return Response.json({ ok: false, error: "ids and extensionId required" }, { status: 400 });
+      const firefoxIds = ids.filter((id) => profileEngine(store.getProfile(id)) === "firefox");
+      if (firefoxIds.length > 0) {
+        return Response.json({ ok: false, error: "Chrome extensions are unavailable for Firefox profiles" }, { status: 400 });
+      }
       if (add && !store.getExtension(extId)) return Response.json({ ok: false, error: "unknown extension" }, { status: 404 });
       const liveIds = [...new Set(ids.filter((id) => !!store.getLaunch(id)))];
       if (liveIds.length > 0) {
@@ -1704,6 +1748,28 @@ export async function handleUiRequest(
       return Response.json({ ok: true, updated: store.assignExtension(ids, extId, add) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  const timezoneRoute = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/timezone$/);
+  if (timezoneRoute && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    if (remote || options.cloudBrowser) {
+      return Response.json({ ok: false, error: "timezone lookup is available for Local profiles only" }, { status: 400 });
+    }
+    try {
+      const id = decodeURIComponent(timezoneRoute[1]!);
+      if (!isSafeProfileId(id)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+      const profile = store.getProfile(id);
+      if (!profile) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+      if (!profile.proxy) return Response.json({ ok: false, error: "profile has no proxy" }, { status: 400 });
+      await attachTimezones([profile], options.timezoneFetch);
+      syncFirefoxTimezone(profile);
+      store.upsertProfile(profile);
+      return Response.json({ ok: true, timezone: profile.timezone });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 500 });
     }
   }
 
@@ -1720,6 +1786,9 @@ export async function handleUiRequest(
     }
     if (!isSafeProfileId(id)) {
       return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    }
+    if (profileEngine(store.getProfile(id)) === "firefox") {
+      return Response.json({ ok: false, error: "adding cookies to an open Firefox profile is unavailable" }, { status: 400 });
     }
 
     let body: Record<string, unknown>;
@@ -1779,7 +1848,11 @@ export async function handleUiRequest(
     // Raising the window is a purely LOCAL operation (the browser runs on this operator in both
     // modes; bringToFront uses the local launch record + CDP), so it works in remote mode too.
     try {
-      await launcher.bringToFront(decodeURIComponent(raise[1]!));
+      const id = decodeURIComponent(raise[1]!);
+      if (profileEngine(store.getProfile(id)) === "firefox") {
+        return Response.json({ ok: false, error: "bringing a Firefox profile to the front is unavailable" }, { status: 400 });
+      }
+      await launcher.bringToFront(id);
       return Response.json({ ok: true });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
@@ -1858,6 +1931,10 @@ export async function handleUiRequest(
           const liveProxyChanged = applyEdits(live, set);
           if (liveProxyChanged && live.proxy) {
             await attachTimezones([live], options.timezoneFetch).catch(() => {});
+            syncFirefoxTimezone(live);
+          } else if (liveProxyChanged) {
+            live.timezone = "";
+            syncFirefoxTimezone(live);
           }
           const committed = await (options.cloudBrowser.commitLiveEdit?.(live) ?? Promise.resolve(false));
           if (!committed) {
@@ -1892,11 +1969,8 @@ export async function handleUiRequest(
       const p = remote ? await remote.getProfile(id).catch(() => null) : store.getProfile(id);
       if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
       const previousGroup = p.group;
-      const proxyChanged = applyEdits(p, set);
+      applyEdits(p, set);
       if (!remote) store.applyGroupExtensionDefaults(p, previousGroup, "extensions" in set);
-      if (proxyChanged && p.proxy) {
-        await attachTimezones([p], options.timezoneFetch).catch(() => {});
-      }
       if (remote) await remote.saveProfile(p);
       else store.upsertProfile(p);
       return Response.json({ ok: true });
@@ -1968,7 +2042,7 @@ export async function handleUiRequest(
         if (action[2] === "open") {
           const result = await options.cloudBrowser.open(id);
           return result.ok
-            ? Response.json({ ok: true, port: result.port, warning: result.warning })
+            ? openResponse(store.getProfile(id), result)
             : Response.json({ ok: false, error: result.error ?? "open failed" }, { status: 500 });
         }
         if (action[2] === "close") {
@@ -1983,8 +2057,11 @@ export async function handleUiRequest(
       try {
         if (action[2] === "open") {
           const force = new URL(req.url).searchParams.get("force") === "1";
+          const profile = remote.getProfile
+            ? await remote.getProfile(id).catch(() => null)
+            : null;
           const r = await remote.open(id, [], force);
-          if (r.ok) return Response.json({ ok: true, port: r.port, warning: r.warning });
+          if (r.ok) return openResponse(profile, r);
           return Response.json(
             { ok: false, error: r.lockedBy ? `in use by ${r.lockedBy}` : (r.error ?? "open failed"), lockedBy: r.lockedBy },
             { status: r.lockedBy ? 409 : 500 },
@@ -2000,11 +2077,12 @@ export async function handleUiRequest(
         return Response.json({ ok: false, error: msg(e) }, { status: 500 });
       }
     }
-    if (!store.getProfile(id)) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    const profile = store.getProfile(id);
+    if (!profile) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
     try {
       if (action[2] === "open") {
         const r = await launcher.start(id);
-        return Response.json({ ok: true, port: r.port });
+        return openResponse(profile, r);
       }
       if (action[2] === "close") {
         const launch = store.getLaunch(id);
