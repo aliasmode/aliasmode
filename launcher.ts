@@ -1956,6 +1956,8 @@ export class Launcher {
     if (status.generation !== launch.firefoxOwner.generation || status.profileId !== launch.profileId
       || status.directory !== launch.userDataDir || status.executablePath !== launch.binaryPath
       || !Number.isInteger(status.browserPid) || status.browserPid <= 0
+      || !Number.isInteger(status.pid) || status.pid <= 0
+      || (launch.firefoxOwner.pid > 0 && status.pid !== launch.firefoxOwner.pid)
       || (launch.pid > 0 && status.browserPid !== launch.pid)) {
       throw new Error("Firefox owner identity does not match the launch");
     }

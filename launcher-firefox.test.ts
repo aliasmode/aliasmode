@@ -102,6 +102,17 @@ test("owner crash never permits duplicate Firefox and stop targets only exact pr
   expect(f.killed).toEqual([202]);
 });
 
+test("Firefox rejects status from a different owner process", async () => {
+  const f = fixture();
+  const call = f.options.firefoxRuntime!.call;
+  f.options.firefoxRuntime!.call = async (...args) => {
+    const result = await call<any>(...args);
+    return args[1] === "status" ? { ...result, pid: 999 } : result;
+  };
+  await expect(f.launcher.start(f.profile.id)).rejects.toBeInstanceOf(BrowserLaunchError);
+  expect(f.store.getLaunch(f.profile.id)).toBeNull();
+});
+
 test("Firefox refuses unsupported saved runtime identities without regenerating them", async () => {
   const f = fixture();
   const profile = { ...f.profile, firefox: { ...f.profile.firefox!, runtimeVersion: "unsupported-runtime" } };
