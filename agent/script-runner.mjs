@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { chromium } from "playwright-core";
+import { chromium, firefox } from "playwright-core";
 
 const scriptPath = process.argv[2];
 if (!scriptPath) throw new Error("script path is missing");
@@ -29,10 +29,13 @@ function firstInputLine() {
 
 async function run(input) {
   if (typeof input?.endpoint !== "string" || !input.endpoint) throw new Error("runner input is missing");
-  if (input.endpoint.startsWith("firefox://")) throw new Error("Firefox scripts run through the AliasMode manager");
+  if (input.endpoint.startsWith("firefox://")) throw new Error("Firefox scripts require a private Playwright endpoint");
+  if (input.engine !== undefined && input.engine !== "firefox") throw new Error("runner input is invalid");
   let browser;
   try {
-    browser = await chromium.connectOverCDP(input.endpoint, { timeout: 30_000 });
+    browser = input.engine === "firefox"
+      ? await firefox.connect(input.endpoint, { timeout: 30_000 })
+      : await chromium.connectOverCDP(input.endpoint, { timeout: 30_000 });
     const context = browser.contexts()[0];
     if (!context) throw new Error("AliasMode browser context is unavailable");
     const page = context.pages()[0] ?? await context.newPage();
@@ -54,11 +57,20 @@ async function run(input) {
   }
 }
 
+function errorText(error, input) {
+  const text = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  return input?.engine === "firefox" && typeof input.endpoint === "string"
+    ? text.replaceAll(input.endpoint, "private Firefox endpoint")
+    : text;
+}
+
+let input;
 try {
-  await run(JSON.parse(await firstInputLine()));
+  input = JSON.parse(await firstInputLine());
+  await run(input);
 } catch (error) {
   process.exitCode = 1;
-  console.error(error instanceof Error ? error.stack : error);
+  console.error(errorText(error, input));
 } finally {
   process.stdin.pause();
 }

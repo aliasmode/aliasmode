@@ -38,7 +38,10 @@ async def run_script(input_value: dict) -> None:
     playwright = None
     try:
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.connect_over_cdp(input_value["endpoint"], timeout=30_000)
+        if input_value.get("engine") == "firefox":
+            browser = await playwright.firefox.connect(input_value["endpoint"], timeout=30_000)
+        else:
+            browser = await playwright.chromium.connect_over_cdp(input_value["endpoint"], timeout=30_000)
         context = browser.contexts[0] if browser.contexts else None
         if context is None:
             raise RuntimeError("AliasMode browser context is unavailable")
@@ -80,7 +83,10 @@ def main() -> int:
         asyncio.run(run_script(input_value))
         return 0
     except BaseException:
-        traceback.print_exc()
+        text = traceback.format_exc()
+        if input_value.get("engine") == "firefox" and isinstance(input_value.get("endpoint"), str):
+            text = text.replace(input_value["endpoint"], "private Firefox endpoint")
+        sys.stderr.write(text)
         return 1
 
 

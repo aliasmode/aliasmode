@@ -237,8 +237,6 @@ export class AgentControlSession {
           name: stringParam(params, "name"),
           ...(params.arguments === undefined ? {} : { arguments: object(params.arguments) }),
         });
-      case "firefox.script.run":
-        return await this.runFirefoxScript(params);
       case "browser.detach":
         return this.detachProfile(stringParam(params, "profileId"));
       case "browser.close":
@@ -335,13 +333,6 @@ export class AgentControlSession {
       throw agentError("browser_not_running", "This Firefox profile is not safely running");
     }
     return await (this.deps.firefoxCall ?? callFirefoxOwner)(launch.firefoxOwner, operation, payload);
-  }
-
-  private async runFirefoxScript(params: Record<string, unknown>): Promise<unknown> {
-    const profileId = stringParam(params, "profileId");
-    const scriptPath = stringParam(params, "scriptPath");
-    const input = object(params.input ?? {});
-    return await this.firefoxCall(profileId, "run-script", { scriptPath, input });
   }
 
   private async listProfiles(): Promise<SafeProfile[]> {

@@ -138,6 +138,7 @@ async function profiles(args: string[]): Promise<unknown> {
       ...(value(rest, "name") ? { name: value(rest, "name") } : {}),
       ...(value(rest, "group") ? { group: value(rest, "group") } : {}),
       ...(value(rest, "platform") ? { platform: value(rest, "platform") } : {}),
+      ...(value(rest, "engine") ? { engine: value(rest, "engine") } : {}),
       ...(value(rest, "screen") ? { screen: value(rest, "screen") } : {}),
     };
     return await withRuntime((client) => client.call("profiles.create", {
@@ -206,15 +207,7 @@ async function playwright(args: string[]): Promise<unknown> {
     });
     try {
       if (opened.engine === "firefox") {
-        return await client.call("firefox.script.run", {
-          profileId,
-          scriptPath: resolve(file),
-          input: {
-            profile: { id: profileId, name: "", group: "", platform: "" },
-            inputs: {},
-            credentials: null,
-          },
-        });
+        throw new Error("Firefox scripts run through the AliasMode script library");
       }
       const output = await new Promise<string>((resolveOutput, reject) => {
         const child = spawn(node, [runner, resolve(file)], {

@@ -159,6 +159,7 @@ export interface ScriptRun {
 interface RunRequest { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean }
 interface RunnerInput {
   endpoint: string;
+  engine?: "firefox";
   profile: { id: string; name: string; group: string; platform: string };
   inputs: Record<string, unknown>;
   credentials: Record<string, string> | null;
@@ -351,16 +352,14 @@ export class ScriptSupervisor {
             credentials: request.useCredentials ? Object.fromEntries(["username", "password", "email", "emailPassword", "twofa"].map((key) => [key, (profile as unknown as Record<string, string>)[key] ?? ""])) : null,
           };
           if (opened.engine === "firefox") {
-            if (script.language !== "javascript") throw new ScriptError("Firefox supports JavaScript scripts only", 400);
             const launch = this.options.store.getLaunch(item.id) as { firefoxOwner?: FirefoxOwner } | null;
             if (!launch?.firefoxOwner) throw new ScriptError("Firefox browser owner is unavailable", 503);
-            const result = await callFirefoxOwner<{ logs?: unknown }>(launch.firefoxOwner, "run-script", {
-              scriptPath: path,
-              input,
-            }, { signal });
-            if (Array.isArray(result.logs) && result.logs.length) {
-              writeFileSync(fd, `${result.logs.map(String).join("\n")}\n`);
-            }
+            const { endpoint } = await callFirefoxOwner<{ endpoint?: unknown }>(launch.firefoxOwner, "playwright-endpoint", {}, { signal });
+            if (typeof endpoint !== "string" || !endpoint) throw new ScriptError("Firefox browser endpoint is unavailable", 503);
+            await (this.options.execute ?? executeScript)({
+              scriptPath: path, language: script.language, logFd: fd, signal,
+              input: { endpoint, engine: "firefox", ...input },
+            });
           } else {
             await (this.options.execute ?? executeScript)({
               scriptPath: path, language: script.language, logFd: fd, signal,

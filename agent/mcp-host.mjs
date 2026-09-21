@@ -123,6 +123,7 @@ const ALIAS_TOOLS = [
         name: { type: "string" },
         group: { type: "string" },
         platform: { type: "string" },
+        engine: { type: "string", enum: ["chromium", "firefox"] },
         screen: { type: "string" },
         proxy: {
           anyOf: [
