@@ -5,10 +5,15 @@ on:
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
+      - scripts/firefox-launcher-acceptance.ts
       - scripts/firefox-owner-smoke.mjs
       - scripts/firefox-owner-smoke-manager.mjs
-      - firefox-runtime.ts
+      - launcher.ts
       - firefox-config.ts
+      - firefox-runtime.ts
+      - session.ts
+      - store.ts
+      - types.ts
       - firefox-worker.mjs
       - playwright-runtime.ts
       - playwright-worker.mjs
@@ -19,10 +24,15 @@ on:
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
+      - scripts/firefox-launcher-acceptance.ts
       - scripts/firefox-owner-smoke.mjs
       - scripts/firefox-owner-smoke-manager.mjs
-      - firefox-runtime.ts
+      - launcher.ts
       - firefox-config.ts
+      - firefox-runtime.ts
+      - session.ts
+      - store.ts
+      - types.ts
       - firefox-worker.mjs
       - playwright-runtime.ts
       - playwright-worker.mjs
@@ -97,6 +107,7 @@ jobs:
             throw "owned AliasMode Firefox did not report Firefox 152.0.4"
           }
           "ALIASMODE_FIREFOX_BINARY_PATH=$($executables[0].FullName)" | Add-Content $env:GITHUB_ENV
+          "ALIASMODE_FIREFOX_BINARY_SHA256=$((Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: pwsh
         run: |
@@ -108,10 +119,15 @@ jobs:
       - name: Prove detached Firefox owner lifecycle
         shell: pwsh
         run: |
-          $browser = Join-Path $env:RUNNER_TEMP 'camoufox/camoufox.exe'
-          bun scripts/firefox-owner-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-owner-headless-proof')
+          bun scripts/firefox-owner-smoke.mjs $env:ALIASMODE_FIREFOX_BINARY_PATH (Join-Path $env:RUNNER_TEMP 'firefox-owner-headless-proof')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          bun scripts/firefox-owner-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-owner-headed-proof') --headed
+          bun scripts/firefox-owner-smoke.mjs $env:ALIASMODE_FIREFOX_BINARY_PATH (Join-Path $env:RUNNER_TEMP 'firefox-owner-headed-proof') --headed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove Launcher persistence and portable handoff
+        shell: pwsh
+        run: |
+          $proof = Join-Path $env:RUNNER_TEMP "firefox-launcher-source-$([guid]::NewGuid().ToString('N'))"
+          bun scripts/firefox-launcher-acceptance.ts $env:ALIASMODE_FIREFOX_BINARY_PATH $proof $env:ALIASMODE_FIREFOX_BINARY_SHA256
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()

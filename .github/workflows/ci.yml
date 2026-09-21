@@ -845,6 +845,16 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
             throw "owned AliasMode Firefox did not report Firefox 152.0.4"
           }
+      - name: Prove packaged Firefox Launcher persistence and portable handoff
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $metadata = Get-Content ".\src-tauri\generated\browser.json" -Raw | ConvertFrom-Json
+          $browser = Resolve-Path (Join-Path ".\src-tauri\resources\firefox" $metadata.firefox.executable)
+          $env:ALIASMODE_PLAYWRIGHT_RUNTIME = (Resolve-Path ".\src-tauri\resources\playwright").Path
+          $proof = Join-Path $env:RUNNER_TEMP "firefox-launcher-packaged-$([guid]::NewGuid().ToString('N'))"
+          bun scripts/firefox-launcher-acceptance.ts $browser $proof $metadata.firefox.sha256
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: bun run rust:test
       - name: Smoke-test compiled sidecar CDP runtime
         shell: pwsh
