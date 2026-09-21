@@ -6,15 +6,19 @@
  * and CloakBrowser derives a coherent, unique fingerprint + UA from that seed at
  * launch (forcing a separate UA would risk UA/UA-CH desync). The operator only
  * supplies name / folder / proxy / (optional) screen; timezone is resolved from
- * the proxy's geoip by the caller.
+ * the proxy's geoip by the caller. Chromium receives a deterministic launch seed;
+ * Firefox receives a complete persisted Camoufox config.
  */
 
-import type { Profile, ProxySpec } from "./types.ts";
+import type { Profile, ProfileEngine, ProxySpec } from "./types.ts";
+import { createFirefoxProfileConfig } from "./firefox-config.ts";
 import { deterministicSeed, hostPlatformOs } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { parseStrictCustomNo, parseStrictResolution } from "./parse.ts";
 
 export interface NewProfileInput {
+  /** Browser identity engine. Defaults to Chromium for compatibility. */
+  engine?: ProfileEngine;
   name?: string;
   group?: string;
   /** Account platform: "x.com", "telegram.org", or "" (none). */
@@ -67,9 +71,20 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
       const [width, height] = SCREENS[Math.floor(Math.random() * SCREENS.length)]!;
       return { width, height };
     })();
+  const engine = input.engine === undefined ? "chromium" : input.engine;
+  if (engine !== "chromium" && engine !== "firefox") throw new Error("unsupported profile engine");
+  const firefox = engine === "firefox"
+    ? createFirefoxProfileConfig(selected.width, selected.height)
+    : undefined;
+  const firefoxUa = firefox?.config["navigator.userAgent"];
+  const firefoxScreenWidth = firefox?.config["screen.width"];
+  const firefoxScreenHeight = firefox?.config["screen.height"];
+  const firefoxTimezone = firefox?.config.timezone;
 
   return {
     id,
+    engine,
+    ...(firefox ? { firefox } : {}),
     accId: "",
     name: (input.name || "").trim() || id, // AdsPower auto-names blank profiles after the id
     group: (input.group || "").trim(),
@@ -81,14 +96,14 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     twofa: (input.twofa || "").trim(),
     proxy,
     customNo: parseStrictCustomNo(input.customNo),
-    ua: "", // CloakBrowser derives a coherent UA from the seed at launch
+    ua: typeof firefoxUa === "string" ? firefoxUa : "", // Firefox's UA is generated with its persisted Camoufox config
     // ...but the platform must be pinned, or a blank UA means no
     // --fingerprint-platform flag and the browser inherits whatever host it
     // happens to run on — a silent identity change on a move between boxes.
-    platformOs: hostPlatformOs(),
-    timezone: "", // resolved from the proxy's geoip by the caller
-    screenWidth: selected.width,
-    screenHeight: selected.height,
+    platformOs: engine === "firefox" ? "windows" : hostPlatformOs(),
+    timezone: typeof firefoxTimezone === "string" ? firefoxTimezone : "", // Firefox saves a host timezone in its persisted config
+    screenWidth: typeof firefoxScreenWidth === "number" ? firefoxScreenWidth : selected.width,
+    screenHeight: typeof firefoxScreenHeight === "number" ? firefoxScreenHeight : selected.height,
     fingerprintSeed: deterministicSeed(id),
     cookies: [],
     seeded: false,

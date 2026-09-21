@@ -1,4 +1,8 @@
-use crate::{browser::BrowserRuntime, credentials, runtime_descriptor::RuntimeDescriptorState};
+use crate::{
+    browser::{BrowserRuntime, FirefoxRuntime},
+    credentials,
+    runtime_descriptor::RuntimeDescriptorState,
+};
 use reqwest::{redirect::Policy, Client};
 use serde::Deserialize;
 use std::{
@@ -387,6 +391,7 @@ pub async fn launch_and_verify(
     app: &AppHandle,
     data_dir: &Path,
     browser: &BrowserRuntime,
+    firefox: &FirefoxRuntime,
     playwright_runtime: &Path,
     nonce: &str,
     agent_nonce: &str,
@@ -401,7 +406,9 @@ pub async fn launch_and_verify(
         .env("ALIASMODE_DESKTOP_VERSION", VERSION)
         .env("ALIASMODE_PLAYWRIGHT_RUNTIME", playwright_runtime)
         .env("CLOAKBROWSER_BINARY_PATH", &browser.executable)
-        .env("CLOAKBROWSER_BINARY_SHA256", &browser.sha256);
+        .env("CLOAKBROWSER_BINARY_SHA256", &browser.sha256)
+        .env("ALIASMODE_FIREFOX_BINARY_PATH", &firefox.executable)
+        .env("ALIASMODE_FIREFOX_BINARY_SHA256", &firefox.sha256);
 
     let (mut events, child) = command.spawn().map_err(|error| error.to_string())?;
     let pid = child.pid();

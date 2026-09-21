@@ -8,6 +8,48 @@ import { ALIASMODE_VERSION } from "../version.ts";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
+function firefoxArchive(executable = "owned-firefox"): { bytes: Uint8Array; archiveSha256: string; executableSha256: string } {
+  const name = new TextEncoder().encode("firefox/aliasmode.exe");
+  const contents = new TextEncoder().encode(executable);
+  const local = new Uint8Array(30 + name.length + contents.length);
+  const localView = new DataView(local.buffer);
+  localView.setUint32(0, 0x04034b50, true);
+  localView.setUint16(4, 20, true);
+  localView.setUint32(18, contents.length, true);
+  localView.setUint32(22, contents.length, true);
+  localView.setUint16(26, name.length, true);
+  local.set(name, 30);
+  local.set(contents, 30 + name.length);
+
+  const central = new Uint8Array(46 + name.length);
+  const centralView = new DataView(central.buffer);
+  centralView.setUint32(0, 0x02014b50, true);
+  centralView.setUint16(4, 20, true);
+  centralView.setUint16(6, 20, true);
+  centralView.setUint32(20, contents.length, true);
+  centralView.setUint32(24, contents.length, true);
+  centralView.setUint16(28, name.length, true);
+  central.set(name, 46);
+
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, 1, true);
+  endView.setUint16(10, 1, true);
+  endView.setUint32(12, central.length, true);
+  endView.setUint32(16, local.length, true);
+
+  const bytes = new Uint8Array(local.length + central.length + end.length);
+  bytes.set(local);
+  bytes.set(central, local.length);
+  bytes.set(end, local.length + central.length);
+  return {
+    bytes,
+    archiveSha256: createHash("sha256").update(bytes).digest("hex"),
+    executableSha256: sha256(executable),
+  };
+}
+
 test("Windows sidecar supports x64 CPUs without AVX2", () => {
   expect(WINDOWS_SIDECAR_TARGET).toBe("bun-windows-x64-baseline");
 });
@@ -16,6 +58,7 @@ function workspace(): string {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-windows-bundle-"));
   mkdirSync(join(cwd, "src-tauri"), { recursive: true });
   writeFileSync(join(cwd, "playwright-worker.mjs"), "worker");
+  writeFileSync(join(cwd, "firefox-worker.mjs"), "firefox worker");
   mkdirSync(join(cwd, "agent"), { recursive: true });
   for (const file of [
     "mcp-host.mjs",
@@ -53,9 +96,10 @@ async function installPython(root: string): Promise<void> {
   writeFileSync(join(python, "Lib", "site-packages", "playwright", "driver", "node.exe"), "driver");
 }
 
-test("Windows bundle preparation packages the official runtime and records its hash", async () => {
+test("Windows bundle preparation packages CloakBrowser and owned Firefox with verified hashes", async () => {
   const cwd = workspace();
   const browserBytes = "official-browser";
+  const firefox = firefoxArchive();
   const staging = join(cwd, "src-tauri", "target", "desktop-staging");
   const browserCache = join(cwd, "src-tauri", "target", "cloakbrowser-cache");
   mkdirSync(staging, { recursive: true });
@@ -67,6 +111,7 @@ test("Windows bundle preparation packages the official runtime and records its h
       cwd,
       platform: "win32",
       arch: "x64",
+      firefoxArchive: firefox,
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
       compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
@@ -93,14 +138,23 @@ test("Windows bundle preparation packages the official runtime and records its h
       executable: "chrome.exe",
       sha256: sha256(browserBytes),
       wrapperVersion: "0.4.11",
+      firefox: {
+        executable: "firefox/aliasmode.exe",
+        sha256: firefox.executableSha256,
+        version: "152.0.4-beta.30",
+        archiveSha256: firefox.archiveSha256,
+      },
     });
     expect(readFileSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chrome.dll"), "utf8")).toBe("dll");
     expect(existsSync(join(cwd, "src-tauri", "resources", "cloakbrowser", "chromedriver.exe"))).toBe(false);
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "firefox", "firefox", "aliasmode.exe"), "utf8")).toBe("owned-firefox");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node", "node.exe"), "utf8")).toBe("node");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "python", "python.exe"), "utf8")).toBe("python");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "agent", "script-runner.mjs"), "utf8")).toBe("script-runner.mjs");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "agent", "script-runner.py"), "utf8")).toBe("script-runner.py");
     expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "worker.mjs"), "utf8")).toBe("worker");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "playwright-worker.mjs"), "utf8")).toBe("worker");
+    expect(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "firefox-worker.mjs"), "utf8")).toBe("firefox worker");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "playwright-core", "package.json"), "utf8")).version).toBe("1.58.2");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "ws", "package.json"), "utf8")).version).toBe("8.21.0");
     expect(JSON.parse(readFileSync(join(cwd, "src-tauri", "resources", "playwright", "node_modules", "@modelcontextprotocol", "sdk", "package.json"), "utf8")).version).toBe("1.30.0");
@@ -124,6 +178,7 @@ test("Windows bundle preparation rejects a non-Windows browser payload", async (
       cwd,
       platform: "win32",
       arch: "x64",
+      firefoxArchive: firefoxArchive(),
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
       compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
@@ -155,6 +210,7 @@ test("Windows bundle preparation rejects installer paths outside its cache", asy
       cwd,
       platform: "win32",
       arch: "x64",
+      firefoxArchive: firefoxArchive(),
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
       compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
@@ -176,6 +232,7 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
       cwd,
       platform: "win32",
       arch: "x64",
+      firefoxArchive: firefoxArchive(),
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
       compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {
@@ -190,8 +247,42 @@ test("Windows bundle preparation rejects a changed packaged executable", async (
         writeFileSync(executable, "browser");
         return { path: executable, sha256: sha256("browser") };
       },
-      hashFile: async () => sha256("replaced"),
+      hashFile: async (path) => path.includes("firefox") ? sha256("owned-firefox") : sha256("replaced"),
     })).rejects.toThrow("does not match the installed SHA-256");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Windows bundle preparation rejects a Firefox archive hash mismatch", async () => {
+  const cwd = workspace();
+  const archive = firefoxArchive();
+  try {
+    await expect(prepareWindowsBundle({
+      cwd,
+      platform: "win32",
+      arch: "x64",
+      firefoxArchive: { ...archive, archiveSha256: sha256("replaced") },
+      compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
+    })).rejects.toThrow("Firefox archive SHA-256 does not match the approved CI artifact");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Windows bundle preparation rejects a Firefox executable hash mismatch", async () => {
+  const cwd = workspace();
+  const archive = firefoxArchive();
+  try {
+    await expect(prepareWindowsBundle({
+      cwd,
+      platform: "win32",
+      arch: "x64",
+      firefoxArchive: { ...archive, executableSha256: sha256("replaced") },
+      compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
+      compileAgent: async (output) => { writeFileSync(output, "agent"); },
+    })).rejects.toThrow("Firefox executable does not match the approved SHA-256");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -202,6 +293,7 @@ test("Windows bundle preparation rejects a changed Python archive before extract
   try {
     await expect(prepareWindowsBundle({
       cwd, platform: "win32", arch: "x64",
+      firefoxArchive: firefoxArchive(),
       compileSidecar: async (output) => { writeFileSync(output, "sidecar"); },
       compileAgent: async (output) => { writeFileSync(output, "agent"); },
       installNode: async (root) => {

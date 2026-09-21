@@ -11,7 +11,7 @@ import {
   runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
-import { captureSession } from "./playwright-worker.mjs";
+import { captureSession, restoreSession } from "./playwright-worker.mjs";
 
 const bunAsNodeTest = process.platform === "win32" ? test.skip : test;
 
@@ -31,6 +31,15 @@ test("resolves source workers beside the Bun entrypoint under Node from PATH", (
     root: sourceRoot,
     nodeExecutable: "node",
     workerPath: join(sourceRoot, "playwright-worker.mjs"),
+  });
+});
+
+test("resolves source workers beside the runtime module, not the command entrypoint", () => {
+  expect(resolvePlaywrightRuntime({ env: {} })).toEqual({
+    kind: "source",
+    root: import.meta.dir,
+    nodeExecutable: "node",
+    workerPath: join(import.meta.dir, "playwright-worker.mjs"),
   });
 });
 
@@ -254,8 +263,15 @@ bunAsNodeTest("importing the worker has no stdin or stdout side effects", async 
 
 test("native capture reads closed observed origins through storageState without CDP", async () => {
   let storageStateCalls = 0;
+  const registered: string[] = [];
   const context = {
     pages: () => [],
+    _connection: {
+      toImpl(value: unknown) {
+        expect(value).toBe(context);
+        return { addVisitedOrigin: (origin: string) => registered.push(origin) };
+      },
+    },
     async cookies() { return []; },
     async storageState(options: unknown) {
       storageStateCalls++;
@@ -274,11 +290,59 @@ test("native capture reads closed observed origins through storageState without 
     captureSeed: { origins: ["https://closed.example"] },
   }, { nativeStorage: true }));
   expect(storageStateCalls).toBe(1);
+  expect(registered).toEqual(["https://closed.example"]);
   expect(result).toEqual({
     cookies: [],
     origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value: "fresh" }] }],
     tabs: [],
   });
+});
+
+test("native capture fails when storageState lacks a closed observed origin", async () => {
+  const context = {
+    pages: () => [],
+    async cookies() { return []; },
+    async storageState() { return { origins: [] }; },
+    async newPage() { throw new Error("native capture must not create a visible page"); },
+  };
+  await expect(captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://closed.example"] },
+  }, { nativeStorage: true })).rejects.toMatchObject({
+    code: "operation_failed",
+    details: { operation: "origin_storage", outcome: "failed" },
+  });
+});
+
+test("native restore does not call Firefox CDP methods", async () => {
+  let handler: ((route: { fulfill: () => Promise<void> }) => Promise<void>) | undefined;
+  let routeUrl = "";
+  let closed = false;
+  const page = {
+    async goto(url: string) {
+      routeUrl = url;
+      await handler?.({ fulfill: async () => {} });
+    },
+    url: () => routeUrl,
+    async evaluate() {},
+    async close() { closed = true; },
+  };
+  const context = {
+    pages: () => [],
+    async newPage() { return page; },
+    async route(_url: string, value: typeof handler) { handler = value; },
+    async unroute() { handler = undefined; },
+    async clearCookies() {},
+    async addCookies() {},
+    async newCDPSession() { throw new Error("Firefox restore must not use CDP"); },
+  };
+  await restoreSession({}, context, {
+    bundle: JSON.stringify({ cookies: [], origins: [{
+      origin: "https://restored.example",
+      localStorage: [{ name: "session", value: "restored" }],
+    }] }),
+    urls: [],
+  }, { nativeStorage: true });
+  expect(closed).toBe(true);
 });
 
 bunAsNodeTest("worker imports all sites without replacing existing cookies and restores complete Cloud jars", async () => {

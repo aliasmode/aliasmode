@@ -40,6 +40,55 @@ test("upsert + get round-trips a full profile", () => {
   store.close();
 });
 
+test("store persists a Firefox identity and rejects in-place engine conversion", () => {
+  const store = memStore();
+  const chromium = parseExport(SAMPLE).profiles[0]!;
+  const firefox: Profile = {
+    ...chromium,
+    engine: "firefox",
+    firefox: {
+      version: 1,
+      runtimeVersion: "152.0.4-beta.30",
+      config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", nested: { value: true } },
+    },
+  };
+
+  store.upsertProfile(firefox);
+  expect(store.getProfile(firefox.id)).toMatchObject({
+    engine: "firefox",
+    firefox: firefox.firefox,
+  });
+  expect(() => store.upsertProfile({ ...chromium, engine: "chromium" })).toThrow("cannot change in place");
+  expect(() => store.upsertProfile({ ...firefox, firefox: { ...firefox.firefox!, version: 2 as any } })).toThrow(
+    "unsupported Firefox profile config version",
+  );
+  store.close();
+});
+
+test("store persists Firefox launch ownership without exposing it through profile data", () => {
+  const store = memStore();
+  const owner = { port: 4321, token: "test-only-owner-token" };
+  store.recordLaunch({
+    profileId: "firefox1",
+    pid: 123,
+    debugPort: 4321,
+    ws: "firefox://127.0.0.1:4321/1",
+    startedAt: 1,
+    engine: "firefox",
+    firefoxOwner: owner,
+    ownerBinaryPath: "C:\\Camoufox\\camoufox.exe",
+  } as any);
+
+  const launch = store.getLaunch("firefox1") as any;
+  expect(launch).toMatchObject({
+    engine: "firefox",
+    firefoxOwner: owner,
+    ownerBinaryPath: "C:\\Camoufox\\camoufox.exe",
+  });
+  expect(store.getProfile("firefox1")).toBeNull();
+  store.close();
+});
+
 test("rename is exact, idempotent, durable, and preserves all profile metadata", () => {
   const dir = mkdtempSync(join(tmpdir(), "cloak-rename-"));
   const db = join(dir, "profiles.sqlite");

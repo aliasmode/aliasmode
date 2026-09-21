@@ -70,6 +70,7 @@ import {
   createProfile,
   fetchProfileEdit,
   updateProfile,
+  refreshProfileTimezone,
   convertMobileProfile,
   exportProfiles,
   type ExportFormat,
@@ -683,15 +684,17 @@ const AUTOMATIC_FINGERPRINT_FIELDS = [
   ["CPU", "Automatic"],
   ["RAM", "Automatic"],
   ["Fingerprint seed", "Automatic · unique and stable"],
-  ["Timezone", "Automatic · from proxy"],
+  ["Timezone", "Stored · set from proxy on request"],
   ["Canvas / WebGL / audio", "Automatic"],
   ["WebRTC", "Automatic · proxy-aware"],
 ] as const;
 
 function FingerprintSettings({
+  engine,
   screen,
   onScreenChange,
 }: {
+  engine: "chromium" | "firefox";
   screen: string;
   onScreenChange: (value: string) => void;
 }) {
@@ -703,16 +706,24 @@ function FingerprintSettings({
       </summary>
       <div className="fingerprint-grid">
         <label className="fld">
-          <span>Screen</span>
-          <input value={screen} placeholder="Automatic · e.g. 1920x1080" onChange={(event) => onScreenChange(event.target.value)} />
+          <span>Browser</span>
+          <input value={engine === "firefox" ? "AliasMode Firefox" : "CloakBrowser"} readOnly tabIndex={-1} className="ro" />
         </label>
+        {engine === "chromium" && (
+          <label className="fld">
+            <span>Screen</span>
+            <input value={screen} placeholder="Automatic · e.g. 1920x1080" onChange={(event) => onScreenChange(event.target.value)} />
+          </label>
+        )}
         {AUTOMATIC_FINGERPRINT_FIELDS.map(([label, value]) => (
           <label className="fld" key={label}>
             <span>{label}</span>
             <input value={value} readOnly tabIndex={-1} className="ro" />
           </label>
         ))}
-        <div className="hint">CloakBrowser keeps the locked values coordinated. Screen is the only fingerprint setting you can override.</div>
+        <div className="hint">{engine === "firefox"
+          ? "AliasMode Firefox uses its native profile. CDP, PDF, and Chrome extensions are unavailable."
+          : "CloakBrowser keeps the locked values coordinated. Screen is the only fingerprint setting you can override."}</div>
       </div>
     </details>
   );
@@ -900,7 +911,7 @@ async function storeDesktopCloudCredentials(
 }
 
 const BLANK_FORM = {
-  name: "", group: "", platform: "", proxyType: "http", host: "", port: "", user: "", pass: "",
+  name: "", engine: "chromium" as "chromium" | "firefox", group: "", platform: "", proxyType: "http", host: "", port: "", user: "", pass: "",
   screen: "", customNo: "", username: "", password: "", email: "", emailPassword: "", twofa: "",
 };
 
@@ -1106,6 +1117,8 @@ function App() {
   // Cloud profile open on this device: edits land in the local cache and sync
   // to Cloud with the running session — no expectedVersion handshake.
   const [editLive, setEditLive] = useState(false);
+  const [editEngine, setEditEngine] = useState<"chromium" | "firefox">("chromium");
+  const [timezoneBusy, setTimezoneBusy] = useState(false);
   const editFetchId = useRef<string | null>(null);
   const [editMobile, setEditMobile] = useState<NonNullable<EditProfile["desktopConversion"]> | null>(null);
   const [editTotp, setEditTotp] = useState<{ code: string; secs: number } | null>(null);
@@ -2025,6 +2038,8 @@ function App() {
       existingGroups.filter((name) => profiles.some((profile) => profile.group === name && profile.permission === "edit")))
     : existingGroups;
   const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");
+  const selectedProfilesSupportChromeExtensions = [...selected].every((id) =>
+    profiles.find((profile) => profile.id === id)?.engine === "chromium");
   const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
   const canEditGroup = (name: string) => !isCloudMode ||
     team?.folders.some((folder) => folder.name === name && folder.permission === "edit" && !folder.archivedAt) === true ||
@@ -2324,6 +2339,7 @@ function App() {
     try {
       const r = await createProfile({
         name: form.name,
+        engine: form.engine,
         group: form.group,
         platform: form.platform,
         screen: form.screen,
@@ -2370,6 +2386,8 @@ function App() {
     setEditMobile(null);
     setEditExpectedVersion(null);
     setEditLive(false);
+    setEditEngine("chromium");
+    setTimezoneBusy(false);
     setEditErr(null);
     setEditLoading(true);
     void (async () => {
@@ -2384,7 +2402,9 @@ function App() {
           email: p.email, emailPassword: p.emailPassword, twofa: p.twofa,
           resolution: p.resolution, tags: p.tags,
           customNo: p.customNo ?? "",
+          timezone: p.timezone,
         });
+        setEditEngine(p.engine === "firefox" ? "firefox" : "chromium");
         setEditExts(p.extensions ?? []);
         setEditInitialExts(p.extensions ?? []);
         setEditMobile(p.desktopConversion ?? null);
@@ -2403,6 +2423,8 @@ function App() {
     setEditId(null);
     setEditExpectedVersion(null);
     setEditLive(false);
+    setEditEngine("chromium");
+    setTimezoneBusy(false);
     setEditLoading(false);
     setEditForm({});
     setEditExts([]);
@@ -2442,6 +2464,19 @@ function App() {
       }
     }
   };
+  const refreshEditedTimezone = async () => {
+    if (!editId || !editHasProxy) return;
+    setTimezoneBusy(true);
+    setEditErr(null);
+    try {
+      const { timezone } = await refreshProfileTimezone(editId);
+      setEditForm((form) => ({ ...form, timezone }));
+    } catch (error) {
+      setEditErr(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTimezoneBusy(false);
+    }
+  };
   const saveEdit = async () => {
     if (!editId) return;
     setEditSaving(true);
@@ -2455,7 +2490,7 @@ function App() {
         email: editForm.email ?? "", emailPassword: editForm.emailPassword ?? "", twofa: editForm.twofa ?? "",
         resolution: editForm.resolution ?? "", tags: editForm.tags ?? "",
         ...(!isCloudMode ? { customNo: editForm.customNo ?? "" } : {}),
-        ...(!sameExtensionSelection(editExts, editInitialExts) ? { extensions: editExts } : {}),
+        ...(!sameExtensionSelection(editExts, editInitialExts) && editEngine === "chromium" ? { extensions: editExts } : {}),
       }, isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined);
       if (r.ok) { closeEdit(); await load(); }
       else if (r.status === 409) {
@@ -3364,7 +3399,7 @@ function App() {
               <Icon name="move" className="sm" />Move
             </button>
           </div>
-          {!isCloudMode && extensions.length > 0 && (
+          {!isCloudMode && extensions.length > 0 && selectedProfilesSupportChromeExtensions && (
             <>
               <span className="vsep" />
               <div className="extctl">
@@ -3427,6 +3462,9 @@ function App() {
                         <span className="n">{p.name}<FingerprintBadge p={p} /></span>
                         <span className="sub">
                           {p.id}
+                          <span title={p.engine === "firefox" ? "Native Firefox profile · no CDP, PDF, or Chrome extensions" : "CloakBrowser · CDP, PDF, and Chrome extensions"}>
+                            {p.engine === "firefox" ? "AliasMode Firefox" : "CloakBrowser"}
+                          </span>
                           {p.running && <span className="live"><StatusDot running />running</span>}
                           {p.lockedBy && (
                             <span className="lockedby" title={`in use by ${p.lockedBy}`}>
@@ -3477,19 +3515,21 @@ function App() {
                         )}
                         {p.running ? (
                           <>
-                            <button
-                              className="iconbtn tip"
-                              data-tip="Add cookie"
-                              aria-label={`Add a cookie to ${p.name}`}
-                              onClick={() => openCookie(p)}
-                            ><Icon name="cookie" className="sm" /></button>
-                            <button
-                              className="iconbtn tip"
-                              data-tip="Bring to front"
-                              aria-label="Bring this browser window to the front"
-                              disabled={busy[p.id]}
-                              onClick={() => act(p.id, raiseProfile)}
-                            ><Icon name="raise" className="sm" /></button>
+                            {p.engine === "chromium" && <>
+                              <button
+                                className="iconbtn tip"
+                                data-tip="Add cookie"
+                                aria-label={`Add a cookie to ${p.name}`}
+                                onClick={() => openCookie(p)}
+                              ><Icon name="cookie" className="sm" /></button>
+                              <button
+                                className="iconbtn tip"
+                                data-tip="Bring to front"
+                                aria-label="Bring this browser window to the front"
+                                disabled={busy[p.id]}
+                                onClick={() => act(p.id, raiseProfile)}
+                              ><Icon name="raise" className="sm" /></button>
+                            </>}
                             <button className="btn sm solid-danger" aria-label={`Close ${p.name}`} disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>
                               <Icon name="power" className="sm" />Close
                             </button>
@@ -3633,7 +3673,7 @@ function App() {
               </form>
             </div>
           </section>
-          <p className="formnote">The in-browser Store button does not work in CloakBrowser. Paste the Store link above, or upload a ZIP/CRX archive.</p>
+          <p className="formnote">The in-browser Store button does not work in CloakBrowser. Paste the Store link above, or upload a ZIP/CRX archive. Chrome extensions apply only to CloakBrowser profiles.</p>
           <ol className="steps">
             <li>Install the extension here. New installs stay unassigned.</li>
             <li>Use <b>Edit &gt; Extensions</b> to assign it to a profile{!isCloudMode && ", or assign many at once from the roster toolbar"}.</li>
@@ -4136,6 +4176,14 @@ function App() {
                   </label>
                 )}
               </div>
+              <label className="fld">
+                <span>Browser</span>
+                <select value={form.engine} onChange={(e) => setF("engine", e.target.value)}>
+                  <option value="chromium">Chromium (CloakBrowser)</option>
+                  <option value="firefox">Firefox (AliasMode Firefox)</option>
+                </select>
+                <small>Firefox uses a native profile. CDP, PDF, and Chrome extensions are unavailable.</small>
+              </label>
               <div className="fld-row">
                 <label className="fld grow">
                   <span>Folder</span>
@@ -4200,7 +4248,7 @@ function App() {
                 </button>
               </div>
               <ProxyCheckFeedback hasProxy={createHasProxy} state={createProxyCheck} />
-              <FingerprintSettings screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
+              <FingerprintSettings engine={form.engine} screen={form.screen} onScreenChange={(value) => setF("screen", value)} />
             </div>
             <div className="modal-foot">
               <button className="btn ghost" onClick={closeCreate}>Cancel</button>
@@ -4278,6 +4326,13 @@ function App() {
                     </label>
                   </div>
                   <label className="fld">
+                    <span>Browser</span>
+                    <input value={editEngine === "firefox" ? "AliasMode Firefox" : "CloakBrowser"} readOnly className="ro" />
+                    <small>{editEngine === "firefox"
+                      ? "Native Firefox profile · no CDP, PDF, or Chrome extensions."
+                      : "CDP, PDF, and Chrome extensions are available."}</small>
+                  </label>
+                  <label className="fld">
                     <span>Tags <span className="muted">(comma-separated)</span></span>
                     <input value={editForm.tags ?? ""} placeholder="warmup, us, priority" onChange={(e) => setEF("tags", e.target.value)} />
                   </label>
@@ -4309,6 +4364,20 @@ function App() {
                     </button>
                   </div>
                   <ProxyCheckFeedback hasProxy={editHasProxy} state={editProxyCheck} />
+                  {!isCloudMode && (
+                    <div className="proxy-check-actions">
+                      <span className="hint">Timezone: {editForm.timezone || "not set"}</span>
+                      <button
+                        type="button"
+                        className="btn proxy-check-btn"
+                        disabled={timezoneBusy || !editHasProxy}
+                        onClick={refreshEditedTimezone}
+                      >
+                        <Icon name="activity" className="sm" />
+                        {timezoneBusy ? "Looking up timezone…" : "Set timezone from proxy"}
+                      </button>
+                    </div>
+                  )}
                   <div className="fld-row">
                     <CopyField label="Username" value={editForm.username ?? ""} onChange={(value) => setEF("username", value)} />
                     <CopyField label="Password" value={editForm.password ?? ""} onChange={(value) => setEF("password", value)} />
@@ -4328,8 +4397,8 @@ function App() {
                       </button>
                     </div>
                   )}
-                  <FingerprintSettings screen={editForm.resolution ?? ""} onScreenChange={(value) => setEF("resolution", value)} />
-                  {editExtensionChoices.length > 0 && (
+                  <FingerprintSettings engine={editEngine} screen={editForm.resolution ?? ""} onScreenChange={(value) => setEF("resolution", value)} />
+                  {editEngine === "chromium" && editExtensionChoices.length > 0 && (
                     <div className="fld">
                       <span>Extensions</span>
                       <div className="extassign">
@@ -4344,7 +4413,7 @@ function App() {
                   )}
                   <p className="formnote">
                     Cookies and locked fingerprint values are preserved. Only editable fields change.
-                    {" Extensions load when the browser opens."}
+                    {editEngine === "chromium" && " Extensions load when the browser opens."}
                   </p>
                 </>
               )}

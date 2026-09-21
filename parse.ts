@@ -21,6 +21,7 @@
  * and dropping AdsPower's own extension cookies.
  */
 
+import { normalizeProfileEngine } from "./firefox-config.ts";
 import type { CookieRecord, Profile, ProxySpec } from "./types.ts";
 import { deterministicSeed, parseResolution, platformFromUA } from "./fingerprint.ts";
 import { normalizeProxyType, parseProxySpec, proxyLegacyString } from "./proxy.ts";
@@ -250,6 +251,40 @@ function parsePlatformOs(raw: string | undefined): "windows" | "macos" | "linux"
   return s === "windows" || s === "macos" || s === "linux" ? s : null;
 }
 
+function parseFirefoxExport(
+  rec: Record<string, string>,
+  validationErrors: string[],
+): Pick<Profile, "engine" | "firefox"> {
+  const hasEngine = Object.hasOwn(rec, "engine");
+  const hasConfig = !!rec.firefox_config?.trim();
+  if (!hasEngine && !hasConfig) return {};
+
+  const engine = (rec.engine ?? "").trim().toLowerCase();
+  if (engine === "firefox") {
+    const rawConfig = rec.firefox_config?.trim();
+    if (!rawConfig) {
+      validationErrors.push("Firefox profiles require a Firefox config");
+      return { engine: "firefox" };
+    }
+    try {
+      return { engine: "firefox", firefox: normalizeProfileEngine("firefox", JSON.parse(rawConfig)).firefox! };
+    } catch (error) {
+      validationErrors.push(error instanceof Error ? error.message : String(error));
+      return { engine: "firefox" };
+    }
+  }
+  if (engine === "chromium") {
+    if (hasConfig) validationErrors.push("Chromium profiles cannot include a Firefox config");
+    return { engine: "chromium" };
+  }
+  if (hasConfig) {
+    validationErrors.push("Firefox config requires engine=firefox");
+  } else {
+    validationErrors.push("unsupported profile engine");
+  }
+  return {};
+}
+
 /**
  * Accept only an IANA-shaped zone name. The value goes straight onto the
  * browser command line as --fingerprint-timezone, so a free-text column must
@@ -330,8 +365,10 @@ export function recordToProfile(
   }
 
   const fpExpected = expectationFromRecord(rec);
+  const browser = parseFirefoxExport(rec, validationErrors);
   const profile: Profile = {
     id,
+    ...browser,
     accId: (rec.acc_id ?? "").trim(),
     name: (rec.name ?? "").trim(),
     group: (rec.group ?? "").trim(),
@@ -630,6 +667,8 @@ function profileFields(p: ProfileExport): Record<string, string> {
     platform_os: platform || "",
     extensions: (p.extensions ?? []).join(","),
     tags: (p.tags ?? []).join(","),
+    engine: p.engine ?? "chromium",
+    firefox_config: p.firefox ? JSON.stringify(p.firefox) : "",
     // Attested fields: a photograph of the identity, never an input to one.
     ...attestationFields(fp),
   };
@@ -647,6 +686,7 @@ const TXT_KEYS = [
   "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
   ...RESTORED_KEYS, ...FP_BLOCK_KEYS, "session", "session_source",
 ] as const;
+const FIREFOX_EXPORT_KEYS = ["engine", "firefox_config"] as const;
 
 /**
  * Columns of the Excel export. Same fields as the .txt block, but with `id`
@@ -658,12 +698,14 @@ export const XLSX_COLUMNS = [
   "email", "emailpassword", "fakey", "cookie", "proxytype", "proxy", "ua", "resolution",
   ...RESTORED_KEYS, ...FP_BLOCK_KEYS, "session", "session_source",
 ] as const;
+const FIREFOX_XLSX_COLUMNS = [...XLSX_COLUMNS, ...FIREFOX_EXPORT_KEYS] as const;
 
 /** Serialize profiles to the AdsPower `key=value` export format. */
 export function serializeAdsTxt(profiles: ProfileExport[]): string {
   const blocks = profiles.map((p) => {
     const f = profileFields(p);
-    return [...TXT_KEYS.map((k) => `${k}=${f[k]}`), "******************"].join("\n");
+    const keys = p.engine === "firefox" ? [...TXT_KEYS, ...FIREFOX_EXPORT_KEYS] : TXT_KEYS;
+    return [...keys.map((k) => `${k}=${f[k]}`), "******************"].join("\n");
   });
   return blocks.join("\n") + (blocks.length ? "\n" : "");
 }
@@ -674,11 +716,12 @@ export function serializeAdsTxt(profiles: ProfileExport[]): string {
  * the sheet and the .txt block stay one decision, not two.
  */
 export function serializeXlsxRows(profiles: ProfileExport[]): { headers: string[]; rows: string[][] } {
+  const columns = profiles.some((profile) => profile.engine === "firefox") ? FIREFOX_XLSX_COLUMNS : XLSX_COLUMNS;
   return {
-    headers: [...XLSX_COLUMNS],
+    headers: [...columns],
     rows: profiles.map((p) => {
       const f = profileFields(p);
-      return XLSX_COLUMNS.map((k) => f[k]!);
+      return columns.map((k) => f[k]!);
     }),
   };
 }

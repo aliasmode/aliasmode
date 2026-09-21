@@ -16,8 +16,10 @@ import type {
   LaunchInfo,
   ObservedFingerprint,
   Profile,
+  ProfileEngine,
   ProxySpec,
 } from "./types.ts";
+import { normalizeProfileEngine } from "./firefox-config.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { assertValidProfile } from "./profile-validation.ts";
@@ -31,6 +33,8 @@ export class ProfileStore {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS profiles (
         id TEXT PRIMARY KEY,
+        engine TEXT NOT NULL DEFAULT 'chromium',
+        firefox_config_json TEXT NOT NULL DEFAULT '',
         acc_id TEXT NOT NULL DEFAULT '',
         name TEXT NOT NULL DEFAULT '',
         "group" TEXT NOT NULL DEFAULT '',
@@ -77,7 +81,10 @@ export class ProfileStore {
         headless INTEGER,
         search_bootstrap_revision INTEGER,
         process_group_id INTEGER,
-        root_start_time TEXT
+        root_start_time TEXT,
+        engine TEXT,
+        firefox_owner_json TEXT,
+        owner_binary_path TEXT
       );
     `);
     // Migration for stores predating the proxy-auth relay (nullable: only authed-proxy launches set it).
@@ -101,6 +108,9 @@ export class ProfileStore {
       "search_bootstrap_revision INTEGER",
       "process_group_id INTEGER",
       "root_start_time TEXT",
+      "engine TEXT",
+      "firefox_owner_json TEXT",
+      "owner_binary_path TEXT",
     ]) {
       try {
         this.db.exec(`ALTER TABLE launches ADD COLUMN ${column}`);
@@ -139,6 +149,17 @@ export class ProfileStore {
         created_at INTEGER NOT NULL DEFAULT 0
       );
     `);
+    // Migration for persisted browser-engine identity. Legacy profiles are Chromium.
+    for (const col of [
+      "engine TEXT NOT NULL DEFAULT 'chromium'",
+      "firefox_config_json TEXT NOT NULL DEFAULT ''",
+    ]) {
+      try {
+        this.db.exec(`ALTER TABLE profiles ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
     // Migration for stores created before the timezone column existed.
     try {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN timezone TEXT NOT NULL DEFAULT ''`);
@@ -226,25 +247,30 @@ export class ProfileStore {
     // Defense in depth for direct hub/API/remote callers that bypass the import
     // parser. Invalid full-profile JSON must never reach persistent identity.
     assertValidProfile(p);
+    const browser = normalizeProfileEngine(p.engine, p.firefox);
     if (p.proxy && p.proxyError) throw new Error("profile cannot contain both a valid proxy and a proxy quarantine error");
     const proxy = p.proxyError ? null : normalizeProxySpec(p.proxy);
     const proxyError = p.proxyError?.trim() ?? "";
     const existing = this.db
-      .query<{ seeded: number; trashed_at: number }, [string]>("SELECT seeded, trashed_at FROM profiles WHERE id = ?")
+      .query<{ seeded: number; trashed_at: number; engine: unknown }, [string]>("SELECT seeded, trashed_at, engine FROM profiles WHERE id = ?")
       .get(p.id);
     if (existing?.trashed_at) throw new Error("Profile is in Trash; restore it before importing or editing it");
+    if (existing && storedProfileEngine(existing.engine) !== browser.engine) {
+      throw new Error("profile engine cannot change in place");
+    }
     const seeded = existing ? existing.seeded : p.seeded ? 1 : 0;
     this.db
       .query(
         `INSERT INTO profiles
-           (id, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone,
+           (id, engine, firefox_config_json, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone,
             screen_width, screen_height, fingerprint_seed, platform_os, fp_observed_json, fp_expected_json, fp_verdict_json, cookies_json, seeded, created_at)
          -- fp_verdict_json is literal '': a verdict is a COMPUTED fact, written
          -- only by saveObservedFingerprint from a real measurement. If a caller
          -- could supply one, an import could hand itself a "verified" badge and
          -- the badge would mean nothing.
-         VALUES ($id,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
+         VALUES ($id,$engine,$firefox,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
          ON CONFLICT(id) DO UPDATE SET
+           engine=$engine, firefox_config_json=$firefox,
            acc_id=$acc, name=$name, "group"=$group, platform=$platform, username=$user, password=$pass,
            email=$email, email_password=$emailPass, twofa=$twofa,
            -- An unrelated edit to a quarantined profile must preserve the raw
@@ -287,6 +313,8 @@ export class ProfileStore {
       )
       .run({
         $id: p.id,
+        $engine: browser.engine,
+        $firefox: browser.firefox ? JSON.stringify(browser.firefox) : "",
         $acc: p.accId,
         $name: p.name,
         $group: p.group,
@@ -498,14 +526,16 @@ export class ProfileStore {
   setGroupExtensionDefaults(name: string, extensionIds: string[]): number {
     const group = name.trim();
     if (!group) throw new Error("group name required");
-    const extensions = normalizeExtensionIds(extensionIds);
+    const defaultExtensions = normalizeExtensionIds(extensionIds);
     const apply = this.db.transaction(() => {
       this.registerGroup(group);
       this.db.query(`UPDATE groups SET extension_defaults_json = ? WHERE name = ?`)
-        .run(JSON.stringify(extensions), group);
+        .run(JSON.stringify(defaultExtensions), group);
       let changed = 0;
       for (const profile of this.listProfiles()) {
-        if (profile.group !== group || sameStrings(profile.extensions ?? [], extensions)) continue;
+        if (profile.group !== group) continue;
+        const extensions = profile.engine === "firefox" ? [] : defaultExtensions;
+        if (sameStrings(profile.extensions ?? [], extensions)) continue;
         profile.extensions = [...extensions];
         this.upsertProfile(profile);
         changed++;
@@ -517,6 +547,10 @@ export class ProfileStore {
 
   /** Apply a named destination's default unless assignments were explicitly supplied. */
   applyGroupExtensionDefaults(profile: Profile, previousGroup: string | null, extensionsExplicit: boolean): void {
+    if (profile.engine === "firefox") {
+      profile.extensions = [];
+      return;
+    }
     const destination = profile.group.trim();
     if (extensionsExplicit || !destination || previousGroup?.trim() === destination) return;
     profile.extensions = this.getGroupExtensionDefaults(destination);
@@ -708,19 +742,27 @@ export class ProfileStore {
   }
 
   recordLaunch(info: LaunchInfo): void {
+    const firefox = info as LaunchInfo & {
+      engine?: "chromium" | "firefox";
+      firefoxOwner?: unknown;
+      ownerBinaryPath?: string;
+    };
     this.db
       .query(
         `INSERT INTO launches
            (profile_id, pid, debug_port, ws, started_at, relay_port, session_base_version,
             binary_path, user_data_dir, binary_sha256, persona_digest, headless,
-            search_bootstrap_revision, process_group_id, root_start_time)
-         VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$headless,$search_bootstrap,$pgid,$root_start)
+            search_bootstrap_revision, process_group_id, root_start_time,
+            engine, firefox_owner_json, owner_binary_path)
+         VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$headless,$search_bootstrap,$pgid,$root_start,
+                 $engine,$firefox_owner,$owner_binary)
          ON CONFLICT(profile_id) DO UPDATE SET
            pid=$pid, debug_port=$port, ws=$ws, started_at=$at, relay_port=$relay,
            session_base_version=$base, binary_path=$binary, user_data_dir=$data,
            binary_sha256=$binary_sha, persona_digest=$persona, headless=$headless,
            search_bootstrap_revision=$search_bootstrap,
-           process_group_id=$pgid, root_start_time=$root_start`,
+           process_group_id=$pgid, root_start_time=$root_start,
+           engine=$engine, firefox_owner_json=$firefox_owner, owner_binary_path=$owner_binary`,
       )
       .run({
         $id: info.profileId,
@@ -738,6 +780,9 @@ export class ProfileStore {
         $search_bootstrap: info.searchBootstrapRevision ?? null,
         $pgid: info.processGroupId ?? null,
         $root_start: info.rootStartTime ?? null,
+        $engine: firefox.engine ?? null,
+        $firefox_owner: firefox.firefoxOwner === undefined ? null : JSON.stringify(firefox.firefoxOwner),
+        $owner_binary: firefox.ownerBinaryPath ?? null,
       });
     // Mirror the launch time onto the profile so the AdsPower user/list facade
     // can report last_open_time (the launches row is deleted on stop).
@@ -797,9 +842,12 @@ function optionalJson<T>(key: string, raw: unknown): Record<string, T> {
 }
 
 function rowToProfile(row: any): Profile {
+  const browser = normalizeProfileEngine(row.engine, readStoredFirefoxConfig(row.firefox_config_json));
   const stored = readStoredProxy(row.proxy_json, row.proxy_error);
   return {
     id: row.id,
+    engine: browser.engine,
+    ...(browser.firefox ? { firefox: browser.firefox } : {}),
     accId: row.acc_id ?? "",
     name: row.name ?? "",
     group: row.group ?? "",
@@ -828,6 +876,22 @@ function rowToProfile(row: any): Profile {
   };
 }
 
+function readStoredFirefoxConfig(raw: unknown): unknown {
+  if (raw == null || raw === "") return undefined;
+  if (typeof raw !== "string") throw new Error("invalid stored Firefox config encoding");
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("invalid stored Firefox config JSON");
+  }
+}
+
+function storedProfileEngine(value: unknown): ProfileEngine {
+  if (value == null || value === "") return "chromium";
+  if (value === "chromium" || value === "firefox") return value;
+  throw new Error("unsupported stored profile engine");
+}
+
 function readStoredProxy(raw: unknown, quarantined: unknown): { proxy: ProxySpec | null; error?: string } {
   const priorError = typeof quarantined === "string" ? quarantined.trim() : "";
   if (priorError) return { proxy: null, error: priorError };
@@ -847,6 +911,8 @@ function readStoredProxy(raw: unknown, quarantined: unknown): { proxy: ProxySpec
 }
 
 function rowToLaunch(row: any): LaunchInfo {
+  const engine = readStoredLaunchEngine(row.engine);
+  const firefoxOwner = readStoredFirefoxOwner(row.firefox_owner_json);
   return {
     profileId: row.profile_id,
     pid: row.pid,
@@ -863,5 +929,24 @@ function rowToLaunch(row: any): LaunchInfo {
     searchBootstrapRevision: row.search_bootstrap_revision ?? undefined,
     processGroupId: row.process_group_id ?? undefined,
     rootStartTime: row.root_start_time ?? undefined,
-  };
+    ...(engine ? { engine } : {}),
+    ...(firefoxOwner === undefined ? {} : { firefoxOwner }),
+    ...(row.owner_binary_path ? { ownerBinaryPath: row.owner_binary_path } : {}),
+  } as LaunchInfo;
+}
+
+function readStoredLaunchEngine(value: unknown): "chromium" | "firefox" | undefined {
+  if (value == null || value === "") return undefined;
+  if (value === "chromium" || value === "firefox") return value;
+  throw new Error("unsupported stored launch engine");
+}
+
+function readStoredFirefoxOwner(raw: unknown): unknown {
+  if (raw == null || raw === "") return undefined;
+  if (typeof raw !== "string") throw new Error("invalid stored Firefox owner encoding");
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("invalid stored Firefox owner JSON");
+  }
 }

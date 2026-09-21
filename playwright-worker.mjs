@@ -240,13 +240,13 @@ async function storageScriptSource() {
   if (typeof source !== "string") throw typed("runtime_unavailable");
   return source;
 }
-async function collectPasscodeStorage(page) {
+async function collectPasscodeStorage(page, isFirefox = false) {
   const source = await storageScriptSource();
-  return page.evaluate(async ({ rules, source }) => {
+  return page.evaluate(async ({ rules, source, isFirefox }) => {
     if (globalThis.location.origin !== "https://web.telegram.org") throw new Error("Wrong capture origin");
     const module = { exports: {} };
     Function("module", "exports", source)(module, module.exports);
-    const script = new (module.exports.StorageScript())(false);
+    const script = new (module.exports.StorageScript())(isFirefox);
     const ruleFor = (name) => rules.find((rule) => rule.databaseName ? name === rule.databaseName : rule.databasePattern && new RegExp(rule.databasePattern).test(name));
     const localStorage = Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) }));
     const indexedDB = [];
@@ -259,7 +259,7 @@ async function collectPasscodeStorage(page) {
       if (db.stores.length) indexedDB.push(db);
     }
     return { localStorage, indexedDB };
-  }, { rules: TELEGRAM_AUTH_INDEXEDDB_RULES, source });
+  }, { rules: TELEGRAM_AUTH_INDEXEDDB_RULES, source, isFirefox });
 }
 
 function validOptionalKeyPath(value) {
@@ -311,7 +311,7 @@ function capturedWebOriginStorage(origin, storage) {
   return normalizeWebOriginStorage(origin, storage);
 }
 
-async function captureLiveOrigin(context, origin) {
+async function captureLiveOrigin(context, origin, isFirefox = false) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const page = context.pages().find((candidate) => {
       try {
@@ -337,7 +337,7 @@ async function captureLiveOrigin(context, origin) {
       if (origin === TELEGRAM_ORIGIN) {
         let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
         if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
-        if (capturePasscode) storage = await collectPasscodeStorage(page);
+        if (capturePasscode) storage = await collectPasscodeStorage(page, isFirefox);
       }
       return storage;
     } catch {}
@@ -619,12 +619,19 @@ async function createReadOnlyStorageReader(browser, context) {
 async function nativeOriginStorage(context, origin) {
   const state = await context.storageState({ indexedDB: true });
   const found = state?.origins?.find((candidate) => candidate?.origin === origin);
+  if (!found) return undefined;
   return {
-    localStorage: Array.isArray(found?.localStorage) ? found.localStorage : [],
-    ...(origin === TELEGRAM_ORIGIN && Array.isArray(found?.indexedDB)
+    localStorage: Array.isArray(found.localStorage) ? found.localStorage : [],
+    ...(origin === TELEGRAM_ORIGIN && Array.isArray(found.indexedDB)
       ? { indexedDB: filterTelegramIndexedDB(found.indexedDB) }
       : {}),
   };
+}
+
+function registerNativeOrigins(context, origins) {
+  const native = context?._connection?.toImpl?.(context);
+  if (typeof native?.addVisitedOrigin !== "function") return;
+  for (const origin of origins) native.addVisitedOrigin(origin);
 }
 
 export async function captureSession(browser, payload, options = {}) {
@@ -655,14 +662,16 @@ export async function captureSession(browser, payload, options = {}) {
     } catch {}
   }
 
+  if (options.nativeStorage) registerNativeOrigins(context, origins);
   let reader;
   try {
     const byOrigin = new Map();
     for (const origin of [...origins].sort()) {
-      let storage = await captureLiveOrigin(context, origin);
+      let storage = await captureLiveOrigin(context, origin, !!options.nativeStorage);
       if (!storage) {
         if (options.nativeStorage) {
           storage = await sessionStep("origin_storage", () => nativeOriginStorage(context, origin));
+          if (!storage) throw sessionError("origin_storage");
         } else {
           reader ??= await sessionStep("hidden_target", () => createReadOnlyStorageReader(browser, context));
           storage = await sessionStep("origin_storage", () => reader.read(origin));
@@ -781,7 +790,7 @@ export async function restoreSession(browser, context, payload, options = {}) {
         intercepted = true;
         return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>restore</title>" });
       };
-      const cdp = typeof context.newCDPSession === "function" ? await context.newCDPSession(page) : null;
+      const cdp = !options.nativeStorage && typeof context.newCDPSession === "function" ? await context.newCDPSession(page) : null;
       try {
         if (cdp) {
           await cdp.send("Network.enable");

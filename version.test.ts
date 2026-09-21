@@ -328,7 +328,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   );
   expect(fullBaselineStep).toContain('$baselineVersion -ne "1.2.21"');
   expect(fullBaselineStep).toContain("& $baselineBun scripts/prepare-windows-bundle.ts");
-  expect(windowsFullJob).not.toContain("actions/download-artifact");
+  const fullArtifactDownloads = [...windowsFullJob.matchAll(/uses: actions\/download-artifact@v4\s+with:\s+name: ([^\r\n]+)/g)]
+    .map((match) => match[1]!.trim());
+  expect(fullArtifactDownloads).toEqual(["aliasmode-firefox-windows-x64"]);
   expect(windowsFullJob).not.toContain("aliasmode-windows-prepared");
   expect(windowsFullJob).not.toContain("prepared-input manifest");
   expect(windowsFullJob).not.toContain("tar.exe -xf");
@@ -350,6 +352,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
     "name: aliasmode-windows-${{ matrix.shard }}-diagnostics-${{ github.run_attempt }}",
   );
   expect(windowsGateNeeds).toEqual([
+    "windows_firefox",
     "windows_cache",
     "windows_synthetic_successor",
     "windows_prepare",

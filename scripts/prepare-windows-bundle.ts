@@ -3,12 +3,13 @@ import {
   cpSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { CLOAKBROWSER_WRAPPER_VERSION, installCloakBrowser } from "../browser-install.ts";
 import { extractZipTo } from "../unzip.ts";
 import { ALIASMODE_VERSION } from "../version.ts";
@@ -20,6 +21,10 @@ export const NODE_WINDOWS_X64_URL = `https://nodejs.org/dist/v${NODE_WINDOWS_X64
 export const PYTHON_WINDOWS_X64_VERSION = "3.13.7";
 export const PYTHON_WINDOWS_X64_URL = `https://www.python.org/ftp/python/${PYTHON_WINDOWS_X64_VERSION}/python-${PYTHON_WINDOWS_X64_VERSION}-embed-amd64.zip`;
 export const PYTHON_WINDOWS_X64_SHA256 = "f6cca216a359be84797cabb54149ce5e062afb16cc7567eb7fc51cacb2d86b65";
+
+export const ALIASMODE_FIREFOX_VERSION = "152.0.4-beta.30";
+export const ALIASMODE_FIREFOX_ARCHIVE_NAME = "aliasmode-152.0.4-beta.30-win.x86_64.zip";
+export const ALIASMODE_FIREFOX_EXECUTABLE_NAME = "aliasmode.exe";
 
 const PYTHON_WHEELS = [
   {
@@ -44,10 +49,24 @@ const PYTHON_WHEELS = [
   },
 ] as const;
 
+export interface PreparedFirefoxMetadata {
+  executable: string;
+  sha256: string;
+  version: typeof ALIASMODE_FIREFOX_VERSION;
+  archiveSha256: string;
+}
+
 export interface PreparedBrowserMetadata {
   executable: string;
   sha256: string;
   wrapperVersion: typeof CLOAKBROWSER_WRAPPER_VERSION;
+  firefox: PreparedFirefoxMetadata;
+}
+
+export interface FirefoxArchive {
+  bytes: Uint8Array;
+  archiveSha256: string;
+  executableSha256: string;
 }
 
 export interface PrepareWindowsBundleOptions {
@@ -63,6 +82,7 @@ export interface PrepareWindowsBundleOptions {
   installPython?: (playwrightRoot: string) => Promise<void>;
   downloadPython?: (url: string) => Promise<Uint8Array>;
   downloadPythonWheel?: (url: string) => Promise<Uint8Array>;
+  firefoxArchive?: FirefoxArchive;
 }
 
 async function sha256File(path: string): Promise<string> {
@@ -106,6 +126,83 @@ async function installPythonRuntime(
 function isWithin(parent: string, child: string): boolean {
   const rel = relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function expectedSha256(value: string | undefined, label: string): string {
+  const hash = value?.toLowerCase();
+  if (!hash || !/^[a-f0-9]{64}$/.test(hash)) {
+    throw new Error(`${label} SHA-256 is missing or invalid`);
+  }
+  return hash;
+}
+
+function configuredFirefoxArchive(): FirefoxArchive {
+  const archivePath = process.env.ALIASMODE_FIREFOX_ARCHIVE;
+  if (!archivePath) {
+    throw new Error("AliasMode Firefox archive is required; set ALIASMODE_FIREFOX_ARCHIVE to the verified CI artifact");
+  }
+  if (basename(archivePath) !== ALIASMODE_FIREFOX_ARCHIVE_NAME) {
+    throw new Error("AliasMode Firefox archive has an unexpected filename");
+  }
+  const archiveReal = realpathSync(archivePath);
+  if (!statSync(archiveReal).isFile()) throw new Error("AliasMode Firefox archive is not a regular file");
+  return {
+    bytes: readFileSync(archiveReal),
+    archiveSha256: expectedSha256(process.env.ALIASMODE_FIREFOX_ARCHIVE_SHA256, "AliasMode Firefox archive"),
+    executableSha256: expectedSha256(process.env.ALIASMODE_FIREFOX_EXECUTABLE_SHA256, "AliasMode Firefox executable"),
+  };
+}
+
+function findFirefoxExecutable(root: string): string {
+  const matches: string[] = [];
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name === ALIASMODE_FIREFOX_EXECUTABLE_NAME) matches.push(path);
+    }
+  };
+  visit(root);
+  if (matches.length !== 1) {
+    throw new Error("AliasMode Firefox archive must contain exactly one aliasmode.exe executable");
+  }
+  return matches[0]!;
+}
+
+async function installFirefoxRuntime(
+  archive: FirefoxArchive,
+  staging: string,
+  resourceRoot: string,
+  hashFile: (path: string) => Promise<string>,
+): Promise<PreparedFirefoxMetadata> {
+  const archiveSha256 = createHash("sha256").update(archive.bytes).digest("hex");
+  const expectedArchiveSha256 = expectedSha256(archive.archiveSha256, "AliasMode Firefox archive");
+  const expectedExecutableSha256 = expectedSha256(archive.executableSha256, "AliasMode Firefox executable");
+  if (archiveSha256 !== expectedArchiveSha256) {
+    throw new Error("AliasMode Firefox archive SHA-256 does not match the approved CI artifact");
+  }
+
+  const extractedRoot = join(staging, "firefox");
+  await extractZipTo(archive.bytes, extractedRoot);
+  const extractedExecutable = findFirefoxExecutable(extractedRoot);
+  const extractedReal = realpathSync(extractedExecutable);
+  const extractedRootReal = realpathSync(extractedRoot);
+  if (!statSync(extractedReal).isFile() || !isWithin(extractedRootReal, extractedReal)) {
+    throw new Error("AliasMode Firefox archive executable escaped its engine directory");
+  }
+  cpSync(extractedRootReal, resourceRoot, { recursive: true, errorOnExist: false });
+  const executable = relative(extractedRootReal, extractedReal).replaceAll("\\", "/");
+  const copiedExecutable = join(resourceRoot, executable);
+  const copiedSha256 = (await hashFile(copiedExecutable)).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(copiedSha256) || copiedSha256 !== expectedExecutableSha256) {
+    throw new Error("packaged AliasMode Firefox executable does not match the approved SHA-256");
+  }
+  return {
+    executable,
+    sha256: copiedSha256,
+    version: ALIASMODE_FIREFOX_VERSION,
+    archiveSha256,
+  };
 }
 
 export const WINDOWS_SIDECAR_TARGET = "bun-windows-x64-baseline";
@@ -200,12 +297,14 @@ export async function prepareWindowsBundle(
   const staging = join(tauri, "target", "desktop-staging");
   const browserCache = join(tauri, "target", "cloakbrowser-cache");
   const resourceRoot = join(resources, "cloakbrowser");
+  const firefoxRoot = join(resources, "firefox");
   const playwrightRoot = join(resources, "playwright");
   const sidecar = join(binaries, "aliasmode-sidecar-x86_64-pc-windows-msvc.exe");
   const agentHelper = join(binaries, "aliasmode-mcp-x86_64-pc-windows-msvc.exe");
 
   rmSync(staging, { recursive: true, force: true });
   rmSync(resourceRoot, { recursive: true, force: true });
+  rmSync(firefoxRoot, { recursive: true, force: true });
   rmSync(playwrightRoot, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   mkdirSync(browserCache, { recursive: true });
@@ -217,6 +316,13 @@ export async function prepareWindowsBundle(
   if (!statSync(sidecar).isFile()) throw new Error("sidecar compiler did not create the expected Windows executable");
   await (options.compileAgent ?? ((output) => compileAgent(cwd, output)))(agentHelper);
   if (!statSync(agentHelper).isFile()) throw new Error("agent helper compiler did not create the expected Windows executable");
+
+  const firefox = await installFirefoxRuntime(
+    options.firefoxArchive ?? configuredFirefoxArchive(),
+    staging,
+    firefoxRoot,
+    options.hashFile ?? sha256File,
+  );
 
   if (options.installNode) {
     await options.installNode(playwrightRoot);
@@ -252,6 +358,8 @@ export async function prepareWindowsBundle(
     throw new Error("official Python Playwright wheel is incomplete");
   }
   cpSync(join(cwd, "playwright-worker.mjs"), join(playwrightRoot, "worker.mjs"));
+  cpSync(join(cwd, "playwright-worker.mjs"), join(playwrightRoot, "playwright-worker.mjs"));
+  cpSync(join(cwd, "firefox-worker.mjs"), join(playwrightRoot, "firefox-worker.mjs"));
 
   const agentRoot = join(playwrightRoot, "agent");
   mkdirSync(agentRoot, { recursive: true });
@@ -303,6 +411,7 @@ export async function prepareWindowsBundle(
     executable: executableRelative,
     sha256: copiedHash,
     wrapperVersion: CLOAKBROWSER_WRAPPER_VERSION,
+    firefox,
   };
   writeFileSync(join(generated, "browser.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   writeFileSync(join(generated, "VERSION.txt"), `${ALIASMODE_VERSION}\n`, "utf8");
@@ -312,7 +421,7 @@ export async function prepareWindowsBundle(
 if (import.meta.main) {
   try {
     const metadata = await prepareWindowsBundle();
-    console.log(`prepared AliasMode Windows bundle with CloakBrowser SHA-256 ${metadata.sha256}`);
+    console.log(`prepared AliasMode Windows bundle with CloakBrowser SHA-256 ${metadata.sha256} and Firefox SHA-256 ${metadata.firefox.sha256}`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

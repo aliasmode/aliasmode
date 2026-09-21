@@ -28,7 +28,7 @@ import type {
   OpenProfileRequest,
   OpenProfileResponse,
   PendingSyncStatus,
-  PortableProfileV1,
+  PortableProfile,
 } from "./contracts/cloud-v1.ts";
 
 export interface PendingCloseInput {
@@ -36,7 +36,7 @@ export interface PendingCloseInput {
   profileId: string;
   registrationId: string;
   expectedVersion: number;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
   readyToSubmit?: boolean;
 }
 
@@ -62,7 +62,7 @@ export interface PendingCloseSummary {
 
 interface EncryptedPendingClose {
   registrationId: string;
-  payload: PortableProfileV1;
+  payload: PortableProfile;
 }
 
 export type PendingOpenPhase = "opening" | "restoring" | "running";

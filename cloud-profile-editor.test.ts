@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { CloudApiError } from "./cloud-client.ts";
 import { CloudProfileEditor } from "./cloud-profile-editor.ts";
-import type { PortableProfileV1 } from "./contracts/cloud-v1.ts";
+import type { PortableProfileV1, PortableProfileV2 } from "./contracts/cloud-v1.ts";
 
 function payload(): PortableProfileV1 {
   return {
@@ -33,6 +33,55 @@ function payload(): PortableProfileV1 {
     },
   };
 }
+
+function firefoxPayload(): PortableProfileV2 {
+  const legacy = payload();
+  return {
+    ...legacy,
+    schemaVersion: 2,
+    profile: {
+      ...legacy.profile,
+      engine: "firefox",
+      extensionAssignments: [],
+      firefox: {
+        version: 1,
+        runtimeVersion: "152.0.4-beta.30",
+        config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", timezone: "Etc/UTC" },
+      },
+    },
+  };
+}
+
+test("Firefox Cloud edits preserve saved identity and session without automatic lookup", async () => {
+  const authoritative = { ...response(), payload: firefoxPayload() };
+  let updated: any;
+  const calls: string[][] = [];
+  const editor = new CloudProfileEditor({
+    getProfile: async () => authoritative,
+    updateProfile: async (_id: string, request: unknown) => { updated = request; },
+  } as any, readOnlyStore(), timezoneFetch({}, calls));
+  expect((await editor.get("cloud1")).engine).toBe("firefox");
+  await editor.save("cloud1", 7, { name: "Renamed", proxy: "new-proxy.example:8080" });
+  expect(calls).toEqual([]);
+  expect(updated.payload.schemaVersion).toBe(2);
+  expect(updated.payload.profile.engine).toBe("firefox");
+  expect(updated.payload.profile.firefox).toEqual(authoritative.payload.profile.firefox);
+  expect(updated.payload.profile.timezone).toBe("Etc/UTC");
+  expect(updated.payload.session).toEqual(authoritative.payload.session);
+});
+
+test("Firefox Cloud edits reject conversion and unsupported identity edits before moving", async () => {
+  for (const set of [{ engine: "chromium" }, { resolution: "1920*1080" }, { extensions: ["chrome-extension"] }]) {
+    const writes: string[] = [];
+    const editor = new CloudProfileEditor({
+      getProfile: async () => ({ ...response(), payload: firefoxPayload() }),
+      moveProfile: async () => { writes.push("move"); },
+      updateProfile: async () => { writes.push("update"); },
+    } as any, readOnlyStore());
+    await expect(editor.save("cloud1", 7, { group: "group-2", ...set })).rejects.toMatchObject({ status: 400 });
+    expect(writes).toEqual([]);
+  }
+});
 
 function response(version = 7, activeOpens: unknown[] = []) {
   return {

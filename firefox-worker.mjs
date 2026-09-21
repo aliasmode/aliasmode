@@ -1,14 +1,16 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { promisify, format } from "node:util";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connectOfficial, nonClosingContext } from "./agent/playwright-proxy.mjs";
 import { MAX_BYTES, VERSION, operatePersistentContext } from "./playwright-worker.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
+const require = createRequire(import.meta.url);
 const ERROR_MESSAGES = {
   invalid_request: "Firefox owner request is invalid",
   invalid_response: "Firefox owner response is invalid",
@@ -77,7 +79,8 @@ async function readConfig() {
     || typeof input.owner.generation !== "string" || !input.owner.generation
     || (input.proxy !== undefined && (!validConfig(input.proxy) || typeof input.proxy.server !== "string" || !input.proxy.server))
     || (input.args !== undefined && (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string")))
-    || (input.headless !== undefined && typeof input.headless !== "boolean")) {
+    || (input.headless !== undefined && typeof input.headless !== "boolean")
+    || (input.restoreLastSession !== undefined && typeof input.restoreLastSession !== "boolean")) {
     throw typed("invalid_request");
   }
   return input;
@@ -106,6 +109,10 @@ async function readRequest(request) {
   return value;
 }
 
+function powerShellLiteral(value) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 async function browserPidOf(context, input) {
   const browser = context.browser?.();
   const launched = typeof browser?.process === "function"
@@ -113,7 +120,9 @@ async function browserPidOf(context, input) {
     : browser?._process ?? browser?._browserProcess;
   if (Number.isSafeInteger(launched?.pid) && launched.pid > 0) return launched.pid;
   if (process.platform !== "win32") throw typed("runtime_unavailable");
-  const command = `$exe = ${JSON.stringify(input.executablePath)}; $directory = ${JSON.stringify(input.userDataDir)}; Get-CimInstance Win32_Process -Filter \"ParentProcessId = ${process.pid}\" | Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -and $_.CommandLine.Contains($directory) } | Select-Object -First 1 -ExpandProperty ProcessId`;
+  const executable = powerShellLiteral(input.executablePath);
+  const directory = powerShellLiteral(input.userDataDir);
+  const command = `$exe = ${executable}; $directory = ${directory}; $profile = '(?i)(?:^|\\s)-profile\\s+(?:"' + [regex]::Escape($directory) + '"|' + [regex]::Escape($directory) + ')(?=\\s|$)'; Get-CimInstance Win32_Process -Filter "ParentProcessId = ${process.pid}" | Where-Object { $_.ExecutablePath -ieq $exe -and $_.CommandLine -match $profile } | Select-Object -First 1 -ExpandProperty ProcessId`;
   try {
     const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true });
     const pid = Number(String(stdout).trim());
@@ -133,6 +142,24 @@ function send(response, status, body) {
   response.end(body);
 }
 
+export function firefoxLaunchOptions(input) {
+  return {
+    executablePath: input.executablePath,
+    viewport: null,
+    ...(input.proxy ? { proxy: input.proxy } : {}),
+    firefoxUserPrefs: {
+      "browser.startup.page": input.restoreLastSession ? 3 : 0,
+      ...(input.proxy ? {
+        "media.peerconnection.ice.proxy_only": true,
+        "media.peerconnection.ice.default_address_only": true,
+        "media.peerconnection.ice.no_host": true,
+      } : {}),
+    },
+    ...(input.headless === undefined ? {} : { headless: input.headless }),
+    ...(input.args ? { args: input.args } : {}),
+  };
+}
+
 async function launchOwner(input) {
   if (await sha256File(input.executablePath) !== input.executableSha256) throw typed("operation_failed");
   cleanCamouConfig(input.config);
@@ -140,19 +167,7 @@ async function launchOwner(input) {
   try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
   if (!runtime.firefox) throw typed("runtime_unavailable");
   try {
-    return await runtime.firefox.launchPersistentContext(input.userDataDir, {
-      executablePath: input.executablePath,
-      ...(input.proxy ? { proxy: input.proxy } : {}),
-      ...(input.proxy ? {
-        firefoxUserPrefs: {
-          "media.peerconnection.ice.proxy_only": true,
-          "media.peerconnection.ice.default_address_only": true,
-          "media.peerconnection.ice.no_host": true,
-        },
-      } : {}),
-      ...(input.headless === undefined ? {} : { headless: input.headless }),
-      ...(input.args ? { args: input.args } : {}),
-    });
+    return await runtime.firefox.launchPersistentContext(input.userDataDir, firefoxLaunchOptions(input));
   } catch {
     throw typed("operation_failed");
   }
@@ -204,14 +219,62 @@ async function run() {
     await current?.client.close().catch(() => {});
     await current?.server.close().catch(() => {});
   };
+  let playwrightServer;
+  let playwrightEndpoint;
+  const closePlaywrightServer = async () => {
+    const current = playwrightServer;
+    playwrightServer = undefined;
+    playwrightEndpoint = undefined;
+    await current?.close();
+  };
+  const initializePlaywrightServer = async () => {
+    if (playwrightEndpoint) return playwrightEndpoint;
+    const serverContext = context?._connection?.toImpl?.(context);
+    const serverBrowser = serverContext?._browser;
+    if (!serverBrowser) throw typed("runtime_unavailable");
+    let PlaywrightServer;
+    try { ({ PlaywrightServer } = require(join(ROOT, "node_modules", "playwright-core", "lib", "remote", "playwrightServer.js"))); }
+    catch { throw typed("runtime_unavailable"); }
+    const bridge = new PlaywrightServer({
+      mode: "launchServerShared",
+      path: `/${randomBytes(32).toString("hex")}`,
+      maxConnections: Infinity,
+      preLaunchedBrowser: serverBrowser,
+    });
+    try {
+      playwrightEndpoint = await bridge.listen(0, "127.0.0.1");
+      playwrightServer = bridge;
+      return playwrightEndpoint;
+    } catch (error) {
+      await bridge.close().catch(() => {});
+      throw error;
+    }
+  };
   let server;
-  const shutdown = async () => {
+  const closeServer = () => !server
+    ? Promise.resolve()
+    : new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  const stopContext = async () => {
     if (closing) return;
     closing = true;
     closed = true;
-    await closeOfficial();
-    await context.close().catch(() => {});
-    await new Promise((resolve) => server?.close(resolve));
+    try {
+      await closeOfficial();
+      await closePlaywrightServer().catch(() => {});
+      await context.close();
+    } catch (error) {
+      closing = false;
+      closed = false;
+      throw error;
+    }
+  };
+  const shutdown = async () => {
+    try {
+      await stopContext();
+    } finally {
+      await closePlaywrightServer().catch(() => {});
+      await closeServer().catch(() => {});
+    }
   };
   const initializeOfficial = async () => {
     if (official) return official;
@@ -270,30 +333,7 @@ async function run() {
       await closeOfficial();
       return null;
     }
-    if (name === "run-script") {
-      if (typeof payload.scriptPath !== "string" || !payload.scriptPath || !payload.input || typeof payload.input !== "object") {
-        throw typed("invalid_request");
-      }
-      const module = await import(pathToFileURL(payload.scriptPath).href);
-      if (typeof module.default !== "function") throw typed("invalid_request");
-      const page = context.pages()[0] ?? await context.newPage();
-      const logs = [];
-      const log = (...values) => logs.push(format(...values));
-      const previousLog = console.log;
-      console.log = log;
-      try {
-        const result = await module.default({
-          browser,
-          context,
-          page,
-          profile: payload.input.profile,
-          inputs: payload.input.inputs,
-          credentials: payload.input.credentials ?? null,
-          log,
-        });
-        return { result: result ?? null, logs };
-      } finally { console.log = previousLog; }
-    }
+    if (name === "playwright-endpoint") return { endpoint: await initializePlaywrightServer() };
     return operatePersistentContext(browser, context, name, payload, { nativeStorage: true });
   };
 
@@ -309,8 +349,13 @@ async function run() {
         const runOperation = queue.then(() => operation(requestValue.operation, requestValue.payload));
         queue = runOperation.catch(() => {});
         const result = await runOperation;
+        if (requestValue.operation === "close") {
+          await stopContext();
+          send(response, 200, responseBody({ version: VERSION, ok: true, result }));
+          await closeServer();
+          return;
+        }
         send(response, 200, responseBody({ version: VERSION, ok: true, result }));
-        if (requestValue.operation === "close") await shutdown();
       } catch (error) {
         const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
         send(response, 400, responseBody({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code], ...(error?.details ? { details: error.details } : {}) } }));
@@ -333,10 +378,12 @@ async function run() {
   context.once?.("close", () => { if (!closing) void shutdown(); });
 }
 
-try {
-  await run();
-} catch (error) {
-  const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
-  process.stdout.write(`${JSON.stringify({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code] } })}\n`);
-  process.exitCode = 1;
+if (process.argv.some((argument) => argument.startsWith("--aliasmode-firefox-owner="))) {
+  try {
+    await run();
+  } catch (error) {
+    const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
+    process.stdout.write(`${JSON.stringify({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code] } })}\n`);
+    process.exitCode = 1;
+  }
 }

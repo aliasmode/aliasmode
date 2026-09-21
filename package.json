@@ -33,6 +33,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@playwright/mcp": "0.0.56",
     "@tauri-apps/api": "2.11.1",
+    "camoufox-js": "0.12.0",
     "cross-spawn": "7.0.6",
     "csv-parse": "^7.0.2",
     "playwright": "1.58.0-alpha-2026-01-16",
@@ -42,6 +43,9 @@
     "ws": "8.21.0"
   },
   "patchedDependencies": {
-    "playwright-core@1.58.2": "patches/playwright-core@1.58.2.patch"
+    "playwright-core@1.58.2": "patches/playwright-core@1.58.2.patch",
+    "header-generator@2.1.88": "patches/header-generator@2.1.88.patch",
+    "fingerprint-generator@2.1.88": "patches/fingerprint-generator@2.1.88.patch",
+    "generative-bayesian-network@2.1.88": "patches/generative-bayesian-network@2.1.88.patch"
   }
 }
