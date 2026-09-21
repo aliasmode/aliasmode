@@ -433,11 +433,27 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(runtimeOwnershipShard).not.toContain("browser close --profile $preexistingProfileId");
   expect(runtimeOwnershipShard).not.toContain("Remove-PersistentProfile $helper $preexistingProfileId");
   for (const contract of [
+    '$metadata.firefox.version -ne "152.0.4-beta.30"',
+    '"ALIASMODE_FIREFOX_BINARY_PATH"',
+    '"ALIASMODE_FIREFOX_BINARY_SHA256"',
+    "candidate Firefox metadata is invalid",
+  ]) {
+    expect(installedAcceptance).toContain(contract);
+  }
+  for (const contract of [
     "runtime-desktop-json-cli",
     "installed JSON CLI could not create a temporary profile",
     "installed JSON CLI could not open a headless browser",
     "installed JSON CLI did not report its browser as running",
     "installed JSON CLI did not close and delete its temporary profile",
+    "runtime-desktop-firefox-cli",
+    'profiles create --name ci-firefox --temporary --engine firefox',
+    "installed AliasMode Firefox SHA-256 does not match browser metadata",
+    "installed JSON CLI could not open a headless Firefox browser",
+    "installed JSON CLI did not report its Firefox browser as running",
+    "installed Firefox owner is not a sidecar child under the packaged Node runtime",
+    "installed Firefox owner or browser process survived close",
+    "firefoxCliLifecycle = $true",
     "runtime-desktop-descriptor",
     "runtime-desktop-single-instance-window",
     "runtime-desktop-eof-termination",
@@ -449,6 +465,9 @@ test("release version and updater trust stay aligned across the desktop bundle",
   ]) {
     expect(runtimeDesktopShard).toContain(contract);
   }
+  expect(runtimeDesktopShard.indexOf("runtime-desktop-firefox-cli")).toBeLessThan(
+    runtimeDesktopShard.indexOf("runtime-desktop-descriptor"),
+  );
   for (const contract of [
     "installed MCP host returned an invalid initialize response",
     "background runtime descriptor is invalid",

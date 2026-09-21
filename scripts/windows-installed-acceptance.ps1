@@ -104,6 +104,13 @@ function Install-AcceptanceArtifact(
   if ($metadata.executable -ne "chrome.exe" -or [string]$metadata.sha256 -notmatch '^[a-f0-9]{64}$') {
     throw "candidate browser metadata is invalid"
   }
+  if (
+    $metadata.firefox.version -ne "152.0.4-beta.30" -or
+    [string]$metadata.firefox.executable -notmatch '(?i)(?:^|[\\/])aliasmode\.exe$' -or
+    [string]$metadata.firefox.sha256 -notmatch '^[a-f0-9]{64}$'
+  ) {
+    throw "candidate Firefox metadata is invalid"
+  }
 
   Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $Destination) { throw "installed acceptance root was not clean" }
@@ -401,6 +408,8 @@ $changedEnvironmentNames = @(
   "ALIASMODE_PLAYWRIGHT_RUNTIME"
   "CLOAKBROWSER_BINARY_PATH"
   "CLOAKBROWSER_BINARY_SHA256"
+  "ALIASMODE_FIREFOX_BINARY_PATH"
+  "ALIASMODE_FIREFOX_BINARY_SHA256"
   "ALIASMODE_SESSION_LAUNCH"
   "ALIASMODE_ACCEPTANCE_WEBVIEW_DEBUG"
   "WEBVIEW2_USER_DATA_FOLDER"
@@ -413,6 +422,9 @@ foreach ($name in $changedEnvironmentNames) {
   $savedProcessEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 foreach ($name in $liveProxyEnvironmentNames) {
+  [Environment]::SetEnvironmentVariable($name, $null, "Process")
+}
+foreach ($name in @("ALIASMODE_FIREFOX_BINARY_PATH", "ALIASMODE_FIREFOX_BINARY_SHA256")) {
   [Environment]::SetEnvironmentVariable($name, $null, "Process")
 }
 
@@ -436,6 +448,7 @@ $checks = [ordered]@{
   degradedTermination = $false
   playwrightWorkerProtocol = $false
   customScriptRunners = $false
+  firefoxCliLifecycle = $false
   browserMetadataHash = $false
   nativeHeadfulLaunch = $false
   proxyMismatch = $false
@@ -888,6 +901,92 @@ async def run(*, log, **_):
       if ($LASTEXITCODE -ne 0 -or -not $closed.ok -or -not $closed.result.closed -or -not $closed.result.deleted) {
         throw "installed JSON CLI did not close and delete its temporary profile: $($closed.error)"
       }
+
+      Set-AcceptanceStage "runtime-desktop-firefox-cli"
+      $firefoxBinaryPath = Join-Path (Join-Path $installRoot "firefox") $installation.BrowserMetadata.firefox.executable
+      if (-not (Test-Path -LiteralPath $firefoxBinaryPath -PathType Leaf)) {
+        throw "installed AliasMode Firefox executable is missing"
+      }
+      $actualFirefoxHash = (Get-FileHash -LiteralPath $firefoxBinaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($actualFirefoxHash -ne $installation.BrowserMetadata.firefox.sha256) {
+        throw "installed AliasMode Firefox SHA-256 does not match browser metadata"
+      }
+
+      $firefoxProfile = (& $helper profiles create --name ci-firefox --temporary --engine firefox | ConvertFrom-Json)
+      if ($LASTEXITCODE -ne 0 -or -not $firefoxProfile.ok -or -not $firefoxProfile.result.id) {
+        throw "installed JSON CLI could not create a temporary Firefox profile: $($firefoxProfile.error)"
+      }
+      $firefoxProfileId = $firefoxProfile.result.id
+      $firefoxOpened = (& $helper browser open --profile $firefoxProfileId --headless | ConvertFrom-Json)
+      if (
+        $LASTEXITCODE -ne 0 -or
+        -not $firefoxOpened.ok -or
+        $firefoxOpened.result.engine -ne "firefox" -or
+        -not $firefoxOpened.result.headless -or
+        $firefoxOpened.result.alreadyOpen -or
+        $firefoxOpened.result.PSObject.Properties.Name -contains "port"
+      ) {
+        throw "installed JSON CLI could not open a headless Firefox browser: $($firefoxOpened.error)"
+      }
+      $firefoxStatus = (& $helper browser status --profile $firefoxProfileId | ConvertFrom-Json)
+      if (
+        $LASTEXITCODE -ne 0 -or
+        -not $firefoxStatus.ok -or
+        -not $firefoxStatus.result.running -or
+        $firefoxStatus.result.engine -ne "firefox"
+      ) {
+        throw "installed JSON CLI did not report its Firefox browser as running: $($firefoxStatus.error)"
+      }
+
+      $firefoxDescriptor = Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion
+      $firefoxBrowserProcesses = @()
+      $firefoxOwnerProcesses = @()
+      $firefoxNodeRoot = Join-Path $playwrightRuntime "node"
+      for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+        $firefoxBrowserProcesses = @($processes | Where-Object {
+          ([string]$_.ExecutablePath).Equals($firefoxBinaryPath, [StringComparison]::OrdinalIgnoreCase) -and
+          [string]$_.CommandLine -match '(?i)(?:^|\s)-profile(?:\s|=)' -and
+          [string]$_.CommandLine -match [Regex]::Escape($appDataRoot)
+        })
+        $firefoxOwnerProcesses = @($processes | Where-Object {
+          (Test-PathWithin ([string]$_.ExecutablePath) $firefoxNodeRoot) -and
+          [string]$_.CommandLine -like "*--aliasmode-firefox-owner=*" -and
+          [int]$_.ParentProcessId -eq [int]$firefoxDescriptor.sidecarPid
+        })
+        if ($firefoxBrowserProcesses.Count -gt 0 -and $firefoxOwnerProcesses.Count -gt 0) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      if ($firefoxBrowserProcesses.Count -eq 0) {
+        throw "installed Firefox process does not use the packaged binary and profile root"
+      }
+      if ($firefoxOwnerProcesses.Count -eq 0) {
+        throw "installed Firefox owner is not a sidecar child under the packaged Node runtime"
+      }
+      $firefoxLifecycleProcessIds = @(
+        $firefoxBrowserProcesses + $firefoxOwnerProcesses |
+          ForEach-Object { [int]$_.ProcessId } |
+          Select-Object -Unique
+      )
+
+      $firefoxClosed = (& $helper browser close --profile $firefoxProfileId | ConvertFrom-Json)
+      if ($LASTEXITCODE -ne 0 -or -not $firefoxClosed.ok -or -not $firefoxClosed.result.closed -or -not $firefoxClosed.result.deleted) {
+        throw "installed JSON CLI did not close and delete its temporary Firefox profile: $($firefoxClosed.error)"
+      }
+      $firefoxProcessesExited = $false
+      for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        $remainingFirefoxProcesses = @($firefoxLifecycleProcessIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($remainingFirefoxProcesses.Count -eq 0) {
+          $firefoxProcessesExited = $true
+          break
+        }
+        Start-Sleep -Milliseconds 500
+      }
+      if (-not $firefoxProcessesExited) {
+        throw "installed Firefox owner or browser process survived close"
+      }
+      $checks.firefoxCliLifecycle = $true
+
       Set-AcceptanceStage "runtime-desktop-descriptor"
       $descriptor = Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion
       $checks.helperMcpCliLifecycle = $true
