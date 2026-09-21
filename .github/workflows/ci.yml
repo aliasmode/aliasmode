@@ -108,8 +108,13 @@ jobs:
           $executable = $executables[0].FullName
           $executableSha = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($executableSha -notmatch '^[a-f0-9]{64}$') { throw "AliasMode Firefox executable SHA-256 is invalid" }
-          $version = (& $executable --version) -join "`n"
-          if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "firefox-version-stdout.txt"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "firefox-version-stderr.txt"
+          $process = Start-Process -FilePath $executable -ArgumentList "--version" -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $version = [IO.File]::ReadAllText($stdoutPath)
+          if ($process.ExitCode -ne 0 -or $version -notmatch '152\.0\.4') {
+            Write-Host "Firefox version probe exited $($process.ExitCode): $version"
+            Write-Host ([IO.File]::ReadAllText($stderrPath))
             throw "owned AliasMode Firefox did not report Firefox 152.0.4"
           }
           "archive_sha256=$archiveSha" | Add-Content $env:GITHUB_OUTPUT
@@ -841,8 +846,13 @@ jobs:
           if ($actualSha -cne $metadata.firefox.sha256) {
             throw "packaged AliasMode Firefox SHA-256 mismatch"
           }
-          $version = (& $firefox --version) -join "`n"
-          if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "firefox-version-stdout.txt"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "firefox-version-stderr.txt"
+          $process = Start-Process -FilePath $firefox.Path -ArgumentList "--version" -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $version = [IO.File]::ReadAllText($stdoutPath)
+          if ($process.ExitCode -ne 0 -or $version -notmatch '152\.0\.4') {
+            Write-Host "Firefox version probe exited $($process.ExitCode): $version"
+            Write-Host ([IO.File]::ReadAllText($stderrPath))
             throw "owned AliasMode Firefox did not report Firefox 152.0.4"
           }
       - name: Prove packaged Firefox Launcher persistence and portable handoff
