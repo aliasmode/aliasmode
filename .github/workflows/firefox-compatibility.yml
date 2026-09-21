@@ -104,8 +104,17 @@ jobs:
           Expand-Archive -LiteralPath $entries[0].FullName -DestinationPath $destination -Force
           $executables = @(Get-ChildItem -LiteralPath $destination -Recurse -File -Filter "aliasmode.exe")
           if ($executables.Count -ne 1) { throw "AliasMode Firefox archive must contain exactly one aliasmode.exe" }
-          $version = (& $executables[0].FullName --version) -join "`n"
-          if ($LASTEXITCODE -ne 0 -or $version -notmatch '152\.0\.4') {
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "firefox-version-stdout.txt"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "firefox-version-stderr.txt"
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          $process = Start-Process -FilePath $executables[0].FullName -ArgumentList "--version" -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $version = [IO.File]::ReadAllText($stdoutPath)
+          $versionError = [IO.File]::ReadAllText($stderrPath)
+          Write-Host "Firefox version probe exited $($process.ExitCode) after $($timer.Elapsed.TotalSeconds) seconds"
+          Write-Host "stdout: $version"
+          Write-Host "stderr: $versionError"
+          (Get-Item -LiteralPath $executables[0].FullName).VersionInfo | Select-Object ProductVersion, FileVersion, CompanyName, ProductName | Format-List
+          if ($process.ExitCode -ne 0 -or $version -notmatch '152\.0\.4') {
             throw "owned AliasMode Firefox did not report Firefox 152.0.4"
           }
           "ALIASMODE_FIREFOX_BINARY_PATH=$($executables[0].FullName)" | Add-Content $env:GITHUB_ENV
