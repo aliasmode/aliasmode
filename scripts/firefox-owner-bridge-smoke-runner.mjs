@@ -40,6 +40,8 @@ try {
       stored: localStorage.getItem("owner-proof"),
       identity: { userAgent: navigator.userAgent, screen: [screen.width, screen.height] },
     }));
+    if (context.pages().length === 1) await context.newPage();
+    await page.close();
     process.stdout.write(JSON.stringify(result));
   }
 } catch (error) {

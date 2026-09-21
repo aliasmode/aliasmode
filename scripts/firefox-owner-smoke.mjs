@@ -119,6 +119,7 @@ try {
   assert.equal((await runBridge(bridge.endpoint, "verify")).stored, "saved");
 
   const beforeCapture = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.ok(beforeCapture.pageTargets.every((target) => new URL(target.url).origin !== origin), "capture fixture origin must have no live page");
   stage("capture");
   const session = JSON.parse(await callFirefoxOwner(owner, "session-capture", {
     captureSeed: { origins: [origin] },
