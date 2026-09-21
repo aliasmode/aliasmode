@@ -13,6 +13,7 @@ if (!browser || !root) {
 await mkdir(root, { recursive: false });
 const record = join(root, "owner.json");
 const configPath = join(root, "firefox-config.json");
+const stage = (name) => console.log(`firefox-owner-smoke:${name}`);
 async function startManager() {
   const manager = Bun.spawn([
     process.execPath,
@@ -26,6 +27,7 @@ async function startManager() {
   if (await manager.exited !== 0) throw new Error("Firefox owner smoke manager did not exit cleanly");
   return JSON.parse(await readFile(record, "utf8"));
 }
+stage("launch");
 const firstOwner = await startManager();
 
 const server = createServer((_request, response) => {
@@ -37,6 +39,31 @@ await new Promise((resolve, reject) => {
   server.listen(0, "127.0.0.1", resolve);
 });
 const origin = `http://127.0.0.1:${server.address().port}`;
+function startBridge(endpoint, mode) {
+  const child = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, "firefox-owner-bridge-smoke-runner.mjs"),
+    origin,
+    mode,
+  ], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
+  child.stdin.write(JSON.stringify({ endpoint }));
+  child.stdin.end();
+  return child;
+}
+async function runBridge(endpoint, mode) {
+  const child = startBridge(endpoint, mode);
+  const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  if (exitCode !== 0) throw new Error("Firefox bridge smoke runner did not exit cleanly");
+  return JSON.parse(stdout);
+}
+async function holdBridge(endpoint) {
+  const child = startBridge(endpoint, "hold");
+  const reader = child.stdout.getReader();
+  const { value, done } = await reader.read();
+  reader.releaseLock();
+  if (done || new TextDecoder().decode(value).trim() !== "{\"ready\":true}") throw new Error("Firefox bridge smoke runner did not become ready");
+  return child;
+}
 const processAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
@@ -70,36 +97,38 @@ try {
   }, { timeoutMs: 30_000 });
   assert.notEqual(snapshot.isError, true, JSON.stringify(snapshot));
 
-  const script = join(root, "owner-script.mjs");
-  await writeFile(script, `export default async ({ browser, context, page, profile, inputs, credentials, log }) => {
-    await page.goto(inputs.origin);
-    await context.addCookies([{ name: "owner-proof", value: "saved", url: inputs.origin }]);
-    await page.evaluate(() => localStorage.setItem("owner-proof", "saved"));
-    log("script ran for %s", profile.id);
-    return {
-      sameBrowser: context.browser() === browser,
-      credentials,
-      profileId: profile.id,
-      identity: await page.evaluate(() => ({ userAgent: navigator.userAgent, screen: [screen.width, screen.height] })),
-    };
-  };\n`);
-  const run = await callFirefoxOwner(owner, "run-script", {
-    scriptPath: script,
-    input: { profile: { id: "owner-profile" }, inputs: { origin }, credentials: null },
-  }, { timeoutMs: 30_000 });
-  assert.equal(run.result.sameBrowser, true);
-  assert.equal(run.result.credentials, null);
-  assert.equal(run.result.profileId, "owner-profile");
-  assert.equal(typeof run.result.identity.userAgent, "string");
-  assert.deepEqual(run.result.identity.screen, [1920, 1080]);
-  assert.deepEqual(run.logs, ["script ran for owner-profile"]);
+  stage("script");
+  const bridge = await callFirefoxOwner(owner, "playwright-endpoint", {}, { timeoutMs: 30_000 });
+  const run = await runBridge(bridge.endpoint, "write");
+  assert.equal(run.stored, "saved");
+  assert.equal(typeof run.identity.userAgent, "string");
+  assert.deepEqual(run.identity.screen, [1920, 1080]);
+  assert.deepEqual(await runBridge(bridge.endpoint, "close"), { protectedContext: true });
+  const hung = await holdBridge(bridge.endpoint);
+  const duringHang = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.equal(duringHang.hasPages, true, "owner remains responsive while an external runner is hung");
+  hung.kill();
+  await hung.exited;
+  const afterHang = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.equal(afterHang.hasPages, true, "external runner disconnect preserves the owner context and pages");
+  assert.equal((await runBridge(bridge.endpoint, "verify")).stored, "saved");
 
+  const beforeCapture = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  stage("capture");
   const session = JSON.parse(await callFirefoxOwner(owner, "session-capture", {
     captureSeed: { origins: [origin] },
   }, { timeoutMs: 30_000 }));
   assert.ok(session.cookies.some((cookie) => cookie.name === "owner-proof" && cookie.value === "saved"));
   assert.deepEqual(session.origins.find((entry) => entry.origin === origin)?.localStorage, [{ name: "owner-proof", value: "saved" }]);
+  const afterCapture = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.deepEqual(afterCapture.pageTargets, beforeCapture.pageTargets, "native closed-origin capture must not publish a page");
 
+  stage("restore");
+  await callFirefoxOwner(owner, "session-restore", { bundle: JSON.stringify(session), urls: [] }, { timeoutMs: 30_000 });
+  const restored = await runBridge(bridge.endpoint, "verify");
+  assert.equal(restored.stored, "saved");
+
+  stage("close");
   await closeFirefoxOwner(owner, { timeoutMs: 30_000 });
   await requireExit(status.pid);
   await requireExit(status.browserPid);
@@ -107,15 +136,16 @@ try {
   owner = undefined;
 
   const configBeforeRestart = await readFile(configPath, "utf8");
+  stage("reopen");
   owner = await startManager();
   firefoxEndpoint(owner);
   const restartStatus = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
   assert.equal(restartStatus.generation, owner.generation);
-  const restarted = await callFirefoxOwner(owner, "run-script", {
-    scriptPath: script,
-    input: { profile: { id: "owner-profile" }, inputs: { origin }, credentials: null },
-  }, { timeoutMs: 30_000 });
-  assert.deepEqual(restarted.result.identity, run.result.identity);
+  const restartBridge = await callFirefoxOwner(owner, "playwright-endpoint", {}, { timeoutMs: 30_000 });
+  const restarted = await runBridge(restartBridge.endpoint, "verify");
+  assert.deepEqual(restarted.identity, run.identity);
+  assert.equal(restarted.stored, "saved");
+  stage("close");
   await closeFirefoxOwner(owner, { timeoutMs: 30_000 });
   await requireExit(restartStatus.pid);
   await requireExit(restartStatus.browserPid);
@@ -126,6 +156,8 @@ try {
     detachedOwnerSurvivesManagerExit: true,
     ownerStatus: true,
     nativeStorageCapture: true,
+    nativeStorageRestore: true,
+    externalPlaywrightBridge: true,
     officialMcp: true,
     scriptContext: true,
     generatedConfig: true,

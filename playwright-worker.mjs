@@ -628,6 +628,12 @@ async function nativeOriginStorage(context, origin) {
   };
 }
 
+function registerNativeOrigins(context, origins) {
+  const native = context?._connection?.toImpl?.(context);
+  if (typeof native?.addVisitedOrigin !== "function") return;
+  for (const origin of origins) native.addVisitedOrigin(origin);
+}
+
 export async function captureSession(browser, payload, options = {}) {
   const context = contextOf(browser);
   const tabs = context.pages().map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
@@ -656,6 +662,7 @@ export async function captureSession(browser, payload, options = {}) {
     } catch {}
   }
 
+  if (options.nativeStorage) registerNativeOrigins(context, origins);
   let reader;
   try {
     const byOrigin = new Map();

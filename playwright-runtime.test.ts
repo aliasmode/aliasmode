@@ -254,8 +254,15 @@ bunAsNodeTest("importing the worker has no stdin or stdout side effects", async 
 
 test("native capture reads closed observed origins through storageState without CDP", async () => {
   let storageStateCalls = 0;
+  const registered: string[] = [];
   const context = {
     pages: () => [],
+    _connection: {
+      toImpl(value: unknown) {
+        expect(value).toBe(context);
+        return { addVisitedOrigin: (origin: string) => registered.push(origin) };
+      },
+    },
     async cookies() { return []; },
     async storageState(options: unknown) {
       storageStateCalls++;
@@ -274,6 +281,7 @@ test("native capture reads closed observed origins through storageState without 
     captureSeed: { origins: ["https://closed.example"] },
   }, { nativeStorage: true }));
   expect(storageStateCalls).toBe(1);
+  expect(registered).toEqual(["https://closed.example"]);
   expect(result).toEqual({
     cookies: [],
     origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value: "fresh" }] }],

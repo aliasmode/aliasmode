@@ -6,6 +6,7 @@ on:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
       - scripts/firefox-owner-smoke.mjs
+      - scripts/firefox-owner-bridge-smoke-runner.mjs
       - scripts/firefox-owner-smoke-manager.mjs
       - firefox-runtime.ts
       - firefox-config.ts
@@ -20,6 +21,7 @@ on:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
       - scripts/firefox-owner-smoke.mjs
+      - scripts/firefox-owner-bridge-smoke-runner.mjs
       - scripts/firefox-owner-smoke-manager.mjs
       - firefox-runtime.ts
       - firefox-config.ts
