@@ -27,6 +27,8 @@ function fixture() {
   let reachable = false;
   let launches = 0;
   let receivedConfig: unknown;
+  let restoreLastSession: boolean | undefined;
+  const navigated: string[][] = [];
   const killed: number[] = [];
   const snapshots = (): HostProcessSnapshot => ({
     incomplete: false,
@@ -38,7 +40,7 @@ function fixture() {
   const options: LauncherOptions = {
     store, dataRoot: root, firefoxBinaryPath: "/fake/firefox.exe", unsafeDisableIdentityGates: true,
     hostPlatform: "win32", hostArch: "x64", captureFingerprint: async () => null,
-    navigate: async () => {}, ensureCookies: async () => ({ injected: false }), log: () => {},
+    navigate: async (_endpoint, urls) => { navigated.push([...urls]); }, ensureCookies: async () => ({ injected: false }), log: () => {},
     readProcessSnapshot: async () => snapshots(),
     isPidAlive: (pid) => pid === 201 ? ownerAlive : pid === 202 ? browserAlive : false,
     killPid: async (pid) => { killed.push(pid); if (pid === 201) ownerAlive = false; if (pid === 202) browserAlive = false; },
@@ -48,6 +50,7 @@ function fixture() {
         launches++;
         expect(store.getLaunch(profile.id)?.firefoxOwner?.generation).toBe(reservation.generation);
         receivedConfig = args.config;
+        restoreLastSession = args.restoreLastSession;
         ownerAlive = true;
         await hooks?.onSpawn?.({ ...reservation, pid: 201, browserPid: 0 });
         browserAlive = true;
@@ -71,6 +74,7 @@ function fixture() {
   return {
     store, profile, options, killed, launcher: new Launcher(options),
     launches: () => launches, config: () => receivedConfig,
+    restoreLastSession: () => restoreLastSession, navigated,
     crashOwner: () => { ownerAlive = false; reachable = false; },
   };
 }
@@ -100,6 +104,31 @@ test("owner crash never permits duplicate Firefox and stop targets only exact pr
   expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
   expect(await restarted.stop(f.profile.id)).toBe(true);
   expect(f.killed).toEqual([202]);
+});
+
+test("Firefox preserves restored native tabs instead of reopening an older saved bundle", async () => {
+  const f = fixture();
+  const root = f.launcher.userDataDir(f.profile.id);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "sessionstore.jsonlz4"), "opaque native session");
+  f.store.saveSessionBundle(f.profile.id, JSON.stringify({ cookies: [], origins: [], tabs: ["https://old.example/"] }));
+  const opened = await f.launcher.start(f.profile.id);
+  expect(f.restoreLastSession()).toBe(true);
+  expect(opened.nativeSessionRestored).toBe(true);
+  expect(f.navigated).toEqual([]);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
+test("Firefox disables native restore when the Cloud coordinator requests portable state", async () => {
+  const f = fixture();
+  const root = f.launcher.userDataDir(f.profile.id);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "sessionstore.jsonlz4"), "opaque native session");
+  const opened = await f.launcher.start(f.profile.id, [], { autoNavigate: false, restoreLastSession: false });
+  expect(f.restoreLastSession()).toBe(false);
+  expect(opened.nativeSessionRestored).toBe(false);
+  expect(f.navigated).toEqual([]);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
 });
 
 test("Firefox rejects status from a different owner process", async () => {

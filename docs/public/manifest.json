@@ -8,7 +8,7 @@
   "mcpCatalogs": {
     "current-source": {
       "path": "mcp-tools/current-source.json",
-      "sha256": "3fd2db3ca92e7a27ee09704307c776da1d4f791f1c06ddb75b122e23b4826d0f"
+      "sha256": "76a96632e945a5b022f79d9667d0bfdcc94716f63e94360d06ddf8e1985d49da"
     },
     "0.1.0-beta.42": {
       "path": "mcp-tools/0.1.0-beta.42.json",

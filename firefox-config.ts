@@ -1,5 +1,18 @@
 import { fromBrowserforge, generateFingerprint } from "camoufox-js/dist/fingerprints.js";
+// @ts-expect-error Bun embeds this package data in compiled sidecars.
+import fingerprintNetworkDefinitionPath from "./node_modules/fingerprint-generator/data_files/fingerprint-network-definition.zip" with { type: "file" };
+// @ts-expect-error Bun embeds this package data in compiled sidecars.
+import inputNetworkDefinitionPath from "./node_modules/header-generator/data_files/input-network-definition.zip" with { type: "file" };
+// @ts-expect-error Bun embeds this package data in compiled sidecars.
+import headerNetworkDefinitionPath from "./node_modules/header-generator/data_files/header-network-definition.zip" with { type: "file" };
 import type { FirefoxProfileConfig, JsonValue, ProfileEngine } from "./types.ts";
+
+const CAMOUFOX_GENERATOR_ASSETS = [
+  fingerprintNetworkDefinitionPath,
+  inputNetworkDefinitionPath,
+  headerNetworkDefinitionPath,
+];
+CAMOUFOX_GENERATOR_ASSETS.forEach((asset) => Bun.file(asset));
 
 export const FIREFOX_RUNTIME_VERSION = "152.0.4-beta.30";
 const FIREFOX_UA_MAJOR_VERSION = "152";
@@ -10,10 +23,14 @@ export function createFirefoxProfileConfig(screenWidth: number, screenHeight: nu
     browsers: ["firefox"],
     operatingSystems: ["windows"],
   });
+  const config = fromBrowserforge(fingerprint, FIREFOX_UA_MAJOR_VERSION);
+  if (typeof config.timezone !== "string" || !config.timezone.trim()) {
+    config.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  }
   return normalizeFirefoxProfileConfig({
     version: 1,
     runtimeVersion: FIREFOX_RUNTIME_VERSION,
-    config: fromBrowserforge(fingerprint, FIREFOX_UA_MAJOR_VERSION),
+    config,
   });
 }
 

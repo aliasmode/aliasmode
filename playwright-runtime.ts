@@ -108,7 +108,7 @@ export function resolvePlaywrightRuntime(
       workerPath: join(packagedRoot, "worker.mjs"),
     };
   }
-  const root = options.sourceRoot ?? dirname(Bun.main);
+  const root = options.sourceRoot ?? import.meta.dir;
   return {
     kind: "source",
     root,

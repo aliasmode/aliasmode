@@ -31,6 +31,9 @@
   },
   "patchedDependencies": {
     "playwright-core@1.58.2": "patches/playwright-core@1.58.2.patch",
+    "fingerprint-generator@2.1.88": "patches/fingerprint-generator@2.1.88.patch",
+    "generative-bayesian-network@2.1.88": "patches/generative-bayesian-network@2.1.88.patch",
+    "header-generator@2.1.88": "patches/header-generator@2.1.88.patch",
   },
   "packages": {
     "@hono/node-server": ["@hono/node-server@2.1.1", "", { "peerDependencies": { "hono": "^4" } }, "sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg=="],
