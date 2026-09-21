@@ -532,6 +532,7 @@ const POST_STOP_CACHE_DIRS = [
  * out and defeat the persistent-session design the whole migration relies on.
  */
 const CACHE_DIRS = POST_STOP_CACHE_DIRS;
+const FIREFOX_CACHE_DIRS = ["cache2", "startupCache", "shader-cache"];
 
 /**
  * Volatile per-profile stores that commonly get left half-written by an UNCLEAN kill (all leveldb-
@@ -1871,7 +1872,7 @@ export class Launcher {
         : profile.proxy ? { server: `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port}` } : undefined;
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
-        userDataDir, config: profile.firefox!.config, proxy, headless,
+        userDataDir, config: profile.firefox!.config, proxy, headless, timeoutMs: this.cdpReadyTimeoutMs,
       }, {
         reservation,
         onSpawn: (spawned) => {
@@ -1948,7 +1949,7 @@ export class Launcher {
     hasPages: boolean; pageTargets: Array<{ id: string; url: string }>;
   }> {
     if (!launch.firefoxOwner) throw new Error("Firefox owner is missing");
-    const status = await this.firefoxRuntime.call<any>(launch.firefoxOwner, "status", {});
+    const status = await this.firefoxRuntime.call<any>(launch.firefoxOwner, "status", {}, { timeoutMs: 800 });
     if (status.generation !== launch.firefoxOwner.generation || status.profileId !== launch.profileId
       || status.directory !== launch.userDataDir || status.executablePath !== launch.binaryPath
       || !Number.isInteger(status.browserPid) || status.browserPid <= 0
@@ -2685,7 +2686,7 @@ export class Launcher {
         if (!this.launchGenerationMatches(profileId, launch)) return false;
         try {
           const closed = launch.engine === "firefox" && launch.firefoxOwner
-            ? await this.firefoxRuntime.close(launch.firefoxOwner).then(() => true)
+            ? await this.firefoxRuntime.close(launch.firefoxOwner, { timeoutMs: this.gracefulStopMs }).then(() => true)
             : await this.browserCloseFn(launch.ws, this.gracefulStopMs);
           if (closed) {
             if (await this.confirmLaunchStopped(profileId, launch, linuxProof ?? undefined, true)) {
@@ -3205,11 +3206,13 @@ export class Launcher {
    * deleting them under a running Chrome risks corruption. Never throws.
    */
   async clearCache(profileId: string): Promise<{ cleared: boolean }> {
-    return this.clearCacheDirs(profileId, CACHE_DIRS, "clearCache");
+    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_CACHE_DIRS : CACHE_DIRS;
+    return this.clearCacheDirs(profileId, dirs, "clearCache");
   }
 
   private clearPostStopCache(profileId: string): void {
-    const { cleared } = this.clearCacheDirs(profileId, POST_STOP_CACHE_DIRS, "post-stop cache cleanup");
+    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_CACHE_DIRS : POST_STOP_CACHE_DIRS;
+    const { cleared } = this.clearCacheDirs(profileId, dirs, "post-stop cache cleanup");
     if (cleared) this.log(`${profileId}: rebuildable disk caches cleared after confirmed stop`);
   }
 

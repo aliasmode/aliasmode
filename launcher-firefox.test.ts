@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Launcher, BrowserLaunchError, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
@@ -100,6 +100,26 @@ test("owner crash never permits duplicate Firefox and stop targets only exact pr
   expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
   expect(await restarted.stop(f.profile.id)).toBe(true);
   expect(f.killed).toEqual([202]);
+});
+
+test("Firefox cache cleanup preserves native storage and lock files", async () => {
+  const f = fixture();
+  const root = f.launcher.userDataDir(f.profile.id);
+  for (const dir of ["cache2", "startupCache", "shader-cache", "storage/default"]) {
+    mkdirSync(join(root, dir), { recursive: true });
+    writeFileSync(join(root, dir, "state"), "test data");
+  }
+  for (const file of ["cookies.sqlite", "prefs.js", "parent.lock", "sessionstore.jsonlz4"]) {
+    writeFileSync(join(root, file), "test data");
+  }
+  await f.launcher.start(f.profile.id);
+  expect(await f.launcher.clearCache(f.profile.id)).toEqual({ cleared: false });
+  expect(existsSync(join(root, "cache2/state"))).toBe(true);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+  for (const dir of ["cache2", "startupCache", "shader-cache"]) expect(existsSync(join(root, dir))).toBe(false);
+  for (const file of ["storage/default/state", "cookies.sqlite", "prefs.js", "parent.lock", "sessionstore.jsonlz4"]) {
+    expect(existsSync(join(root, file))).toBe(true);
+  }
 });
 
 test("Firefox rejects Chromium launch switches and stale stop generations", async () => {
