@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import { ProfileStore } from "./store.ts";
+import { buildNewProfile } from "./create.ts";
 import {
   serveAutomationApi,
   serveDashboard,
@@ -16,6 +17,28 @@ test("profile identity cards do not fetch egress IP automatically", () => {
   expect(webSource).not.toContain("checking egress IP");
   expect(webSource).toContain("AliasMode Firefox");
   expect(webSource).toContain("no CDP, PDF, or Chrome extensions");
+});
+
+test("identity cards load stored Chromium and Firefox metadata without egress lookup", async () => {
+  const store = new ProfileStore(":memory:");
+  const chromium = buildNewProfile({ engine: "chromium", name: "Chromium card" }, () => false);
+  const firefox = buildNewProfile({ engine: "firefox", name: "Firefox card" }, (id) => id === chromium.id);
+  store.upsertProfiles([chromium, firefox]);
+  const server = serveDashboard({ port: 0, launcher: {} as any, store, log: () => {} });
+
+  try {
+    for (const [profile, browser] of [[chromium, "CloakBrowser"], [firefox, "AliasMode Firefox"]] as const) {
+      const response = await fetch(`http://127.0.0.1:${server.port}/card?id=${profile.id}`);
+      expect(response.status).toBe(200);
+      const card = await response.text();
+      expect(card).toContain(browser);
+      expect(card).toContain(profile.timezone || "—");
+      expect(card).not.toContain("ip-api.com");
+    }
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
 });
 
 test("dashboard health route blocks browser cross-origin submissions on loopback", async () => {
