@@ -206,9 +206,9 @@ export async function runPlaywrightWorker<T>(
     const owner = firefoxOwnerForEndpoint(endpoint);
     if (!owner) throw new PlaywrightWorkerError("runtime_unavailable", "Firefox owner is unavailable");
     try {
-      return await callFirefoxOwner<T>(owner, operation, payload);
+      return await callFirefoxOwner<T>(owner, operation, payload, { timeoutMs: options.timeoutMs });
     } catch (error) {
-      if (error instanceof FirefoxOwnerError) throw new PlaywrightWorkerError(error.code, error.message);
+      if (error instanceof FirefoxOwnerError) throw new PlaywrightWorkerError(error.code, error.message, error.details);
       throw error;
     }
   }
@@ -266,7 +266,7 @@ export async function runPlaywrightWorker<T>(
   if (response?.version !== PLAYWRIGHT_PROTOCOL_VERSION || typeof response.ok !== "boolean") {
     throw responseFailure("invalid_response", operation, "wrong_protocol_shape", output.value.bytes, exit, errorOutput);
   }
-  if (!response.ok) {
+  if (response.ok === false) {
     const code = response.error?.code;
     const valid = ["invalid_request", "invalid_response", "operation_failed", "timeout", "runtime_unavailable"].includes(code);
     throw new PlaywrightWorkerError(
