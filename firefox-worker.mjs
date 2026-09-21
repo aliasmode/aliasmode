@@ -106,6 +106,10 @@ async function readRequest(request) {
   return value;
 }
 
+function powerShellLiteral(value) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 async function browserPidOf(context, input) {
   const browser = context.browser?.();
   const launched = typeof browser?.process === "function"
@@ -113,7 +117,9 @@ async function browserPidOf(context, input) {
     : browser?._process ?? browser?._browserProcess;
   if (Number.isSafeInteger(launched?.pid) && launched.pid > 0) return launched.pid;
   if (process.platform !== "win32") throw typed("runtime_unavailable");
-  const command = `$exe = ${JSON.stringify(input.executablePath)}; $directory = ${JSON.stringify(input.userDataDir)}; Get-CimInstance Win32_Process -Filter \"ParentProcessId = ${process.pid}\" | Where-Object { $_.ExecutablePath -eq $exe -and $_.CommandLine -and $_.CommandLine.Contains($directory) } | Select-Object -First 1 -ExpandProperty ProcessId`;
+  const executable = powerShellLiteral(input.executablePath);
+  const directory = powerShellLiteral(input.userDataDir);
+  const command = `$exe = ${executable}; $directory = ${directory}; $profile = '(?i)(?:^|\\s)-profile\\s+(?:"' + [regex]::Escape($directory) + '"|' + [regex]::Escape($directory) + ')(?=\\s|$)'; Get-CimInstance Win32_Process -Filter "ParentProcessId = ${process.pid}" | Where-Object { $_.ExecutablePath -ieq $exe -and $_.CommandLine -match $profile } | Select-Object -First 1 -ExpandProperty ProcessId`;
   try {
     const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true });
     const pid = Number(String(stdout).trim());
@@ -142,6 +148,7 @@ async function launchOwner(input) {
   try {
     return await runtime.firefox.launchPersistentContext(input.userDataDir, {
       executablePath: input.executablePath,
+      viewport: null,
       ...(input.proxy ? { proxy: input.proxy } : {}),
       ...(input.proxy ? {
         firefoxUserPrefs: {
@@ -205,13 +212,28 @@ async function run() {
     await current?.server.close().catch(() => {});
   };
   let server;
-  const shutdown = async () => {
+  const closeServer = () => !server
+    ? Promise.resolve()
+    : new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  const stopContext = async () => {
     if (closing) return;
     closing = true;
     closed = true;
-    await closeOfficial();
-    await context.close().catch(() => {});
-    await new Promise((resolve) => server?.close(resolve));
+    try {
+      await closeOfficial();
+      await context.close();
+    } catch (error) {
+      closing = false;
+      closed = false;
+      throw error;
+    }
+  };
+  const shutdown = async () => {
+    try {
+      await stopContext();
+    } finally {
+      await closeServer().catch(() => {});
+    }
   };
   const initializeOfficial = async () => {
     if (official) return official;
@@ -309,8 +331,13 @@ async function run() {
         const runOperation = queue.then(() => operation(requestValue.operation, requestValue.payload));
         queue = runOperation.catch(() => {});
         const result = await runOperation;
+        if (requestValue.operation === "close") {
+          await stopContext();
+          send(response, 200, responseBody({ version: VERSION, ok: true, result }));
+          await closeServer();
+          return;
+        }
         send(response, 200, responseBody({ version: VERSION, ok: true, result }));
-        if (requestValue.operation === "close") await shutdown();
       } catch (error) {
         const code = ERROR_MESSAGES[error?.code] ? error.code : "operation_failed";
         send(response, 400, responseBody({ version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code], ...(error?.details ? { details: error.details } : {}) } }));

@@ -5,6 +5,12 @@ on:
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
+      - scripts/firefox-owner-smoke.mjs
+      - scripts/firefox-owner-smoke-manager.mjs
+      - firefox-runtime.ts
+      - firefox-worker.mjs
+      - playwright-runtime.ts
+      - playwright-worker.mjs
       - agent/playwright-proxy.mjs
       - package.json
       - bun.lock
@@ -12,6 +18,12 @@ on:
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
+      - scripts/firefox-owner-smoke.mjs
+      - scripts/firefox-owner-smoke-manager.mjs
+      - firefox-runtime.ts
+      - firefox-worker.mjs
+      - playwright-runtime.ts
+      - playwright-worker.mjs
       - agent/playwright-proxy.mjs
       - package.json
       - bun.lock
@@ -47,6 +59,14 @@ jobs:
           node scripts/firefox-compatibility-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-headless-proof')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/firefox-compatibility-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-headed-proof') --headed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove detached Firefox owner lifecycle
+        shell: pwsh
+        run: |
+          $browser = Join-Path $env:RUNNER_TEMP 'camoufox/camoufox.exe'
+          bun scripts/firefox-owner-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-owner-headless-proof')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun scripts/firefox-owner-smoke.mjs $browser (Join-Path $env:RUNNER_TEMP 'firefox-owner-headed-proof') --headed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()

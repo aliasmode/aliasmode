@@ -36,6 +36,7 @@ export interface StartFirefoxOwnerInput {
   proxy?: { server: string; username?: string; password?: string; bypass?: string };
   headless?: boolean;
   args?: string[];
+  timeoutMs?: number;
 }
 
 export interface FirefoxOwnerCallbacks {
@@ -44,10 +45,16 @@ export interface FirefoxOwnerCallbacks {
   onReady?: (owner: FirefoxOwner) => void | Promise<void>;
 }
 
+export interface FirefoxOwnerErrorDetails {
+  operation?: string;
+  outcome?: string;
+}
+
 export class FirefoxOwnerError extends Error {
   constructor(
     readonly code: "invalid_request" | "invalid_response" | "operation_failed" | "runtime_unavailable" | "timeout",
     message: string,
+    readonly details?: FirefoxOwnerErrorDetails,
   ) {
     super(message);
   }
@@ -69,9 +76,33 @@ function endpointKey(endpoint: string, generation: string): string {
   return `firefox://127.0.0.1:${parsed.port}/${encodeURIComponent(generation)}`;
 }
 
-function responseError(code: string, message: string): FirefoxOwnerError {
+function responseError(code: string, message: string, details?: FirefoxOwnerErrorDetails): FirefoxOwnerError {
   const valid = ["invalid_request", "invalid_response", "operation_failed", "runtime_unavailable", "timeout"] as const;
-  return new FirefoxOwnerError(valid.includes(code as typeof valid[number]) ? code as typeof valid[number] : "operation_failed", message);
+  return new FirefoxOwnerError(valid.includes(code as typeof valid[number]) ? code as typeof valid[number] : "operation_failed", message, details);
+}
+
+function requestSignal(options: { signal?: AbortSignal; timeoutMs?: number }) {
+  if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1)) {
+    throw new FirefoxOwnerError("invalid_request", "Firefox owner timeout is invalid");
+  }
+  if (!options.signal && options.timeoutMs === undefined) return { signal: undefined, dispose() {}, timedOut: () => false };
+  const controller = new AbortController();
+  let timedOut = false;
+  const abort = () => controller.abort();
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener("abort", abort, { once: true });
+  const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose() {
+      if (timer) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
+    },
+    timedOut: () => timedOut,
+  };
 }
 
 async function readResponse(response: Response): Promise<string> {
@@ -123,14 +154,25 @@ export async function reserveFirefoxOwner(): Promise<FirefoxReservation> {
   };
 }
 
-function readReady(child: ChildProcess): Promise<FirefoxOwner> {
+function readReady(child: ChildProcess, timeoutMs?: number): Promise<FirefoxOwner> {
   return new Promise((resolve, reject) => {
     let output = "";
     let settled = false;
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+      try { child.kill(); } catch {}
+      fail(new FirefoxOwnerError("timeout", "Firefox owner readiness timed out"));
+    }, timeoutMs);
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       reject(error);
+    };
+    const succeed = (owner: FirefoxOwner) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(owner);
     };
     child.once("error", () => fail(new FirefoxOwnerError("runtime_unavailable", "Firefox owner could not start")));
     child.once("exit", () => fail(new FirefoxOwnerError("runtime_unavailable", "Firefox owner stopped before ready")));
@@ -151,8 +193,7 @@ function readReady(child: ChildProcess): Promise<FirefoxOwner> {
         fail(new FirefoxOwnerError("invalid_response", "Firefox owner readiness is invalid"));
         return;
       }
-      settled = true;
-      resolve(response.result);
+      succeed(response.result);
     });
   });
 }
@@ -165,7 +206,8 @@ export async function startFirefoxOwner(
     || typeof input.executablePath !== "string" || !input.executablePath
     || typeof input.executableSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.executableSha256)
     || typeof input.userDataDir !== "string" || !input.userDataDir
-    || !input.config || typeof input.config !== "object" || Array.isArray(input.config)) {
+    || !input.config || typeof input.config !== "object" || Array.isArray(input.config)
+    || (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1))) {
     throw new FirefoxOwnerError("invalid_request", "Firefox owner input is invalid");
   }
   try { JSON.stringify(input.config); } catch { throw new FirefoxOwnerError("invalid_request", "Firefox owner input is invalid"); }
@@ -178,7 +220,9 @@ export async function startFirefoxOwner(
     throw new FirefoxOwnerError("invalid_request", "Firefox owner reservation is invalid");
   }
   const runtime = resolvePlaywrightRuntime();
-  const workerPath = join(runtime.root, "firefox-worker.mjs");
+  const workerPath = runtime.kind === "source"
+    ? join(import.meta.dir, "firefox-worker.mjs")
+    : join(runtime.root, "firefox-worker.mjs");
   let child: ChildProcess;
   try {
     child = spawn(runtime.nodeExecutable, [workerPath, `--aliasmode-firefox-owner=${reservation.generation}`], {
@@ -208,7 +252,7 @@ export async function startFirefoxOwner(
     child.kill();
     throw new FirefoxOwnerError("operation_failed", "Firefox owner reservation was not saved");
   }
-  const ready = readReady(child);
+  const ready = readReady(child, input.timeoutMs);
   child.stdin.on("error", () => {});
   child.stdin.end(JSON.stringify({ version: PLAYWRIGHT_PROTOCOL_VERSION, ...input, owner: reservation }));
   let owner: FirefoxOwner;
@@ -247,7 +291,7 @@ export async function callFirefoxOwner<T>(
   owner: FirefoxOwner,
   operation: string,
   payload: unknown,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<T> {
   if (typeof operation !== "string" || !operation || !payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new FirefoxOwnerError("invalid_request", "Firefox owner request is invalid");
@@ -260,29 +304,32 @@ export async function callFirefoxOwner<T>(
   if (Buffer.byteLength(request) > PLAYWRIGHT_MAX_MESSAGE_BYTES) {
     throw new FirefoxOwnerError("invalid_request", "Firefox owner request exceeded its limit");
   }
+  const abort = requestSignal(options);
   let response: Response;
   try {
     response = await fetch(owner.endpoint, {
       method: "POST",
       headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" },
       body: request,
-      signal: options.signal,
+      signal: abort.signal,
     });
-  } catch {
+    const body = await readResponse(response);
+    let value: any;
+    try { value = JSON.parse(body); } catch { throw new FirefoxOwnerError("invalid_response", "Firefox owner response is invalid"); }
+    if (value?.version !== PLAYWRIGHT_PROTOCOL_VERSION || typeof value.ok !== "boolean") {
+      throw new FirefoxOwnerError("invalid_response", "Firefox owner response is invalid");
+    }
+    if (!value.ok) throw responseError(value.error?.code, value.error?.message || "Firefox owner operation failed", value.error?.details);
+    if (!response.ok) throw new FirefoxOwnerError("operation_failed", "Firefox owner operation failed");
+    return value.result as T;
+  } catch (error) {
+    if (error instanceof FirefoxOwnerError) throw error;
+    if (abort.timedOut()) throw new FirefoxOwnerError("timeout", "Firefox owner operation timed out");
     throw new FirefoxOwnerError("runtime_unavailable", "Firefox owner is unavailable");
-  }
-  const body = await readResponse(response);
-  let value: any;
-  try { value = JSON.parse(body); } catch { throw new FirefoxOwnerError("invalid_response", "Firefox owner response is invalid"); }
-  if (value?.version !== PLAYWRIGHT_PROTOCOL_VERSION || typeof value.ok !== "boolean") {
-    throw new FirefoxOwnerError("invalid_response", "Firefox owner response is invalid");
-  }
-  if (!value.ok) throw responseError(value.error?.code, value.error?.message || "Firefox owner operation failed");
-  if (!response.ok) throw new FirefoxOwnerError("operation_failed", "Firefox owner operation failed");
-  return value.result as T;
+  } finally { abort.dispose(); }
 }
 
-export async function closeFirefoxOwner(owner: FirefoxOwner): Promise<void> {
-  await callFirefoxOwner(owner, "close", {});
+export async function closeFirefoxOwner(owner: FirefoxOwner, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<void> {
+  await callFirefoxOwner(owner, "close", {}, options);
   forgetFirefoxOwner(owner);
 }
