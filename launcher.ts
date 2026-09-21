@@ -1854,6 +1854,9 @@ export class Launcher {
       }
     }
     mkdirSync(userDataDir, { recursive: true });
+    const restoreLastSession = !pendingSession && opts.restoreLastSession !== false && [
+      "sessionstore.jsonlz4", "sessionstore-backups/recovery.jsonlz4", "sessionstore-backups/previous.jsonlz4",
+    ].some((file) => existsSync(join(userDataDir, file)));
     let reserved = false;
     try {
       if (needsProxyRelay(profile)) {
@@ -1875,7 +1878,8 @@ export class Launcher {
         : profile.proxy ? { server: `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port}` } : undefined;
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
-        userDataDir, config: profile.firefox!.config, proxy, headless, timeoutMs: this.cdpReadyTimeoutMs,
+        userDataDir, config: profile.firefox!.config, proxy, headless, restoreLastSession,
+        timeoutMs: this.cdpReadyTimeoutMs,
       }, {
         reservation,
         onSpawn: (spawned) => {
@@ -1894,7 +1898,14 @@ export class Launcher {
       launch.ws = firefoxEndpoint(running);
       this.store.recordLaunch(launch);
       profile = this.requireUnchangedProfile(profileId, snapshot, "Firefox startup");
-      await this.firefoxStatus(launch);
+      let startupStatus = await this.firefoxStatus(launch);
+      const restoreDeadline = Date.now() + 3_000;
+      while (restoreLastSession && !startupStatus.pageTargets.some((target) => canonicalUserPageUrl(target.url))
+        && Date.now() < restoreDeadline) {
+        await sleep(50);
+        startupStatus = await this.firefoxStatus(launch);
+      }
+      const nativeSessionRestored = restoreLastSession && startupStatus.pageTargets.some((target) => canonicalUserPageUrl(target.url));
       const captured = await recordCapture({
         profile, capture: () => this.captureFingerprintFn(launch.ws),
         save: (id, observed, verdict) => this.store.saveObservedFingerprint(id, observed, verdict),
@@ -1924,7 +1935,7 @@ export class Launcher {
         if (opts.autoNavigate ?? true) {
           const savedTabs = opts.restoreLastSession === false ? [] : bundleTabUrls(this.store.getSessionBundle(profileId) ?? "");
           const home = platformHomeUrl(profile.platform);
-          const urls = startupUrls.length ? startupUrls : savedTabs.length ? savedTabs : home ? [home] : [];
+          const urls = startupUrls.length ? startupUrls : nativeSessionRestored ? [] : savedTabs.length ? savedTabs : home ? [home] : [];
           await this.navigate(launch.ws, urls).catch(() => {
             this.log(`${profileId}: startup navigation failed; open the site manually`);
           });
@@ -1933,7 +1944,7 @@ export class Launcher {
       this.requireUnchangedProfile(profileId, snapshot, "Firefox launch commit");
       this.markIdentityCertified(profileId);
       if (pendingSession) this.store.markSessionRestored(profileId, pendingSession);
-      return { ws: launch.ws, port, nativeSessionRestored: false };
+      return { ws: launch.ws, port, nativeSessionRestored };
     } catch (error) {
       if (reserved) {
         const stopped = await this.doStop(profileId, launch).catch(() => false);

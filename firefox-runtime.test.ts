@@ -8,6 +8,7 @@ import {
   type FirefoxOwner,
 } from "./firefox-runtime.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
+import { firefoxLaunchOptions } from "./firefox-worker.mjs";
 
 async function ownerServer(handler: RequestListener) {
   const server = createServer(handler);
@@ -26,6 +27,24 @@ async function ownerServer(handler: RequestListener) {
   };
   return { server, owner };
 }
+
+test("Firefox owner passes native session restore and proxy preferences", () => {
+  const proxy = { server: "http://proxy.example:8080" };
+  expect(firefoxLaunchOptions({ executablePath: "firefox.exe", proxy, restoreLastSession: true })).toMatchObject({
+    executablePath: "firefox.exe",
+    viewport: null,
+    proxy,
+    firefoxUserPrefs: {
+      "browser.startup.page": 3,
+      "media.peerconnection.ice.proxy_only": true,
+      "media.peerconnection.ice.default_address_only": true,
+      "media.peerconnection.ice.no_host": true,
+    },
+  });
+  expect(firefoxLaunchOptions({ executablePath: "firefox.exe" }).firefoxUserPrefs).toEqual({
+    "browser.startup.page": 0,
+  });
+});
 
 test("Firefox owner endpoints are opaque and route worker operations privately", async () => {
   let authorization = "";
