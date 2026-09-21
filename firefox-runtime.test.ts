@@ -3,6 +3,7 @@ import { createServer, type RequestListener } from "node:http";
 import {
   callFirefoxOwner,
   firefoxEndpoint,
+  firefoxOwnerReady,
   forgetFirefoxOwner,
   reserveFirefoxOwner,
   type FirefoxOwner,
@@ -44,6 +45,17 @@ test("Firefox owner passes native session restore and proxy preferences", () => 
   expect(firefoxLaunchOptions({ executablePath: "firefox.exe" }).firefoxUserPrefs).toEqual({
     "browser.startup.page": 0,
   });
+});
+
+test("Firefox owner preserves pre-readiness worker error codes", () => {
+  const error = (() => {
+    try {
+      firefoxOwnerReady({ version: 1, ok: false, error: { code: "runtime_unavailable" } });
+    } catch (failure) {
+      return failure;
+    }
+  })();
+  expect(error).toMatchObject({ name: "FirefoxOwnerError", code: "runtime_unavailable", message: "Firefox owner failed before ready" });
 });
 
 test("Firefox owner endpoints are opaque and route worker operations privately", async () => {

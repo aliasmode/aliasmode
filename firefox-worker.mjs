@@ -114,6 +114,9 @@ function powerShellLiteral(value) {
 }
 
 async function browserPidOf(context, input) {
+  const serverBrowser = context?._connection?.toImpl?.(context)?._browser;
+  const serverProcess = serverBrowser?.options?.browserProcess?.process;
+  if (Number.isSafeInteger(serverProcess?.pid) && serverProcess.pid > 0) return serverProcess.pid;
   const browser = context.browser?.();
   const launched = typeof browser?.process === "function"
     ? browser.process()

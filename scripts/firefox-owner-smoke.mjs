@@ -64,7 +64,7 @@ async function holdBridge(endpoint) {
   if (done) throw new Error("Firefox bridge smoke runner stopped before ready");
   let signal;
   try { signal = JSON.parse(new TextDecoder().decode(value)); } catch { throw new Error("Firefox bridge smoke runner readiness is invalid"); }
-  if (signal?.ready !== true) throw new Error(`Firefox bridge smoke runner failed during ${signal?.failed ?? "startup"}`);
+  if (signal?.ready !== true) throw new Error(`Firefox bridge smoke runner failed during ${signal?.failed ?? "startup"}: ${typeof signal?.error === "string" ? signal.error : "unknown error"}`);
   return child;
 }
 const processAlive = (pid) => {
@@ -106,6 +106,9 @@ try {
   assert.equal(run.stored, "saved");
   assert.equal(typeof run.identity.userAgent, "string");
   assert.deepEqual(run.identity.screen, [savedConfig.config["screen.width"], savedConfig.config["screen.height"]]);
+  const afterWrite = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.equal(afterWrite.generation, owner.generation, "external runner disconnect preserves the owner");
+  assert.equal(afterWrite.hasPages, true, "external runner disconnect preserves the owner page");
   const hung = await holdBridge(bridge.endpoint);
   const duringHang = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
   assert.equal(duringHang.hasPages, true, "owner remains responsive while an external runner is hung");

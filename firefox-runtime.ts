@@ -58,6 +58,7 @@ export class FirefoxOwnerError extends Error {
     readonly details?: FirefoxOwnerErrorDetails,
   ) {
     super(message);
+    this.name = "FirefoxOwnerError";
   }
 }
 
@@ -155,6 +156,22 @@ export async function reserveFirefoxOwner(): Promise<FirefoxReservation> {
   };
 }
 
+export function firefoxOwnerReady(response: unknown): FirefoxOwner {
+  const value: any = response;
+  if (value?.version !== PLAYWRIGHT_PROTOCOL_VERSION) {
+    throw new FirefoxOwnerError("invalid_response", "Firefox owner readiness is invalid");
+  }
+  if (value.ok === false) {
+    throw responseError(value.error?.code, "Firefox owner failed before ready");
+  }
+  if (value.ok !== true
+    || typeof value.result?.endpoint !== "string" || typeof value.result?.generation !== "string"
+    || !Number.isSafeInteger(value.result?.pid) || !Number.isSafeInteger(value.result?.browserPid)) {
+    throw new FirefoxOwnerError("invalid_response", "Firefox owner readiness is invalid");
+  }
+  return value.result;
+}
+
 function readReady(child: ChildProcess, timeoutMs?: number): Promise<FirefoxOwner> {
   return new Promise((resolve, reject) => {
     let output = "";
@@ -176,7 +193,7 @@ function readReady(child: ChildProcess, timeoutMs?: number): Promise<FirefoxOwne
       resolve(owner);
     };
     child.once("error", () => fail(new FirefoxOwnerError("runtime_unavailable", "Firefox owner could not start")));
-    child.once("exit", () => fail(new FirefoxOwnerError("runtime_unavailable", "Firefox owner stopped before ready")));
+    child.once("close", () => fail(new FirefoxOwnerError("runtime_unavailable", "Firefox owner stopped before ready")));
     child.stdout?.on("data", (chunk: Buffer | string) => {
       if (settled) return;
       output += chunk.toString();
@@ -188,13 +205,8 @@ function readReady(child: ChildProcess, timeoutMs?: number): Promise<FirefoxOwne
       if (newline < 0) return;
       let response: any;
       try { response = JSON.parse(output.slice(0, newline)); } catch { fail(new FirefoxOwnerError("invalid_response", "Firefox owner readiness is invalid")); return; }
-      if (response?.version !== PLAYWRIGHT_PROTOCOL_VERSION || response.ok !== true
-        || typeof response.result?.endpoint !== "string" || typeof response.result?.generation !== "string"
-        || !Number.isSafeInteger(response.result?.pid) || !Number.isSafeInteger(response.result?.browserPid)) {
-        fail(new FirefoxOwnerError("invalid_response", "Firefox owner readiness is invalid"));
-        return;
-      }
-      succeed(response.result);
+      try { succeed(firefoxOwnerReady(response)); }
+      catch (error) { fail(error instanceof Error ? error : new FirefoxOwnerError("invalid_response", "Firefox owner readiness is invalid")); }
     });
   });
 }
