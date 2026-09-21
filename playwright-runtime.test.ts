@@ -11,6 +11,7 @@ import {
   runPlaywrightWorker,
   verifyPlaywrightRuntime,
 } from "./playwright-runtime.ts";
+import { captureSession } from "./playwright-worker.mjs";
 
 const bunAsNodeTest = process.platform === "win32" ? test.skip : test;
 
@@ -233,6 +234,51 @@ test("source worker loads pinned dependencies under Node from PATH", async () =>
   const error = await runPlaywrightWorker("page", {}, { timeoutMs: 10_000 })
     .then(() => null, (failure) => failure);
   expect(error).toMatchObject({ code: "invalid_request" });
+});
+
+bunAsNodeTest("importing the worker has no stdin or stdout side effects", async () => {
+  const worker = pathToFileURL(join(import.meta.dir, "playwright-worker.mjs")).href;
+  const child = Bun.spawn(["node", "--input-type=module", "--eval", `await import(${JSON.stringify(worker)})`], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exitCode).toBe(0);
+  expect(stdout).toBe("");
+  expect(stderr).toBe("");
+});
+
+test("native capture reads closed observed origins through storageState without CDP", async () => {
+  let storageStateCalls = 0;
+  const context = {
+    pages: () => [],
+    async cookies() { return []; },
+    async storageState(options: unknown) {
+      storageStateCalls++;
+      expect(options).toEqual({ indexedDB: true });
+      return {
+        origins: [{
+          origin: "https://closed.example",
+          localStorage: [{ name: "session", value: "fresh" }],
+          indexedDB: [{ name: "unrelated", version: 1, stores: [] }],
+        }],
+      };
+    },
+    async newCDPSession() { throw new Error("Firefox capture must not use CDP"); },
+  };
+  const result = JSON.parse(await captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://closed.example"] },
+  }, { nativeStorage: true }));
+  expect(storageStateCalls).toBe(1);
+  expect(result).toEqual({
+    cookies: [],
+    origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value: "fresh" }] }],
+    tabs: [],
+  });
 });
 
 bunAsNodeTest("worker imports all sites without replacing existing cookies and restores complete Cloud jars", async () => {

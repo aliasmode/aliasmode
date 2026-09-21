@@ -198,6 +198,20 @@ export async function runPlaywrightWorker<T>(
   if (Buffer.byteLength(request) > PLAYWRIGHT_MAX_MESSAGE_BYTES) {
     throw new PlaywrightWorkerError("invalid_request", "Playwright worker request exceeded its limit");
   }
+  const endpoint = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as { endpoint?: unknown }).endpoint
+    : undefined;
+  if (typeof endpoint === "string" && endpoint.startsWith("firefox://")) {
+    const { callFirefoxOwner, firefoxOwnerForEndpoint, FirefoxOwnerError } = await import("./firefox-runtime.ts");
+    const owner = firefoxOwnerForEndpoint(endpoint);
+    if (!owner) throw new PlaywrightWorkerError("runtime_unavailable", "Firefox owner is unavailable");
+    try {
+      return await callFirefoxOwner<T>(owner, operation, payload);
+    } catch (error) {
+      if (error instanceof FirefoxOwnerError) throw new PlaywrightWorkerError(error.code, error.message);
+      throw error;
+    }
+  }
   const spawn = options.spawn ?? ((argv: string[]) => Bun.spawn(argv, {
     stdin: "pipe",
     stdout: "pipe",
