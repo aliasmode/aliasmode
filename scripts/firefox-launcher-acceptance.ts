@@ -59,7 +59,7 @@ async function ownerScript(
   const runtime = resolvePlaywrightRuntime();
   const sourceRoot = resolve(import.meta.dir, "..");
   const executable = language === "python"
-    ? runtime.kind === "packaged" ? join(runtime.root, "python", "python.exe") : "python"
+    ? runtime.kind === "packaged" ? join(runtime.root, "python", "python.exe") : process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3")
     : runtime.nodeExecutable;
   const runner = runtime.kind === "packaged"
     ? join(runtime.root, "agent", language === "python" ? "script-runner.py" : "script-runner.mjs")
@@ -364,11 +364,9 @@ async def run(*, context, inputs, log, **_kwargs):
   assert.equal((localState as any).telegramAuth, "synthetic-auth", "local reopen keeps selected Telegram IndexedDB auth");
   assert.ok((localState as any).cookies.some((cookie: { name: string; value: string }) => cookie.name === "launcher-proof" && cookie.value === "saved"), "local reopen keeps cookies");
   assert.ok((localState as any).tabs.includes(firstTab) && (localState as any).tabs.includes(secondTab), "local reopen keeps native tabs without a saved bundle");
-  if (resolvePlaywrightRuntime().kind === "packaged") {
-    const pythonRun = await ownerScript(localLauncher, profileId, pythonVerifier, { origin, firstTab }, "python");
-    assert.ok(pythonRun.logs.includes("Python fixture context verified"), "external Python runner returns fixture logs");
-    assert.equal((pythonRun.result as any).localStorage, "saved", "external Python runner uses the owned Firefox context");
-  }
+  const pythonRun = await ownerScript(localLauncher, profileId, pythonVerifier, { origin, firstTab }, "python");
+  assert.ok(pythonRun.logs.includes("Python fixture context verified"), "external Python runner returns fixture logs");
+  assert.equal((pythonRun.result as any).localStorage, "saved", "external Python runner uses the owned Firefox context");
 
   const captured = await readSessionInSubprocess(reopened.ws, {
     captureSeed: { origins: [origin, telegramOrigin], telegramClient: "k" },
