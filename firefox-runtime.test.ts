@@ -29,22 +29,20 @@ async function ownerServer(handler: RequestListener) {
   return { server, owner };
 }
 
-test("Firefox owner passes native session restore and proxy preferences", () => {
+test("Firefox owner passes native proxy preferences", () => {
   const proxy = { server: "http://proxy.example:8080" };
-  expect(firefoxLaunchOptions({ executablePath: "firefox.exe", proxy, restoreLastSession: true })).toMatchObject({
+  expect(firefoxLaunchOptions({ executablePath: "firefox.exe", proxy })).toMatchObject({
     executablePath: "firefox.exe",
     viewport: null,
     proxy,
     firefoxUserPrefs: {
-      "browser.startup.page": 3,
       "media.peerconnection.ice.proxy_only": true,
       "media.peerconnection.ice.default_address_only": true,
       "media.peerconnection.ice.no_host": true,
     },
   });
-  expect(firefoxLaunchOptions({ executablePath: "firefox.exe" }).firefoxUserPrefs).toEqual({
-    "browser.startup.page": 0,
-  });
+  expect(firefoxLaunchOptions({ executablePath: "firefox.exe", proxy })).not.toHaveProperty("firefoxUserPrefs.browser.startup.page");
+  expect(firefoxLaunchOptions({ executablePath: "firefox.exe" })).not.toHaveProperty("firefoxUserPrefs");
 });
 
 test("Firefox owner preserves pre-readiness worker error codes", () => {

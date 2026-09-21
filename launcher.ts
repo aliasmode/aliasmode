@@ -67,6 +67,15 @@ const NATIVE_SESSION_ARTIFACTS = [
   "Default/Last Tabs",
 ];
 
+function writeFirefoxStartupPage(userDataDir: string, restoreLastSession: boolean): void {
+  const path = join(userDataDir, "user.js");
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const preserved = existing
+    .replace(/^user_pref\("browser\.startup\.page",\s*\d+\);\s*$/gm, "")
+    .trimEnd();
+  writeFileSync(path, `${preserved}${preserved ? "\n" : ""}user_pref("browser.startup.page", ${restoreLastSession ? 3 : 0});\n`);
+}
+
 export type BrowserLaunchFailure =
   | "preflight"
   | "mode_conflict"
@@ -1857,6 +1866,7 @@ export class Launcher {
     const restoreLastSession = !pendingSession && opts.restoreLastSession !== false && [
       "sessionstore.jsonlz4", "sessionstore-backups/recovery.jsonlz4", "sessionstore-backups/previous.jsonlz4",
     ].some((file) => existsSync(join(userDataDir, file)));
+    writeFirefoxStartupPage(userDataDir, restoreLastSession);
     let reserved = false;
     try {
       if (needsProxyRelay(profile)) {
@@ -1878,7 +1888,7 @@ export class Launcher {
         : profile.proxy ? { server: `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port}` } : undefined;
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
-        userDataDir, config: profile.firefox!.config, proxy, headless, restoreLastSession,
+        userDataDir, config: profile.firefox!.config, proxy, headless,
         timeoutMs: this.cdpReadyTimeoutMs,
       }, {
         reservation,
