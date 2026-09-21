@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createServer } from "node:http";
+import { createServer, type RequestListener } from "node:http";
 import {
   callFirefoxOwner,
   firefoxEndpoint,
@@ -9,7 +9,7 @@ import {
 } from "./firefox-runtime.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
 
-async function ownerServer(handler: Parameters<typeof createServer>[0]) {
+async function ownerServer(handler: RequestListener) {
   const server = createServer(handler);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

@@ -8,6 +8,7 @@ on:
       - scripts/firefox-owner-smoke.mjs
       - scripts/firefox-owner-smoke-manager.mjs
       - firefox-runtime.ts
+      - firefox-config.ts
       - firefox-worker.mjs
       - playwright-runtime.ts
       - playwright-worker.mjs
@@ -21,6 +22,7 @@ on:
       - scripts/firefox-owner-smoke.mjs
       - scripts/firefox-owner-smoke-manager.mjs
       - firefox-runtime.ts
+      - firefox-config.ts
       - firefox-worker.mjs
       - playwright-runtime.ts
       - playwright-worker.mjs
