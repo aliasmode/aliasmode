@@ -131,6 +131,23 @@ test("Firefox disables native restore when the Cloud coordinator requests portab
   expect(await f.launcher.stop(f.profile.id)).toBe(true);
 });
 
+test("Firefox target probes ignore replaced launch generations", async () => {
+  const f = fixture();
+  await f.launcher.start(f.profile.id);
+  const launch = f.store.getLaunch(f.profile.id)!;
+  const call = f.options.firefoxRuntime!.call;
+  f.options.firefoxRuntime!.call = async (...args) => {
+    const result = await call<any>(...args);
+    if (args[1] !== "status") return result;
+    f.store.recordLaunch({ ...launch, startedAt: launch.startedAt + 1 });
+    return { ...result, hasPages: false, pageTargets: [] };
+  };
+  expect(await f.launcher.pageTargetFingerprint(f.profile.id, launch)).toBeNull();
+  f.store.recordLaunch(launch);
+  expect(await f.launcher.hasPageTargets(f.profile.id)).toBe(true);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
 test("Firefox rejects status from a different owner process", async () => {
   const f = fixture();
   const call = f.options.firefoxRuntime!.call;

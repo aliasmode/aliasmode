@@ -126,7 +126,9 @@ try {
     server!.once("error", fail);
     server!.listen(0, "127.0.0.1", done);
   });
-  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const fixtureHost = "aliasmode-fixture.test";
+  const fixturePort = (server.address() as { port: number }).port;
+  const origin = `http://${fixtureHost}:${fixturePort}`;
   const proxyUser = "acceptance-user";
   const proxyPassword = "acceptance-password";
   const expectedProxyAuthorization = `Basic ${Buffer.from(`${proxyUser}:${proxyPassword}`).toString("base64")}`;
@@ -148,11 +150,20 @@ try {
       response.end();
       return;
     }
+    if (target.hostname !== fixtureHost || target.port !== String(fixturePort)) {
+      proxyFailure = "Launcher proxy relay received a request outside the synthetic fixture";
+      response.writeHead(502);
+      response.end();
+      return;
+    }
     proxyRequests++;
-    if (target.origin === origin) proxyFixtureRequests++;
+    proxyFixtureRequests++;
     const headers = { ...request.headers, host: target.host };
     delete headers["proxy-authorization"];
-    const upstream = httpRequest(target, { method: request.method, headers }, (upstreamResponse) => {
+    const upstream = httpRequest({
+      hostname: "127.0.0.1", port: fixturePort, path: `${target.pathname}${target.search}`,
+      method: request.method, headers,
+    }, (upstreamResponse) => {
       response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
       upstreamResponse.pipe(response);
     });
