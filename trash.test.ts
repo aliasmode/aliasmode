@@ -12,11 +12,24 @@ import type { Launcher } from "./launcher.ts";
 
 const stores: ProfileStore[] = [];
 const roots: string[] = [];
-afterEach(() => {
+async function removeFixtureRoot(root: string) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      rmSync(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+      Bun.gc(true);
+      await Bun.sleep(100);
+    }
+  }
+  rmSync(root, { recursive: true, force: true });
+}
+afterEach(async () => {
   while (stores.length) stores.pop()!.close();
   // Bun's transaction statements release file handles only after collection.
   Bun.gc(true);
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  for (const root of roots.splice(0)) await removeFixtureRoot(root);
 });
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "aliasmode-trash-"));
