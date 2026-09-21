@@ -144,9 +144,20 @@ jobs:
           $proof = Join-Path $env:RUNNER_TEMP "firefox-launcher-source-$([guid]::NewGuid().ToString('N'))"
           bun scripts/firefox-launcher-acceptance.ts $env:ALIASMODE_FIREFOX_BINARY_PATH $proof $env:ALIASMODE_FIREFOX_BINARY_SHA256
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
+      - name: Report compatibility results
         if: always()
-        with:
-          name: firefox-compatibility-results
-          path: ${{ runner.temp }}/firefox-*-proof/result.json
-          if-no-files-found: ignore
+        shell: pwsh
+        run: |
+          $reports = @(Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Recurse -File -Filter result.json -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -like "firefox-*-proof" })
+          if ($reports.Count -eq 0) {
+            "## Firefox compatibility results`n`nNo result reports were produced." | Add-Content $env:GITHUB_STEP_SUMMARY
+            Write-Host "No Firefox compatibility result reports were produced"
+            exit 0
+          }
+          "## Firefox compatibility results" | Add-Content $env:GITHUB_STEP_SUMMARY
+          foreach ($report in $reports) {
+            $result = Get-Content -LiteralPath $report.FullName -Raw
+            Write-Host "Firefox compatibility result ($($report.Directory.Name)): $result"
+            "`n### $($report.Directory.Name)`n`n```json`n$result`n```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
