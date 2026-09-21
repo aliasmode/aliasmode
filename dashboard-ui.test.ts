@@ -226,6 +226,25 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   expect(styles).toContain(".proxy-referral a:focus-visible");
 });
 
+test("dashboard selects browser only for new Local profiles", () => {
+  const createModal = app.slice(app.indexOf("{showCreate && ("), app.indexOf("{editId && ("));
+  const editModal = app.slice(app.indexOf("{editId && ("), app.indexOf("{showBulk && ("));
+  expect(createModal).toContain('value="chromium">Chromium (CloakBrowser)');
+  expect(createModal).toContain('value="firefox">Firefox (AliasMode Firefox)');
+  expect(createModal).toContain('setF("engine", e.target.value)');
+  expect(editModal).toContain('value={editEngine === "firefox" ? "AliasMode Firefox" : "CloakBrowser"} readOnly');
+  expect(editModal).not.toContain('setEF("engine"');
+  expect(app).toContain('Native Firefox profile · no CDP, PDF, or Chrome extensions');
+  expect(app).toContain('{p.engine === "chromium" && <>');
+  expect(app).toContain('selectedProfilesSupportChromeExtensions');
+});
+
+test("Local timezone lookup is explicit", () => {
+  expect(app).toContain("refreshProfileTimezone(editId)");
+  expect(app).toContain("Set timezone from proxy");
+  expect(app).not.toContain("Automatic · from proxy");
+});
+
 test("running profile rows expose Bring to front in Local and Cloud mode", () => {
   expect(app).toContain('data-tip="Bring to front"');
   expect(app).toContain('aria-label="Bring this browser window to the front"');
@@ -788,7 +807,7 @@ test("extensions can be assigned to Cloud profiles and groups without losing mis
   expect(app).toContain("new Set([...editInitialExts, ...editExts])");
   expect(app).toContain("new Set([...storedGroupDefaultExts, ...groupDefaultExts])");
   expect(app).toContain("Cloud assignments remain and will show as not installed here.");
-  expect(app).toContain("{editExtensionChoices.length > 0 && (");
+  expect(app).toContain("{editEngine === \"chromium\" && editExtensionChoices.length > 0 && (");
   expect(app).toContain("Group defaults");
   expect(app).toContain("fetchGroupExtensionDefaults()");
   expect(app).toContain("setGroupExtensionDefaults(groupDefaultName, groupDefaultExts)");

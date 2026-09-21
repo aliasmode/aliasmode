@@ -14,7 +14,7 @@ function setup(ids = ["p1", "p2"]) {
   for (const id of ids) store.upsertProfile({ ...buildNewProfile({ name: id, group: "folder", proxy }, () => false), id });
   const blocked = new Set<string>();
   const launcher = { profileDeletionBlocked: (id: string) => blocked.has(id) } as unknown as Launcher;
-  const options: UiRuntimeOptions = { timezoneFetch: async () => new Response('{"status":"success","timezone":"Europe/London"}') };
+  const options: UiRuntimeOptions = {};
   const request = (action: string, body: unknown, extra: UiRuntimeOptions = options, headers = { "Content-Type": "application/json" }) =>
     handleUiRequest(new Request(`http://localhost/ui/api/proxies/${action}`, { method: "POST", headers, body: JSON.stringify(body) }), launcher, store, null, extra).then((r) => r!);
   const preview = async () => (await request("preview", { scope: { all: true }, mode: "list", input: "new.example:9000\nnew.example:9001" })).json() as Promise<ProxyPreview>;
@@ -60,13 +60,19 @@ test("stale and running rows are skipped independently; failed-only retry requir
   expect(store.getProfile("p2")!.proxy!.port).toBe("9001");
 });
 
-test("a profile starting while timezone lookup runs is never changed", async () => {
-  const { store, request, preview, blocked, options } = setup(["p1"]);
-  options.timezoneFetch = async () => { blocked.add("p1"); return new Response('{}'); };
+test("bulk replacements preserve timezone without a lookup", async () => {
+  const { store, request, preview, options } = setup(["p1"]);
+  const before = store.getProfile("p1")!;
+  before.timezone = "America/Los_Angeles";
+  store.upsertProfile(before);
+  let lookups = 0;
+  options.timezoneFetch = async () => { lookups++; return new Response("{}"); };
   const result = await preview();
   const output = await events(await request("apply", { previewId: result.previewId }));
-  expect(output.find((e) => e.type === "replacement")?.row.code).toBe("profile_open");
-  expect(store.getProfile("p1")!.proxy!.host).toBe("old.example");
+  expect(output.find((e) => e.type === "replacement")?.row.status).toBe("updated");
+  expect(lookups).toBe(0);
+  expect(store.getProfile("p1")!.proxy!.host).toBe("new.example");
+  expect(store.getProfile("p1")!.timezone).toBe("America/Los_Angeles");
 });
 
 test("bulk checks stream redacted deduplicated results without opening a browser", async () => {

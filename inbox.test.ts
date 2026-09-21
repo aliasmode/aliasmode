@@ -196,7 +196,7 @@ test("same-id re-import updates explicit portable identity fields", async () => 
   store.close();
 });
 
-test("an explicit imported timezone skips proxy GeoIP enrichment", async () => {
+test("an explicit imported timezone is retained without a lookup", async () => {
   const logs: string[] = [];
   const batch = await prepareImportBuffers(
     [{
@@ -210,6 +210,24 @@ test("an explicit imported timezone skips proxy GeoIP enrichment", async () => {
 
   expect(batch.profiles[0]!.timezone).toBe("Europe/London");
   expect(logs.some((message) => message.includes("resolved timezone"))).toBe(false);
+});
+
+test("a proxy import preserves an existing timezone without a lookup", async () => {
+  const store = new ProfileStore(":memory:");
+  const original = parseExport(REC("existing")).profiles[0]!;
+  original.timezone = "America/Los_Angeles";
+  store.upsertProfile(original);
+
+  await importBuffers(store, [{
+    name: "proxy.txt",
+    bytes: new TextEncoder().encode(`id=${original.id}\nproxytype=http\nproxy=8.8.8.8:8080:user:pass\n******************`),
+  }], () => {});
+
+  expect(store.getProfile(original.id)).toMatchObject({
+    proxy: { host: "8.8.8.8", port: "8080" },
+    timezone: "America/Los_Angeles",
+  });
+  store.close();
 });
 
 test("sparse re-import preserves a quarantined legacy proxy for later repair", async () => {

@@ -1,4 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import { ProfileStore } from "./store.ts";
 import {
@@ -6,6 +8,15 @@ import {
   serveDashboard,
   serveDesktopAutomationApi,
 } from "./web.ts";
+
+const webSource = readFileSync(join(import.meta.dir, "web.ts"), "utf8");
+
+test("profile identity cards do not fetch egress IP automatically", () => {
+  expect(webSource).not.toContain("ip-api.com/json");
+  expect(webSource).not.toContain("checking egress IP");
+  expect(webSource).toContain("AliasMode Firefox");
+  expect(webSource).toContain("no CDP, PDF, or Chrome extensions");
+});
 
 test("dashboard health route blocks browser cross-origin submissions on loopback", async () => {
   let publishes = 0;

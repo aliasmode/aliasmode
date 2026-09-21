@@ -1,5 +1,4 @@
 import { CloudApiError } from "./cloud-client.ts";
-import { attachTimezones } from "./geoip.ts";
 import { buildProxyPreview, checkProfileProxies, replacementState, selectProxyProfiles, ProxyToolsError, type PlannedProxyReplacement, type ProxyInventoryProfile } from "./proxy-bulk.ts";
 import { normalizeProxySpec, proxyHostPort, proxyIdentityKey } from "./proxy.ts";
 import { runProxyReplacements } from "./proxy-replacements.ts";
@@ -153,15 +152,7 @@ export async function handleProxyToolsRequest(
                       Object.assign(row.view, { status: "skipped", code: "version_conflict" }); continue;
                     }
                     if (launcher.profileDeletionBlocked(id)) { Object.assign(row.view, { status: "skipped", code: "profile_open" }); continue; }
-                    const changed = { ...profile, proxy: row.next!, timezone: "" };
-                    await attachTimezones([changed], options.timezoneFetch).catch(() => {});
-                    assertCurrent();
-                    profile = store.getProfile(id);
-                    if (!profile || proxyIdentityKey(profile.proxy) !== row.originalKey || profile.group !== row.view.group) {
-                      Object.assign(row.view, { status: "skipped", code: "version_conflict" }); continue;
-                    }
-                    if (launcher.profileDeletionBlocked(id)) { Object.assign(row.view, { status: "skipped", code: "profile_open" }); continue; }
-                    profile.proxy = row.next!; profile.timezone = changed.timezone; delete profile.proxyError;
+                    profile.proxy = row.next!; delete profile.proxyError;
                     store.upsertProfile(profile);
                     Object.assign(row.view, { status: "updated", code: undefined });
                   } catch { Object.assign(row.view, { status: "failed", code: "update_failed" }); }
