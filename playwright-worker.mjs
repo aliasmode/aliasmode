@@ -617,8 +617,7 @@ async function createReadOnlyStorageReader(browser, context) {
 }
 
 async function nativeOriginStorage(context, origin) {
-  let native;
-  try { native = context?._connection?.toImpl?.(context); } catch {}
+  const native = context?._connection?.toImpl?.(context);
   const trackedOrigins = native?._origins;
   const savedOrigins = trackedOrigins instanceof Set ? [...trackedOrigins] : undefined;
   try {
