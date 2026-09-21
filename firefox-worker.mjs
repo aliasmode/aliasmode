@@ -79,8 +79,7 @@ async function readConfig() {
     || typeof input.owner.generation !== "string" || !input.owner.generation
     || (input.proxy !== undefined && (!validConfig(input.proxy) || typeof input.proxy.server !== "string" || !input.proxy.server))
     || (input.args !== undefined && (!Array.isArray(input.args) || input.args.some((arg) => typeof arg !== "string")))
-    || (input.headless !== undefined && typeof input.headless !== "boolean")
-    || (input.restoreLastSession !== undefined && typeof input.restoreLastSession !== "boolean")) {
+    || (input.headless !== undefined && typeof input.headless !== "boolean")) {
     throw typed("invalid_request");
   }
   return input;
@@ -149,15 +148,14 @@ export function firefoxLaunchOptions(input) {
   return {
     executablePath: input.executablePath,
     viewport: null,
-    ...(input.proxy ? { proxy: input.proxy } : {}),
-    firefoxUserPrefs: {
-      "browser.startup.page": input.restoreLastSession ? 3 : 0,
-      ...(input.proxy ? {
+    ...(input.proxy ? {
+      proxy: input.proxy,
+      firefoxUserPrefs: {
         "media.peerconnection.ice.proxy_only": true,
         "media.peerconnection.ice.default_address_only": true,
         "media.peerconnection.ice.no_host": true,
-      } : {}),
-    },
+      },
+    } : {}),
     ...(input.headless === undefined ? {} : { headless: input.headless }),
     ...(input.args ? { args: input.args } : {}),
   };

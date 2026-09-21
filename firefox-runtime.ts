@@ -36,7 +36,6 @@ export interface StartFirefoxOwnerInput {
   proxy?: { server: string; username?: string; password?: string; bypass?: string };
   headless?: boolean;
   args?: string[];
-  restoreLastSession?: boolean;
   timeoutMs?: number;
 }
 
@@ -220,7 +219,6 @@ export async function startFirefoxOwner(
     || typeof input.executableSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.executableSha256)
     || typeof input.userDataDir !== "string" || !input.userDataDir
     || !input.config || typeof input.config !== "object" || Array.isArray(input.config)
-    || (input.restoreLastSession !== undefined && typeof input.restoreLastSession !== "boolean")
     || (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1))) {
     throw new FirefoxOwnerError("invalid_request", "Firefox owner input is invalid");
   }

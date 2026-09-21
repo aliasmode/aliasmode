@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Launcher, BrowserLaunchError, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
@@ -27,7 +27,6 @@ function fixture() {
   let reachable = false;
   let launches = 0;
   let receivedConfig: unknown;
-  let restoreLastSession: boolean | undefined;
   const navigated: string[][] = [];
   const killed: number[] = [];
   const snapshots = (): HostProcessSnapshot => ({
@@ -40,7 +39,8 @@ function fixture() {
   const options: LauncherOptions = {
     store, dataRoot: root, firefoxBinaryPath: "/fake/firefox.exe", unsafeDisableIdentityGates: true,
     hostPlatform: "win32", hostArch: "x64", captureFingerprint: async () => null,
-    navigate: async (_endpoint, urls) => { navigated.push([...urls]); }, ensureCookies: async () => ({ injected: false }), log: () => {},
+    navigate: async (_endpoint, urls) => { navigated.push([...urls]); }, ensureCookies: async () => ({ injected: false }),
+    applySession: async () => {}, log: () => {},
     readProcessSnapshot: async () => snapshots(),
     isPidAlive: (pid) => pid === 201 ? ownerAlive : pid === 202 ? browserAlive : false,
     killPid: async (pid) => { killed.push(pid); if (pid === 201) ownerAlive = false; if (pid === 202) browserAlive = false; },
@@ -50,7 +50,6 @@ function fixture() {
         launches++;
         expect(store.getLaunch(profile.id)?.firefoxOwner?.generation).toBe(reservation.generation);
         receivedConfig = args.config;
-        restoreLastSession = args.restoreLastSession;
         ownerAlive = true;
         await hooks?.onSpawn?.({ ...reservation, pid: 201, browserPid: 0 });
         browserAlive = true;
@@ -74,7 +73,7 @@ function fixture() {
   return {
     store, profile, options, killed, launcher: new Launcher(options),
     launches: () => launches, config: () => receivedConfig,
-    restoreLastSession: () => restoreLastSession, navigated,
+    navigated,
     crashOwner: () => { ownerAlive = false; reachable = false; },
   };
 }
@@ -106,14 +105,15 @@ test("owner crash never permits duplicate Firefox and stop targets only exact pr
   expect(f.killed).toEqual([202]);
 });
 
-test("Firefox preserves restored native tabs instead of reopening an older saved bundle", async () => {
+test("Firefox enables native tab restore in the owned profile before spawn", async () => {
   const f = fixture();
   const root = f.launcher.userDataDir(f.profile.id);
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, "sessionstore.jsonlz4"), "opaque native session");
+  writeFileSync(join(root, "user.js"), 'user_pref("toolkit.telemetry.enabled", false);\nuser_pref("browser.startup.page", 1);\n');
   f.store.saveSessionBundle(f.profile.id, JSON.stringify({ cookies: [], origins: [], tabs: ["https://old.example/"] }));
   const opened = await f.launcher.start(f.profile.id);
-  expect(f.restoreLastSession()).toBe(true);
+  expect(readFileSync(join(root, "user.js"), "utf8")).toBe('user_pref("toolkit.telemetry.enabled", false);\nuser_pref("browser.startup.page", 3);\n');
   expect(opened.nativeSessionRestored).toBe(true);
   expect(f.navigated).toEqual([]);
   expect(await f.launcher.stop(f.profile.id)).toBe(true);
@@ -124,10 +124,24 @@ test("Firefox disables native restore when the Cloud coordinator requests portab
   const root = f.launcher.userDataDir(f.profile.id);
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, "sessionstore.jsonlz4"), "opaque native session");
+  writeFileSync(join(root, "user.js"), 'user_pref("toolkit.telemetry.enabled", false);\nuser_pref("browser.startup.page", 3);\n');
   const opened = await f.launcher.start(f.profile.id, [], { autoNavigate: false, restoreLastSession: false });
-  expect(f.restoreLastSession()).toBe(false);
+  expect(readFileSync(join(root, "user.js"), "utf8")).toBe('user_pref("toolkit.telemetry.enabled", false);\nuser_pref("browser.startup.page", 0);\n');
   expect(opened.nativeSessionRestored).toBe(false);
   expect(f.navigated).toEqual([]);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
+test("Firefox disables native restore before applying a pending Cloud bundle", async () => {
+  const f = fixture();
+  const root = f.launcher.userDataDir(f.profile.id);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "sessionstore.jsonlz4"), "opaque native session");
+  f.store.upsertProfiles([f.profile], new Map([[f.profile.id, JSON.stringify({ cookies: [], origins: [], tabs: [] })]]));
+  const opened = await f.launcher.start(f.profile.id, [], { autoNavigate: false });
+  expect(readFileSync(join(root, "user.js"), "utf8")).toBe('user_pref("browser.startup.page", 0);\n');
+  expect(opened.nativeSessionRestored).toBe(false);
+  expect(f.store.getPendingSessionBundle(f.profile.id)).toBeNull();
   expect(await f.launcher.stop(f.profile.id)).toBe(true);
 });
 
