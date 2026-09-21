@@ -281,35 +281,19 @@ test("native capture reads closed observed origins through storageState without 
   });
 });
 
-test("native capture visits a missing closed origin instead of fabricating empty storage", async () => {
-  let handler: ((route: { fulfill: () => Promise<void> }) => Promise<void>) | undefined;
-  let routeUrl = "";
-  let closed = false;
-  const page = {
-    async goto(url: string) {
-      routeUrl = url;
-      await handler?.({ fulfill: async () => {} });
-    },
-    url: () => routeUrl,
-    async evaluate() { return { localStorage: [{ name: "session", value: "recovered" }] }; },
-    async close() { closed = true; },
-  };
+test("native capture fails when storageState lacks a closed observed origin", async () => {
   const context = {
     pages: () => [],
     async cookies() { return []; },
     async storageState() { return { origins: [] }; },
-    async newPage() { return page; },
-    async route(_url: string, value: typeof handler) { handler = value; },
-    async unroute() { handler = undefined; },
+    async newPage() { throw new Error("native capture must not create a visible page"); },
   };
-  const result = JSON.parse(await captureSession({ contexts: () => [context] }, {
+  await expect(captureSession({ contexts: () => [context] }, {
     captureSeed: { origins: ["https://closed.example"] },
-  }, { nativeStorage: true }));
-  expect(result.origins).toEqual([{
-    origin: "https://closed.example",
-    localStorage: [{ name: "session", value: "recovered" }],
-  }]);
-  expect(closed).toBe(true);
+  }, { nativeStorage: true })).rejects.toMatchObject({
+    code: "operation_failed",
+    details: { operation: "origin_storage", outcome: "failed" },
+  });
 });
 
 test("native restore does not call Firefox CDP methods", async () => {

@@ -628,39 +628,6 @@ async function nativeOriginStorage(context, origin) {
   };
 }
 
-async function createNativeStorageReader(context) {
-  let ordinal = 0;
-  return {
-    async read(origin) {
-      const page = await context.newPage();
-      const captureUrl = `${origin}/?__aliasmode_session_capture__=${++ordinal}`;
-      let intercepted = false;
-      const handler = (route) => {
-        intercepted = true;
-        return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>capture</title>" });
-      };
-      try {
-        await context.route(captureUrl, handler);
-        await page.goto(captureUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
-        if (!intercepted || new URL(page.url()).origin !== origin) throw new Error("Capture navigation was not intercepted");
-        let storage = await page.evaluate(() => ({
-          localStorage: Object.keys(globalThis.localStorage).map((name) => ({ name, value: globalThis.localStorage.getItem(name) })),
-        }));
-        if (origin === TELEGRAM_ORIGIN) {
-          let capturePasscode = !localStorageHasTelegramAuth(storage.localStorage);
-          if (!capturePasscode) capturePasscode = await passcodeDatabasePresent(page);
-          if (capturePasscode) storage = await collectPasscodeStorage(page, true);
-        }
-        return storage;
-      } finally {
-        await context.unroute(captureUrl, handler).catch(() => {});
-        await page.close().catch(() => {});
-      }
-    },
-    async close() {},
-  };
-}
-
 export async function captureSession(browser, payload, options = {}) {
   const context = contextOf(browser);
   const tabs = context.pages().map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
@@ -697,10 +664,7 @@ export async function captureSession(browser, payload, options = {}) {
       if (!storage) {
         if (options.nativeStorage) {
           storage = await sessionStep("origin_storage", () => nativeOriginStorage(context, origin));
-          if (!storage) {
-            reader ??= await sessionStep("origin_storage", () => createNativeStorageReader(context));
-            storage = await sessionStep("origin_storage", () => reader.read(origin));
-          }
+          if (!storage) throw sessionError("origin_storage");
         } else {
           reader ??= await sessionStep("hidden_target", () => createReadOnlyStorageReader(browser, context));
           storage = await sessionStep("origin_storage", () => reader.read(origin));

@@ -12,16 +12,21 @@ if (!browser || !root) {
 
 await mkdir(root, { recursive: false });
 const record = join(root, "owner.json");
-const manager = Bun.spawn([
-  process.execPath,
-  join(import.meta.dir, "firefox-owner-smoke-manager.mjs"),
-  browser,
-  join(root, "profile"),
-  record,
-  process.argv.includes("--headed") ? "headed" : "headless",
-], { stdout: "ignore", stderr: "inherit" });
-const managerExit = await manager.exited;
-if (managerExit !== 0) throw new Error("Firefox owner smoke manager did not exit cleanly");
+const configPath = join(root, "firefox-config.json");
+async function startManager() {
+  const manager = Bun.spawn([
+    process.execPath,
+    join(import.meta.dir, "firefox-owner-smoke-manager.mjs"),
+    browser,
+    join(root, "profile"),
+    record,
+    configPath,
+    process.argv.includes("--headed") ? "headed" : "headless",
+  ], { stdout: "ignore", stderr: "inherit" });
+  if (await manager.exited !== 0) throw new Error("Firefox owner smoke manager did not exit cleanly");
+  return JSON.parse(await readFile(record, "utf8"));
+}
+const firstOwner = await startManager();
 
 const server = createServer((_request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -42,7 +47,10 @@ async function requireExit(pid) {
 }
 let owner;
 try {
-  owner = JSON.parse(await readFile(record, "utf8"));
+  owner = firstOwner;
+  const savedConfig = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(Object.keys(savedConfig).sort(), ["config", "runtimeVersion", "version"]);
+  assert.ok(Object.keys(savedConfig.config).length > 0, "generated config must not be empty");
   const endpoint = firefoxEndpoint(owner);
   assert.equal(endpoint.includes(owner.token), false, "the public endpoint hides the owner token");
 
@@ -68,14 +76,22 @@ try {
     await context.addCookies([{ name: "owner-proof", value: "saved", url: inputs.origin }]);
     await page.evaluate(() => localStorage.setItem("owner-proof", "saved"));
     log("script ran for %s", profile.id);
-    await page.close();
-    return { sameBrowser: context.browser() === browser, credentials, profileId: profile.id };
+    return {
+      sameBrowser: context.browser() === browser,
+      credentials,
+      profileId: profile.id,
+      identity: await page.evaluate(() => ({ userAgent: navigator.userAgent, screen: [screen.width, screen.height] })),
+    };
   };\n`);
   const run = await callFirefoxOwner(owner, "run-script", {
     scriptPath: script,
     input: { profile: { id: "owner-profile" }, inputs: { origin }, credentials: null },
   }, { timeoutMs: 30_000 });
-  assert.deepEqual(run.result, { sameBrowser: true, credentials: null, profileId: "owner-profile" });
+  assert.equal(run.result.sameBrowser, true);
+  assert.equal(run.result.credentials, null);
+  assert.equal(run.result.profileId, "owner-profile");
+  assert.equal(typeof run.result.identity.userAgent, "string");
+  assert.deepEqual(run.result.identity.screen, [1920, 1080]);
   assert.deepEqual(run.logs, ["script ran for owner-profile"]);
 
   const session = JSON.parse(await callFirefoxOwner(owner, "session-capture", {
@@ -89,6 +105,22 @@ try {
   await requireExit(status.browserPid);
   await assert.rejects(() => callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 }), { name: "FirefoxOwnerError" });
   owner = undefined;
+
+  const configBeforeRestart = await readFile(configPath, "utf8");
+  owner = await startManager();
+  firefoxEndpoint(owner);
+  const restartStatus = await callFirefoxOwner(owner, "status", {}, { timeoutMs: 800 });
+  assert.equal(restartStatus.generation, owner.generation);
+  const restarted = await callFirefoxOwner(owner, "run-script", {
+    scriptPath: script,
+    input: { profile: { id: "owner-profile" }, inputs: { origin }, credentials: null },
+  }, { timeoutMs: 30_000 });
+  assert.deepEqual(restarted.result.identity, run.result.identity);
+  await closeFirefoxOwner(owner, { timeoutMs: 30_000 });
+  await requireExit(restartStatus.pid);
+  await requireExit(restartStatus.browserPid);
+  owner = undefined;
+  assert.equal(await readFile(configPath, "utf8"), configBeforeRestart, "the saved generated config must not change across restart");
   const result = {
     platform: process.platform,
     detachedOwnerSurvivesManagerExit: true,
@@ -96,6 +128,8 @@ try {
     nativeStorageCapture: true,
     officialMcp: true,
     scriptContext: true,
+    generatedConfig: true,
+    generatedConfigSurvivesRestart: true,
     gracefulClose: true,
   };
   await writeFile(join(root, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
