@@ -197,6 +197,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciSuccessorJob).toContain("$entries.Count -ne 2");
   expect(ciSuccessorJob).toContain("$stream.ReadByte() -ne 0x4d");
   expect(ciSuccessorJob).toContain('Status -cne "NotSigned"');
+  expect(ciSuccessorJob).toContain('Remove-Item -LiteralPath ".\\src-tauri\\resources\\firefox" -Recurse -Force -ErrorAction SilentlyContinue');
   expect(ciSuccessorJob).toContain("& git checkout -- .");
   expect(ciSuccessorJob).toContain("git rev-parse HEAD");
   expect(ciSuccessorJob).toContain("git status --porcelain --untracked-files=all");

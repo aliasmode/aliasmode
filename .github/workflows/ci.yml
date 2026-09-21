@@ -505,6 +505,7 @@ jobs:
             }
           } finally {
             Remove-Item -LiteralPath ".\artifacts\firefox" -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath ".\src-tauri\resources\firefox" -Recurse -Force -ErrorAction SilentlyContinue
             & git checkout -- .
             if ($LASTEXITCODE -ne 0) { throw "synthetic successor source restoration failed" }
             $checkedOut = (& git rev-parse HEAD).Trim()

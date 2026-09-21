@@ -1,4 +1,3 @@
-import { fromBrowserforge, generateFingerprint } from "camoufox-js/dist/fingerprints.js";
 // @ts-expect-error Bun embeds this package data in compiled sidecars.
 import fingerprintNetworkDefinitionPath from "./node_modules/fingerprint-generator/data_files/fingerprint-network-definition.zip" with { type: "file" };
 // @ts-expect-error Bun embeds this package data in compiled sidecars.
@@ -7,12 +6,16 @@ import inputNetworkDefinitionPath from "./node_modules/header-generator/data_fil
 import headerNetworkDefinitionPath from "./node_modules/header-generator/data_files/header-network-definition.zip" with { type: "file" };
 import type { FirefoxProfileConfig, JsonValue, ProfileEngine } from "./types.ts";
 
-const CAMOUFOX_GENERATOR_ASSETS = [
-  fingerprintNetworkDefinitionPath,
-  inputNetworkDefinitionPath,
-  headerNetworkDefinitionPath,
-];
-CAMOUFOX_GENERATOR_ASSETS.forEach((asset) => Bun.file(asset));
+const generatorAssetInputs = [
+  ["fingerprint-network-definition.zip", fingerprintNetworkDefinitionPath],
+  ["input-network-definition.zip", inputNetworkDefinitionPath],
+  ["header-network-definition.zip", headerNetworkDefinitionPath],
+] as const;
+const generatorAssets = Object.fromEntries(await Promise.all(generatorAssetInputs.map(async ([name, source]) => {
+  return [name, Buffer.from(await Bun.file(source).arrayBuffer())] as const;
+})));
+(globalThis as typeof globalThis & { __aliasmodeGeneratorAssets?: Record<string, Buffer> }).__aliasmodeGeneratorAssets = generatorAssets;
+const { fromBrowserforge, generateFingerprint } = await import("camoufox-js/dist/fingerprints.js");
 
 export const FIREFOX_RUNTIME_VERSION = "152.0.4-beta.30";
 const FIREFOX_UA_MAJOR_VERSION = "152";
