@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ProfileStore } from "./store.ts";
 import { importBuffers, importInbox, prepareImportBuffers } from "./inbox.ts";
-import { parseExport } from "./parse.ts";
+import { parseExport, serializeAdsTxt } from "./parse.ts";
 
 const REC = (id: string) => `id=${id}
 name=acct-${id}
@@ -115,6 +115,43 @@ test("sparse same-id re-import updates only present fields and preserves identit
   expect(got.extensions).toEqual(["wallet"]);
   expect(got.tags).toEqual(["returning-account"]);
   expect(got.seeded).toBe(true);
+  store.close();
+});
+
+test("Firefox re-imports preserve the saved config and reject identity replacement", async () => {
+  const store = new ProfileStore(":memory:");
+  const original = {
+    ...parseExport(REC("firefox-import")).profiles[0]!,
+    engine: "firefox" as const,
+    firefox: {
+      version: 1 as const,
+      runtimeVersion: "152.0.4-beta.30",
+      config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", nested: { value: true } },
+    },
+  };
+  store.upsertProfile(original);
+
+  await importBuffers(
+    store,
+    [{ name: "firefox.txt", bytes: new TextEncoder().encode(`id=${original.id}\nname=renamed\n******************`) }],
+    () => {},
+  );
+  expect(store.getProfile(original.id)).toMatchObject({ name: "renamed", engine: "firefox", firefox: original.firefox });
+
+  const changed = {
+    ...original,
+    firefox: { ...original.firefox, config: { ...original.firefox.config, nested: { value: false } } },
+  };
+  await expect(importBuffers(
+    store,
+    [{ name: "changed.txt", bytes: new TextEncoder().encode(serializeAdsTxt([changed])) }],
+    () => {},
+  )).rejects.toThrow("Firefox config cannot change through import");
+  await expect(importBuffers(
+    store,
+    [{ name: "missing.txt", bytes: new TextEncoder().encode(`id=${original.id}\nengine=firefox\n******************`) }],
+    () => {},
+  )).rejects.toThrow("Firefox profiles require a Firefox config");
   store.close();
 });
 

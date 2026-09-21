@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { parseImportFile } from "./import-formats.ts";
+import { parseExport, serializeXlsxRows } from "./parse.ts";
 import { isSafeProfileId } from "./profile-id.ts";
 import { writeXlsx } from "./xlsx.ts";
 
@@ -91,6 +92,28 @@ test("provider parser reads Dolphin Anty and HideMyAcc spreadsheet columns", asy
     tags: ["one", "two"],
     proxy: { type: "http", host: "10.0.0.1", port: "3128", user: "user", pass: "pass" },
   });
+});
+
+test("local Firefox XLSX exports retain config through the full import path", async () => {
+  const chromium = parseExport("id=local-chromium\nname=Chromium\ncookie=[]\n******************").profiles[0]!;
+  const firefox = {
+    ...parseExport("id=local-firefox\nname=Firefox\ncookie=[]\n******************").profiles[0]!,
+    engine: "firefox" as const,
+    firefox: {
+      version: 1 as const,
+      runtimeVersion: "152.0.4-beta.30",
+      config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0" },
+    },
+  };
+  const { headers, rows } = serializeXlsxRows([chromium, firefox]);
+  const summary = await parseImportFile("profiles.xlsx", await writeXlsx(headers, rows));
+
+  expect(summary.profiles).toHaveLength(2);
+  expect(summary.profiles.find((profile) => profile.id === firefox.id)).toMatchObject({
+    engine: "firefox",
+    firefox: firefox.firefox,
+  });
+  expect(summary.profiles.find((profile) => profile.id === chromium.id)?.engine).toBe("chromium");
 });
 
 test("provider parser accepts readable Multilogin and Donut-style wrappers", async () => {

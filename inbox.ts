@@ -89,6 +89,10 @@ function unsafeImportError(problems: string[], status = 400): ProfileImportError
   return new ProfileImportError(`unsafe import rejected; no profiles were changed: ${problems.join("; ")}`, status);
 }
 
+function sameFirefoxConfig(a: Profile["firefox"], b: Profile["firefox"]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 /** Merge only fields actually present in an AdsPower re-export. */
 function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
   const p = incoming.profile;
@@ -220,6 +224,13 @@ export async function importBuffers(
       continue;
     }
     const present = new Set(entry.presentFields);
+    if (present.has("engine") || present.has("firefox_config")) {
+      if ((entry.profile.engine ?? "chromium") !== (existing.engine ?? "chromium")) {
+        problems.push(`${entry.source}: profile ${entry.profile.id}: profile engine cannot change in place`);
+      } else if (existing.engine === "firefox" && !sameFirefoxConfig(existing.firefox, entry.profile.firefox)) {
+        problems.push(`${entry.source}: profile ${entry.profile.id}: Firefox config cannot change through import`);
+      }
+    }
     if (present.has("proxy") && !entry.profile.proxy && (existing.proxy || existing.proxyError)) {
       problems.push(`${entry.source}: profile ${entry.profile.id}: blank proxy would erase the stored proxy; use profile edit to remove it explicitly`);
     }

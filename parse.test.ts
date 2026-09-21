@@ -13,6 +13,7 @@ import {
   decodeText,
   parseUpdateFile,
   serializeAdsTxt,
+  serializeXlsxRows,
   serializeCsv,
 } from "./parse.ts";
 import { deterministicSeed } from "./fingerprint.ts";
@@ -58,6 +59,44 @@ test("splitRecords drops blocks without an id", () => {
   expect(recs.length).toBe(2);
   expect(recs[0]!.id).toBe("k1d0cd11");
   expect(recs[1]!.id).toBe("k1d0ccwr");
+});
+
+test("local TXT and XLSX exports preserve a saved Firefox config", () => {
+  const firefox = {
+    ...parseExport(SAMPLE).profiles[0]!,
+    engine: "firefox" as const,
+    firefox: {
+      version: 1 as const,
+      runtimeVersion: "152.0.4-beta.30",
+      config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", nested: { value: true } },
+    },
+  };
+  const txt = serializeAdsTxt([firefox]);
+  const parsed = parseExport(txt);
+  expect(parsed.errors).toEqual([]);
+  expect(parsed.profiles[0]).toMatchObject({ engine: "firefox", firefox: firefox.firefox });
+
+  const xlsx = serializeXlsxRows([firefox]);
+  expect(xlsx.headers).toEqual(expect.arrayContaining(["engine", "firefox_config"]));
+  const row = Object.fromEntries(xlsx.headers.map((header, index) => [header, xlsx.rows[0]![index]!])) as Record<string, string>;
+  expect(recordToProfile(row)!.profile).toMatchObject({ engine: "firefox", firefox: firefox.firefox });
+});
+
+test("legacy Chromium local exports retain their existing field shape", () => {
+  const chromium = parseExport(SAMPLE).profiles[0]!;
+  expect(serializeAdsTxt([chromium])).not.toContain("engine=");
+  expect(serializeXlsxRows([chromium]).headers).not.toContain("engine");
+});
+
+test("local Firefox imports reject missing, unknown, or malformed config", () => {
+  for (const text of [
+    "id=firefox1\nengine=firefox\n******************",
+    "id=firefox1\nengine=webkit\nfirefox_config={}\n******************",
+    "id=firefox1\nengine=firefox\nfirefox_config={}\n******************",
+  ]) {
+    const summary = parseExport(text);
+    expect(summary.imports[0]!.validationErrors.length).toBeGreaterThan(0);
+  }
 });
 
 test("normalizeCookies strips AdsPower extension cookies and normalizes sameSite", () => {

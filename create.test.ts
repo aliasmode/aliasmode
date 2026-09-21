@@ -8,11 +8,32 @@ test("buildNewProfile makes a unique id with a seed-derived fingerprint and no f
   expect(p.name).toBe("sophia");
   expect(p.group).toBe("va1");
   expect(p.fingerprintSeed).toBe(deterministicSeed(p.id)); // unique fingerprint from the id
+  expect(p.engine).toBe("chromium");
+  expect(p.firefox).toBeUndefined();
   expect(p.ua).toBe(""); // UA comes from the seed at launch, never forced
   expect(p.cookies).toEqual([]);
   expect(p.seeded).toBe(false);
   expect(p.screenWidth).toBeGreaterThan(0);
 });
+
+test("buildNewProfile generates and fixes a Windows Camoufox identity for Firefox", () => {
+  const p = buildNewProfile({ engine: "firefox", screen: "1440x900" }, () => false);
+
+  expect(p.engine).toBe("firefox");
+  expect(p.firefox!.version).toBe(1);
+  expect(p.firefox!.runtimeVersion).toBe("152.0.4-beta.30");
+  expect(p.firefox!.config["navigator.platform"]).toBe("Win32");
+  expect(p.firefox!.config["navigator.userAgent"]).toContain("Firefox/152.0");
+  expect(p.firefox!.config["window.outerWidth"]).toBe(1440);
+  expect(p.firefox!.config["window.outerHeight"]).toBe(900);
+  expect(p.ua).toContain("Firefox/152.0");
+  expect(p.platformOs).toBe("windows");
+});
+
+test("buildNewProfile rejects an unknown browser engine", () => {
+  expect(() => buildNewProfile({ engine: "webkit" as any }, () => false)).toThrow("unsupported profile engine");
+});
+
 
 test("buildNewProfile stores account credentials for the Edit view", () => {
   const p = buildNewProfile({

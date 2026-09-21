@@ -1,3 +1,4 @@
+import { normalizeProfileEngine } from "./firefox-config.ts";
 import type { CookieRecord, Profile } from "./types.ts";
 import { MAX_CUSTOM_NO_LENGTH, MAX_SCREEN_DIMENSION, MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH } from "./parse.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
@@ -52,6 +53,7 @@ function assertCookie(value: unknown, index: number): asserts value is CookieRec
 export function assertValidProfile(value: unknown): asserts value is Profile {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("profile must be an object");
   const profile = value as Record<string, unknown>;
+  normalizeProfileEngine(profile.engine, profile.firefox);
   assertSafeProfileId(profile.id);
 
   for (const field of REQUIRED_STRING_FIELDS) {

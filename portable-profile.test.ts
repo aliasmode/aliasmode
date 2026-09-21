@@ -27,6 +27,22 @@ function profile(): Profile {
   };
 }
 
+function firefoxProfile(): Profile {
+  return {
+    ...profile(),
+    engine: "firefox",
+    firefox: {
+      version: 1,
+      runtimeVersion: "152.0.4-beta.30",
+      config: {
+        "navigator.userAgent": "Mozilla/5.0 Firefox/152.0",
+        "navigator.platform": "Win32",
+        nested: { value: true },
+      },
+    },
+  };
+}
+
 test("portable profile codec round-trips profile secrets and normalized session state", () => {
   const source = profile();
   const bundle = JSON.stringify({
@@ -61,6 +77,37 @@ test("portable profile codec round-trips profile secrets and normalized session 
     seeded: false,
   });
   expect(JSON.parse(decoded.sessionBundle)).toEqual(encoded.session);
+});
+
+test("portable Firefox profiles use V2 and preserve the fixed Camoufox config", () => {
+  const source = firefoxProfile();
+  const encoded = encodePortableProfile(source);
+
+  expect(encoded).toMatchObject({
+    schemaVersion: 2,
+    profile: {
+      engine: "firefox",
+      firefox: source.firefox,
+    },
+  });
+  const decoded = decodePortableProfile(encoded);
+  expect(decoded.profile).toMatchObject({
+    engine: "firefox",
+    firefox: source.firefox,
+  });
+  expect(decoded.profile.firefox).not.toBe(source.firefox);
+  expect(decoded.profile.fpObserved).toBeUndefined();
+});
+
+test("portable profile codec rejects Firefox engine and config mismatches", () => {
+  const encoded = encodePortableProfile(firefoxProfile());
+  expect(() => decodePortableProfile({
+    ...encoded,
+    profile: { ...encoded.profile, engine: "chromium" },
+  } as any)).toThrow("unsupported portable profile payload");
+  expect(() => encodePortableProfile({ ...profile(), firefox: firefoxProfile().firefox } as Profile)).toThrow(
+    "Chromium profiles cannot include a Firefox config",
+  );
 });
 
 test("portable profile codec omits an unknown legacy platform from the wire payload", () => {
