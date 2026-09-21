@@ -7,7 +7,7 @@ import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudClient } from "./cloud-client.ts";
 import type { ScriptInput, ScriptLanguage, ScriptRecord, ScriptSummary, PublishedScript, PublishScriptInput, PublishedScriptsQuery, ListPublishedScriptsResponse } from "./contracts/cloud-v1.ts";
-import { resolvePlaywrightRuntime } from "./playwright-runtime.ts";
+import { resolvePlaywrightRuntime, type PlaywrightRuntimeLayout } from "./playwright-runtime.ts";
 
 export class ScriptError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -166,19 +166,79 @@ interface RunnerInput {
 }
 export type ScriptExecution = (options: { scriptPath: string; language: ScriptLanguage; input: RunnerInput; logFd: number; signal: AbortSignal }) => Promise<void>;
 
-export const executeScript: ScriptExecution = async ({ scriptPath, language, input, logFd, signal }) => {
-  signal.throwIfAborted();
-  const runtime = resolvePlaywrightRuntime();
-  if (runtime.kind !== "packaged") throw new ScriptError("Scripts require the packaged desktop runtime", 503);
-  const executable = language === "python" ? join(runtime.root, "python", "python.exe") : runtime.nodeExecutable;
-  const runner = join(runtime.root, "agent", language === "python" ? "script-runner.py" : "script-runner.mjs");
-  if (!existsSync(executable) || !existsSync(runner)) throw new ScriptError("The script runtime is missing; update AliasMode", 503);
+interface ScriptRunner {
+  executable: string;
+  runner: string;
+}
+
+export interface ScriptRuntimeVerificationOptions {
+  runtime?: PlaywrightRuntimeLayout;
+  env?: NodeJS.ProcessEnv;
+}
+
+function scriptRunnerEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["APPDATA", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE"]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+    if (source[key] !== undefined) env[key] = source[key];
   }
+  return env;
+}
+
+function supportsSourceScripts(): boolean {
+  return (process.platform === "darwin" && process.arch === "arm64") || (process.platform === "linux" && process.arch === "x64");
+}
+
+export function resolveScriptRunner(language: ScriptLanguage, runtime = resolvePlaywrightRuntime()): ScriptRunner {
+  if (runtime.kind === "source" && !supportsSourceScripts()) {
+    throw new ScriptError("Scripts require the packaged desktop runtime", 503);
+  }
+  return {
+    executable: runtime.kind === "source"
+      ? language === "python" ? "python3" : runtime.nodeExecutable
+      : language === "python" ? join(runtime.root, "python", "python.exe") : runtime.nodeExecutable,
+    runner: join(runtime.root, "agent", language === "python" ? "script-runner.py" : "script-runner.mjs"),
+  };
+}
+
+async function sourceCommandAvailable(executable: string, args: string[], runtime: PlaywrightRuntimeLayout, env: NodeJS.ProcessEnv): Promise<boolean> {
+  try {
+    const child = Bun.spawn([executable, ...args], { cwd: runtime.root, env, stdout: "ignore", stderr: "ignore" });
+    return await child.exited === 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function verifyScriptRuntime(language: ScriptLanguage, options: ScriptRuntimeVerificationOptions = {}): Promise<ScriptRunner> {
+  const runtime = options.runtime ?? resolvePlaywrightRuntime();
+  const resolved = resolveScriptRunner(language, runtime);
+  if (!existsSync(resolved.executable) && runtime.kind === "packaged") {
+    throw new ScriptError("The script runtime is missing; update AliasMode", 503);
+  }
+  if (!existsSync(resolved.runner)) {
+    throw new ScriptError(runtime.kind === "source"
+      ? "The source script runner is missing; restore the AliasMode source checkout"
+      : "The script runtime is missing; update AliasMode", 503);
+  }
+  if (runtime.kind !== "source") return resolved;
+
+  const env = scriptRunnerEnvironment(options.env);
+  const available = language === "javascript"
+    ? await sourceCommandAvailable(resolved.executable, ["-e", "const p = require('playwright-core/package.json'); if (+process.versions.node.split('.')[0] < 18 || p.version !== '1.58.2') process.exit(1)"], runtime, env)
+    : await sourceCommandAvailable(resolved.executable, ["-c", "from playwright.async_api import async_playwright\nfrom playwright._repo_version import version\nraise SystemExit(not version.startswith('1.58.'))"], runtime, env);
+  if (!available) {
+    throw new ScriptError(language === "javascript"
+      ? "Source JavaScript scripts require Node.js 18 or newer and compatible Playwright 1.58.2 installed"
+      : "Source Python scripts require Python 3 with compatible Playwright 1.58.x installed", 503);
+  }
+  return resolved;
+}
+
+export const executeScript: ScriptExecution = async ({ scriptPath, language, input, logFd, signal }) => {
+  signal.throwIfAborted();
+  const { executable, runner } = await verifyScriptRuntime(language);
   const child = spawn(executable, [...(language === "python" ? ["-u", "-X", "utf8"] : []), runner, scriptPath], {
-    windowsHide: true, detached: process.platform !== "win32", env, stdio: ["pipe", logFd, logFd],
+    windowsHide: true, detached: process.platform !== "win32", env: scriptRunnerEnvironment(), stdio: ["pipe", logFd, logFd],
   });
   let termination: Promise<void> | undefined;
   const stop = () => {
@@ -307,9 +367,7 @@ export class ScriptSupervisor {
     try {
       const script = await this.options.library.get(request.scriptId);
       this.options.library.assertScope(run.scope);
-      if (!this.options.execute && resolvePlaywrightRuntime().kind !== "packaged") {
-        throw new ScriptError("Scripts require the packaged desktop runtime", 503);
-      }
+      if (!this.options.execute) await verifyScriptRuntime(script.language);
       run.view.scriptName = script.name;
       const path = join(run.directory, script.language === "python" ? "script.py" : "script.mjs");
       writeFileSync(path, script.source, { mode: 0o600 });

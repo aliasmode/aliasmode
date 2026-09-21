@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ScriptLibrary, ScriptSupervisor, type ScriptExecution } from "./scripts.ts";
+import { ScriptLibrary, ScriptSupervisor, resolveScriptRunner, verifyScriptRuntime, type ScriptExecution } from "./scripts.ts";
 import { handleUiRequest } from "./ui.ts";
 import { CloudClient } from "./cloud-client.ts";
 
@@ -11,7 +11,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function root() { const dir = mkdtempSync(join(tmpdir(), "aliasmode-scripts-")); roots.push(dir); return dir; }
 const input = { name: "Visit", description: "Example", language: "javascript" as const, source: "export default async () => {};" };
 
-function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; cloud?: any; firefoxOwner?: any } = {}) {
+function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; cloud?: any; firefoxOwner?: any; realExecute?: boolean } = {}) {
   const directory = root();
   const events: string[] = [];
   const launch = (id: string) => options.firefoxOwner
@@ -21,7 +21,7 @@ function harness(execute: ScriptExecution = async () => {}, options: { active?: 
   const profiles = ["a", "b", "c"].map((id) => ({ id, name: id, group: "", platform: "", username: `user-${id}`, password: `test-password-${id}`, twofa: "" }));
   const library = new ScriptLibrary(directory, !!options.cloud, options.cloud);
   const supervisor = new ScriptSupervisor({
-    root: directory, library, execute,
+    root: directory, library, ...(options.realExecute ? {} : { execute }),
     store: { getProfile: (id: string) => profiles.find((p) => p.id === id), getLaunch: (id: string) => launches.get(id), listAgentTemporary: () => [] } as any,
     launcher: {
       certifiedActive: async (id: string) => launches.has(id),
@@ -33,6 +33,51 @@ function harness(execute: ScriptExecution = async () => {}, options: { active?: 
   });
   return { library, supervisor, events, directory, launches };
 }
+
+const sourceRuntime = {
+  kind: "source" as const,
+  root: import.meta.dir,
+  nodeExecutable: "node",
+  workerPath: join(import.meta.dir, "playwright-worker.mjs"),
+};
+
+test("source scripts resolve the checked-in runners through system executables", async () => {
+  if (!((process.platform === "darwin" && process.arch === "arm64") || (process.platform === "linux" && process.arch === "x64"))) return;
+  expect(resolveScriptRunner("javascript", sourceRuntime)).toEqual({
+    executable: "node", runner: join(import.meta.dir, "agent", "script-runner.mjs"),
+  });
+  expect(resolveScriptRunner("python", sourceRuntime)).toEqual({
+    executable: "python3", runner: join(import.meta.dir, "agent", "script-runner.py"),
+  });
+  await expect(verifyScriptRuntime("javascript", { runtime: sourceRuntime })).resolves.toEqual({
+    executable: "node", runner: join(import.meta.dir, "agent", "script-runner.mjs"),
+  });
+});
+
+test("source script prerequisite errors are clear", async () => {
+  if (!((process.platform === "darwin" && process.arch === "arm64") || (process.platform === "linux" && process.arch === "x64"))) return;
+  const emptyPath = root();
+  await expect(verifyScriptRuntime("javascript", { runtime: sourceRuntime, env: { PATH: emptyPath } }))
+    .rejects.toThrow("Node.js 18 or newer and compatible Playwright");
+  await expect(verifyScriptRuntime("python", { runtime: sourceRuntime, env: { PATH: emptyPath } }))
+    .rejects.toThrow("Python 3 with compatible Playwright");
+});
+
+test("a missing runtime fails before a script opens a profile", async () => {
+  const previous = process.env.ALIASMODE_PLAYWRIGHT_RUNTIME;
+  process.env.ALIASMODE_PLAYWRIGHT_RUNTIME = root();
+  try {
+    const h = harness(undefined, { realExecute: true });
+    const script = await h.library.save(input);
+    h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: {}, useCredentials: false });
+    await h.supervisor.settled();
+    expect(h.events).toEqual([]);
+    expect(h.supervisor.status()?.profiles[0]?.error).toContain("script runtime is missing");
+  } finally {
+    if (previous === undefined) delete process.env.ALIASMODE_PLAYWRIGHT_RUNTIME;
+    else process.env.ALIASMODE_PLAYWRIGHT_RUNTIME = previous;
+  }
+});
 
 test("local script imports never execute, survive reload, and check revisions", async () => {
   const h = harness();
