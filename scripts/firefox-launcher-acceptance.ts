@@ -385,19 +385,13 @@ async def run(*, context, inputs, log, **_kwargs):
   const cloud = await cloudLauncher.start(profileId, [], { autoNavigate: false });
   assert.equal(await cloudLauncher.certifiedActive(profileId), true, "cloud handoff owner is certified");
   assert.notEqual(cloudStore.getLaunch(profileId)?.firefoxOwner?.generation, localOwnerGeneration, "cloud handoff uses a distinct Firefox owner");
-  const handoffSession = JSON.parse(handoff.sessionBundle) as { tabs?: unknown };
-  const handoffTabs = Array.isArray(handoffSession.tabs)
-    ? handoffSession.tabs.filter((tab): tab is string => typeof tab === "string")
-    : [];
-  assert.ok(handoffTabs.includes(firstTab) && handoffTabs.includes(secondTab), "portable handoff keeps fixture tabs");
-  delete handoffSession.tabs;
-  await applySessionToEndpoint(cloud.ws, JSON.stringify(handoffSession), handoffTabs);
+  await applySessionToEndpoint(cloud.ws, handoff.sessionBundle, []);
   const cloudVerification = await ownerScript(cloudLauncher, profileId, verifier, { origin, firstTab, telegramTab });
   assert.ok(cloudVerification.logs.includes("Fixture state verified"), "cloud external JavaScript runner returns logs");
   const cloudState = cloudVerification.result;
   assert.deepEqual((cloudState as any).identity, mutated.identity, "cloud handoff keeps the generated Firefox identity");
   assert.equal((cloudState as any).localStorage, "saved", "cloud handoff applies Local Storage");
-  assert.equal((cloudState as any).indexedDB, null, "cloud handoff does not fabricate unsupported generic IndexedDB");
+  assert.equal(JSON.parse(captured).origins.find((entry: { origin: string }) => entry.origin === origin)?.indexedDB, undefined, "portable capture excludes unsupported generic IndexedDB");
   assert.equal((cloudState as any).telegramAuth, "synthetic-auth", "cloud handoff applies selected Telegram IndexedDB auth");
   assert.ok((cloudState as any).cookies.some((cookie: { name: string; value: string }) => cookie.name === "launcher-proof" && cookie.value === "saved"), "cloud handoff applies cookies");
   assert.ok((cloudState as any).tabs.includes(firstTab) && (cloudState as any).tabs.includes(secondTab), "cloud handoff applies portable tabs");
