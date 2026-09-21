@@ -204,6 +204,29 @@ test("group extension defaults replace current members and seed moves", () => {
   s.close();
 });
 
+test("Firefox profiles do not materialize group extension defaults", () => {
+  const s = new ProfileStore(":memory:");
+  const firefox = {
+    engine: "firefox" as const,
+    firefox: { version: 1 as const, runtimeVersion: "152.0.4-beta.30", config: {} },
+  };
+  s.upsertProfile(profile({ id: "chromium", group: "Sales", extensions: ["old"] }));
+  s.upsertProfile(profile({ id: "firefox-member", group: "Sales", extensions: [], ...firefox }));
+
+  expect(s.setGroupExtensionDefaults("Sales", ["group-extension"])).toBe(1);
+  expect(s.getProfile("chromium")!.extensions).toEqual(["group-extension"]);
+  expect(s.getProfile("firefox-member")!.extensions).toEqual([]);
+
+  s.upsertProfile(profile({ id: "firefox-move", group: "Other", extensions: ["old"], ...firefox }));
+  expect(s.setGroup(["firefox-move"], "Sales")).toBe(1);
+  expect(s.getProfile("firefox-move")!.extensions).toEqual([]);
+
+  const created = profile({ id: "firefox-created", group: "Sales", extensions: ["old"], ...firefox });
+  s.applyGroupExtensionDefaults(created, null, false);
+  expect(created.extensions).toEqual([]);
+  s.close();
+});
+
 test("group inheritance preserves divergence on same-group and ungroup moves", () => {
   const s = new ProfileStore(":memory:");
   s.registerGroup("Sales");

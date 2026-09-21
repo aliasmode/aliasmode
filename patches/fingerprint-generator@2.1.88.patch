@@ -1,0 +1,30 @@
+diff --git a/fingerprint-generator.js b/fingerprint-generator.js
+index f9d5697f00a56f07242debb69f50ab2e7e0c7271..8774015b8e06b993928a1d19f896a2d41da2f6c9 100644
+--- a/fingerprint-generator.js
++++ b/fingerprint-generator.js
+@@ -1,4 +1,16 @@
+ "use strict";
++function bundledAssetPath(name) {
++    const assets = globalThis.Bun?.embeddedFiles;
++    const prefix = name.slice(0, name.lastIndexOf("."));
++    const asset = assets?.find((file) => file.name.startsWith(`${prefix}-`) && file.name.endsWith(".zip"));
++    if (asset) {
++        const root = process.platform === "win32" ? "B:\\~BUN\\root\\" : "/$bunfs/root/";
++        return `${root}${asset.name}`;
++    }
++    return `${__dirname}/data_files/${name}`;
++}
++const fingerprintNetworkDefinitionPath = bundledAssetPath("fingerprint-network-definition.zip");
++
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.FingerprintGenerator = void 0;
+ const generative_bayesian_network_1 = require("generative-bayesian-network");
+@@ -31,7 +43,7 @@ class FingerprintGenerator extends header_generator_1.HeaderGenerator {
+             slim: options.slim,
+         };
+         this.fingerprintGeneratorNetwork = new generative_bayesian_network_1.BayesianNetwork({
+-            path: `${__dirname}/data_files/fingerprint-network-definition.zip`,
++            path: fingerprintNetworkDefinitionPath,
+         });
+     }
+     /**

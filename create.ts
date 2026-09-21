@@ -77,6 +77,9 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     ? createFirefoxProfileConfig(selected.width, selected.height)
     : undefined;
   const firefoxUa = firefox?.config["navigator.userAgent"];
+  const firefoxScreenWidth = firefox?.config["screen.width"];
+  const firefoxScreenHeight = firefox?.config["screen.height"];
+  const firefoxTimezone = firefox?.config.timezone;
 
   return {
     id,
@@ -98,9 +101,9 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     // --fingerprint-platform flag and the browser inherits whatever host it
     // happens to run on — a silent identity change on a move between boxes.
     platformOs: engine === "firefox" ? "windows" : hostPlatformOs(),
-    timezone: "", // resolved from the proxy's geoip by the caller
-    screenWidth: selected.width,
-    screenHeight: selected.height,
+    timezone: typeof firefoxTimezone === "string" ? firefoxTimezone : "", // Firefox saves a host timezone in its persisted config
+    screenWidth: typeof firefoxScreenWidth === "number" ? firefoxScreenWidth : selected.width,
+    screenHeight: typeof firefoxScreenHeight === "number" ? firefoxScreenHeight : selected.height,
     fingerprintSeed: deterministicSeed(id),
     cookies: [],
     seeded: false,

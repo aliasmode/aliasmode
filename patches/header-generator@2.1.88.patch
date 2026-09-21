@@ -1,0 +1,48 @@
+diff --git a/header-generator.js b/header-generator.js
+index dc1c16f3924048398551a1b9eca548df291fea85..ce59f03584bc5d971ad05a2591a7b0dc5ec135f1 100644
+--- a/header-generator.js
++++ b/header-generator.js
+@@ -1,4 +1,19 @@
+ "use strict";
++const headersOrder = require("./data_files/headers-order.json");
++const browserHelper = require("./data_files/browser-helper-file.json");
++function bundledAssetPath(name) {
++    const assets = globalThis.Bun?.embeddedFiles;
++    const prefix = name.slice(0, name.lastIndexOf("."));
++    const asset = assets?.find((file) => file.name.startsWith(`${prefix}-`) && file.name.endsWith(".zip"));
++    if (asset) {
++        const root = process.platform === "win32" ? "B:\\~BUN\\root\\" : "/$bunfs/root/";
++        return `${root}${asset.name}`;
++    }
++    return `${__dirname}/data_files/${name}`;
++}
++const inputNetworkDefinitionPath = bundledAssetPath("input-network-definition.zip");
++const headerNetworkDefinitionPath = bundledAssetPath("header-network-definition.zip");
++
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.HeaderGenerator = exports.headerGeneratorOptionsShape = void 0;
+ const tslib_1 = require("tslib");
+@@ -91,8 +106,8 @@ class HeaderGenerator {
+             strict,
+         };
+         this.uniqueBrowsers = [];
+-        this.headersOrder = JSON.parse((0, fs_1.readFileSync)(`${__dirname}/data_files/headers-order.json`).toString());
+-        const uniqueBrowserStrings = JSON.parse((0, fs_1.readFileSync)(`${__dirname}/data_files/browser-helper-file.json`, 'utf8').toString());
++        this.headersOrder = headersOrder;
++        const uniqueBrowserStrings = browserHelper;
+         for (const browserString of uniqueBrowserStrings) {
+             // There are headers without user agents in the datasets we used to configure the generator. They should be disregarded.
+             if (browserString !== constants_1.MISSING_VALUE_DATASET_TOKEN) {
+@@ -100,10 +115,10 @@ class HeaderGenerator {
+             }
+         }
+         this.inputGeneratorNetwork = new generative_bayesian_network_1.BayesianNetwork({
+-            path: `${__dirname}/data_files/input-network-definition.zip`,
++            path: inputNetworkDefinitionPath,
+         });
+         this.headerGeneratorNetwork = new generative_bayesian_network_1.BayesianNetwork({
+-            path: `${__dirname}/data_files/header-network-definition.zip`,
++            path: headerNetworkDefinitionPath,
+         });
+     }
+     /**
