@@ -61,36 +61,70 @@ test("runs only selected profiles sequentially and closes only job-opened browse
   expect(h.supervisor.status()?.profiles.map((p) => p.status)).toEqual(["succeeded", "succeeded"]);
 });
 
-test("Firefox JavaScript scripts run inside the persistent owner context", async () => {
+test("Firefox scripts use a private Playwright endpoint in the external runner", async () => {
+  const requests: any[] = [];
+  const executions: any[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      requests.push(await request.json());
+      return Response.json({ version: 1, ok: true, result: { endpoint: "ws://127.0.0.1:9223/private" } });
+    },
+  });
+  const owner = {
+    endpoint: `http://127.0.0.1:${server.port}/`, token: "private-token", pid: 12, browserPid: 13, generation: "generation",
+  };
+  const h = harness(async (options) => { executions.push(options); }, { firefoxOwner: owner });
+  try {
+    const script = await h.library.save(input);
+    h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: { url: "https://example.test" }, useCredentials: false });
+    await h.supervisor.settled();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      operation: "playwright-endpoint",
+      payload: { ownerGeneration: "generation" },
+    });
+    expect(executions).toHaveLength(1);
+    expect(executions[0].input).toMatchObject({
+      endpoint: "ws://127.0.0.1:9223/private", engine: "firefox",
+      profile: { id: "a" }, inputs: { url: "https://example.test" }, credentials: null,
+    });
+    expect(h.supervisor.status()?.profiles[0]?.status).toBe("succeeded");
+    expect(h.supervisor.log(h.supervisor.status()!.id, 0).text).not.toContain("9223/private");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("Firefox script cancellation aborts the external runner before browser cleanup", async () => {
   const requests: any[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       requests.push(await request.json());
-      return Response.json({ version: 1, ok: true, result: { result: null, logs: ["native output"] } });
+      return Response.json({ version: 1, ok: true, result: { endpoint: "ws://127.0.0.1:9223/private" } });
     },
   });
-  const owner = {
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  const h = harness(async ({ signal }) => {
+    started();
+    await new Promise<void>((_, reject) => signal.addEventListener("abort", () => reject(new Error("stopped")), { once: true }));
+  }, { firefoxOwner: {
     endpoint: `http://127.0.0.1:${server.port}/`, token: "private-token", pid: 12, browserPid: 13, generation: "generation",
-  };
-  const h = harness(async () => { throw new Error("external runner must not start"); }, { firefoxOwner: owner });
+  } });
   try {
     const script = await h.library.save(input);
-    const run = h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: { url: "https://example.test" }, useCredentials: false });
-    await h.supervisor.settled();
-
+    h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: {}, useCredentials: false });
+    await ready;
+    await h.supervisor.stop();
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({
-      operation: "run-script",
-      payload: {
-        scriptPath: expect.any(String),
-        ownerGeneration: "generation",
-        input: { profile: { id: "a" }, inputs: { url: "https://example.test" }, credentials: null },
-      },
-    });
-    expect(h.supervisor.status()?.profiles[0]?.status).toBe("succeeded");
-    expect(h.supervisor.log(run.id, 0).text).toContain("native output");
+    expect(requests[0].operation).toBe("playwright-endpoint");
+    expect(h.events).toEqual(["open:a", "close:a"]);
+    expect(h.supervisor.status()?.profiles[0]?.status).toBe("cancelled");
   } finally {
     server.stop(true);
   }

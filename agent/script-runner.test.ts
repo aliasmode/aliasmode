@@ -20,18 +20,29 @@ function nodeRuntime(root: string): string {
   mkdirSync(playwright, { recursive: true });
   writeFileSync(join(playwright, "package.json"), JSON.stringify({ type: "module", exports: "./index.mjs" }));
   writeFileSync(join(playwright, "index.mjs"), `
-    export const chromium = {
+    const chromium = {
       async connectOverCDP(endpoint) {
         process.stdout.write("connected " + endpoint + "\\n");
-        return {
-          contexts: () => [{
-            pages: () => [{ kind: "first-page" }],
-            newPage: async () => ({ kind: "new-page" }),
-          }],
-          close: async () => process.stdout.write("detached\\n"),
-        };
+        return browser();
       },
     };
+    const firefox = {
+      async connect(endpoint) {
+        if (endpoint.includes("fail")) throw new Error("Firefox endpoint failed: " + endpoint);
+        process.stdout.write("firefox connected " + endpoint + "\\n");
+        return browser();
+      },
+    };
+    function browser() {
+      return {
+        contexts: () => [{
+          pages: () => [{ kind: "first-page" }],
+          newPage: async () => ({ kind: "new-page" }),
+        }],
+        close: async () => process.stdout.write("detached\\n"),
+      };
+    }
+    export { chromium, firefox };
   `);
   return runner;
 }
@@ -56,8 +67,16 @@ class Chromium:
         print(f"connected {endpoint}", flush=True)
         return Browser()
 
+class Firefox:
+    async def connect(self, endpoint, timeout=None):
+        if "fail" in endpoint:
+            raise RuntimeError(f"Firefox endpoint failed: {endpoint}")
+        print(f"firefox connected {endpoint}", flush=True)
+        return Browser()
+
 class Playwright:
     chromium = Chromium()
+    firefox = Firefox()
     async def start(self):
         return self
     async def stop(self):
@@ -118,7 +137,41 @@ test("Node script runner passes the CDP objects and user data without a completi
   }
 });
 
-test("Node script runner rejects private Firefox locators", async () => {
+test("Node script runner connects Firefox through a private Playwright endpoint", async () => {
+  const root = workspace();
+  try {
+    const runner = nodeRuntime(root);
+    const script = join(root, "script.mjs");
+    writeFileSync(script, "export default async ({ log }) => log('firefox script');");
+    const child = Bun.spawn(["node", runner, script], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    child.stdin.write(`${JSON.stringify({ ...input, endpoint: "ws://127.0.0.1:9223/private", engine: "firefox" })}\n`);
+    expect(await output(child)).toEqual({
+      code: 0,
+      stderr: "",
+      stdout: "firefox connected ws://127.0.0.1:9223/private\nfirefox script\ndetached\n",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Node script runner redacts Firefox endpoint errors", async () => {
+  const root = workspace();
+  try {
+    const runner = nodeRuntime(root);
+    const endpoint = "ws://127.0.0.1:9223/private-fail";
+    const child = Bun.spawn(["node", runner, "unused.mjs"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    child.stdin.write(`${JSON.stringify({ ...input, endpoint, engine: "firefox" })}\n`);
+    const result = await output(child);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("private Firefox endpoint");
+    expect(result.stderr).not.toContain(endpoint);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Node script runner rejects opaque Firefox locators", async () => {
   const root = workspace();
   try {
     const runner = nodeRuntime(root);
@@ -129,7 +182,7 @@ test("Node script runner rejects private Firefox locators", async () => {
     const result = await output(child);
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Firefox scripts run through the AliasMode manager");
+    expect(result.stderr).toContain("Firefox scripts require a private Playwright endpoint");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -173,6 +226,48 @@ async def run(*, page, profile, inputs, credentials, log, **_):
       stderr: "",
       stdout: "connected ws://127.0.0.1:9222/devtools/browser/test\nprofile-1 hello user first-page\ndetached\ndriver-stopped\n",
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Python script runner connects Firefox through a private Playwright endpoint", async () => {
+  const root = workspace();
+  try {
+    const script = join(root, "script.py");
+    writeFileSync(script, "async def run(*, log, **_):\n    log('firefox script')\n");
+    const child = Bun.spawn([pythonExecutable, pythonRunner, script], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PYTHONPATH: pythonRuntime(root) },
+    });
+    child.stdin.write(`${JSON.stringify({ ...input, endpoint: "ws://127.0.0.1:9223/private", engine: "firefox" })}\n`);
+    expect(await output(child)).toEqual({
+      code: 0,
+      stderr: "",
+      stdout: "firefox connected ws://127.0.0.1:9223/private\nfirefox script\ndetached\ndriver-stopped\n",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Python script runner redacts Firefox endpoint errors", async () => {
+  const root = workspace();
+  try {
+    const endpoint = "ws://127.0.0.1:9223/private-fail";
+    const child = Bun.spawn([pythonExecutable, pythonRunner, "unused.py"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PYTHONPATH: pythonRuntime(root) },
+    });
+    child.stdin.write(`${JSON.stringify({ ...input, endpoint, engine: "firefox" })}\n`);
+    const result = await output(child);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("private Firefox endpoint");
+    expect(result.stderr).not.toContain(endpoint);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
