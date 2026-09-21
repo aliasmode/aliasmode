@@ -61,7 +61,10 @@ async function holdBridge(endpoint) {
   const reader = child.stdout.getReader();
   const { value, done } = await reader.read();
   reader.releaseLock();
-  if (done || new TextDecoder().decode(value).trim() !== "{\"ready\":true}") throw new Error("Firefox bridge smoke runner did not become ready");
+  if (done) throw new Error("Firefox bridge smoke runner stopped before ready");
+  let signal;
+  try { signal = JSON.parse(new TextDecoder().decode(value)); } catch { throw new Error("Firefox bridge smoke runner readiness is invalid"); }
+  if (signal?.ready !== true) throw new Error(`Firefox bridge smoke runner failed during ${signal?.failed ?? "startup"}`);
   return child;
 }
 const processAlive = (pid) => {
