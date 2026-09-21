@@ -185,7 +185,8 @@ function Write-AcceptanceDiagnostics(
   [string]$RecordedShard,
   [string]$Version,
   $Checks,
-  [int]$CleanupFailureCount
+  [int]$CleanupFailureCount,
+  $NativeNetworkObservation
 ) {
   $parent = Split-Path $Path -Parent
   if ($parent) { New-Item -ItemType Directory -Force $parent | Out-Null }
@@ -197,12 +198,154 @@ function Write-AcceptanceDiagnostics(
     success = $Success
     checks = $Checks
     cleanupFailureCount = $CleanupFailureCount
+    nativeNetworkObservation = $NativeNetworkObservation
   }
   [IO.File]::WriteAllText(
     $Path,
     ($diagnostics | ConvertTo-Json -Depth 5),
     [Text.UTF8Encoding]::new($false)
   )
+}
+
+function Set-NativeNetworkObservationPhase(
+  [string]$Path,
+  [string]$Phase,
+  [object[]]$Processes,
+  [object[]]$Matches
+) {
+  $config = [ordered]@{
+    phase = $Phase
+    processes = @($Processes)
+    matches = @($Matches)
+  }
+  [IO.File]::WriteAllText(
+    $Path,
+    ($config | ConvertTo-Json -Compress -Depth 5),
+    [Text.UTF8Encoding]::new($false)
+  )
+}
+
+function Start-NativeNetworkObservation([string]$ConfigPath) {
+  $readyPath = "$ConfigPath.ready"
+  Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
+  $job = Start-Job -ArgumentList $ConfigPath, $readyPath -ScriptBlock {
+    param([string]$Path, [string]$ReadyPath)
+
+    $seen = [Collections.Generic.HashSet[string]]::new()
+    $samples = 0
+    try {
+      while (Test-Path -LiteralPath $Path) {
+        try {
+          $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
+        } catch {
+          Start-Sleep -Milliseconds 100
+          continue
+        }
+        $tracked = @{}
+        foreach ($entry in @($config.processes)) {
+          $trackedProcessId = 0
+          if ([int]::TryParse([string]$entry.pid, [ref]$trackedProcessId) -and $trackedProcessId -gt 0) {
+            $tracked[$trackedProcessId] = [string]$entry.kind
+          }
+        }
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        $matchedRoots = [Collections.Generic.Queue[int]]::new()
+        foreach ($match in @($config.matches)) {
+          foreach ($process in $processes) {
+            if ([string]::IsNullOrWhiteSpace([string]$process.ExecutablePath) -or
+              -not ([string]$process.ExecutablePath).Equals([string]$match.executable, [StringComparison]::OrdinalIgnoreCase)) {
+              continue
+            }
+            if ($match.marker -and ([string]$process.CommandLine).IndexOf([string]$match.marker, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+              continue
+            }
+            if ($match.parentPid -and [int]$process.ParentProcessId -ne [int]$match.parentPid) {
+              continue
+            }
+            $matchedRootId = [int]$process.ProcessId
+            $tracked[$matchedRootId] = [string]$match.kind
+            $matchedRoots.Enqueue($matchedRootId)
+          }
+        }
+        while ($matchedRoots.Count -gt 0) {
+          $parentProcessId = $matchedRoots.Dequeue()
+          foreach ($process in $processes) {
+            $childProcessId = [int]$process.ProcessId
+            if ([int]$process.ParentProcessId -ne $parentProcessId -or $tracked.ContainsKey($childProcessId)) { continue }
+            $tracked[$childProcessId] = $tracked[$parentProcessId]
+            $matchedRoots.Enqueue($childProcessId)
+          }
+        }
+        $connections = @(Get-NetTCPConnection -ErrorAction Stop)
+        $samples++
+        if (-not (Test-Path -LiteralPath $ReadyPath)) {
+          [IO.File]::WriteAllText($ReadyPath, "ready", [Text.UTF8Encoding]::new($false))
+        }
+        foreach ($connection in $connections) {
+          $connectionProcessId = [int]$connection.OwningProcess
+          if (-not $tracked.ContainsKey($connectionProcessId)) { continue }
+          $remoteAddress = [string]$connection.RemoteAddress
+          $remotePort = [int]$connection.RemotePort
+          $address = $null
+          if ([Net.IPAddress]::TryParse($remoteAddress, [ref]$address)) {
+            $loopback = [Net.IPAddress]::IsLoopback($address) -or
+              $address.Equals([Net.IPAddress]::Any) -or $address.Equals([Net.IPAddress]::IPv6Any) -or
+              ($address.IsIPv4MappedToIPv6 -and [Net.IPAddress]::IsLoopback($address.MapToIPv4()))
+            if ($loopback) { continue }
+          }
+          if ($remotePort -le 0) { continue }
+          $key = "$($config.phase)|$($tracked[$connectionProcessId])|$connectionProcessId|$remoteAddress|$remotePort"
+          if ($seen.Add($key)) {
+            [PSCustomObject][ordered]@{
+              type = "connection"
+              phase = [string]$config.phase
+              process = [string]$tracked[$connectionProcessId]
+              pid = $connectionProcessId
+              remoteAddress = $remoteAddress
+              remotePort = $remotePort
+            }
+          }
+        }
+        Start-Sleep -Milliseconds 100
+      }
+      [PSCustomObject][ordered]@{ type = "summary"; samples = $samples }
+    } catch {
+      throw "native network observation failed"
+    }
+  }
+  for ($attempt = 0; $attempt -lt 150; $attempt++) {
+    if (Test-Path -LiteralPath $readyPath) { return $job }
+    if ($job.State -in @("Failed", "Completed", "Stopped")) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Remove-Item -LiteralPath $ConfigPath -Force -ErrorAction SilentlyContinue
+  Wait-Job $job -Timeout 15 | Out-Null
+  Remove-Job $job -Force -ErrorAction SilentlyContinue
+  throw "native network observation did not become ready"
+}
+
+function Stop-NativeNetworkObservation([Management.Automation.Job]$Job, [string]$ConfigPath) {
+  $readyPath = "$ConfigPath.ready"
+  Remove-Item -LiteralPath $ConfigPath, $readyPath -Force -ErrorAction SilentlyContinue
+  if (-not (Wait-Job $Job -Timeout 15)) {
+    Stop-Job $Job -ErrorAction SilentlyContinue
+    Remove-Job $Job -Force -ErrorAction SilentlyContinue
+    throw "native network observation did not stop"
+  }
+  if ($Job.State -ne "Completed") {
+    Remove-Job $Job -Force -ErrorAction SilentlyContinue
+    throw "native network observation failed"
+  }
+  $observations = @(Receive-Job $Job -ErrorAction Stop)
+  Remove-Job $Job -Force -ErrorAction SilentlyContinue
+  $summary = @($observations | Where-Object { $_.type -eq "summary" } | Select-Object -Last 1)
+  if ($summary.Count -ne 1 -or [int]$summary[0].samples -le 0) {
+    throw "native network observation recorded no successful samples"
+  }
+  return [ordered]@{
+    samples = [int]$summary[0].samples
+    connections = @($observations | Where-Object { $_.type -eq "connection" })
+  }
 }
 
 function Read-McpResponse([Diagnostics.Process]$Process, [int]$Id) {
@@ -436,6 +579,9 @@ $primaryFailure = $null
 $acceptanceSucceeded = $false
 $acceptanceStateOwned = $false
 $cleanupFailures = [Collections.Generic.List[string]]::new()
+$nativeNetworkObservation = $null
+$nativeNetworkObservationJob = $null
+$nativeNetworkObservationConfigPath = ""
 $checks = [ordered]@{
   artifactVerified = $false
   installed = $false
@@ -449,6 +595,7 @@ $checks = [ordered]@{
   playwrightWorkerProtocol = $false
   customScriptRunners = $false
   firefoxCliLifecycle = $false
+  nativeNetworkObservation = $false
   browserMetadataHash = $false
   nativeHeadfulLaunch = $false
   proxyMismatch = $false
@@ -803,6 +950,16 @@ public static class AliasModeWindow {
         throw "installed JSON CLI could not create a temporary profile: $($profile.error)"
       }
       $profileId = $profile.result.id
+      $runtimeDescriptor = Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion
+      $nativeNetworkObservationConfigPath = Join-Path $runRoot "native-network-observation.json"
+      $chromiumBinaryPath = Join-Path $installRoot "cloakbrowser\chrome.exe"
+      Set-NativeNetworkObservationPhase $nativeNetworkObservationConfigPath "chromium-lifecycle" @(
+        @{ pid = [int]$runtimeDescriptor.desktopPid; kind = "app" },
+        @{ pid = [int]$runtimeDescriptor.sidecarPid; kind = "sidecar" }
+      ) @(
+        @{ kind = "chromium-browser"; executable = $chromiumBinaryPath; marker = $profileId }
+      )
+      $nativeNetworkObservationJob = Start-NativeNetworkObservation $nativeNetworkObservationConfigPath
       $opened = & $helper browser open --profile $profileId --headless | ConvertFrom-Json
       if ($LASTEXITCODE -ne 0 -or -not $opened.ok -or -not $opened.result.headless -or $opened.result.alreadyOpen) {
         $sidecarLog = Get-ChildItem (Join-Path $appDataRoot "logs\aliasmode-*.log") -File -ErrorAction SilentlyContinue |
@@ -912,11 +1069,19 @@ async def run(*, log, **_):
         throw "installed AliasMode Firefox SHA-256 does not match browser metadata"
       }
 
+      $firefoxNodePath = Join-Path $playwrightRuntime "node\node.exe"
       $firefoxProfile = (& $helper profiles create --name ci-firefox --temporary --engine firefox | ConvertFrom-Json)
       if ($LASTEXITCODE -ne 0 -or -not $firefoxProfile.ok -or -not $firefoxProfile.result.id) {
         throw "installed JSON CLI could not create a temporary Firefox profile: $($firefoxProfile.error)"
       }
       $firefoxProfileId = $firefoxProfile.result.id
+      Set-NativeNetworkObservationPhase $nativeNetworkObservationConfigPath "firefox-lifecycle" @(
+        @{ pid = [int]$runtimeDescriptor.desktopPid; kind = "app" },
+        @{ pid = [int]$runtimeDescriptor.sidecarPid; kind = "sidecar" }
+      ) @(
+        @{ kind = "firefox-browser"; executable = $firefoxBinaryPath; marker = $firefoxProfileId },
+        @{ kind = "firefox-owner"; executable = $firefoxNodePath; marker = "--aliasmode-firefox-owner="; parentPid = [int]$runtimeDescriptor.sidecarPid }
+      )
       $firefoxOpened = (& $helper browser open --profile $firefoxProfileId --headless | ConvertFrom-Json)
       if (
         $LASTEXITCODE -ne 0 -or
@@ -985,7 +1150,11 @@ async def run(*, log, **_):
       if (-not $firefoxProcessesExited) {
         throw "installed Firefox owner or browser process survived close"
       }
+      $nativeNetworkObservation = Stop-NativeNetworkObservation $nativeNetworkObservationJob $nativeNetworkObservationConfigPath
+      $nativeNetworkObservationJob = $null
+      $nativeNetworkObservationConfigPath = ""
       $checks.firefoxCliLifecycle = $true
+      $checks.nativeNetworkObservation = $true
 
       Set-AcceptanceStage "runtime-desktop-descriptor"
       $descriptor = Read-ValidRuntimeDescriptor $descriptorPath $bundleVersion
@@ -1891,6 +2060,16 @@ try {
   $stageBeforeCleanup = $stage
   Set-AcceptanceStage "cleanup"
 
+  if ($nativeNetworkObservationJob) {
+    try {
+      $nativeNetworkObservation = Stop-NativeNetworkObservation $nativeNetworkObservationJob $nativeNetworkObservationConfigPath
+      $nativeNetworkObservationJob = $null
+      $nativeNetworkObservationConfigPath = ""
+    } catch {
+      $cleanupFailures.Add("native network observation cleanup failed")
+    }
+  }
+
   if ($automationPortBlocker) {
     try { $automationPortBlocker.Stop() } catch { $cleanupFailures.Add("automation port fixture cleanup failed") }
   }
@@ -1952,7 +2131,8 @@ try {
     $Shard `
     $recordedVersion `
     $checks `
-    $cleanupFailures.Count
+    $cleanupFailures.Count `
+    $nativeNetworkObservation
 } catch {
   $cleanupFailures.Add("diagnostics write failed")
   $overallSuccess = $false
