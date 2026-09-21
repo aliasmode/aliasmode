@@ -18,6 +18,7 @@ function wire(method: string, params: Record<string, unknown> = {}, id = 1): str
 
 function harness(options: {
   active?: boolean;
+  firefox?: boolean;
   stopResult?: boolean;
   temporary?: boolean;
 } = {}) {
@@ -30,6 +31,10 @@ function harness(options: {
         ws: "ws://127.0.0.1:9333/devtools/browser/test",
         startedAt: 1,
         headless: true,
+        ...(options.firefox ? {
+          engine: "firefox" as const,
+          firefoxOwner: { endpoint: "http://127.0.0.1:9444/", token: "private-token", pid: 12, browserPid: 13, generation: "generation" },
+        } : {}),
       }
     : null;
   let profileExists = true;
@@ -169,6 +174,52 @@ test("disconnect detaches from an existing browser without closing it", async ()
   });
   await h.session.disconnect();
   expect(h.events).toEqual([]);
+});
+
+test("Firefox browser status and open keep the owner transport private", async () => {
+  const h = harness({ active: true, firefox: true });
+  const session = new AgentControlSession({
+    ...h.deps,
+    firefoxCall: async () => ({ tools: [] }),
+  });
+
+  const status = await session.enqueue(wire("browser.status", { profileId: "profile1" }));
+  const opened = await session.enqueue(wire("browser.open", { profileId: "profile1" }));
+
+  for (const result of [status, opened]) {
+    const text = JSON.stringify(result);
+    expect(text).toContain('"engine":"firefox"');
+    expect(text).not.toContain("firefoxOwner");
+    expect(text).not.toContain("private-token");
+    expect(text).not.toContain("firefox://");
+    expect(text).not.toContain("debugPort");
+    expect(text).not.toContain('"port"');
+    expect(text).not.toContain('"ws"');
+  }
+  await session.disconnect();
+});
+
+test("Firefox MCP relays official schemas and calls through the authenticated manager", async () => {
+  const h = harness({ active: true, firefox: true });
+  const calls: Array<{ operation: string; payload: Record<string, unknown> }> = [];
+  const session = new AgentControlSession({
+    ...h.deps,
+    firefoxCall: async (_owner, operation, payload) => {
+      calls.push({ operation, payload });
+      return operation === "mcp-list" ? [{ name: "browser_snapshot" }] : { content: [] };
+    },
+  });
+
+  expect(await session.enqueue(wire("firefox.tools.list", { profileId: "profile1" }))).toMatchObject({
+    ok: true, result: { tools: [{ name: "browser_snapshot" }] },
+  });
+  expect(await session.enqueue(wire("firefox.tools.call", {
+    profileId: "profile1", name: "browser_snapshot", arguments: { compact: true },
+  }))).toMatchObject({ ok: true, result: { content: [] } });
+  expect(calls).toEqual([
+    { operation: "mcp-list", payload: {} },
+    { operation: "mcp-call", payload: { name: "browser_snapshot", arguments: { compact: true } } },
+  ]);
 });
 
 test("an existing browser rejects a launch-mode change", async () => {

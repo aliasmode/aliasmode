@@ -157,7 +157,12 @@ async function browser(args: string[]): Promise<unknown> {
   const profileId = requireProfile(rest);
   if (action === "status") {
     return await withRuntime(async (client) => {
-      const { ws: _ws, ...status } = await client.call("browser.status", { profileId });
+      const value = await client.call("browser.status", { profileId });
+      if (value.engine === "firefox") {
+        const { ws: _ws, port: _port, debugPort: _debugPort, firefoxOwner: _firefoxOwner, ...status } = value;
+        return status;
+      }
+      const { ws: _ws, ...status } = value;
       return status;
     });
   }
@@ -174,7 +179,9 @@ async function browser(args: string[]): Promise<unknown> {
       await client.call("browser.detach", { profileId });
       return {
         profileId: opened.profileId,
-        port: opened.port,
+        ...(opened.engine === "firefox"
+          ? { engine: "firefox", capabilities: opened.capabilities }
+          : { port: opened.port }),
         headless: opened.headless,
         alreadyOpen: opened.alreadyOpen,
       };
@@ -198,6 +205,17 @@ async function playwright(args: string[]): Promise<unknown> {
       headless: has(rest, "headless"),
     });
     try {
+      if (opened.engine === "firefox") {
+        return await client.call("firefox.script.run", {
+          profileId,
+          scriptPath: resolve(file),
+          input: {
+            profile: { id: profileId, name: "", group: "", platform: "" },
+            inputs: {},
+            credentials: null,
+          },
+        });
+      }
       const output = await new Promise<string>((resolveOutput, reject) => {
         const child = spawn(node, [runner, resolve(file)], {
           windowsHide: true,

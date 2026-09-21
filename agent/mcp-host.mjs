@@ -12,6 +12,35 @@ import { PlaywrightToolProxy } from "./playwright-proxy.mjs";
 
 const VERSION = process.env.ALIASMODE_APP_VERSION || "0.1.0-beta.32";
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
+const FIREFOX_FILTERED_TOOLS = new Set(["browser_close", "browser_install", "browser_pdf_save"]);
+
+function firefoxTools(tools) {
+  return tools.filter((tool) => !FIREFOX_FILTERED_TOOLS.has(tool.name) && !/pdf/i.test(tool.name));
+}
+
+function safeBrowserResult(value) {
+  if (value?.engine !== "firefox") return value;
+  const {
+    profileId, running, state, engine, capabilities, headless, alreadyOpen,
+    ownedByConnection, attachedExisting, selected, closed, sync, deleted, detached,
+  } = value;
+  return {
+    ...(profileId !== undefined ? { profileId } : {}),
+    ...(running !== undefined ? { running } : {}),
+    ...(state !== undefined ? { state } : {}),
+    engine,
+    ...(capabilities !== undefined ? { capabilities } : {}),
+    ...(headless !== undefined ? { headless } : {}),
+    ...(alreadyOpen !== undefined ? { alreadyOpen } : {}),
+    ...(ownedByConnection !== undefined ? { ownedByConnection } : {}),
+    ...(attachedExisting !== undefined ? { attachedExisting } : {}),
+    ...(selected !== undefined ? { selected } : {}),
+    ...(closed !== undefined ? { closed } : {}),
+    ...(sync !== undefined ? { sync } : {}),
+    ...(deleted !== undefined ? { deleted } : {}),
+    ...(detached !== undefined ? { detached } : {}),
+  };
+}
 const PROFILE_ID = { type: "string", minLength: 1 };
 const PROXY_REPLACEMENT_ROW = {
   type: "object",
@@ -253,15 +282,31 @@ export async function createAliasModeMcp(options = {}) {
     { capabilities: { tools: {} } },
   );
   let selectedProfileId;
+  let selectedEngine;
+  let selectedFirefoxTools = [];
   const ownedProfileIds = new Set();
   let closing;
 
+  const selectedTools = () => selectedEngine === "firefox" ? selectedFirefoxTools : playwright.listTools();
+
   const selectBrowser = async (profileId, knownStatus) => {
     const status = knownStatus ?? await runtime.call("browser.status", { profileId });
-    if (!status.running || !status.ws) throw new Error("open this AliasMode profile before selecting it");
+    if (!status.running) throw new Error("open this AliasMode profile before selecting it");
     selectedProfileId = undefined;
+    selectedEngine = undefined;
+    selectedFirefoxTools = [];
+    await playwright.detach();
+    if (status.engine === "firefox") {
+      const result = await runtime.call("firefox.tools.list", { profileId });
+      selectedFirefoxTools = firefoxTools(result.tools ?? []);
+      selectedProfileId = profileId;
+      selectedEngine = "firefox";
+      return safeBrowserResult({ ...status, selected: true });
+    }
+    if (!status.ws) throw new Error("open this AliasMode profile before selecting it");
     await playwright.attach(status.ws);
     selectedProfileId = profileId;
+    selectedEngine = "chromium";
     return {
       profileId,
       selected: true,
@@ -275,23 +320,31 @@ export async function createAliasModeMcp(options = {}) {
     const target = profileId || selectedProfileId;
     if (!target) throw new Error("select an open AliasMode browser first");
     const selected = target === selectedProfileId;
+    const engine = selectedEngine;
     if (selected) await playwright.detach();
     try {
       const result = await runtime.call("browser.close", { profileId: target });
       ownedProfileIds.delete(target);
-      if (selected) selectedProfileId = undefined;
-      return result;
+      if (selected) {
+        selectedProfileId = undefined;
+        selectedEngine = undefined;
+        selectedFirefoxTools = [];
+      }
+      return safeBrowserResult(result);
     } catch (error) {
       if (selected) {
         const status = await runtime.call("browser.status", { profileId: target }).catch(() => undefined);
-        if (status?.running && status.ws) await playwright.attach(status.ws).catch(() => {});
+        if (status?.running) {
+          if (engine === "firefox") await selectBrowser(target, status).catch(() => {});
+          else if (status.ws) await playwright.attach(status.ws).catch(() => {});
+        }
       }
       throw error;
     }
   };
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...ALIAS_TOOLS, ...playwright.listTools()],
+    tools: [...ALIAS_TOOLS, ...selectedTools()],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -324,9 +377,9 @@ export async function createAliasModeMcp(options = {}) {
           try {
             await selectBrowser(args.profileId, {
               running: true,
-              ws: opened.ws,
-              port: opened.port,
-              headless: opened.headless,
+              ...(opened.engine === "firefox"
+                ? { engine: "firefox", capabilities: opened.capabilities, headless: opened.headless }
+                : { ws: opened.ws, port: opened.port, headless: opened.headless }),
             });
           } catch (error) {
             if (opened.ownedByConnection) {
@@ -337,13 +390,15 @@ export async function createAliasModeMcp(options = {}) {
             throw error;
           }
         }
-        return toolResult({
+        return toolResult(safeBrowserResult({
           profileId: opened.profileId,
-          port: opened.port,
+          ...(opened.engine === "firefox"
+            ? { engine: "firefox", capabilities: opened.capabilities }
+            : { port: opened.port }),
           headless: opened.headless,
           alreadyOpen: opened.alreadyOpen,
           selected: args.select !== false,
-        });
+        }));
       }
       if (name === "aliasmode_browser_select") {
         return toolResult(await selectBrowser(args.profileId));
@@ -352,15 +407,22 @@ export async function createAliasModeMcp(options = {}) {
         const profileId = args.profileId || selectedProfileId;
         if (!profileId) throw new Error("select an open AliasMode browser first");
         const status = await runtime.call("browser.status", { profileId });
-        const { ws: _ws, ...safeStatus } = status;
+        const { ws: _ws, firefoxOwner: _firefoxOwner, ...safeStatus } = safeBrowserResult(status);
         return toolResult({ ...safeStatus, selected: profileId === selectedProfileId });
       }
       if (name === "aliasmode_browser_close" || name === "browser_close") {
         return toolResult(await closeBrowser(args.profileId));
       }
       if (!selectedProfileId) throw new Error("select an open AliasMode browser first");
-      if (!playwright.listTools().some((tool) => tool.name === name)) {
+      if (!selectedTools().some((tool) => tool.name === name)) {
         throw new Error(`unknown AliasMode tool: ${name}`);
+      }
+      if (selectedEngine === "firefox") {
+        return await runtime.call("firefox.tools.call", {
+          profileId: selectedProfileId,
+          name,
+          arguments: args,
+        });
       }
       return await playwright.callTool(name, args);
     } catch (error) {
