@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const VERSION = 1;
-const MAX_BYTES = 16 * 1024 * 1024;
+export const VERSION = 1;
+export const MAX_BYTES = 16 * 1024 * 1024;
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const ERROR_MESSAGES = {
   invalid_request: "Playwright worker request is invalid",
@@ -616,7 +616,18 @@ async function createReadOnlyStorageReader(browser, context) {
   };
 }
 
-async function captureSession(browser, payload) {
+async function nativeOriginStorage(context, origin) {
+  const state = await context.storageState({ indexedDB: true });
+  const found = state?.origins?.find((candidate) => candidate?.origin === origin);
+  return {
+    localStorage: Array.isArray(found?.localStorage) ? found.localStorage : [],
+    ...(origin === TELEGRAM_ORIGIN && Array.isArray(found?.indexedDB)
+      ? { indexedDB: filterTelegramIndexedDB(found.indexedDB) }
+      : {}),
+  };
+}
+
+export async function captureSession(browser, payload, options = {}) {
   const context = contextOf(browser);
   const tabs = context.pages().map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
   const seed = payload.captureSeed;
@@ -650,8 +661,12 @@ async function captureSession(browser, payload) {
     for (const origin of [...origins].sort()) {
       let storage = await captureLiveOrigin(context, origin);
       if (!storage) {
-        reader ??= await sessionStep("hidden_target", () => createReadOnlyStorageReader(browser, context));
-        storage = await sessionStep("origin_storage", () => reader.read(origin));
+        if (options.nativeStorage) {
+          storage = await sessionStep("origin_storage", () => nativeOriginStorage(context, origin));
+        } else {
+          reader ??= await sessionStep("hidden_target", () => createReadOnlyStorageReader(browser, context));
+          storage = await sessionStep("origin_storage", () => reader.read(origin));
+        }
       }
       const captured = await sessionStep("validation", () => capturedWebOriginStorage(origin, storage));
       if (captured) byOrigin.set(origin, captured);
@@ -682,7 +697,7 @@ async function captureSession(browser, payload) {
 }
 
 function isInternalNewTabUrl(url) {
-  return INTERNAL_NEW_TAB_URLS.has(url);
+  return INTERNAL_NEW_TAB_URLS.has(url) || url === "about:newtab" || url === "about:home";
 }
 
 async function navigatePages(context, urls, replacePages = false) {
@@ -742,7 +757,7 @@ async function navigatePages(context, urls, replacePages = false) {
   if (firstError) throw firstError;
 }
 
-async function restoreSession(browser, context, payload) {
+export async function restoreSession(browser, context, payload, options = {}) {
   let bundle;
   try { bundle = JSON.parse(payload.bundle); } catch { throw sessionError("invalid_bundle"); }
   const origins = Array.isArray(bundle.origins)
@@ -776,7 +791,7 @@ async function restoreSession(browser, context, payload) {
         await page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
         if (!intercepted) throw new Error("Restore navigation was not intercepted");
         if (new URL(page.url()).origin !== target.origin) throw new Error("wrong restore origin");
-      await page.evaluate(async ({ entries, databases, source, databaseRules }) => {
+      await page.evaluate(async ({ entries, databases, source, isFirefox, databaseRules }) => {
         const removeDatabase = (name) => new Promise((resolve, reject) => {
           const request = globalThis.indexedDB.deleteDatabase(name);
           request.onsuccess = resolve;
@@ -794,7 +809,7 @@ async function restoreSession(browser, context, payload) {
         if (databases.length) {
           const module = { exports: {} };
           Function("module", "exports", source)(module, module.exports);
-          const script = new (module.exports.StorageScript())(false);
+          const script = new (module.exports.StorageScript())(isFirefox);
           for (const database of databases) await script._restoreDB(database);
         }
         const backup = Object.keys(localStorage).map((name) => ({ name, value: localStorage.getItem(name) }));
@@ -810,6 +825,7 @@ async function restoreSession(browser, context, payload) {
           entries: target.localStorage,
           databases: target.indexedDB ?? [],
           source: storageSource,
+          isFirefox: !!options.nativeStorage,
           databaseRules: target.origin === TELEGRAM_ORIGIN ? TELEGRAM_AUTH_INDEXEDDB_RULES : [],
         });
       } finally {
@@ -966,6 +982,105 @@ async function searchProvider(chromium, payload) {
       });
     } finally { await page.close().catch(() => {}); }
   });
+}
+
+export async function operatePersistentContext(browser, context, operation, payload, options = {}) {
+  const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
+  if (operation === "session-capture") return captureSession(browser, payload, { nativeStorage: !!options.nativeStorage });
+  if (operation === "session-restore") return restoreSession(browser, context, payload, { nativeStorage: !!options.nativeStorage });
+  if (operation === "cookie-add") {
+    await context.addCookies(payload.cookies);
+    return null;
+  }
+  if (operation === "cookie-harvest") return context.cookies(Array.isArray(payload.urls) && payload.urls.length ? payload.urls : SESSION_URLS);
+  if (operation === "navigate") {
+    await navigatePages(context, payload.urls, !!payload.replacePages);
+    return null;
+  }
+  if (operation === "profile-card") {
+    if (!payload.temporary && context.pages().some((page) => {
+      try { return typeof page.url === "function" && page.url() === payload.url; } catch { return false; }
+    })) return { createdPageTargetIds: [] };
+    const page = await context.newPage();
+    try { await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 15_000 }); } catch {}
+    if (payload.temporary) await page.close().catch(() => {});
+    return { createdPageTargetIds: [] };
+  }
+  if (operation === "label-window") {
+    await context.addInitScript({ content: payload.script }).catch(() => {});
+    for (const page of context.pages()) await page.evaluate(payload.script).catch(() => {});
+    return null;
+  }
+  if (operation === "ensure-cookies") {
+    const key = (cookie) => JSON.stringify([
+      cookie.name, cookie.domain.toLowerCase(), cookie.path || "/",
+      cookie.partitionKey || "", cookie.partitionKey ? cookie._crHasCrossSiteAncestor ?? true : null,
+    ]);
+    const present = new Set((await context.cookies()).map(key));
+    const missing = payload.cookies.filter((cookie) => !present.has(key(cookie)));
+    if (missing.length) await context.addCookies(missing);
+    return { injected: missing.length > 0 };
+  }
+  if (operation === "diagnostics") {
+    const page = await context.newPage();
+    try {
+      await page.goto("https://example.com", { waitUntil: "domcontentloaded", timeout: payload.timeoutMs }).catch(() => {});
+      const fingerprint = await page.evaluate(payload.fingerprintScript).catch(() => ({ errors: { probe: "diagnostic probe failed" } }));
+      const webrtcIps = await page.evaluate(payload.webrtcScript).catch(() => []);
+      let egress = null;
+      for (const url of payload.egressUrls) {
+        try { const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: payload.timeoutMs }); if (response?.ok()) { egress = await page.locator("body").innerText({ timeout: Math.min(payload.timeoutMs, 5_000) }); break; } } catch {}
+      }
+      let login = null;
+      if (payload.collectLogin) {
+        try {
+          await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: payload.timeoutMs });
+          await page.waitForSelector('[data-testid="SideNav_NewTweet_Button"], [data-testid="AppTabBar_Home_Link"], [aria-label="Home timeline"], input[name="text"], a[href="/login"], [data-testid="loginButton"]', { timeout: 15_000 }).catch(() => {});
+          login = await page.evaluate(payload.loginScript);
+        } catch { login = { loggedIn: false, loggedOut: false, url: "error", title: "diagnostic navigation failed" }; }
+      }
+      return { fingerprint, webrtcIps, egress, login };
+    } finally { await page.close().catch(() => {}); }
+  }
+  if (operation === "page" && payload.kind === "fingerprint") {
+    const page = await context.newPage();
+    const url = "https://fingerprint.aliasmode.invalid/?__aliasmode_fingerprint__=1";
+    let intercepted = false;
+    const handler = async (route) => {
+      if (route.request().url() !== url) return route.abort();
+      intercepted = true;
+      return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Fingerprint</title>" });
+    };
+    try {
+      await page.route("**/*", handler);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+      if (!intercepted || page.url() !== url) throw new Error("fingerprint document was not fulfilled locally");
+      return await page.evaluate(payload.fingerprintScript);
+    } finally {
+      await page.unroute("**/*", handler).catch(() => {});
+      await page.close().catch(() => {});
+    }
+  }
+  if (operation === "page") {
+    const page = payload.temporary ? await context.newPage() : context.pages()[0] || await context.newPage();
+    try {
+      if (payload.url) await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: payload.timeoutMs || 30_000 }).catch(() => {});
+      if (payload.kind === "user-agent") return page.evaluate(() => navigator.userAgent);
+      if (payload.kind === "scripts") {
+        const values = [];
+        for (const source of payload.scripts) values.push(await page.evaluate(source).catch((error) => ({ __aliasmodeError: String(error) })));
+        return values;
+      }
+      if (payload.kind === "egress") {
+        for (const url of payload.urls) {
+          try { const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: payload.timeoutMs }); if (response?.ok()) return await page.locator("body").innerText({ timeout: Math.min(payload.timeoutMs, 5_000) }); } catch {}
+        }
+        return null;
+      }
+      throw typed("invalid_request");
+    } finally { if (payload.temporary) await page.close().catch(() => {}); }
+  }
+  throw typed("invalid_request");
 }
 
 async function operate(chromium, operation, payload) {
@@ -1130,24 +1245,28 @@ async function operate(chromium, operation, payload) {
   });
 }
 
-let response;
-let exitCode = 0;
-try {
-  const request = await readStdin();
-  let runtime;
-  try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
-  const result = await operate(runtime.chromium || runtime.default?.chromium, request.operation, request.payload);
-  response = { version: VERSION, ok: true, result };
-} catch (error) {
-  exitCode = 1;
-  const code = error?.code && ERROR_MESSAGES[error.code] ? error.code : "operation_failed";
-  response = { version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code], ...(error?.details ? { details: error.details } : {}) } };
+export async function runWorkerMain() {
+  let response;
+  let exitCode = 0;
+  try {
+    const request = await readStdin();
+    let runtime;
+    try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
+    const result = await operate(runtime.chromium || runtime.default?.chromium, request.operation, request.payload);
+    response = { version: VERSION, ok: true, result };
+  } catch (error) {
+    exitCode = 1;
+    const code = error?.code && ERROR_MESSAGES[error.code] ? error.code : "operation_failed";
+    response = { version: VERSION, ok: false, error: { code, message: ERROR_MESSAGES[code], ...(error?.details ? { details: error.details } : {}) } };
+  }
+  const output = JSON.stringify(response);
+  if (Buffer.byteLength(output) > MAX_BYTES) {
+    process.stdout.write(JSON.stringify({ version: VERSION, ok: false, error: { code: "operation_failed", message: ERROR_MESSAGES.operation_failed } }));
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(output);
+    process.exitCode = exitCode;
+  }
 }
-const output = JSON.stringify(response);
-if (Buffer.byteLength(output) > MAX_BYTES) {
-  process.stdout.write(JSON.stringify({ version: VERSION, ok: false, error: { code: "operation_failed", message: ERROR_MESSAGES.operation_failed } }));
-  process.exitCode = 1;
-} else {
-  process.stdout.write(output);
-  process.exitCode = exitCode;
-}
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) await runWorkerMain();
