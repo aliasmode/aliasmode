@@ -111,7 +111,7 @@ for (let index = 0; index < applications.count; index += 1) {
   if (name.toLowerCase().includes("aliasmode")) aliasModeCandidates.push({ pid, name, bundlePath, executablePath });
 }
 if (matches.length !== 1) throw new Error("expected exactly one supplied Firefox application process; matched " + matches.length + "; AliasMode candidates " + JSON.stringify(aliasModeCandidates));
-console.log(matches[0].pid);`;
+matches[0].pid;`;
 }
 
 function nativeBrowserScript(pid, commands = "") {
