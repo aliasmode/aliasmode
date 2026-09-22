@@ -21,6 +21,8 @@ import {
   matchOwnedBrowserPids,
   matchProfileDirHolderPids,
   parseTasklistImageNames,
+  parseDarwinFirefoxPsSnapshot,
+  parseDarwinKernelArgv,
   parseDarwinPsSnapshot,
   parseLinuxProcStat,
   platformHomeUrl,
@@ -33,6 +35,7 @@ import {
   type SearchProviderEnsurer,
   type HostProcessSnapshot,
 } from "./launcher.ts";
+import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
 import { parseExport } from "./parse.ts";
 import { SessionRestoreError } from "./session.ts";
 
@@ -1520,6 +1523,72 @@ test("macOS ps parsing preserves exact ownership when the app executable path ha
     incomplete: false,
     records: [{ pid: 4243, executablePath: "/tmp/not-cloak", commandLine }],
   })).toBeNull();
+});
+
+test("Darwin Firefox kernel argv requires the actual executable and exact profile", () => {
+  const identity = {
+    binaryPath: "/Applications/Alias Mode.app/Contents/MacOS/firefox",
+    userDataDir: "/Users/test/Alias Profiles/profile one",
+    ownerBinaryPath: "/Applications/Alias Mode.app/Contents/MacOS/bun",
+    generation: "generation-one",
+  };
+  const raw = [
+    `  101 /tmp/spoofed -profile ${identity.userDataDir}`,
+    `  102 /tmp/spoofed --aliasmode-firefox-owner=${identity.generation}`,
+  ].join("\n");
+  const snapshot = parseDarwinFirefoxPsSnapshot(raw, (pid) => pid === 101
+    ? { executablePath: identity.binaryPath, argv: [identity.binaryPath, "-profile", identity.userDataDir] }
+    : { executablePath: identity.ownerBinaryPath, argv: [identity.ownerBinaryPath, "firefox-worker.mjs", `--aliasmode-firefox-owner=${identity.generation}`] });
+
+  expect(snapshot.incomplete).toBe(false);
+  expect(matchFirefoxProcesses(identity, snapshot)).toEqual({ browsers: [101], owners: [102] });
+
+  const spoofed = parseDarwinFirefoxPsSnapshot(raw, (pid) => pid === 101
+    ? { executablePath: "/tmp/other", argv: [identity.binaryPath, "-profile", identity.userDataDir] }
+    : { executablePath: identity.ownerBinaryPath, argv: [identity.ownerBinaryPath, "firefox-worker.mjs", `--aliasmode-firefox-owner=${identity.generation}`] });
+  expect(matchFirefoxProcesses(identity, spoofed)).toBeNull();
+});
+
+test("Darwin Firefox kernel argv rejects split and sibling profiles, bad generations, and failed queries", () => {
+  const identity = {
+    binaryPath: "/Applications/Alias Mode.app/Contents/MacOS/firefox",
+    userDataDir: "/Users/test/Alias Profiles/profile one",
+    ownerBinaryPath: "/Applications/Alias Mode.app/Contents/MacOS/bun",
+    generation: "generation-one",
+  };
+  const raw = [
+    "  201 firefox -profile candidate",
+    "  202 firefox -profile candidate",
+    "  203 bun --aliasmode-firefox-owner=candidate",
+  ].join("\n");
+  const snapshot = parseDarwinFirefoxPsSnapshot(raw, (pid) => {
+    if (pid === 201) return {
+      executablePath: identity.binaryPath,
+      argv: [identity.binaryPath, "-profile", "/Users/test/Alias", "Profiles/profile one"],
+    };
+    if (pid === 202) return {
+      executablePath: identity.binaryPath,
+      argv: [identity.binaryPath, "-profile", `${identity.userDataDir} sibling`],
+    };
+    return {
+      executablePath: identity.ownerBinaryPath,
+      argv: [identity.ownerBinaryPath, "firefox-worker.mjs", `--aliasmode-firefox-owner=${identity.generation}-extra`],
+    };
+  });
+  expect(matchFirefoxProcesses(identity, snapshot)).toEqual({ browsers: [], owners: [] });
+
+  const malformed = parseDarwinFirefoxPsSnapshot(raw, () => null);
+  expect(malformed.incomplete).toBe(true);
+  expect(matchFirefoxProcesses(identity, malformed)).toBeNull();
+  expect(parseDarwinKernelArgv(Uint8Array.of(1, 0, 0, 0, 47, 0, 0, 102))).toBeNull();
+
+  const encoded = new TextEncoder().encode("/kernel/firefox\0\0firefox\0-profile\0/Users/test/Alias Profiles/profile one\0");
+  const valid = new Uint8Array(encoded.byteLength + 4);
+  valid[0] = 3;
+  valid.set(encoded, 4);
+  expect(parseDarwinKernelArgv(valid)).toEqual([
+    "firefox", "-profile", "/Users/test/Alias Profiles/profile one",
+  ]);
 });
 
 test("bounded process snapshot reader kills a hung scanner and returns unknown", async () => {
