@@ -1,25 +1,32 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
+import { buildNewProfile } from "../create.ts";
 import { Launcher } from "../launcher.ts";
 import { createFirefoxProfileConfig } from "../firefox-config.ts";
-import { callFirefoxOwner } from "../firefox-runtime.ts";
+import { callFirefoxOwner, FirefoxOwnerError } from "../firefox-runtime.ts";
 import { decodePortableProfile, encodePortableProfile } from "../portable-profile.ts";
 import { resolvePlaywrightRuntime } from "../playwright-runtime.ts";
+import { applySourceRuntime, type SourceRuntime } from "../source-runtime.ts";
 import { applySessionToEndpoint, readSessionInSubprocess } from "../session.ts";
 import { ProfileStore } from "../store.ts";
 import type { Profile } from "../types.ts";
 
-const [binaryArg, rootArg, expectedSha256] = process.argv.slice(2);
-if (!binaryArg || !rootArg || !/^[a-f0-9]{64}$/.test(expectedSha256 ?? "")) {
-  throw new Error("usage: bun scripts/firefox-launcher-acceptance.ts <aliasmode.exe> <new-directory> <sha256>");
+const [binaryArg, rootArg, expectedSha256, sourceRuntimeArg] = process.argv.slice(2);
+if (!binaryArg || !rootArg || !/^[a-f0-9]{64}$/.test(expectedSha256 ?? "")
+  || (sourceRuntimeArg !== undefined && !sourceRuntimeArg)) {
+  throw new Error("usage: bun scripts/firefox-launcher-acceptance.ts <aliasmode.exe> <new-directory> <sha256> [source-runtime-root]");
 }
 
 const binary = resolve(binaryArg);
 const root = resolve(rootArg);
+const sourceRuntimeRoot = sourceRuntimeArg ? resolve(sourceRuntimeArg) : undefined;
+const run = promisify(execFile);
 const localDataRoot = join(root, "local-data");
 const cloudDataRoot = join(root, "cloud-data");
 await mkdir(root, { recursive: false });
@@ -29,6 +36,12 @@ let server: ReturnType<typeof createServer> | undefined;
 let proxyServer: ReturnType<typeof createServer> | undefined;
 let localLauncher: Launcher | undefined;
 let cloudLauncher: Launcher | undefined;
+let concurrentLauncher: Launcher | undefined;
+let foreignOwner: ReturnType<typeof Bun.spawn> | undefined;
+const concurrentFirefoxId = "firefoxconcurrent";
+const concurrentFirefoxPeerId = "firefoxconcurrentpeer";
+let concurrentChromiumId: string | undefined;
+const nativeCloseId = "firefoxnativeclose";
 
 async function sha256File(path: string): Promise<string> {
   const hash = createHash("sha256");
@@ -36,8 +49,48 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function stop(launcher: Launcher | undefined, profileId: string): Promise<void> {
-  if (launcher) await launcher.stop(profileId).catch(() => {});
+async function closeNativeFirefoxWindow(browserPid: number): Promise<void> {
+  assert.equal(process.platform, "darwin", "native window close acceptance runs on macOS");
+  const script = `tell application "System Events"
+  set browserProcesses to every application process whose unix id is ${browserPid}
+  if (count of browserProcesses) is not 1 then error "exact browser process is unavailable"
+  tell item 1 of browserProcesses
+    set frontmost to true
+    delay 0.2
+    set browserWindows to every window
+    if (count of browserWindows) is not 1 then error "exact browser window is unavailable"
+    tell item 1 of browserWindows
+      set closeButtons to every button whose subrole is "AXCloseButton"
+      if (count of closeButtons) is not 1 then error "exact browser close button is unavailable"
+      perform action "AXPress" of item 1 of closeButtons
+    end tell
+  end tell
+end tell`;
+  await run("osascript", ["-e", script]);
+}
+
+async function waitForNativeFirefoxClose(profileId: string): Promise<void> {
+  const launch = localStore.getLaunch(profileId);
+  assert.ok(launch?.firefoxOwner, "native AXClose profile has a Firefox owner");
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const status = await callFirefoxOwner<{ pageTargets?: unknown }>(launch.firefoxOwner!, "status", {}, { timeoutMs: 800 });
+      if (!Array.isArray(status.pageTargets)) throw new Error("native AXClose owner status has invalid page targets");
+      if (status.pageTargets.length === 0) return;
+    } catch (error) {
+      if (error instanceof FirefoxOwnerError && error.code === "runtime_unavailable") return;
+      throw error;
+    }
+    await Bun.sleep(100);
+  }
+  throw new Error("native AXClose did not close the Firefox window");
+}
+
+async function stopForCleanup(launcher: Launcher | undefined, store: ProfileStore, profileId: string): Promise<boolean> {
+  if (!launcher) return store.getLaunch(profileId) === null;
+  const stopped = await launcher.stop(profileId).catch(() => false);
+  return stopped && store.getLaunch(profileId) === null;
 }
 
 async function ownerScript(
@@ -116,6 +169,7 @@ function profile(id: string, config: ReturnType<typeof createFirefoxProfileConfi
 }
 
 try {
+  if (sourceRuntimeRoot) applySourceRuntime(sourceRuntimeRoot);
   assert.equal(await sha256File(binary), expectedSha256, "CI passes the approved Firefox executable hash");
 
   server = createServer((request, response) => {
@@ -390,6 +444,73 @@ async def run(*, context, inputs, log, **_kwargs):
   assert.ok(!disabledStatus.pageTargets.some((target) => target.url === firstTab || target.url === secondTab), "disabled Local reopen does not restore native tabs");
   assert.equal(await localLauncher.stop(profileId), true, "Launcher stops Firefox after disabled native reopen");
 
+  const runtime = sourceRuntimeRoot
+    ? JSON.parse(await readFile(join(sourceRuntimeRoot, "browser-runtime.json"), "utf8")) as SourceRuntime
+    : null;
+  if (runtime) {
+    console.log("firefox-launcher-acceptance:concurrent-engine-stop");
+    localStore.upsertProfile(profile(concurrentFirefoxId, createFirefoxProfileConfig(1440, 900)));
+    localStore.upsertProfile(profile(concurrentFirefoxPeerId, createFirefoxProfileConfig(1440, 900)));
+    const chromiumProfile = buildNewProfile(
+      { engine: "chromium", name: "Chromium concurrent acceptance", screen: "1440x900" },
+      (id) => localStore.getProfile(id) !== null,
+    );
+    const chromiumId = chromiumProfile.id;
+    concurrentChromiumId = chromiumId;
+    localStore.upsertProfile(chromiumProfile);
+    concurrentLauncher = new Launcher({
+      store: localStore,
+      dataRoot: join(root, "concurrent-data"),
+      binaryPath: runtime.chromium.path,
+      expectedBinarySha256: runtime.chromium.sha256,
+      firefoxBinaryPath: binary,
+      expectedFirefoxBinarySha256: expectedSha256,
+      headless: true,
+      baseArgs: process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : [],
+      portRange: { start: 20000, end: 20999 },
+    });
+    await Promise.all([
+      concurrentLauncher.start(concurrentFirefoxId, [], { autoNavigate: false }),
+      concurrentLauncher.start(concurrentFirefoxPeerId, [], { autoNavigate: false }),
+      concurrentLauncher.start(chromiumId, [], { autoNavigate: false }),
+    ]);
+    foreignOwner = Bun.spawn([
+      runtime.node,
+      "--eval",
+      "setInterval(() => {}, 1000)",
+      "--",
+      "--aliasmode-firefox-owner=foreign-acceptance-generation",
+    ], { stdout: "ignore", stderr: "ignore" });
+    assert.ok(foreignOwner.pid > 0, "foreign owner-marker fixture starts");
+    await Bun.sleep(100);
+    assert.equal(foreignOwner.exitCode, null, "foreign owner-marker fixture remains alive before Firefox stop");
+
+    assert.equal(await concurrentLauncher.stop(concurrentFirefoxId), true, "Launcher stops one Firefox beside Firefox, Chromium, and a foreign owner marker");
+    assert.equal(localStore.getLaunch(concurrentFirefoxId), null, "stopped concurrent Firefox launch clears");
+    assert.equal(await concurrentLauncher.certifiedActive(concurrentFirefoxPeerId), true, "second Firefox remains certified after peer stop");
+    assert.equal(await concurrentLauncher.certifiedActive(chromiumId), true, "Chromium remains certified after Firefox stop");
+    assert.equal(await concurrentLauncher.stop(concurrentFirefoxPeerId), true, "Launcher stops the second concurrent Firefox");
+    assert.equal(foreignOwner.exitCode, null, "foreign owner-marker fixture remains alive after peer Firefox stops");
+    assert.equal(await concurrentLauncher.stop(chromiumId), true, "Launcher stops the concurrent Chromium");
+    foreignOwner.kill();
+    await foreignOwner.exited;
+    foreignOwner = undefined;
+  }
+
+  if (process.platform === "darwin") {
+    console.log("firefox-launcher-acceptance:native-axclose-before-stop");
+    localStore.upsertProfile(profile(nativeCloseId, createFirefoxProfileConfig(1440, 900)));
+    await localLauncher.start(nativeCloseId, [], { autoNavigate: false, headless: false });
+    const nativeLaunch = localStore.getLaunch(nativeCloseId);
+    assert.ok(nativeLaunch?.firefoxOwner, "native AXClose profile has a Firefox owner");
+    const nativeStatus = await callFirefoxOwner<{ browserPid: number }>(nativeLaunch.firefoxOwner!, "status", {}, { timeoutMs: 800 });
+    assert.ok(Number.isSafeInteger(nativeStatus.browserPid) && nativeStatus.browserPid > 0, "native AXClose browser PID is valid");
+    await closeNativeFirefoxWindow(nativeStatus.browserPid);
+    await waitForNativeFirefoxClose(nativeCloseId);
+    assert.equal(await localLauncher.stop(nativeCloseId), true, "Launcher confirms stop after native AXClose");
+    assert.equal(localStore.getLaunch(nativeCloseId), null, "native AXClose launch clears after confirmed stop");
+  }
+
   cloudStore.upsertProfile(handoff.profile);
 
   cloudLauncher = new Launcher({
@@ -423,11 +544,24 @@ async def run(*, context, inputs, log, **_kwargs):
     cloudPort: cloud.port,
   }));
 } finally {
-  await stop(cloudLauncher, "firefoxlaunchproof");
-  await stop(localLauncher, "firefoxlaunchproof");
+  const cleanup = await Promise.all([
+    stopForCleanup(cloudLauncher, cloudStore, "firefoxlaunchproof"),
+    stopForCleanup(concurrentLauncher, localStore, concurrentFirefoxId),
+    stopForCleanup(concurrentLauncher, localStore, concurrentFirefoxPeerId),
+    concurrentChromiumId
+      ? stopForCleanup(concurrentLauncher, localStore, concurrentChromiumId)
+      : Promise.resolve(true),
+    stopForCleanup(localLauncher, localStore, nativeCloseId),
+    stopForCleanup(localLauncher, localStore, "firefoxlaunchproof"),
+  ]);
+  if (foreignOwner) {
+    foreignOwner.kill();
+    await foreignOwner.exited.catch(() => {});
+  }
   cloudStore.close();
   localStore.close();
   await new Promise<void>((done) => proxyServer?.close(() => done()) ?? done());
   await new Promise<void>((done) => server?.close(() => done()) ?? done());
+  if (!cleanup.every(Boolean)) throw new Error("acceptance cleanup could not confirm browser teardown");
   await rm(root, { recursive: true, force: true });
 }

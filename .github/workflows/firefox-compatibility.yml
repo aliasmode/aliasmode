@@ -175,6 +175,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "ALIASMODE_SOURCE_RUNTIME_ROOT=$proof" | Add-Content $env:GITHUB_ENV
       - name: Diagnose Windows source setup failure
         if: failure() && steps.source-setup.outcome == 'failure'
         shell: pwsh
@@ -208,7 +209,7 @@ jobs:
         shell: pwsh
         run: |
           $proof = Join-Path $env:RUNNER_TEMP "firefox-launcher-source-$([guid]::NewGuid().ToString('N'))"
-          bun scripts/firefox-launcher-acceptance.ts $env:ALIASMODE_FIREFOX_BINARY_PATH $proof $env:ALIASMODE_FIREFOX_BINARY_SHA256
+          bun scripts/firefox-launcher-acceptance.ts $env:ALIASMODE_FIREFOX_BINARY_PATH $proof $env:ALIASMODE_FIREFOX_BINARY_SHA256 $env:ALIASMODE_SOURCE_RUNTIME_ROOT
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Report compatibility results
         if: always()
@@ -362,6 +363,7 @@ jobs:
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof"
           fi
           bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof"
+          printf 'ALIASMODE_SOURCE_RUNTIME_ROOT=%s\n' "$proof" >> "$GITHUB_ENV"
       - name: Install previous macOS runtime for profile upgrade proof
         if: matrix.platform == 'darwin'
         shell: bash
@@ -407,7 +409,7 @@ jobs:
         run: |
           set -euo pipefail
           proof="$RUNNER_TEMP/firefox launcher source-$(uuidgen | tr '[:upper:]' '[:lower:]')"
-          bun scripts/firefox-launcher-acceptance.ts "$ALIASMODE_FIREFOX_BINARY_PATH" "$proof" "$ALIASMODE_FIREFOX_BINARY_SHA256"
+          bun scripts/firefox-launcher-acceptance.ts "$ALIASMODE_FIREFOX_BINARY_PATH" "$proof" "$ALIASMODE_FIREFOX_BINARY_SHA256" "$ALIASMODE_SOURCE_RUNTIME_ROOT"
       - name: Prove source CLI and script runners
         shell: bash
         run: |
