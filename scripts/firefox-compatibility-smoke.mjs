@@ -34,6 +34,7 @@ function appBundlePath(path) {
   if (index < 0) throw new Error("native Firefox UI acceptance requires an executable inside a .app bundle");
   return executable.slice(0, index + 4);
 }
+const nativeExecutable = nativeUi ? resolve(executablePath) : undefined;
 const nativeAppBundle = nativeUi ? appBundlePath(executablePath) : undefined;
 await mkdir(root, { recursive: false });
 const server = createServer((_request, response) => {
@@ -90,10 +91,17 @@ async function syntheticDuckDuckGo(context) {
 }
 
 function nativeBrowserScript(commands = "") {
-  return `set browserApp to POSIX file ${JSON.stringify(nativeAppBundle)} as alias
+  return `set browserBundlePath to POSIX path of (POSIX file ${JSON.stringify(nativeAppBundle)} as alias)
+set browserExecutablePath to POSIX path of (POSIX file ${JSON.stringify(nativeExecutable)} as alias)
 tell application "System Events"
-  set browserProcesses to every application process whose application file is browserApp
-  if (count of browserProcesses) is not 1 then error "expected exactly one supplied Firefox application process"
+  set browserProcesses to {}
+  repeat with browserProcess in every application process
+    try
+      set processPath to POSIX path of ((application file of browserProcess) as alias)
+      if processPath is browserBundlePath or processPath is browserExecutablePath then set end of browserProcesses to browserProcess
+    end try
+  end repeat
+  if (count of browserProcesses) is not 1 then error "expected exactly one supplied Firefox application process; matched " & (count of browserProcesses)
   tell item 1 of browserProcesses
     set frontmost to true
     delay 0.2
