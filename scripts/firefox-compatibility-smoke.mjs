@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { firefox } from "playwright-core";
 import { connectOfficial, nonClosingContext } from "../agent/playwright-proxy.mjs";
 
 const executablePath = process.argv[2];
 const root = process.argv[3] && resolve(process.argv[3]);
+const headed = process.argv.includes("--headed");
+const nativeUi = process.argv.includes("--native-ui");
+const run = promisify(execFile);
 if (!executablePath || !root) {
-  throw new Error("usage: node scripts/firefox-compatibility-smoke.mjs <browser> <new-test-directory> [--headed]");
+  throw new Error("usage: node scripts/firefox-compatibility-smoke.mjs <browser> <new-test-directory> [--headed] [--native-ui]");
+}
+if (nativeUi && (!headed || process.platform !== "darwin")) {
+  throw new Error("native Firefox UI acceptance requires headed macOS");
 }
 await mkdir(root, { recursive: false });
 const server = createServer((_request, response) => {
@@ -27,7 +35,7 @@ let official;
 async function launch(directory) {
   const context = await firefox.launchPersistentContext(join(root, directory), {
     executablePath: resolve(executablePath),
-    headless: !process.argv.includes("--headed"),
+    headless: !headed,
     viewport: null,
     timeout: 120_000,
   });
@@ -50,6 +58,49 @@ async function identity(page) {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     screen: [screen.width, screen.height, screen.colorDepth],
   }));
+}
+
+async function nativeAddressBarSearch(page, phase) {
+  if (!nativeUi) return;
+  const query = `aliasmode firefox ${phase} search`;
+  await page.bringToFront();
+  const searchResult = page.waitForURL((url) => {
+    const destination = new URL(url);
+    return (destination.hostname === "duckduckgo.com" || destination.hostname.endsWith(".duckduckgo.com"))
+      && destination.searchParams.get("q") === query;
+  }, { timeout: 30_000 });
+  await run("osascript", ["-e", `tell application "System Events"
+  keystroke "l" using command down
+  keystroke "${query}"
+  key code 36
+end tell`]);
+  await searchResult;
+}
+
+async function captureNativeFirefoxUi(page, name) {
+  if (!nativeUi) return;
+  await page.bringToFront();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await run("screencapture", ["-x", join(root, `firefox-dock-tabs-${name}.png`)]);
+}
+
+async function captureNativeTabEvidence(context, page) {
+  if (!nativeUi) return;
+  await captureNativeFirefoxUi(page, "one");
+  const second = await context.newPage();
+  await second.goto(origin);
+  await captureNativeFirefoxUi(second, "two");
+  for (let index = 0; index < 4; index += 1) {
+    const extra = await context.newPage();
+    await extra.goto(origin);
+  }
+  await captureNativeFirefoxUi(context.pages().at(-1), "several");
+  await run("osascript", ["-e", `tell application "System Events"
+  tell (first application process whose frontmost is true)
+    set size of window 1 to {720, 620}
+  end tell
+end tell`]);
+  await captureNativeFirefoxUi(context.pages().at(-1), "narrow");
 }
 
 async function databaseValue(page, value) {
@@ -77,6 +128,8 @@ try {
   await context.addCookies([{ name: "proof", value: "saved", url: origin, expires: Math.floor(Date.now() / 1000) + 86400 }]);
   await page.evaluate(() => localStorage.setItem("proof", "saved"));
   await databaseValue(page, { restored: true });
+  await nativeAddressBarSearch(page, "fresh");
+  if (nativeUi) await page.goto(origin);
 
   official = await connectOfficial("firefox-proof", async () => nonClosingContext(context));
   assert.ok(official.tools.some((tool) => tool.name === "browser_snapshot"));
@@ -114,6 +167,8 @@ try {
   assert.ok((await context.cookies()).some((cookie) => cookie.name === "proof" && cookie.value === "saved"));
   assert.equal(await page.evaluate(() => localStorage.getItem("proof")), "saved");
   assert.deepEqual(await databaseValue(page, null), { restored: true });
+  await nativeAddressBarSearch(page, "reopened");
+  await captureNativeTabEvidence(context, page);
   await context.close();
   contexts.delete(context);
 
@@ -139,6 +194,8 @@ try {
     scriptContext: true,
     selectedStateTransfer: true,
     indexedDbSnapshot: true,
+    nativeAddressBarDuckDuckGo: nativeUi,
+    nativeTabAndDockEvidence: nativeUi,
   };
   await writeFile(join(root, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
   console.log(JSON.stringify(result));

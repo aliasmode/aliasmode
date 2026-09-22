@@ -355,8 +355,15 @@ jobs:
           if [[ "${{ matrix.platform }}" == "linux" ]]; then
             xvfb-run -a node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed
           else
-            node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed
+            node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed --native-ui
           fi
+      - name: Upload macOS native Firefox UI evidence
+        if: always() && matrix.platform == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-macos-native-ui
+          path: ${{ runner.temp }}/firefox-headed-proof/firefox-dock-tabs-*.png
+          if-no-files-found: warn
       - name: Prove detached Firefox owner lifecycle
         shell: bash
         run: |
