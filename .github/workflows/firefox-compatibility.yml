@@ -287,10 +287,12 @@ jobs:
           proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
           cd "$proof"
           bun "$GITHUB_WORKSPACE/cli.ts" install-browser --state-root "$proof"
-          chromium_args=()
           # GitHub's Ubuntu runner blocks Chromium's user namespaces.
-          if [[ "${{ matrix.platform }}" == "linux" ]]; then chromium_args+=(--no-sandbox); fi
-          bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless "${chromium_args[@]}" --state-root "$proof/chromium-state"
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --no-sandbox --state-root "$proof/chromium-state"
+          else
+            bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof/chromium-state"
+          fi
           bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof/firefox-state"
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: bash
