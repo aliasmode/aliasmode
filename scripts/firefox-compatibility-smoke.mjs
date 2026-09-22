@@ -12,12 +12,20 @@ const executablePath = process.argv[2];
 const root = process.argv[3] && resolve(process.argv[3]);
 const headed = process.argv.includes("--headed");
 const nativeUi = process.argv.includes("--native-ui");
+const previousBrowserIndex = process.argv.indexOf("--previous-browser");
+const previousBrowser = previousBrowserIndex < 0 ? undefined : process.argv[previousBrowserIndex + 1];
 const run = promisify(execFile);
 if (!executablePath || !root) {
-  throw new Error("usage: node scripts/firefox-compatibility-smoke.mjs <browser> <new-test-directory> [--headed] [--native-ui]");
+  throw new Error("usage: node scripts/firefox-compatibility-smoke.mjs <browser> <new-test-directory> [--headed] [--native-ui] [--previous-browser <browser>]");
+}
+if (previousBrowserIndex >= 0 && (!previousBrowser || previousBrowser.startsWith("--"))) {
+  throw new Error("--previous-browser requires a browser executable");
 }
 if (nativeUi && (!headed || process.platform !== "darwin")) {
   throw new Error("native Firefox UI acceptance requires headed macOS");
+}
+if (previousBrowser && !nativeUi) {
+  throw new Error("--previous-browser requires native Firefox UI acceptance");
 }
 function appBundlePath(path) {
   const executable = resolve(path);
@@ -40,9 +48,9 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const contexts = new Set();
 let official;
 
-async function launch(directory) {
+async function launch(directory, browser = executablePath) {
   const context = await firefox.launchPersistentContext(join(root, directory), {
-    executablePath: resolve(executablePath),
+    executablePath: resolve(browser),
     headless: !headed,
     viewport: null,
     timeout: 120_000,
@@ -225,6 +233,28 @@ try {
   await context.close();
   contexts.delete(context);
 
+  if (previousBrowser) {
+    context = await launch("previous-runtime-profile", previousBrowser);
+    page = await openFixture(context);
+    const previousIdentity = await identity(page);
+    await context.addCookies([{ name: "previous-proof", value: "saved", url: origin, expires: Math.floor(Date.now() / 1000) + 86400 }]);
+    await page.evaluate(() => localStorage.setItem("previous-proof", "saved"));
+    await databaseValue(page, { upgraded: true });
+    await context.close();
+    contexts.delete(context);
+
+    context = await launch("previous-runtime-profile");
+    duckDuckGoResponses = await syntheticDuckDuckGo(context);
+    page = await openFixture(context);
+    assert.deepEqual(await identity(page), previousIdentity, "candidate preserves prior runtime identity");
+    assert.ok((await context.cookies()).some((cookie) => cookie.name === "previous-proof" && cookie.value === "saved"));
+    assert.equal(await page.evaluate(() => localStorage.getItem("previous-proof")), "saved");
+    assert.deepEqual(await databaseValue(page, null), { upgraded: true });
+    await nativeAddressBarSearch(page, "upgraded", duckDuckGoResponses);
+    await context.close();
+    contexts.delete(context);
+  }
+
   context = await launch("transferred-profile");
   await context.addCookies(transferred.cookies);
   page = await openFixture(context);
@@ -249,6 +279,7 @@ try {
     indexedDbSnapshot: true,
     nativeAddressBarDuckDuckGo: nativeUi,
     nativeTabAndDockEvidence: nativeUi,
+    previousRuntimeUpgrade: Boolean(previousBrowser),
   };
   await writeFile(join(root, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
   console.log(JSON.stringify(result));
