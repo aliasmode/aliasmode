@@ -287,6 +287,29 @@ jobs:
           proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
           cd "$proof"
           bun "$GITHUB_WORKSPACE/cli.ts" install-browser --state-root "$proof"
+          if [[ "${{ matrix.platform }}" == "linux" ]]; then
+            if ! browser="$(bun -e 'const path = process.env.CLOAKBROWSER_BINARY_PATH; if (!path) process.exit(2); process.stdout.write(path)')"; then
+              printf '%s\n' 'Linux direct Chromium probe: browser-path-missing' >&2
+              exit 1
+            fi
+            stderr="$proof/chromium-direct.stderr"
+            probe_exit=0
+            timeout 30s "$browser" --headless --disable-background-networking --no-first-run --no-default-browser-check --user-data-dir="$proof/chromium-direct-profile" --dump-dom about:blank >/dev/null 2>"$stderr" || probe_exit=$?
+            if (( probe_exit != 0 )); then
+              if grep -qE 'error while loading shared libraries|cannot open shared object file' "$stderr"; then
+                cause='missing-shared-library'
+              elif grep -qE 'No usable sandbox|Failed to move to new namespace|Operation not permitted' "$stderr"; then
+                cause='namespace-sandbox'
+              elif (( probe_exit == 124 )); then
+                cause='deadline-exceeded'
+              else
+                cause="browser-exit-${probe_exit}"
+              fi
+              printf 'Linux direct Chromium probe: %s\n' "$cause" >&2
+              exit 1
+            fi
+            printf '%s\n' 'Linux direct Chromium probe: passed'
+          fi
           bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof/chromium-state"
           bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof/firefox-state"
       - name: Prove persistent contexts, MCP, scripts, and storage
