@@ -2734,11 +2734,13 @@ export class Launcher {
       // returns true once the debug endpoint is gone, but an OS process can
       // survive after dropping its listener. Exact process verification below
       // is still the final source of truth.
-      // Browser.close is destructive too: only send it after the same exact
-      // executable/port/user-data identity check required before an OS kill.
-      // A recycled port can expose an unrelated but valid CDP endpoint.
-      const wasAlive = initial?.cdpAlive === true && initial.process === "alive" &&
-        initial.cdpWs === launch?.ws;
+      // Chromium's Browser.close requires exact OS identity: a recycled port
+      // can expose an unrelated CDP endpoint. Firefox status instead authenticates
+      // the exact owner and launch, even when native window close leaves the host
+      // scan inconclusive. Final disappearance and force-kill checks stay exact.
+      const wasAlive = initial?.cdpAlive === true && initial.cdpWs === launch?.ws && (
+        initial.process === "alive" || (launch?.engine === "firefox" && !!launch.firefoxOwner)
+      );
       const hasLinuxTreeProof = !requiresLinuxProof || !!linuxProof;
       if (wasAlive && hasLinuxTreeProof && launch?.ws) {
         if (!this.launchGenerationMatches(profileId, launch)) return false;

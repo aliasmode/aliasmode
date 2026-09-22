@@ -26,6 +26,8 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   let browserAlive = false;
   let ownerAlive = false;
   let reachable = false;
+  let hasPages = true;
+  let snapshotIncomplete = false;
   let launches = 0;
   let receivedConfig: unknown;
   let startupPreferences = "";
@@ -34,7 +36,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   const navigated: string[][] = [];
   const killed: number[] = [];
   const snapshots = (): HostProcessSnapshot => ({
-    incomplete: false,
+    incomplete: snapshotIncomplete,
     records: [
       ...(browserAlive ? [{ pid: 202, parentPid: 201, processGroupId: 201, startTime: "202", executablePath: browserExecutable, argv: [browserExecutable, "-profile", join(root, profile.id), "-juggler-pipe"] }] : []),
       ...(ownerAlive ? [{ pid: 201, parentPid: 1, processGroupId: 201, startTime: "201", executablePath: ownerExecutable, argv: [ownerExecutable, "firefox-worker.mjs", `--aliasmode-firefox-owner=${reservation.generation}`] }] : []),
@@ -69,7 +71,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
         return {
           ...reservation, pid: 201, browserPid: 202, profileId: profile.id,
           directory: join(root, profile.id), executablePath: browserExecutable,
-          hasPages: true, pageTargets: [{ id: "1", url: "https://example.com/" }],
+          hasPages, pageTargets: hasPages ? [{ id: "1", url: "https://example.com/" }] : [],
         } as any;
       },
       close: async () => { browserAlive = false; ownerAlive = false; reachable = false; },
@@ -84,6 +86,8 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
       ownerExecutable = owner;
     },
     crashOwner: () => { ownerAlive = false; reachable = false; },
+    closeNativeWindow: () => { hasPages = false; },
+    setSnapshotIncomplete: (value: boolean) => { snapshotIncomplete = value; },
   };
 }
 
@@ -100,6 +104,53 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.launches()).toBe(1);
   expect(await restarted.stop(f.profile.id)).toBe(true);
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
+});
+
+test("Firefox uses its authenticated owner when an external close leaves the host scan inconclusive", async () => {
+  const f = fixture("darwin", "arm64");
+  await f.launcher.start(f.profile.id);
+  const close = f.options.firefoxRuntime!.close;
+  f.options.firefoxRuntime!.close = async (owner, options) => {
+    await close(owner, options);
+    f.setSnapshotIncomplete(false);
+  };
+  f.closeNativeWindow();
+  f.setSnapshotIncomplete(true);
+
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+  expect(f.killed).toEqual([]);
+  expect(f.store.getLaunch(f.profile.id)).toBeNull();
+});
+
+test("Firefox retains ownership when its host scan stays inconclusive after authenticated close", async () => {
+  const f = fixture("darwin", "arm64");
+  await f.launcher.start(f.profile.id);
+  f.closeNativeWindow();
+  f.setSnapshotIncomplete(true);
+  const launcher = new Launcher({ ...f.options, teardownTimeoutMs: 0 });
+
+  expect(await launcher.stop(f.profile.id)).toBe(false);
+  expect(f.killed).toEqual([]);
+  expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
+});
+
+test("Firefox does not close a mismatched owner when its host scan is inconclusive", async () => {
+  const f = fixture("darwin", "arm64");
+  await f.launcher.start(f.profile.id);
+  f.closeNativeWindow();
+  f.setSnapshotIncomplete(true);
+  const call = f.options.firefoxRuntime!.call;
+  f.options.firefoxRuntime!.call = async (...args) => {
+    const status = await call<any>(...args);
+    return args[1] === "status" ? { ...status, generation: "different-generation" } : status;
+  };
+  let closed = false;
+  f.options.firefoxRuntime!.close = async () => { closed = true; };
+
+  expect(await f.launcher.stop(f.profile.id)).toBe(false);
+  expect(closed).toBe(false);
+  expect(f.killed).toEqual([]);
+  expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
 });
 
 test("Firefox records and matches the managed Node owner after PATH changes", async () => {
