@@ -4093,10 +4093,25 @@ export async function diagnoseDarwinFirefoxSnapshot(identity: {
     && normalized(record.executablePath) === normalized(expected);
   const profileMatches = !!browser?.argv?.some((arg, index, args) => arg === "-profile"
     && args[index + 1] === identity.userDataDir);
+  const matcher = matchFirefoxProcesses(identity, snapshot ?? { records: [], incomplete: true }, false);
+  const candidates = records.map((record) => {
+    const args = record.argv ?? [];
+    return {
+      holdsProfile: args.some((arg, index) => arg === "-profile" && args[index + 1] === identity.userDataDir),
+      ownsGeneration: args.includes(`--aliasmode-firefox-owner=${identity.generation}`),
+      mainExecutableMatches: executableMatches(record, identity.binaryPath),
+      ownerExecutableMatches: executableMatches(record, identity.ownerBinaryPath),
+      contentProcess: args.includes("-contentproc"),
+      expectedBrowser: record.pid === identity.browserPid,
+      expectedOwner: record.pid === identity.ownerPid,
+    };
+  });
   return {
     incomplete: snapshot?.incomplete ?? true,
     recordCount: records.length,
     failures,
+    candidates,
+    match: matcher ? { browsers: matcher.browsers.length, owners: matcher.owners.length } : null,
     browser: { present: !!browser, executableMatches: executableMatches(browser, identity.binaryPath), profileMatches },
     owner: {
       present: !!owner,
