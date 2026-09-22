@@ -215,9 +215,15 @@ async function nativeTabButton(pid, label) {
     if (count of targetButtons) is 0 then error "native tab button missing; observed buttons: " & observedButtons
     if ${JSON.stringify(label)} is "New Tab" and (count of targetButtons) is not 1 then error "native new-tab button is ambiguous"
     set targetButton to item 1 of targetButtons
+    set targetPosition to position of targetButton
     repeat with candidate in targetButtons
-      if (item 1 of position of candidate) > (item 1 of position of targetButton) then set targetButton to contents of candidate
+      set candidatePosition to position of candidate
+      if (item 1 of candidatePosition) > (item 1 of targetPosition) then
+        set targetButton to contents of candidate
+        set targetPosition to candidatePosition
+      end if
     end repeat
+    set observedButtons to observedButtons & "Selected ${label} at " & (item 1 of targetPosition) & ", " & (item 2 of targetPosition) & linefeed
     perform action "AXPress" of targetButton
     return observedButtons
 `)]);
