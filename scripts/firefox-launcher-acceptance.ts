@@ -4,7 +4,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
-import { Launcher } from "../launcher.ts";
+import { diagnoseDarwinFirefoxSnapshot, Launcher } from "../launcher.ts";
 import { createFirefoxProfileConfig } from "../firefox-config.ts";
 import { callFirefoxOwner } from "../firefox-runtime.ts";
 import { decodePortableProfile, encodePortableProfile } from "../portable-profile.ts";
@@ -342,6 +342,13 @@ async def run(*, context, inputs, log, **_kwargs):
   assert.ok(localOwnerGeneration, "local Firefox owner has a generation");
   assert.equal(initialLaunch.binarySha256, expectedSha256, "Launcher stores the approved Firefox executable hash");
   assert.ok(initialLaunch.firefoxOwner && initialLaunch.firefoxOwner.pid > 0 && initialLaunch.firefoxOwner.browserPid > 0, "Launcher starts a real Node owner and browser");
+  if (process.platform === "darwin") {
+    console.log(JSON.stringify(await diagnoseDarwinFirefoxSnapshot({
+      binaryPath: initialLaunch.binaryPath!, userDataDir: initialLaunch.userDataDir!,
+      ownerBinaryPath: initialLaunch.ownerBinaryPath!, generation: initialLaunch.firefoxOwner!.generation,
+      browserPid: initialLaunch.pid, ownerPid: initialLaunch.firefoxOwner!.pid,
+    })));
+  }
   assert.equal(await localLauncher.certifiedActive(profileId), true, "Launcher certifies the owned Firefox process");
   const mutationRun = await ownerScript(localLauncher, profileId, mutator, { origin, firstTab, secondTab, telegramTab });
   assert.ok(mutationRun.logs.includes("Fixture state saved"), "external JavaScript runner returns fixture logs");

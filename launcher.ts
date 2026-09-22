@@ -3934,7 +3934,9 @@ interface DarwinFirefoxKernelRecord {
   argv: string[];
 }
 
-type DarwinFirefoxKernelQuery = (pid: number) => DarwinFirefoxKernelRecord | null;
+export type DarwinFirefoxKernelFailureStage = "pidpath" | "mib" | "sysctl_size" | "sysctl_read" | "parse_argv" | "ffi_exception";
+type DarwinFirefoxKernelFailure = (pid: number, stage: DarwinFirefoxKernelFailureStage) => void;
+type DarwinFirefoxKernelQuery = (pid: number, onFailure?: DarwinFirefoxKernelFailure) => DarwinFirefoxKernelRecord | null;
 
 const DARWIN_PROC_PIDPATH_SIZE = 4096;
 const DARWIN_PROCARGS2_NAME = new TextEncoder().encode("kern.procargs2\0");
@@ -3979,26 +3981,28 @@ export function parseDarwinKernelArgv(bytes: Uint8Array): string[] | null {
   return argv;
 }
 
-function readDarwinKernelArgv(pid: number): string[] | null {
-  if (!darwinLibSystem || !Number.isSafeInteger(pid) || pid <= 0) return null;
+function readDarwinKernelArgv(pid: number, onFailure?: DarwinFirefoxKernelFailure): string[] | null {
+  const fail = (stage: DarwinFirefoxKernelFailureStage) => (onFailure?.(pid, stage), null);
+  if (!darwinLibSystem || !Number.isSafeInteger(pid) || pid <= 0) return fail("ffi_exception");
   try {
     const mib = new Int32Array(3);
     const mibLength = new BigUint64Array([BigInt(mib.length - 1)]);
     if (darwinLibSystem.symbols.sysctlnametomib(DARWIN_PROCARGS2_NAME, mib, mibLength) !== 0
-      || mibLength[0] !== 2n) return null;
+      || mibLength[0] !== 2n) return fail("mib");
     mib[2] = pid;
     const requiredLength = new BigUint64Array(1);
-    if (darwinLibSystem.symbols.sysctl(mib, 3, null, requiredLength, null, 0n) !== 0) return null;
+    if (darwinLibSystem.symbols.sysctl(mib, 3, null, requiredLength, null, 0n) !== 0) return fail("sysctl_size");
     const required = requiredLength[0] ?? 0n;
-    if (required < 5n || required > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    if (required < 5n || required > BigInt(Number.MAX_SAFE_INTEGER)) return fail("parse_argv");
     const bytes = new Uint8Array(Number(required));
     const receivedLength = new BigUint64Array([required]);
-    if (darwinLibSystem.symbols.sysctl(mib, 3, bytes, receivedLength, null, 0n) !== 0) return null;
+    if (darwinLibSystem.symbols.sysctl(mib, 3, bytes, receivedLength, null, 0n) !== 0) return fail("sysctl_read");
     const received = receivedLength[0] ?? 0n;
-    if (received < 5n || received > BigInt(bytes.byteLength)) return null;
-    return parseDarwinKernelArgv(bytes.subarray(0, Number(received)));
+    if (received < 5n || received > BigInt(bytes.byteLength)) return fail("parse_argv");
+    const argv = parseDarwinKernelArgv(bytes.subarray(0, Number(received)));
+    return argv ?? fail("parse_argv");
   } catch {
-    return null;
+    return fail("ffi_exception");
   }
 }
 
@@ -4007,19 +4011,19 @@ export function parseDarwinKernelExecutablePath(path: Uint8Array, length: number
   return DARWIN_TEXT_DECODER.decode(path.subarray(0, length));
 }
 
-function readDarwinFirefoxKernelRecord(pid: number): DarwinFirefoxKernelRecord | null {
-  if (!darwinLibproc || !darwinLibSystem || !Number.isSafeInteger(pid) || pid <= 0) return null;
+function readDarwinFirefoxKernelRecord(pid: number, onFailure?: DarwinFirefoxKernelFailure): DarwinFirefoxKernelRecord | null {
+  const fail = (stage: DarwinFirefoxKernelFailureStage) => (onFailure?.(pid, stage), null);
+  if (!darwinLibproc || !darwinLibSystem || !Number.isSafeInteger(pid) || pid <= 0) return fail("ffi_exception");
   try {
     const path = new Uint8Array(DARWIN_PROC_PIDPATH_SIZE);
     const length = darwinLibproc.symbols.proc_pidpath(pid, path, path.byteLength);
-    if (!Number.isSafeInteger(length) || length <= 1 || length >= path.byteLength) return null;
+    if (!Number.isSafeInteger(length) || length <= 1 || length >= path.byteLength) return fail("pidpath");
     const executablePath = parseDarwinKernelExecutablePath(path, length);
-    if (!executablePath) return null;
-    const argv = readDarwinKernelArgv(pid);
-    if (!argv) return null;
-    return { executablePath, argv };
+    if (!executablePath) return fail("pidpath");
+    const argv = readDarwinKernelArgv(pid, onFailure);
+    return argv ? { executablePath, argv } : null;
   } catch {
-    return null;
+    return fail("ffi_exception");
   }
 }
 
@@ -4031,6 +4035,7 @@ function isDarwinFirefoxCandidate(commandLine: string): boolean {
 export function parseDarwinFirefoxPsSnapshot(
   raw: string,
   query: DarwinFirefoxKernelQuery,
+  onFailure?: DarwinFirefoxKernelFailure,
 ): HostProcessSnapshot {
   const records: HostProcessRecord[] = [];
   let incomplete = false;
@@ -4041,7 +4046,7 @@ export function parseDarwinFirefoxPsSnapshot(
     const commandLine = match[2] ?? "";
     if (!Number.isSafeInteger(pid) || pid <= 0 || !isDarwinFirefoxCandidate(commandLine)) continue;
     let record: DarwinFirefoxKernelRecord | null = null;
-    try { record = query(pid); } catch {}
+    try { record = query(pid, onFailure); } catch { onFailure?.(pid, "ffi_exception"); }
     if (!record) {
       incomplete = true;
       continue;
@@ -4051,7 +4056,7 @@ export function parseDarwinFirefoxPsSnapshot(
   return { records, incomplete };
 }
 
-async function readDarwinFirefoxProcessSnapshot(): Promise<HostProcessSnapshot | null> {
+async function readDarwinFirefoxProcessSnapshot(onFailure?: DarwinFirefoxKernelFailure): Promise<HostProcessSnapshot | null> {
   try {
     const child = Bun.spawn(["ps", "-axww", "-o", "pid=", "-o", "args="], { stdout: "pipe", stderr: "ignore" });
     const result = await readSnapshotChildBounded(
@@ -4059,10 +4064,46 @@ async function readDarwinFirefoxProcessSnapshot(): Promise<HostProcessSnapshot |
       DARWIN_PROCESS_SCAN_TIMEOUT_MS,
     );
     if (!result || result.exitCode !== 0) return null;
-    return parseDarwinFirefoxPsSnapshot(result.raw, readDarwinFirefoxKernelRecord);
+    return parseDarwinFirefoxPsSnapshot(result.raw, readDarwinFirefoxKernelRecord, onFailure);
   } catch {
     return null;
   }
+}
+
+export async function diagnoseDarwinFirefoxSnapshot(identity: {
+  binaryPath: string;
+  userDataDir: string;
+  ownerBinaryPath: string;
+  generation: string;
+  browserPid: number;
+  ownerPid: number;
+}) {
+  const failures: Array<{ subject: "browser" | "owner" | "other"; stage: DarwinFirefoxKernelFailureStage }> = [];
+  const snapshot = await readDarwinFirefoxProcessSnapshot((pid, stage) => {
+    failures.push({ subject: pid === identity.browserPid ? "browser" : pid === identity.ownerPid ? "owner" : "other", stage });
+  });
+  const records = snapshot?.records ?? [];
+  const browser = records.find((record) => record.pid === identity.browserPid);
+  const owner = records.find((record) => record.pid === identity.ownerPid);
+  const normalized = (value: string) => {
+    const path = value.replace(/ \(deleted\)$/, "");
+    try { return realpathSync(path); } catch { return resolve(path); }
+  };
+  const executableMatches = (record: HostProcessRecord | undefined, expected: string) => !!record?.executablePath
+    && normalized(record.executablePath) === normalized(expected);
+  const profileMatches = !!browser?.argv?.some((arg, index, args) => arg === "-profile"
+    && args[index + 1] === identity.userDataDir);
+  return {
+    incomplete: snapshot?.incomplete ?? true,
+    recordCount: records.length,
+    failures,
+    browser: { present: !!browser, executableMatches: executableMatches(browser, identity.binaryPath), profileMatches },
+    owner: {
+      present: !!owner,
+      executableMatches: executableMatches(owner, identity.ownerBinaryPath),
+      generationMatches: !!owner?.argv?.includes(`--aliasmode-firefox-owner=${identity.generation}`),
+    },
+  };
 }
 
 /** Parse the stable `pid= args=` shape emitted by macOS ps. */
