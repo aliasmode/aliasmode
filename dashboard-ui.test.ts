@@ -229,10 +229,19 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
 test("dashboard selects browser for new profiles", () => {
   const createModal = app.slice(app.indexOf("{showCreate && ("), app.indexOf("{editId && ("));
   const editModal = app.slice(app.indexOf("{editId && ("), app.indexOf("{showBulk && ("));
-  expect(createModal).toContain('value="chromium">Chromium (CloakBrowser)');
-  expect(createModal).toContain('value="firefox">Firefox (AliasMode Firefox)');
-  expect(createModal).toContain('setF("engine", e.target.value)');
-  expect(createModal).not.toContain("!isCloudMode && (\n                <label className=\"fld\">\n                  <span>Browser</span>");
+  expect(createModal).toContain('className="browser-options"');
+  expect(createModal).toContain('engine: "chromium", label: "Chrome", runtime: "CloakBrowser"');
+  expect(createModal).toContain('engine: "firefox", label: "Firefox", runtime: "AliasMode Firefox"');
+  expect(createModal).toContain('type="radio" name="browser-engine"');
+  expect(createModal).toContain('checked={form.engine === engine}');
+  expect(createModal).toContain('setF("engine", engine)');
+  expect(createModal).toContain('aria-label={`${label}: ${runtime}`}');
+  expect(createModal).toContain('data-tip={runtime}');
+  expect(createModal).not.toContain('<select value={form.engine}');
+  expect(createModal.indexOf('className="browser-options"')).toBeGreaterThan(createModal.indexOf('<FingerprintSettings'));
+  expect(createModal.indexOf('className="browser-options"')).toBeLessThan(createModal.indexOf('className="modal-foot"'));
+  expect(styles).toContain('.browser-info:focus-visible::after');
+  expect(styles).toContain('.browser-card:has(input:focus-visible)');
   expect(app).toContain("engine: form.engine,");
   expect(editModal).toContain('value={editEngine === "firefox" ? "AliasMode Firefox" : "CloakBrowser"} readOnly');
   expect(editModal).not.toContain('setEF("engine"');

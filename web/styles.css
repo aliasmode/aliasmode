@@ -1148,6 +1148,41 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .modal-err { color: var(--danger-ink); background: var(--danger-soft); border: 1px solid var(--danger-line); }
 .modal-ok { color: var(--success-ink); background: var(--success-soft); border: 1px solid var(--success-line); }
 
+/* Browser choice stays monochrome in both themes. */
+.browser-options {
+  --browser-ink: #171717; --browser-surface: #fff; --browser-line: #ddd;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+}
+:root[data-theme="dark"] .browser-options { --browser-ink: #f5f5f5; --browser-surface: #171717; --browser-line: #444; }
+.browser-option { position: relative; min-width: 0; color: var(--browser-ink); }
+.browser-option:has(input:checked) { color: var(--browser-surface); }
+.browser-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px;
+  min-height: 104px; padding: 18px 28px; cursor: pointer;
+  background: var(--browser-surface); border: 1px solid var(--browser-line); border-radius: var(--r-lg);
+  font-size: 13px; font-weight: 600; transition: background .13s var(--ease), border-color .13s var(--ease), color .13s var(--ease);
+}
+.browser-card:hover { border-color: var(--browser-ink); }
+.browser-card:has(input:checked) { background: var(--browser-ink); border-color: var(--browser-ink); }
+.browser-card:has(input:focus-visible) { outline: 2px solid var(--browser-ink); outline-offset: 3px; }
+.browser-card input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.browser-logo { display: block; width: 30px; height: 30px; fill: currentColor; }
+.browser-info {
+  position: absolute; top: 7px; right: 7px; display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--r-xs); background: none; color: inherit;
+}
+.browser-info:focus-visible { outline-color: currentColor; }
+.browser-info::after {
+  top: auto; bottom: calc(100% + 8px); left: auto; right: -4px; transform: translateY(3px);
+  width: max-content; max-width: 160px; white-space: normal; text-align: left;
+}
+.browser-info::before {
+  top: auto; bottom: calc(100% + 3px); left: auto; right: 7px; transform: translateY(3px);
+  border-bottom-width: 0; border-top: 5px solid var(--ink);
+}
+.browser-info:hover::after, .browser-info:hover::before,
+.browser-info:focus-visible::after, .browser-info:focus-visible::before { opacity: 1; transform: translateY(0); }
+
 /* Fingerprint disclosure --------------------------------------------------- */
 
 .fingerprint-settings { border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
