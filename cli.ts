@@ -10,6 +10,7 @@
  *   4. Set a campaign's "Base URL" to http://127.0.0.1:50400 and run it.
  *
  * Other commands:
+ *   bun cli.ts setup               # install the verified source runtime
  *   bun cli.ts install-browser     # download, verify, and pin CloakBrowser
  *   bun cli.ts install-browser --engine firefox --archive <owned-build.zip>
  *   bun cli.ts import [file|dir]   # default: import the inbox
@@ -74,6 +75,7 @@ import { defaultOperatorName } from "./operator.ts";
 import { ensureDuckDuckGoDefault, type SearchProviderSetupResult } from "./search-provider.ts";
 import { installCloakBrowser } from "./browser-install.ts";
 import { installFirefox } from "./firefox-install.ts";
+import { applySourceRuntime, setupSourceRuntime } from "./source-runtime.ts";
 import { resolveEgressEndpoints } from "./egress.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
 import {
@@ -2351,8 +2353,8 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     await runWindowsWindowAcceptance(paths, rest);
     return;
   }
-  const profileId = "aliasmode-cloud-smoke";
   const engine = cloudLauncherSmokeEngine(rest);
+  const profileId = engine === "firefox" ? "aliasmode-firefox-cloud-smoke" : "aliasmode-cloud-smoke";
   const canaryWorkerTimeoutMs = has(rest, "unsafe-disable-identity-gates")
     ? UNSAFE_CANARY_TIMEOUT_MS
     : undefined;
@@ -2528,15 +2530,23 @@ async function main() {
   if (await dispatchReadSessionWorker(argv)) return;
 
   const [cmd, ...rest] = argv;
+  const paths = statePaths(resolveStateRoot(rest));
+  if (cmd === "setup") {
+    ensureStateDirectories(paths);
+    await setupSourceRuntime(paths.root);
+    console.log(`AliasMode source runtime is ready. Start it with:\n  bun cli.ts start --state-root ${paths.root}`);
+    return;
+  }
+  if (!compiled) applySourceRuntime(paths.root);
   if (!compiled && (cmd === "start" || cmd === "serve")) {
     try {
       await verifyPlaywrightRuntime();
     } catch (error) {
       console.error(`[aliasmode] ${error instanceof Error ? error.message : "source Playwright runtime is unavailable"}`);
+      console.error("[aliasmode] Run bun cli.ts setup to install the verified source runtime.");
       throw error;
     }
   }
-  const paths = statePaths(resolveStateRoot(rest));
   const desktop = has(rest, "desktop-stdio");
   // The desktop sidecar's stdout/stderr are discarded by the Tauri shell, which
   // made device-only failures undebuggable. Mirror every log line to a rotating
@@ -2990,7 +3000,7 @@ async function main() {
       break;
     }
     default:
-      console.log("commands: install-browser | start | import [file|dir] | inspect <file> | serve | diagnose | list");
+      console.log("commands: setup | install-browser | start | import [file|dir] | inspect <file> | serve | diagnose | list");
       process.exit(cmd ? 1 : 0);
   }
 }

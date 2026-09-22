@@ -99,8 +99,8 @@ export type BrowserLaunchFailure =
   | "cdp_readiness";
 
 const PREFLIGHT_GUIDANCE = {
-  chromium_setup: "Chrome runtime approval is missing or invalid. Run bun cli.ts install-browser, then restart AliasMode.",
-  firefox_setup: "Firefox runtime approval is missing or invalid. Run bun cli.ts install-browser --engine firefox --archive <owned-build.zip>, then restart AliasMode.",
+  chromium_setup: "Chrome runtime approval is missing or invalid. Run bun cli.ts setup, then restart AliasMode.",
+  firefox_setup: "Firefox runtime approval is missing or invalid. Run bun cli.ts setup, then restart AliasMode.",
   proxy_invalid: "Saved proxy settings are invalid. Edit or clear this profile's proxy.",
   proxy_https_auth: "Authenticated HTTPS proxies are unsupported. Use HTTP or SOCKS5.",
   persona_mobile: "This profile has a mobile user agent. Use a desktop browser profile.",

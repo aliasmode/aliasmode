@@ -19,11 +19,12 @@ import {
   runCloakpitImportCommand,
   selectedCloudUrl,
 } from "./cli.ts";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import net from "node:net";
 import { statePaths } from "./paths.ts";
+import { applySourceRuntime, type SourceRuntime } from "./source-runtime.ts";
 import { AppConfigStore } from "./app-config.ts";
 
 const cloudMode = {
@@ -116,8 +117,63 @@ test("source start reports when Node is unavailable", async () => {
   ]);
   expect(exitCode).toBe(1);
   expect(stderr).toContain("source Playwright runtime requires Node.js 18 or newer on PATH");
+  expect(stderr).toContain("bun cli.ts setup");
   expect(existsSync(stateRoot)).toBe(false);
   await removeTemporaryRoot(parent);
+});
+
+test("source start loads a managed runtime from its custom state root before verification", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aliasmode-cli-source-runtime-"));
+  const root = join(cwd, "custom-state");
+  mkdirSync(root);
+  const node = Bun.which("node");
+  if (!node) throw new Error("test Node runtime is unavailable");
+  const runtime: SourceRuntime = {
+    version: 1,
+    node: resolve(node),
+    chromium: { path: join(root, "managed-chromium"), sha256: "a".repeat(64) },
+    firefox: { path: join(root, "managed-firefox"), sha256: "b".repeat(64) },
+  };
+  writeFileSync(join(root, "browser-runtime.json"), JSON.stringify(runtime));
+  const applied: NodeJS.ProcessEnv = { PATH: "" };
+  applySourceRuntime(root, applied);
+  expect(applied.PATH).toStartWith(dirname(runtime.node));
+  expect(applied.CLOAKBROWSER_BINARY_SHA256).toBe(runtime.chromium.sha256);
+  expect(applied.ALIASMODE_FIREFOX_BINARY_SHA256).toBe(runtime.firefox.sha256);
+
+  const port = await freeLoopbackPort();
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: "", ALIASMODE_PLAYWRIGHT_RUNTIME: "" };
+  delete env.CLOAKBROWSER_BINARY_PATH;
+  delete env.CLOAKBROWSER_BINARY_SHA256;
+  delete env.ALIASMODE_FIREFOX_BINARY_PATH;
+  delete env.ALIASMODE_FIREFOX_BINARY_SHA256;
+  const child = Bun.spawn([
+    process.execPath,
+    "--no-env-file",
+    join(import.meta.dir, "cli.ts"),
+    "start",
+    "--port", String(port),
+    "--state-root", root,
+  ], { cwd, stdout: "pipe", stderr: "ignore", env });
+  const output = new Response(child.stdout).text();
+  let logs = "";
+  try {
+    let health: Response | undefined;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      try {
+        health = await fetch(`http://127.0.0.1:${port}/ui/api/health`);
+        if (health.ok) break;
+      } catch {}
+      if (await Promise.race([child.exited.then(() => true), Bun.sleep(100).then(() => false)])) break;
+    }
+    expect(health?.ok).toBe(true);
+  } finally {
+    child.kill();
+    await child.exited;
+    logs = await output;
+    await removeTemporaryRoot(cwd);
+  }
+  expect(logs).toContain("unconfigured mode:");
 });
 
 for (const mode of ["unconfigured", "local", "cloud"] as const) {
