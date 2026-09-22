@@ -2077,9 +2077,9 @@ test("host policy still blocks mobile and unrecognized personas before spawn", a
     preflightReason: "persona_unsupported",
   });
   expect(spawned).toEqual([]);
-  // The public error stays closed, but the local log names the real reason.
-  expect(logs.some((m) => m.includes("rejected before launch: unsupported mobile persona"))).toBe(true);
-  expect(logs.some((m) => m.includes("rejected before launch: unsupported imported user agent"))).toBe(true);
+  // The public error stays closed, while the local log gives fixed safe guidance.
+  expect(logs.some((m) => m.includes(new BrowserLaunchError("preflight", "persona_mobile").guidance!))).toBe(true);
+  expect(logs.some((m) => m.includes(new BrowserLaunchError("preflight", "persona_unsupported").guidance!))).toBe(true);
   store.close();
 });
 
