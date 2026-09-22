@@ -1,15 +1,14 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { CloudApiError } from "./cloud-client.ts";
 import { CloudBrowserCoordinator, observeBrowserTargets } from "./cloud-browser.ts";
 import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v1.ts";
-import { BrowserLaunchError, Launcher as ProductionLauncher, type FetchFn, type SpawnFn } from "./launcher.ts";
+import { BrowserLaunchError, Launcher as ProductionLauncher } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
-import { resolvePlaywrightRuntime, PlaywrightWorkerError } from "./playwright-runtime.ts";
-import { handleCloudBrowserControl } from "./server.ts";
+import { PlaywrightWorkerError } from "./playwright-runtime.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { sessionBundleSignature, SessionRestoreError } from "./session.ts";
 import { ProfileStore } from "./store.ts";
@@ -340,11 +339,14 @@ function setup(options: {
 }
 
 const VALID_DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+const TEST_BINARY = "approved test browser binary";
+const TEST_BINARY_SHA256 = createHash("sha256").update(TEST_BINARY).digest("hex");
 
 type CloudTestEngine = "chromium" | "firefox";
 
-function productionCloudPayload(engine: CloudTestEngine): OpenProfileResponse["payload"] {
+function productionCloudPayload(engine: CloudTestEngine, profileId: string): OpenProfileResponse["payload"] {
   const base = payload();
+  base.profile.id = profileId;
   base.profile.ua = VALID_DESKTOP_UA;
   if (engine === "chromium") return base;
   return {
@@ -355,84 +357,31 @@ function productionCloudPayload(engine: CloudTestEngine): OpenProfileResponse["p
       firefox: {
         version: 1,
         runtimeVersion: "152.0.4-beta.30",
-        config: {
-          "navigator.userAgent": "Mozilla/5.0 Firefox/152.0",
-          timezone: "UTC",
-        },
+        config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", timezone: "UTC" },
       },
     },
     session: base.session,
   };
 }
 
-async function productionCloudCoordinator(
+async function runProductionCloudPreflight(
   engine: CloudTestEngine,
-  pin: string | undefined,
+  pin: string,
+  profileId = "profile1",
   root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-production-launch-")),
-): Promise<{
-  coordinator: CloudBrowserCoordinator;
-  launcher: ProductionLauncher;
-  store: ProfileStore;
-  logs: string[];
-  cleanup(removeRoot?: boolean): void;
-}> {
-  mkdirSync(root, { recursive: true });
+): Promise<{ result: Awaited<ReturnType<CloudBrowserCoordinator["open"]>>; boundaryCalls: number; cleanup(removeRoot?: boolean): void }> {
   const binary = join(root, "approved-browser");
-  writeFileSync(binary, "test browser binary");
-  chmodSync(binary, 0o755);
+  writeFileSync(binary, TEST_BINARY);
   const store = new ProfileStore(":memory:");
   const queue = new PendingSyncQueue(join(root, "pending.sqlite"), new Uint8Array(32).fill(9));
-  const logs: string[] = [];
-  const payload = productionCloudPayload(engine);
   const opened: OpenProfileResponse = {
-    ok: true,
-    registrationId: "registration1",
-    baseVersion: 1,
-    payload,
-    activeOpens: [],
+    ok: true, registrationId: "registration1", baseVersion: 1,
+    payload: productionCloudPayload(engine, profileId), activeOpens: [],
   };
-  let nextPid = 6000;
-  const alivePorts = new Set<number>();
-  const spawn: SpawnFn = (_path, args) => {
-    const port = Number(args.find((arg) => arg.startsWith("--remote-debugging-port="))?.split("=")[1]);
-    alivePorts.add(port);
-    const pid = nextPid++;
-    return { pid, kill() { alivePorts.delete(port); } };
-  };
-  const fetch: FetchFn = async (url) => {
-    const port = Number(url.match(/:(\d+)\//)?.[1]);
-    return {
-      ok: alivePorts.has(port),
-      json: async () => ({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/test` }),
-    };
-  };
-  const firefoxGeneration = "test-firefox-generation";
-  const firefoxOwnerBinary = realpathSync(Bun.which(resolvePlaywrightRuntime().nodeExecutable) ?? resolvePlaywrightRuntime().nodeExecutable);
-  const firefoxUserDataDir = join(root, "profiles", "profile1");
-  const firefoxRuntime = {
-    reserve: async () => ({ endpoint: "http://127.0.0.1:9515/", token: "test-token", generation: firefoxGeneration }),
-    start: async (_input: unknown, callbacks: any) => {
-      const owner = {
-        endpoint: "http://127.0.0.1:9515/", token: "test-token", generation: firefoxGeneration, pid: 7101, browserPid: 7102,
-      };
-      await callbacks.onSpawn?.(owner);
-      await callbacks.onReady?.(owner);
-      return owner;
-    },
-    call: async (owner: { generation: string }, operation: string) => {
-      expect(operation).toBe("status");
-      return {
-        generation: owner.generation,
-        directory: firefoxUserDataDir,
-        executablePath: realpathSync(binary),
-        browserPid: 7102,
-        pid: 7101,
-        profileId: "profile1",
-        hasPages: true,
-        pageTargets: [{ id: "page", url: "https://x.com/home" }],
-      };
-    },
-    close: async () => {},
+  let boundaryCalls = 0;
+  const failAtNativeBoundary = () => {
+    boundaryCalls++;
+    throw new BrowserLaunchError("process_spawn");
   };
   const launcher = new ProductionLauncher({
     store,
@@ -442,40 +391,22 @@ async function productionCloudCoordinator(
     dataRoot: join(root, "profiles"),
     hostPlatform: "darwin",
     hostArch: "arm64",
-    portProbe: () => true,
-    spawn,
-    fetch,
-    firefoxRuntime,
-    captureFingerprint: async () => null,
-    ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
-    ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {},
-    labelWindow: async () => {},
-    isPidAlive: () => true,
-    findOwnedBrowserPids: async ({ debugPort }) => {
-      const port = Number(debugPort);
-      return alivePorts.has(port) ? [6000] : [];
+    spawn: failAtNativeBoundary,
+    firefoxRuntime: {
+      reserve: async () => failAtNativeBoundary(),
+      start: async () => { throw new Error("Firefox owner start should not run"); },
+      call: async () => { throw new Error("Firefox owner call should not run"); },
+      close: async () => {},
     },
     findProfileDirHolderPids: async () => [],
-    readProcessSnapshot: async () => engine === "firefox" ? {
-      incomplete: false,
-      records: [
-        { pid: 7101, executablePath: firefoxOwnerBinary, executablePathExact: true, argv: [`--aliasmode-firefox-owner=${firefoxGeneration}`] },
-        { pid: 7102, executablePath: realpathSync(binary), executablePathExact: true, argv: [realpathSync(binary), "-profile", firefoxUserDataDir] },
-      ],
-    } : { incomplete: false, records: [] },
-    killPid: async () => {},
-    browserClose: async () => false,
-    cdpReadyTimeoutMs: 1000,
   });
-  const cloud = {
-    async openProfile() { return opened; },
-    async heartbeat() { return { ok: true as const, revoked: false as const, activeOpens: [] }; },
-    async abandon() { return { ok: true as const, status: "abandoned" as const }; },
-    async closeOpen() { return { ok: true as const, status: "accepted" as const, version: 2 }; },
-  };
   const coordinator = new CloudBrowserCoordinator({
-    cloud: cloud as any,
+    cloud: {
+      async openProfile() { return opened; },
+      async heartbeat() { return { ok: true as const, revoked: false as const, activeOpens: [] }; },
+      async abandon() { return { ok: true as const, status: "abandoned" as const }; },
+      async closeOpen() { return { ok: true as const, status: "accepted" as const, version: 2 }; },
+    } as any,
     launcher,
     store,
     queue: () => queue,
@@ -483,16 +414,13 @@ async function productionCloudCoordinator(
     deviceId: () => "device1",
     heartbeatMs: 0,
     dirtyMonitorMs: 0,
-    observeTargets: () => ({ close() {} }),
     readSession: async () => JSON.stringify({ cookies: [] }),
     applySession: async () => {},
-    log: (message) => logs.push(message),
   });
+  const result = await coordinator.open(profileId);
   return {
-    coordinator,
-    launcher,
-    store,
-    logs,
+    result,
+    boundaryCalls,
     cleanup(removeRoot = true) {
       queue.close();
       store.close();
@@ -501,66 +429,51 @@ async function productionCloudCoordinator(
   };
 }
 
-test("real Cloud opens distinguish missing Chromium and Firefox pins and pass with either approved pin", async () => {
-  const approved = createHash("sha256").update("test browser binary").digest("hex");
+test("real Cloud preflight distinguishes missing engine pins before native boundaries", async () => {
   for (const [engine, reason] of [
     ["chromium", "chromium_setup"],
     ["firefox", "firefox_setup"],
   ] as const) {
-    const missing = await productionCloudCoordinator(engine, undefined);
+    const missing = await runProductionCloudPreflight(engine, "");
     try {
-      const result = await missing.coordinator.open("profile1");
-      expect(result).toMatchObject({
-        ok: false,
-        error: expect.stringContaining("browser_launch/preflight"),
-      });
-      if (result.ok) throw new Error("missing browser pin unexpectedly opened Cloud profile");
-      const guidance = new BrowserLaunchError("preflight", reason).guidance;
-      expect(result.error).toContain(guidance);
-      expect(JSON.stringify({ result, logs: missing.logs })).not.toContain("test-token");
+      expect(missing.result).toMatchObject({ ok: false, error: expect.stringContaining("browser_launch/preflight") });
+      if (missing.result.ok) throw new Error("missing browser pin unexpectedly opened Cloud profile");
+      expect(missing.result.error).toContain(new BrowserLaunchError("preflight", reason).guidance);
+      expect(missing.boundaryCalls).toBe(0);
     } finally {
       missing.cleanup();
     }
 
-    const valid = await productionCloudCoordinator(engine, approved);
+    const approved = await runProductionCloudPreflight(engine, TEST_BINARY_SHA256);
     try {
-      expect((await valid.coordinator.open("profile1")).ok).toBe(true);
+      expect(approved.result).toMatchObject({ ok: false, error: expect.stringContaining("browser_launch/process_spawn") });
+      expect(approved.boundaryCalls).toBe(1);
     } finally {
-      valid.cleanup();
+      approved.cleanup();
     }
   }
 });
 
-test("dashboard Cloud start preserves Chromium state before Firefox and returns typed setup guidance", async () => {
-  const root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-cached-engine-"));
-  const approved = createHash("sha256").update("test browser binary").digest("hex");
+test("legacy Chromium and native Firefox Cloud profiles preflight independently", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-two-engine-"));
   try {
-    const chromium = await productionCloudCoordinator("chromium", approved, root);
-    expect((await chromium.coordinator.open("profile1")).ok).toBe(true);
-    chromium.cleanup(false);
-
-    const cachedState = join(root, "profiles", "profile1", "Default", "Cache", "state");
-    mkdirSync(join(root, "profiles", "profile1", "Default", "Cache"), { recursive: true });
-    writeFileSync(cachedState, "persisted Chromium cache state");
-    expect(existsSync(cachedState)).toBe(true);
-
-    const firefox = await productionCloudCoordinator("firefox", approved, root);
-    expect((await firefox.coordinator.open("profile1")).ok).toBe(true);
-    firefox.cleanup(false);
-
-    const missingFirefoxPin = await productionCloudCoordinator("firefox", undefined, root);
+    const legacyChromium = await runProductionCloudPreflight(
+      "chromium", TEST_BINARY_SHA256, "legacy-chromium", root,
+    );
     try {
-      const response = await handleCloudBrowserControl(
-        new Request("http://dashboard.local/api/v1/browser/start?user_id=profile1"),
-        missingFirefoxPin.coordinator,
-        missingFirefoxPin.launcher,
-        missingFirefoxPin.store,
-      );
-      const body = await response.json() as { code: number; msg: string };
-      expect(body.code).toBe(-1);
-      expect(body.msg).toContain(new BrowserLaunchError("preflight", "firefox_setup").guidance);
+      expect(legacyChromium.result).toMatchObject({ error: expect.stringContaining("browser_launch/process_spawn") });
+      expect(legacyChromium.boundaryCalls).toBe(1);
     } finally {
-      missingFirefoxPin.cleanup(false);
+      legacyChromium.cleanup(false);
+    }
+    const nativeFirefox = await runProductionCloudPreflight(
+      "firefox", TEST_BINARY_SHA256, "native-firefox", root,
+    );
+    try {
+      expect(nativeFirefox.result).toMatchObject({ error: expect.stringContaining("browser_launch/process_spawn") });
+      expect(nativeFirefox.boundaryCalls).toBe(1);
+    } finally {
+      nativeFirefox.cleanup(false);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

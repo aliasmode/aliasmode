@@ -2206,8 +2206,8 @@ test("missing Firefox kernel pin has an engine-specific preflight reason before 
   mkdirSync(root, { recursive: true });
   const binary = join(root, "aliasmode-firefox");
   writeFileSync(binary, "approved Firefox kernel");
-  const store = seeded();
-  const profile = store.getProfile("k1d0cd11")!;
+  const store = new ProfileStore(":memory:");
+  const profile = parseExport(SAMPLE).profiles[0]!;
   store.upsertProfile({
     ...profile,
     engine: "firefox",
@@ -2224,6 +2224,7 @@ test("missing Firefox kernel pin has an engine-specific preflight reason before 
   const launcher = new ProductionLauncher({
     store,
     firefoxBinaryPath: binary,
+    expectedFirefoxBinarySha256: "",
     dataRoot: join(root, "profiles"),
     hostPlatform: "darwin",
     hostArch: "arm64",
