@@ -19,6 +19,14 @@ if (!executablePath || !root) {
 if (nativeUi && (!headed || process.platform !== "darwin")) {
   throw new Error("native Firefox UI acceptance requires headed macOS");
 }
+function appBundlePath(path) {
+  const executable = resolve(path);
+  const suffix = ".app/Contents/MacOS/";
+  const index = executable.lastIndexOf(suffix);
+  if (index < 0) throw new Error("native Firefox UI acceptance requires an executable inside a .app bundle");
+  return executable.slice(0, index + 4);
+}
+const nativeAppBundle = nativeUi ? appBundlePath(executablePath) : undefined;
 await mkdir(root, { recursive: false });
 const server = createServer((_request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -60,47 +68,86 @@ async function identity(page) {
   }));
 }
 
-async function nativeAddressBarSearch(page, phase) {
+async function syntheticDuckDuckGo(context) {
+  let fulfilled = 0;
+  await context.route(/^https?:\/\/(?:[^/]+\.)?duckduckgo\.com(?:[/?]|$)/, async (route) => {
+    fulfilled += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: "<!doctype html><title>AliasMode DuckDuckGo proof</title>",
+    });
+  });
+  return () => fulfilled;
+}
+
+function nativeBrowserScript(commands = "") {
+  return `set browserApp to POSIX file ${JSON.stringify(nativeAppBundle)} as alias
+tell application "System Events"
+  set browserProcesses to every application process whose application file is browserApp
+  if (count of browserProcesses) is not 1 then error "expected exactly one supplied Firefox application process"
+  tell item 1 of browserProcesses
+    set frontmost to true
+    delay 0.2
+${commands}  end tell
+end tell`;
+}
+
+async function focusNativeBrowser() {
+  await run("osascript", ["-e", nativeBrowserScript()]);
+}
+
+async function nativeAddressBarSearch(page, phase, duckDuckGoResponses) {
   if (!nativeUi) return;
   const query = `aliasmode firefox ${phase} search`;
+  const before = duckDuckGoResponses();
+  await focusNativeBrowser();
   await page.bringToFront();
   const searchResult = page.waitForURL((url) => {
     const destination = new URL(url);
     return (destination.hostname === "duckduckgo.com" || destination.hostname.endsWith(".duckduckgo.com"))
       && destination.searchParams.get("q") === query;
   }, { timeout: 30_000 });
-  await run("osascript", ["-e", `tell application "System Events"
-  keystroke "l" using command down
-  keystroke "${query}"
-  key code 36
-end tell`]);
+  await run("osascript", ["-e", nativeBrowserScript(`    keystroke "l" using command down
+    keystroke "${query}"
+    key code 36
+`)]);
   await searchResult;
+  assert.ok(duckDuckGoResponses() > before, "DuckDuckGo navigation must use the synthetic response");
 }
 
 async function captureNativeFirefoxUi(page, name) {
   if (!nativeUi) return;
+  await focusNativeBrowser();
   await page.bringToFront();
   await new Promise((resolve) => setTimeout(resolve, 500));
   await run("screencapture", ["-x", join(root, `firefox-dock-tabs-${name}.png`)]);
 }
 
+async function closeOtherPages(context, page) {
+  for (const other of context.pages()) {
+    if (other !== page) await other.close();
+  }
+  assert.equal(context.pages().length, 1, "native tab evidence starts with one tab");
+}
+
 async function captureNativeTabEvidence(context, page) {
   if (!nativeUi) return;
+  await closeOtherPages(context, page);
   await captureNativeFirefoxUi(page, "one");
   const second = await context.newPage();
   await second.goto(origin);
+  assert.equal(context.pages().length, 2, "native two-tab evidence has two tabs");
   await captureNativeFirefoxUi(second, "two");
   for (let index = 0; index < 4; index += 1) {
     const extra = await context.newPage();
     await extra.goto(origin);
   }
-  await captureNativeFirefoxUi(context.pages().at(-1), "several");
-  await run("osascript", ["-e", `tell application "System Events"
-  tell (first application process whose frontmost is true)
-    set size of window 1 to {720, 620}
-  end tell
-end tell`]);
-  await captureNativeFirefoxUi(context.pages().at(-1), "narrow");
+  assert.equal(context.pages().length, 6, "native several-tab evidence has six tabs");
+  const lastPage = context.pages().at(-1);
+  await captureNativeFirefoxUi(lastPage, "several");
+  await run("osascript", ["-e", nativeBrowserScript("    set size of window 1 to {720, 620}\n")]);
+  await captureNativeFirefoxUi(lastPage, "narrow");
 }
 
 async function databaseValue(page, value) {
@@ -123,12 +170,17 @@ async function databaseValue(page, value) {
 
 try {
   let context = await launch("profile");
+  let duckDuckGoResponses = nativeUi ? await syntheticDuckDuckGo(context) : () => 0;
   let page = await openFixture(context);
   const initialIdentity = await identity(page);
   await context.addCookies([{ name: "proof", value: "saved", url: origin, expires: Math.floor(Date.now() / 1000) + 86400 }]);
   await page.evaluate(() => localStorage.setItem("proof", "saved"));
   await databaseValue(page, { restored: true });
-  await nativeAddressBarSearch(page, "fresh");
+  if (nativeUi) {
+    await closeOtherPages(context, page);
+    await captureNativeFirefoxUi(page, "baseline");
+  }
+  await nativeAddressBarSearch(page, "fresh", duckDuckGoResponses);
   if (nativeUi) await page.goto(origin);
 
   official = await connectOfficial("firefox-proof", async () => nonClosingContext(context));
@@ -162,12 +214,13 @@ try {
   contexts.delete(context);
 
   context = await launch("profile");
+  duckDuckGoResponses = nativeUi ? await syntheticDuckDuckGo(context) : () => 0;
   page = await openFixture(context);
   assert.deepEqual(await identity(page), initialIdentity);
   assert.ok((await context.cookies()).some((cookie) => cookie.name === "proof" && cookie.value === "saved"));
   assert.equal(await page.evaluate(() => localStorage.getItem("proof")), "saved");
   assert.deepEqual(await databaseValue(page, null), { restored: true });
-  await nativeAddressBarSearch(page, "reopened");
+  await nativeAddressBarSearch(page, "reopened", duckDuckGoResponses);
   await captureNativeTabEvidence(context, page);
   await context.close();
   contexts.delete(context);
