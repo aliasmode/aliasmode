@@ -163,7 +163,7 @@ jobs:
               const resolved = realpathSync(path).replace(/^\\\\\?\\/, "");
               return process.platform === "win32" ? resolved.toLowerCase() : resolved;
             };
-            const selected = Bun.which("node");
+            const selected = Bun.which("node", { PATH: process.env.PATH });
             if (!selected || normalize(selected) !== normalize(runtime.node)) throw new Error("source setup did not select its managed Node runtime");
             for (const executable of [runtime.node, runtime.chromium.path, runtime.firefox.path]) {
               if (!existsSync(executable)) throw new Error("source setup runtime executable is missing");
@@ -334,7 +334,7 @@ jobs:
               const resolved = realpathSync(path).replace(/^\\\\\?\\/, "");
               return process.platform === "win32" ? resolved.toLowerCase() : resolved;
             };
-            const selected = Bun.which("node");
+            const selected = Bun.which("node", { PATH: process.env.PATH });
             if (!selected || normalize(selected) !== normalize(runtime.node)) throw new Error("source setup did not select its managed Node runtime");
             for (const executable of [runtime.node, runtime.chromium.path, runtime.firefox.path]) {
               if (!existsSync(executable)) throw new Error("source setup runtime executable is missing");
