@@ -15,6 +15,7 @@ on:
       - firefox-runtime.ts
       - firefox-install.ts
       - browser-install.ts
+      - source-runtime.ts
       - cli.ts
       - scripts.ts
       - agent/script-runner.mjs
@@ -42,6 +43,7 @@ on:
       - firefox-runtime.ts
       - firefox-install.ts
       - browser-install.ts
+      - source-runtime.ts
       - cli.ts
       - scripts.ts
       - agent/script-runner.mjs
@@ -137,6 +139,24 @@ jobs:
           }
           "ALIASMODE_FIREFOX_BINARY_PATH=$($executables[0].FullName)" | Add-Content $env:GITHUB_ENV
           "ALIASMODE_FIREFOX_BINARY_SHA256=$((Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
+      - name: Prove source setup supplies Cloud browser runtimes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @(
+            "GH_TOKEN", "GITHUB_TOKEN",
+            "CLOAKBROWSER_BINARY_PATH", "CLOAKBROWSER_BINARY_SHA256",
+            "ALIASMODE_FIREFOX_BINARY_PATH", "ALIASMODE_FIREFOX_BINARY_SHA256"
+          )) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+          }
+          $proof = Join-Path $env:RUNNER_TEMP "cloud-launcher-smoke-$([guid]::NewGuid().ToString('N'))"
+          bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" setup --state-root $proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --headless --state-root $proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root $proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: pwsh
         run: |
@@ -280,20 +300,20 @@ jobs:
           [[ "$version" =~ 152\.0\.4 ]]
           printf 'Firefox native binary: %s\n' "$binary_info"
           printf 'Firefox version: %s\n' "$version"
-      - name: Prove Cloud coordinator lifecycle for both engines
+      - name: Prove source setup supplies Cloud browser runtimes
         shell: bash
         run: |
           set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CLOAKBROWSER_BINARY_PATH CLOAKBROWSER_BINARY_SHA256 ALIASMODE_FIREFOX_BINARY_PATH ALIASMODE_FIREFOX_BINARY_SHA256
           proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
-          cd "$proof"
-          bun "$GITHUB_WORKSPACE/cli.ts" install-browser --state-root "$proof"
+          bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" setup --state-root "$proof"
           # GitHub's Ubuntu runner blocks Chromium's user namespaces.
           if [[ "${{ matrix.platform }}" == "linux" ]]; then
-            bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --no-sandbox --state-root "$proof/chromium-state"
+            bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --no-sandbox --state-root "$proof"
           else
-            bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof/chromium-state"
+            bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof"
           fi
-          bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof/firefox-state"
+          bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof"
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: bash
         run: |

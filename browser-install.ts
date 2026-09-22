@@ -31,6 +31,7 @@ const WINDOWS_ARCHIVE_URLS = [
 export interface BrowserInstallOptions {
   cwd?: string;
   cacheDir?: string;
+  writeEnv?: boolean;
   runInstaller?: () => Promise<{ code: number; output: string }>;
   exists?: (path: string) => boolean;
   hashFile?: (path: string) => Promise<string>;
@@ -158,9 +159,11 @@ export async function installCloakBrowser(opts: BrowserInstallOptions = {}): Pro
     throw new Error("installed CloakBrowser did not match the pinned Windows x64 executable");
   }
 
-  const envPath = resolve(cwd, ".env");
-  const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
-  const newline = current.includes("\r\n") || process.platform === "win32" ? "\r\n" : "\n";
-  writeFileSync(envPath, browserEnvText(current, path, sha256, newline), "utf8");
+  if (opts.writeEnv !== false) {
+    const envPath = resolve(cwd, ".env");
+    const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+    const newline = current.includes("\r\n") || process.platform === "win32" ? "\r\n" : "\n";
+    writeFileSync(envPath, browserEnvText(current, path, sha256, newline), "utf8");
+  }
   return { path, sha256 };
 }

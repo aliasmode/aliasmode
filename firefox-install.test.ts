@@ -64,6 +64,50 @@ test("Firefox setup includes approved builds for every supported host", () => {
   }
 });
 
+test("Firefox setup uses the exact approved public release archive for each host", () => {
+  const expected = {
+    "linux-x64": "aliasmode-152.0.4-beta.30-lin.x86_64.zip",
+    "darwin-arm64": "aliasmode-152.0.4-beta.30-mac.arm64.zip",
+    "win32-x64": "aliasmode-152.0.4-beta.30-win.x86_64.zip",
+  };
+  for (const [platform, arch] of [["linux", "x64"], ["darwin", "arm64"], ["win32", "x64"]] as const) {
+    const archive = expected[`${platform}-${arch}` as keyof typeof expected];
+    expect(firefoxReleaseArchiveUrl(firefoxBuildForHost(platform, arch))).toBe(
+      `https://github.com/aliasmode/aliasmode-firefox/releases/download/v152.0.4-beta.30/${archive}`,
+    );
+  }
+});
+
+test("Firefox setup downloads, verifies, and pins the host release without environment output", async () => {
+  const f = fixture("darwin", false);
+  let requested = "";
+  const result = await installFirefox({ cwd: f.cwd, platform: "darwin", arch: "arm64", writeEnv: false }, {
+    builds: [f.build],
+    extract: f.extract,
+    fetch: async (input) => {
+      requested = String(input);
+      return new Response("approved archive");
+    },
+  });
+
+  expect(requested).toBe("https://github.com/aliasmode/aliasmode-firefox/releases/download/v152.0.4-beta.30/aliasmode-152.0.4-beta.30-mac.arm64.zip");
+  expect(result.sha256).toBe(f.build.executableSha256);
+  expect(existsSync(join(f.cwd, ".env"))).toBe(false);
+  expect(readdirSync(f.cwd).some((entry) => entry.startsWith(".aliasmode-firefox-download-"))).toBe(false);
+});
+
+test("Firefox setup removes its failed public release download", async () => {
+  const f = fixture("linux", false);
+  await expect(installFirefox({ cwd: f.cwd, platform: "linux", arch: "x64", writeEnv: false }, {
+    builds: [f.build],
+    extract: f.extract,
+    fetch: async () => new Response("missing", { status: 404 }),
+  })).rejects.toThrow("download failed");
+
+  expect(readdirSync(f.cwd).some((entry) => entry.startsWith(".aliasmode-firefox-download-"))).toBe(false);
+  expect(existsSync(join(f.cwd, "browser"))).toBe(false);
+});
+
 test("Firefox configuration preserves Chromium pins and replaces only Firefox pins", () => {
   const value = browserEnvText("CLOAKBROWSER_BINARY_PATH=chromium\nALIASMODE_FIREFOX_BINARY_PATH=old\nALIASMODE_FIREFOX_BINARY_SHA256=old\n", "/new firefox/aliasmode", "a".repeat(64), "\n", "ALIASMODE_FIREFOX");
   expect(value).toContain("CLOAKBROWSER_BINARY_PATH=chromium\n");
