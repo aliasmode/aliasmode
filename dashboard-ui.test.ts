@@ -242,6 +242,8 @@ test("dashboard selects browser for new profiles", () => {
   expect(createModal.indexOf('className="browser-options"')).toBeLessThan(createModal.indexOf('className="modal-foot"'));
   expect(styles).toContain('.browser-info:focus-visible::after');
   expect(styles).toContain('.browser-card:has(input:focus-visible)');
+  expect(styles).toContain('.browser-card:has(input:checked) { background: var(--browser-selected);');
+  expect(styles).not.toContain('.browser-option:has(input:checked) { color: var(--browser-surface); }');
   expect(app).toContain("engine: form.engine,");
   expect(editModal).toContain('value={editEngine === "firefox" ? "AliasMode Firefox" : "CloakBrowser"} readOnly');
   expect(editModal).not.toContain('setEF("engine"');

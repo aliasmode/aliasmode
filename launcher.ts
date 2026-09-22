@@ -98,12 +98,30 @@ export type BrowserLaunchFailure =
   | "process_spawn"
   | "cdp_readiness";
 
+const PREFLIGHT_GUIDANCE = {
+  chromium_setup: "Chrome runtime approval is missing or invalid. Run bun cli.ts install-browser, then restart AliasMode.",
+  firefox_setup: "Firefox runtime approval is missing or invalid. Run bun cli.ts install-browser --engine firefox --archive <owned-build.zip>, then restart AliasMode.",
+  proxy_invalid: "Saved proxy settings are invalid. Edit or clear this profile's proxy.",
+  proxy_https_auth: "Authenticated HTTPS proxies are unsupported. Use HTTP or SOCKS5.",
+  persona_mobile: "This profile has a mobile user agent. Use a desktop browser profile.",
+  persona_unsupported: "This profile's user agent has no recognized desktop platform. Check its saved browser identity.",
+  firefox_configuration: "The saved Firefox configuration is missing or incompatible with this runtime. Use a matching AliasMode runtime and profile export.",
+  firefox_extensions: "This Firefox profile contains Chrome extensions. Remove them before opening it.",
+  firefox_host: "Firefox requires Apple Silicon macOS, Linux x64, or Windows x64.",
+  firefox_arguments: "Firefox profiles cannot use Chromium launch arguments.",
+  stored_identity: "The saved browser launch does not match this profile's current identity. Close the existing browser, then reopen the profile.",
+} as const;
+
 /** Closed, public-safe browser launch failure. Never attach a raw cause. */
 export class BrowserLaunchError extends Error {
   override readonly name = "BrowserLaunchError";
 
-  constructor(readonly failure: BrowserLaunchFailure) {
+  constructor(readonly failure: BrowserLaunchFailure, readonly preflightReason?: keyof typeof PREFLIGHT_GUIDANCE) {
     super(`browser_launch/${failure} (failed)`);
+  }
+
+  get guidance(): string | undefined {
+    return this.failure === "preflight" && this.preflightReason ? PREFLIGHT_GUIDANCE[this.preflightReason] : undefined;
   }
 }
 
@@ -763,7 +781,7 @@ export class Launcher {
       return /^[a-f0-9]{64}$/.test(expected) ? expected : "0".repeat(64);
     }
     if (!/^[a-f0-9]{64}$/.test(expected)) {
-      throw new Error(`approved ${engine} kernel hash is not configured`);
+      throw new BrowserLaunchError("preflight", engine === "firefox" ? "firefox_setup" : "chromium_setup");
     }
     return expected;
   }
@@ -883,19 +901,17 @@ export class Launcher {
   private assertHostCompatibility(profile: Profile): void {
     if (profile.engine === "firefox") {
       if (!profile.firefox || profile.firefox.version !== 1 || profile.firefox.runtimeVersion !== FIREFOX_RUNTIME_VERSION) {
-        throw new Error("Firefox profile configuration is missing or unsupported by this runtime");
+        throw new BrowserLaunchError("preflight", "firefox_configuration");
       }
-      if (profile.extensions?.length) throw new Error("Chrome extensions are not supported by Firefox profiles");
+      if (profile.extensions?.length) throw new BrowserLaunchError("preflight", "firefox_extensions");
       if (this.enforceHostCompatibility && !supportsFirefoxHost(this.hostPlatform, this.hostArch)) {
-        throw new Error("AliasMode Firefox requires macOS arm64, Linux x64, or Windows x64");
+        throw new BrowserLaunchError("preflight", "firefox_host");
       }
       return;
     }
     if (!this.enforceHostCompatibility) return;
     if (isMobileUserAgent(profile.ua)) {
-      throw new Error(
-        "unsupported mobile persona: AliasMode launches a desktop browser and cannot coherently emulate mobile touch, model, sensors, codecs, or APIs",
-      );
+      throw new BrowserLaunchError("preflight", "persona_mobile");
     }
     // Cross-OS desktop spoofing is supported: CloakBrowser applies the persona's
     // platform/brand via --fingerprint-* flags regardless of the host OS (the
@@ -903,7 +919,7 @@ export class Launcher {
     // OS/arch is no longer pinned to the persona. We still require a recognized
     // DESKTOP persona — a desktop browser cannot coherently emulate a mobile one.
     if (profile.ua.trim() && !platformFromUA(profile.ua)) {
-      throw new Error("unsupported imported user agent: no recognized desktop platform");
+      throw new BrowserLaunchError("preflight", "persona_unsupported");
     }
   }
 
@@ -1187,7 +1203,10 @@ export class Launcher {
         return await this.doStart(profileId, launchArgs, opts);
       })
       .catch((error) => {
-        if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) throw error;
+        if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) {
+          if (error instanceof BrowserLaunchError && error.guidance) this.log(`start ${profileId} rejected: ${error.guidance}`);
+          throw error;
+        }
         this.log(`start ${profileId} rejected before launch: ${error instanceof Error ? error.message : String(error)}`);
         const normalized = new BrowserLaunchError("preflight");
         const retained = this.failedStartGeneration(error);
@@ -1222,19 +1241,16 @@ export class Launcher {
     let profile = this.store.getProfile(profileId);
     if (!profile) throw new Error(`Unknown profile: ${profileId}`);
     if (profile.proxyError) {
-      throw new Error(`profile ${profileId} has a quarantined legacy proxy: ${profile.proxyError}; edit or clear the proxy before launch`);
+      throw new BrowserLaunchError("preflight", "proxy_invalid");
     }
     let profileSnapshot = JSON.stringify(profile);
     let approvedBinarySha256: string;
     try {
       if (profile.proxy?.type === "https" && profile.proxy.user) {
-        throw new Error(
-          "authenticated HTTPS proxies are not supported: the credential relay cannot preserve TLS to the upstream; " +
-          "use authenticated HTTP or SOCKS5",
-        );
+        throw new BrowserLaunchError("preflight", "proxy_https_auth");
       }
       this.assertHostCompatibility(profile);
-      if (profile.engine === "firefox" && chromeArgs.length) throw new Error("Chromium launch arguments are not supported by Firefox profiles");
+      if (profile.engine === "firefox" && chromeArgs.length) throw new BrowserLaunchError("preflight", "firefox_arguments");
       approvedBinarySha256 = this.approvedBinarySha256(profile.engine);
     } catch (error) {
       return await this.rejectUnsafeExistingLaunch(profileId, "host/persona verification", error);
@@ -1256,8 +1272,8 @@ export class Launcher {
       }
       try {
         this.assertStoredLaunchPersona(profile, existing, approvedBinarySha256);
-      } catch (error) {
-        return await this.rejectUnsafeExistingLaunch(profileId, "launch-time persona verification", error);
+      } catch {
+        return await this.rejectUnsafeExistingLaunch(profileId, "launch-time persona verification", new BrowserLaunchError("preflight", "stored_identity"));
       }
       const trackedProc = this.procs.get(profileId);
       const liveness = await this.inspectLaunchLiveness(profileId, existing, trackedProc, true)

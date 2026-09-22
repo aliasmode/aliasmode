@@ -1150,12 +1150,11 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 
 /* Browser choice stays monochrome in both themes. */
 .browser-options {
-  --browser-ink: #171717; --browser-surface: #fff; --browser-line: #ddd;
+  --browser-ink: #171717; --browser-surface: #fff; --browser-line: #ddd; --browser-selected: #f3f3f3; --browser-selected-line: #aaa;
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
 }
-:root[data-theme="dark"] .browser-options { --browser-ink: #f5f5f5; --browser-surface: #171717; --browser-line: #444; }
+:root[data-theme="dark"] .browser-options { --browser-ink: #f5f5f5; --browser-surface: #171717; --browser-line: #444; --browser-selected: #252525; --browser-selected-line: #666; }
 .browser-option { position: relative; min-width: 0; color: var(--browser-ink); }
-.browser-option:has(input:checked) { color: var(--browser-surface); }
 .browser-card {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px;
   min-height: 104px; padding: 18px 28px; cursor: pointer;
@@ -1163,7 +1162,7 @@ td.col-tags .chip + .chip { margin-left: 4px; }
   font-size: 13px; font-weight: 600; transition: background .13s var(--ease), border-color .13s var(--ease), color .13s var(--ease);
 }
 .browser-card:hover { border-color: var(--browser-ink); }
-.browser-card:has(input:checked) { background: var(--browser-ink); border-color: var(--browser-ink); }
+.browser-card:has(input:checked) { background: var(--browser-selected); border-color: var(--browser-selected-line); }
 .browser-card:has(input:focus-visible) { outline: 2px solid var(--browser-ink); outline-offset: 3px; }
 .browser-card input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .browser-logo { display: block; width: 30px; height: 30px; fill: currentColor; }

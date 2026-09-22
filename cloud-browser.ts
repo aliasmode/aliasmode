@@ -902,7 +902,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       // failure there is a local queue/database error whose message holds no
       // session material and is the only clue an operator gets.
       const localDetail = stage === "pending_sync" && error instanceof Error ? `: ${error.message}` : "";
-      this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})${localDetail}`);
+      const guidance = error instanceof BrowserLaunchError && error.guidance ? `: ${error.guidance}` : "";
+      this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})${localDetail}${guidance}`);
       const currentLaunch = retainAfterSessionFailure && retainedGeneration
         ? this.options.store.getLaunch(profileId)
         : undefined;
@@ -915,7 +916,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         this.startHeartbeat(profileId);
         return {
           ok: false,
-          error: `Cloud profile open failed at ${failureStage} (${code}); browser left open`,
+          error: `Cloud profile open failed at ${failureStage} (${code}); browser left open${guidance}`,
         };
       }
       if (registrationRecorded && registrationId && cleanupGeneration) {
@@ -970,7 +971,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       return {
         ok: false,
-        error: `Cloud profile open failed at ${failureStage} (${code})`,
+        error: `Cloud profile open failed at ${failureStage} (${code})${guidance}`,
       };
     } finally {
       if (this.startupLeases.get(profileId)?.registrationId === registrationId) {
