@@ -12,6 +12,16 @@ export interface FirefoxRuntimeBuild {
 
 export const FIREFOX_RUNTIME_BUILDS: readonly FirefoxRuntimeBuild[] = [
   {
+    platform: "linux", arch: "x64", executablePath: "aliasmode",
+    archiveSha256: "cf32b90bf4404a4b2eb1abb8347dfe487a218acd71f8a1dd98fea9c5c6a64754",
+    executableSha256: "5e3c886a7a00ab1ef124fd69c8d726970f0c8da51188098590fe0b1960bea072",
+  },
+  {
+    platform: "darwin", arch: "arm64", executablePath: "AliasMode.app/Contents/MacOS/aliasmode",
+    archiveSha256: "f7fb8b0e3436544ca1efaeed216687a4a99e23ccd621a9bc9266bd7cebc6738f",
+    executableSha256: "106e198995286cee91c1d637924f636445fd95d59b372ec8213e48756acd6f2f",
+  },
+  {
     platform: "win32", arch: "x64", executablePath: "aliasmode.exe",
     archiveSha256: "af5d8ec61f6805048564932ef49837353993df88e7b62db0dd67011904cfc1c7",
     executableSha256: "6685cbdcb0da2a129a5e25bd91e4cd3eb79ad3b557d45841537e04cf273deeaa",

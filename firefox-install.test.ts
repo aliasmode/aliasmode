@@ -53,6 +53,15 @@ test("Firefox setup selects only matching host builds", () => {
   expect(() => firefoxBuildForHost("darwin", "x64", [build])).toThrow("macOS");
 });
 
+test("Firefox setup includes approved builds for every supported host", () => {
+  for (const [platform, arch] of [["win32", "x64"], ["linux", "x64"], ["darwin", "arm64"]] as const) {
+    const build = firefoxBuildForHost(platform, arch);
+    expect(build).toMatchObject({ platform, arch });
+    expect(build.archiveSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(build.executableSha256).toMatch(/^[a-f0-9]{64}$/);
+  }
+});
+
 test("Firefox configuration preserves Chromium pins and replaces only Firefox pins", () => {
   const value = browserEnvText("CLOAKBROWSER_BINARY_PATH=chromium\nALIASMODE_FIREFOX_BINARY_PATH=old\nALIASMODE_FIREFOX_BINARY_SHA256=old\n", "/new firefox/aliasmode", "a".repeat(64), "\n", "ALIASMODE_FIREFOX");
   expect(value).toContain("CLOAKBROWSER_BINARY_PATH=chromium\n");
