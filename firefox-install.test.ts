@@ -4,7 +4,7 @@ import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { browserEnvText } from "./browser-install.ts";
-import { firefoxBuildForHost, installFirefox, type FirefoxRuntimeBuild } from "./firefox-install.ts";
+import { firefoxBuildForHost, firefoxReleaseArchiveUrl, installFirefox, type FirefoxRuntimeBuild } from "./firefox-install.ts";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -26,12 +26,14 @@ for (const args of [["--engine", "firefox"], ["--engine", "invalid"]]) {
 }
 
 
-function fixture(platform: "linux" | "darwin" = "linux") {
+function fixture(platform: "linux" | "darwin" = "linux", writeEnv = true) {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-firefox-install-"));
   roots.push(cwd);
   const archive = join(cwd, "owned-browser.zip");
   writeFileSync(archive, "approved archive");
-  writeFileSync(join(cwd, ".env"), "CLOAKBROWSER_BINARY_PATH=existing-chromium\nALIASMODE_FIREFOX_BINARY_PATH=old-firefox\nALIASMODE_FIREFOX_BINARY_SHA256=old-hash\n");
+  if (writeEnv) {
+    writeFileSync(join(cwd, ".env"), "CLOAKBROWSER_BINARY_PATH=existing-chromium\nALIASMODE_FIREFOX_BINARY_PATH=old-firefox\nALIASMODE_FIREFOX_BINARY_SHA256=old-hash\n");
+  }
   const build: FirefoxRuntimeBuild = {
     platform, arch: platform === "darwin" ? "arm64" : "x64",
     executablePath: platform === "darwin" ? "AliasMode.app/Contents/MacOS/aliasmode" : "aliasmode",

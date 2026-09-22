@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -78,4 +78,20 @@ test("installCloakBrowser writes nothing when the official installer fails", asy
     runInstaller: async () => ({ code: 9, output: "download failed" }),
   })).rejects.toThrow("exited with code 9");
   expect(readFileSync(envPath, "utf8")).toBe("HUB_PASSWORD=unchanged\n");
+});
+
+test("installCloakBrowser can return a verified binary without writing environment pins", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aliasmode-browser-install-no-env-"));
+  dirs.push(dir);
+  const binary = join(dir, "cache", "chrome");
+
+  await expect(installCloakBrowser({
+    cwd: dir,
+    writeEnv: false,
+    runInstaller: async () => ({ code: 0, output: `${binary}\n` }),
+    exists: (path) => path === binary,
+    hashFile: async () => "b".repeat(64),
+  })).resolves.toEqual({ path: binary, sha256: "b".repeat(64) });
+
+  expect(existsSync(join(dir, ".env"))).toBe(false);
 });
