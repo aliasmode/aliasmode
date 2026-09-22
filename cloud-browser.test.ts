@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { CloudApiError } from "./cloud-client.ts";
 import { CloudBrowserCoordinator, observeBrowserTargets } from "./cloud-browser.ts";
 import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v1.ts";
-import { BrowserLaunchError } from "./launcher.ts";
+import { BrowserLaunchError, Launcher as ProductionLauncher, type FetchFn, type SpawnFn } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
-import { PlaywrightWorkerError } from "./playwright-runtime.ts";
+import { resolvePlaywrightRuntime, PlaywrightWorkerError } from "./playwright-runtime.ts";
+import { handleCloudBrowserControl } from "./server.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { sessionBundleSignature, SessionRestoreError } from "./session.ts";
 import { ProfileStore } from "./store.ts";
@@ -336,6 +338,234 @@ function setup(options: {
     },
   };
 }
+
+const VALID_DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
+
+type CloudTestEngine = "chromium" | "firefox";
+
+function productionCloudPayload(engine: CloudTestEngine): OpenProfileResponse["payload"] {
+  const base = payload();
+  base.profile.ua = VALID_DESKTOP_UA;
+  if (engine === "chromium") return base;
+  return {
+    schemaVersion: 2,
+    profile: {
+      ...base.profile,
+      engine: "firefox",
+      firefox: {
+        version: 1,
+        runtimeVersion: "152.0.4-beta.30",
+        config: {
+          "navigator.userAgent": "Mozilla/5.0 Firefox/152.0",
+          timezone: "UTC",
+        },
+      },
+    },
+    session: base.session,
+  };
+}
+
+async function productionCloudCoordinator(
+  engine: CloudTestEngine,
+  pin: string | undefined,
+  root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-production-launch-")),
+): Promise<{
+  coordinator: CloudBrowserCoordinator;
+  launcher: ProductionLauncher;
+  store: ProfileStore;
+  logs: string[];
+  cleanup(removeRoot?: boolean): void;
+}> {
+  mkdirSync(root, { recursive: true });
+  const binary = join(root, "approved-browser");
+  writeFileSync(binary, "test browser binary");
+  chmodSync(binary, 0o755);
+  const store = new ProfileStore(":memory:");
+  const queue = new PendingSyncQueue(join(root, "pending.sqlite"), new Uint8Array(32).fill(9));
+  const logs: string[] = [];
+  const payload = productionCloudPayload(engine);
+  const opened: OpenProfileResponse = {
+    ok: true,
+    registrationId: "registration1",
+    baseVersion: 1,
+    payload,
+    activeOpens: [],
+  };
+  let nextPid = 6000;
+  const alivePorts = new Set<number>();
+  const spawn: SpawnFn = (_path, args) => {
+    const port = Number(args.find((arg) => arg.startsWith("--remote-debugging-port="))?.split("=")[1]);
+    alivePorts.add(port);
+    const pid = nextPid++;
+    return { pid, kill() { alivePorts.delete(port); } };
+  };
+  const fetch: FetchFn = async (url) => {
+    const port = Number(url.match(/:(\d+)\//)?.[1]);
+    return {
+      ok: alivePorts.has(port),
+      json: async () => ({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/test` }),
+    };
+  };
+  const firefoxGeneration = "test-firefox-generation";
+  const firefoxOwnerBinary = realpathSync(Bun.which(resolvePlaywrightRuntime().nodeExecutable) ?? resolvePlaywrightRuntime().nodeExecutable);
+  const firefoxUserDataDir = join(root, "profiles", "profile1");
+  const firefoxRuntime = {
+    reserve: async () => ({ endpoint: "http://127.0.0.1:9515/", token: "test-token", generation: firefoxGeneration }),
+    start: async (_input: unknown, callbacks: any) => {
+      const owner = {
+        endpoint: "http://127.0.0.1:9515/", token: "test-token", generation: firefoxGeneration, pid: 7101, browserPid: 7102,
+      };
+      await callbacks.onSpawn?.(owner);
+      await callbacks.onReady?.(owner);
+      return owner;
+    },
+    call: async (owner: { generation: string }, operation: string) => {
+      expect(operation).toBe("status");
+      return {
+        generation: owner.generation,
+        directory: firefoxUserDataDir,
+        executablePath: realpathSync(binary),
+        browserPid: 7102,
+        pid: 7101,
+        profileId: "profile1",
+        hasPages: true,
+        pageTargets: [{ id: "page", url: "https://x.com/home" }],
+      };
+    },
+    close: async () => {},
+  };
+  const launcher = new ProductionLauncher({
+    store,
+    binaryPath: binary,
+    firefoxBinaryPath: binary,
+    ...(engine === "chromium" ? { expectedBinarySha256: pin } : { expectedFirefoxBinarySha256: pin }),
+    dataRoot: join(root, "profiles"),
+    hostPlatform: "darwin",
+    hostArch: "arm64",
+    portProbe: () => true,
+    spawn,
+    fetch,
+    firefoxRuntime,
+    captureFingerprint: async () => null,
+    ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
+    ensureCookies: async () => ({ injected: false }),
+    navigate: async () => {},
+    labelWindow: async () => {},
+    isPidAlive: () => true,
+    findOwnedBrowserPids: async ({ debugPort }) => {
+      const port = Number(debugPort);
+      return alivePorts.has(port) ? [6000] : [];
+    },
+    findProfileDirHolderPids: async () => [],
+    readProcessSnapshot: async () => engine === "firefox" ? {
+      incomplete: false,
+      records: [
+        { pid: 7101, executablePath: firefoxOwnerBinary, executablePathExact: true, argv: [`--aliasmode-firefox-owner=${firefoxGeneration}`] },
+        { pid: 7102, executablePath: realpathSync(binary), executablePathExact: true, argv: [realpathSync(binary), "-profile", firefoxUserDataDir] },
+      ],
+    } : { incomplete: false, records: [] },
+    killPid: async () => {},
+    browserClose: async () => false,
+    cdpReadyTimeoutMs: 1000,
+  });
+  const cloud = {
+    async openProfile() { return opened; },
+    async heartbeat() { return { ok: true as const, revoked: false as const, activeOpens: [] }; },
+    async abandon() { return { ok: true as const, status: "abandoned" as const }; },
+    async closeOpen() { return { ok: true as const, status: "accepted" as const, version: 2 }; },
+  };
+  const coordinator = new CloudBrowserCoordinator({
+    cloud: cloud as any,
+    launcher,
+    store,
+    queue: () => queue,
+    accountId: () => "account1",
+    deviceId: () => "device1",
+    heartbeatMs: 0,
+    dirtyMonitorMs: 0,
+    observeTargets: () => ({ close() {} }),
+    readSession: async () => JSON.stringify({ cookies: [] }),
+    applySession: async () => {},
+    log: (message) => logs.push(message),
+  });
+  return {
+    coordinator,
+    launcher,
+    store,
+    logs,
+    cleanup(removeRoot = true) {
+      queue.close();
+      store.close();
+      if (removeRoot) rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test("real Cloud opens distinguish missing Chromium and Firefox pins and pass with either approved pin", async () => {
+  const approved = createHash("sha256").update("test browser binary").digest("hex");
+  for (const [engine, reason] of [
+    ["chromium", "chromium_setup"],
+    ["firefox", "firefox_setup"],
+  ] as const) {
+    const missing = await productionCloudCoordinator(engine, undefined);
+    try {
+      const result = await missing.coordinator.open("profile1");
+      expect(result).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("browser_launch/preflight"),
+      });
+      if (result.ok) throw new Error("missing browser pin unexpectedly opened Cloud profile");
+      const guidance = new BrowserLaunchError("preflight", reason).guidance;
+      expect(result.error).toContain(guidance);
+      expect(JSON.stringify({ result, logs: missing.logs })).not.toContain("test-token");
+    } finally {
+      missing.cleanup();
+    }
+
+    const valid = await productionCloudCoordinator(engine, approved);
+    try {
+      expect((await valid.coordinator.open("profile1")).ok).toBe(true);
+    } finally {
+      valid.cleanup();
+    }
+  }
+});
+
+test("dashboard Cloud start preserves Chromium state before Firefox and returns typed setup guidance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-cached-engine-"));
+  const approved = createHash("sha256").update("test browser binary").digest("hex");
+  try {
+    const chromium = await productionCloudCoordinator("chromium", approved, root);
+    expect((await chromium.coordinator.open("profile1")).ok).toBe(true);
+    chromium.cleanup(false);
+
+    const cachedState = join(root, "profiles", "profile1", "Default", "Cache", "state");
+    mkdirSync(join(root, "profiles", "profile1", "Default", "Cache"), { recursive: true });
+    writeFileSync(cachedState, "persisted Chromium cache state");
+    expect(existsSync(cachedState)).toBe(true);
+
+    const firefox = await productionCloudCoordinator("firefox", approved, root);
+    expect((await firefox.coordinator.open("profile1")).ok).toBe(true);
+    firefox.cleanup(false);
+
+    const missingFirefoxPin = await productionCloudCoordinator("firefox", undefined, root);
+    try {
+      const response = await handleCloudBrowserControl(
+        new Request("http://dashboard.local/api/v1/browser/start?user_id=profile1"),
+        missingFirefoxPin.coordinator,
+        missingFirefoxPin.launcher,
+        missingFirefoxPin.store,
+      );
+      const body = await response.json() as { code: number; msg: string };
+      expect(body.code).toBe(-1);
+      expect(body.msg).toContain(new BrowserLaunchError("preflight", "firefox_setup").guidance);
+    } finally {
+      missingFirefoxPin.cleanup(false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("Firefox Cloud checkpoints use owner polling and preserve V2 through offline close", async () => {
   let cdpObservers = 0;

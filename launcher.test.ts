@@ -2181,7 +2181,11 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     hostArch: "x64",
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
-  await expect(noPin.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  const noPinFailure = await noPin.start("k1d0cd11").catch((error) => error);
+  expect(noPinFailure).toMatchObject({
+    failure: "preflight",
+    preflightReason: "chromium_setup",
+  });
 
   const mismatch = new ProductionLauncher({
     store,
@@ -2193,6 +2197,45 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
   });
   await expect(mismatch.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("binary_verification"));
   expect(spawns).toBe(1);
+  store.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("missing Firefox kernel pin has an engine-specific preflight reason before owner startup", async () => {
+  const root = join(tmpdir(), `firefox-kernel-pin-${crypto.randomUUID()}`);
+  mkdirSync(root, { recursive: true });
+  const binary = join(root, "aliasmode-firefox");
+  writeFileSync(binary, "approved Firefox kernel");
+  const store = seeded();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({
+    ...profile,
+    engine: "firefox",
+    firefox: {
+      version: 1,
+      runtimeVersion: "152.0.4-beta.30",
+      config: {
+        "navigator.userAgent": "Mozilla/5.0 Firefox/152.0",
+        timezone: "UTC",
+      },
+    },
+  });
+  let spawns = 0;
+  const launcher = new ProductionLauncher({
+    store,
+    firefoxBinaryPath: binary,
+    dataRoot: join(root, "profiles"),
+    hostPlatform: "darwin",
+    hostArch: "arm64",
+    spawn: () => { spawns++; return { pid: 1, kill() {} }; },
+  });
+
+  const failure = await launcher.start("k1d0cd11").catch((error) => error);
+  expect(failure).toMatchObject({
+    failure: "preflight",
+    preflightReason: "firefox_setup",
+  });
+  expect(spawns).toBe(0);
   store.close();
   rmSync(root, { recursive: true, force: true });
 });
