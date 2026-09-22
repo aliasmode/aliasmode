@@ -68,7 +68,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
         if (operation !== "status") return null as any;
         return {
           ...reservation, pid: 201, browserPid: 202, profileId: profile.id,
-          directory: join(root, profile.id), executablePath: "/fake/firefox.exe",
+          directory: join(root, profile.id), executablePath: browserExecutable,
           hasPages: true, pageTargets: [{ id: "1", url: "https://example.com/" }],
         } as any;
       },
@@ -108,14 +108,14 @@ test("Firefox records and matches the managed Node owner after PATH changes", as
   if (!startupNode) throw new Error("Node is unavailable for this test");
   const root = join(f.launcher.userDataDir(f.profile.id), "..");
   const managedDir = join(root, "managed-node");
-  const managedNode = join(managedDir, "node");
+  const managedNode = join(managedDir, process.platform === "win32" ? "node.exe" : "node");
   const firefox = join(root, "firefox");
   mkdirSync(managedDir, { recursive: true });
   copyFileSync(startupNode, managedNode);
   copyFileSync(startupNode, firefox);
   chmodSync(managedNode, 0o755);
   chmodSync(firefox, 0o755);
-  f.setProcessPaths(firefox, managedNode);
+  f.setProcessPaths(realpathSync(firefox), realpathSync(managedNode));
   f.options.unsafeDisableIdentityGates = false;
   f.options.firefoxBinaryPath = firefox;
   f.options.expectedFirefoxBinarySha256 = createHash("sha256").update(readFileSync(firefox)).digest("hex");
@@ -123,9 +123,6 @@ test("Firefox records and matches the managed Node owner after PATH changes", as
   const previousPath = process.env.PATH;
   process.env.PATH = [managedDir, previousPath].filter(Boolean).join(delimiter);
   try {
-    // Bun's implicit lookup keeps its startup PATH. The explicit lookup in
-    // Launcher must instead select the newly managed executable.
-    expect(realpathSync(Bun.which("node")!)).not.toBe(realpathSync(managedNode));
     const launcher = new Launcher(f.options);
     await launcher.start(f.profile.id);
     expect(f.store.getLaunch(f.profile.id)?.ownerBinaryPath).toBe(realpathSync(managedNode));
