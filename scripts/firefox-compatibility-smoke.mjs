@@ -61,9 +61,14 @@ async function launch(directory, browser = executablePath) {
   return context;
 }
 
+async function fixturePage(page, title) {
+  await page.goto(origin);
+  if (title) await page.evaluate((title) => { document.title = title; }, title);
+}
+
 async function openFixture(context) {
   const page = context.pages()[0] ?? await context.newPage();
-  await page.goto(origin);
+  await fixturePage(page);
   return page;
 }
 
@@ -169,6 +174,24 @@ async function captureNativeFirefoxUi(page, name) {
   await run("screencapture", ["-x", join(root, `firefox-dock-tabs-${name}.png`)]);
 }
 
+async function assertOneNativeWindow() {
+  const pid = await focusNativeBrowser();
+  const { stdout } = await run("osascript", ["-e", `tell application "System Events" to tell first application process whose unix id is ${pid} to count windows`]);
+  assert.equal(Number.parseInt(stdout, 10), 1, "native tab evidence uses one browser window");
+  return pid;
+}
+
+async function nativeTab(context, title) {
+  const pid = await assertOneNativeWindow();
+  const [page] = await Promise.all([
+    context.waitForEvent("page"),
+    run("osascript", ["-e", nativeBrowserScript(pid, "    keystroke \"t\" using command down\n")]),
+  ]);
+  await fixturePage(page, title);
+  await assertOneNativeWindow();
+  return page;
+}
+
 async function closeOtherPages(context, page) {
   for (const other of context.pages()) {
     if (other !== page) await other.close();
@@ -179,20 +202,21 @@ async function closeOtherPages(context, page) {
 async function captureNativeTabEvidence(context, page) {
   if (!nativeUi) return;
   await closeOtherPages(context, page);
+  await fixturePage(page, "Tab1");
+  await assertOneNativeWindow();
   await captureNativeFirefoxUi(page, "one");
-  const second = await context.newPage();
-  await second.goto(origin);
+  const second = await nativeTab(context, "Tab2");
   assert.equal(context.pages().length, 2, "native two-tab evidence has two tabs");
   await captureNativeFirefoxUi(second, "two");
-  for (let index = 0; index < 4; index += 1) {
-    const extra = await context.newPage();
-    await extra.goto(origin);
+  for (let index = 3; index <= 6; index += 1) {
+    await nativeTab(context, `Tab${index}`);
   }
   assert.equal(context.pages().length, 6, "native several-tab evidence has six tabs");
   const lastPage = context.pages().at(-1);
   await captureNativeFirefoxUi(lastPage, "several");
-  const pid = await focusNativeBrowser();
+  const pid = await assertOneNativeWindow();
   await run("osascript", ["-e", nativeBrowserScript(pid, "    set size of window 1 to {720, 620}\n")]);
+  await assertOneNativeWindow();
   await captureNativeFirefoxUi(lastPage, "narrow");
 }
 
