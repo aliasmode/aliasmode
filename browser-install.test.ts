@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   browserEnvText,
+  cloakBrowserVersionForPlatform,
+  CLOAKBROWSER_MACOS_VERSION,
   CLOAKBROWSER_VERSION,
   CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256,
   CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256,
@@ -19,6 +21,10 @@ afterEach(() => {
 test("official CloakBrowser payload identity is pinned", () => {
   expect(CLOAKBROWSER_WRAPPER_VERSION).toBe("0.4.11");
   expect(CLOAKBROWSER_VERSION).toBe("146.0.7680.177.5");
+  expect(CLOAKBROWSER_MACOS_VERSION).toBe("145.0.7632.109.2");
+  expect(cloakBrowserVersionForPlatform("linux")).toBe(CLOAKBROWSER_VERSION);
+  expect(cloakBrowserVersionForPlatform("win32")).toBe(CLOAKBROWSER_VERSION);
+  expect(cloakBrowserVersionForPlatform("darwin")).toBe(CLOAKBROWSER_MACOS_VERSION);
   expect(CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256).toBe(
     "b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe",
   );

@@ -13,6 +13,13 @@ import { join, resolve } from "node:path";
 
 export const CLOAKBROWSER_WRAPPER_VERSION = "0.4.11";
 export const CLOAKBROWSER_VERSION = "146.0.7680.177.5";
+export const CLOAKBROWSER_MACOS_VERSION = "145.0.7632.109.2";
+
+/** The wrapper's signed release map uses its final macOS build. */
+export function cloakBrowserVersionForPlatform(platform = process.platform): string {
+  return platform === "darwin" ? CLOAKBROWSER_MACOS_VERSION : CLOAKBROWSER_VERSION;
+}
+
 export const CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256 = "b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe";
 export const CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256 = "03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80";
 const WINDOWS_ARCHIVE_NAME = "cloakbrowser-windows-x64.zip";
@@ -101,7 +108,7 @@ async function runOfficialInstaller(cwd: string, cacheDir?: string): Promise<{ c
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("CLOAKBROWSER_")),
   );
-  env.CLOAKBROWSER_VERSION = CLOAKBROWSER_VERSION;
+  env.CLOAKBROWSER_VERSION = cloakBrowserVersionForPlatform();
   env.CLOAKBROWSER_AUTO_UPDATE = "false";
   if (cacheDir) env.CLOAKBROWSER_CACHE_DIR = cacheDir;
   const child = Bun.spawn(
