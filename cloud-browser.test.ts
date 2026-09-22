@@ -447,12 +447,10 @@ test("dashboard Cloud preflight distinguishes missing engine pins before native 
     const missing = await runProductionCloudPreflight(engine, "");
     try {
       expect(missing.status).toBe(500);
-      expect(missing.result).toMatchObject({ ok: false, error: expect.stringContaining("browser_launch/preflight") });
-      if (missing.result.ok) throw new Error("missing browser pin unexpectedly opened Cloud profile");
+      expect(missing.result.ok).toBe(false);
+      expect(missing.result.error).toContain("browser_launch/preflight");
       const guidance = new BrowserLaunchError("preflight", reason).guidance;
-      if (!guidance) throw new Error("test preflight guidance is missing");
-      expect(missing.result.error).toBeString();
-      expect(missing.result.error).toContain(guidance);
+      expect(missing.result.error).toContain(guidance!);
       expect(missing.boundaryCalls).toBe(0);
     } finally {
       missing.cleanup();
