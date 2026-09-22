@@ -54,6 +54,8 @@ async function launch(directory, browser = executablePath) {
     executablePath: resolve(browser),
     headless: !headed,
     viewport: null,
+    // Expose Gecko's native controls to System Events in these scratch profiles.
+    ...(nativeUi ? { firefoxUserPrefs: { "accessibility.force_disabled": -1 } } : {}),
     timeout: 120_000,
   });
   contexts.add(context);
