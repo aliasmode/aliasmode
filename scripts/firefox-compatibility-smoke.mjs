@@ -148,7 +148,11 @@ async function nativeAddressBarSearch(page, phase, duckDuckGoResponses) {
     keystroke "${query}"
     key code 36
 `)]);
-  await searchResult;
+  try {
+    await searchResult;
+  } finally {
+    await captureNativeFirefoxUi(page, `search-${phase}`);
+  }
   assert.ok(duckDuckGoResponses() > before, "DuckDuckGo navigation must use the synthetic response");
 }
 

@@ -140,6 +140,7 @@ jobs:
           "ALIASMODE_FIREFOX_BINARY_PATH=$($executables[0].FullName)" | Add-Content $env:GITHUB_ENV
           "ALIASMODE_FIREFOX_BINARY_SHA256=$((Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
       - name: Prove source setup supplies Cloud browser runtimes
+        id: source-setup
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -173,6 +174,20 @@ jobs:
           bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --headless --state-root $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root $proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Diagnose Windows source setup failure
+        if: failure() && steps.source-setup.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $proof = Join-Path $env:RUNNER_TEMP "source-setup-diagnostic-$([guid]::NewGuid().ToString('N'))"
+          bun --no-env-file -e '
+            import { setupSourceRuntime } from "./source-runtime.ts";
+            try { await setupSourceRuntime(process.argv[1]); }
+            catch (error) {
+              console.error(error instanceof Error ? error.message : "source setup failed");
+              process.exit(1);
+            }
+          ' $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: pwsh
