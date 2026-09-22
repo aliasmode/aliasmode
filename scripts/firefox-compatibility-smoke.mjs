@@ -90,18 +90,34 @@ async function syntheticDuckDuckGo(context) {
   return () => fulfilled;
 }
 
-function nativeBrowserScript(commands = "") {
-  return `set browserBundlePath to POSIX path of (POSIX file ${JSON.stringify(nativeAppBundle)} as alias)
-set browserExecutablePath to POSIX path of (POSIX file ${JSON.stringify(nativeExecutable)} as alias)
-tell application "System Events"
-  set browserProcesses to {}
-  repeat with browserProcess in every application process
-    try
-      set processPath to POSIX path of ((application file of browserProcess) as alias)
-      if processPath is browserBundlePath or processPath is browserExecutablePath then set end of browserProcesses to browserProcess
-    end try
-  end repeat
-  if (count of browserProcesses) is not 1 then error "expected exactly one supplied Firefox application process; matched " & (count of browserProcesses)
+function nativeBrowserLookupScript() {
+  return `ObjC.import('AppKit');
+ObjC.import('Foundation');
+const canonicalPath = (url) => url ? ObjC.unwrap(url.URLByResolvingSymlinksInPath.path) : null;
+const targetBundlePath = canonicalPath($.NSURL.fileURLWithPath($(${JSON.stringify(nativeAppBundle)})));
+const targetExecutablePath = canonicalPath($.NSURL.fileURLWithPath($(${JSON.stringify(nativeExecutable)})));
+const applications = $.NSWorkspace.sharedWorkspace.runningApplications;
+const matches = [];
+const aliasModeCandidates = [];
+for (let index = 0; index < applications.count; index += 1) {
+  const application = applications.objectAtIndex(index);
+  const bundlePath = canonicalPath(application.bundleURL);
+  const executablePath = canonicalPath(application.executableURL);
+  const name = application.localizedName ? ObjC.unwrap(application.localizedName) : "";
+  const pid = Number(application.processIdentifier);
+  if (bundlePath === targetBundlePath || executablePath === targetExecutablePath) {
+    matches.push({ pid, name, bundlePath, executablePath });
+  }
+  if (name.toLowerCase().includes("aliasmode")) aliasModeCandidates.push({ pid, name, bundlePath, executablePath });
+}
+if (matches.length !== 1) throw new Error("expected exactly one supplied Firefox application process; matched " + matches.length + "; AliasMode candidates " + JSON.stringify(aliasModeCandidates));
+console.log(matches[0].pid);`;
+}
+
+function nativeBrowserScript(pid, commands = "") {
+  return `tell application "System Events"
+  set browserProcesses to every application process whose unix id is ${pid}
+  if (count of browserProcesses) is not 1 then error "expected supplied Firefox process by PID; matched " & (count of browserProcesses)
   tell item 1 of browserProcesses
     set frontmost to true
     delay 0.2
@@ -110,26 +126,35 @@ end tell`;
 }
 
 async function focusNativeBrowser() {
-  await run("osascript", ["-e", nativeBrowserScript()]);
+  const { stdout } = await run("osascript", ["-l", "JavaScript", "-e", nativeBrowserLookupScript()]);
+  const pid = Number.parseInt(stdout, 10);
+  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("native Firefox application lookup returned an invalid PID");
+  await run("osascript", ["-e", nativeBrowserScript(pid)]);
+  return pid;
 }
 
 async function nativeAddressBarSearch(page, phase, duckDuckGoResponses) {
   if (!nativeUi) return;
   const query = `aliasmode firefox ${phase} search`;
   const before = duckDuckGoResponses();
-  await focusNativeBrowser();
+  const pid = await focusNativeBrowser();
   await page.bringToFront();
   const searchResult = page.waitForURL((url) => {
     const destination = new URL(url);
     return (destination.hostname === "duckduckgo.com" || destination.hostname.endsWith(".duckduckgo.com"))
       && destination.searchParams.get("q") === query;
   }, { timeout: 30_000 });
-  await run("osascript", ["-e", nativeBrowserScript(`    keystroke "l" using command down
+  await run("osascript", ["-e", nativeBrowserScript(pid, `    keystroke "l" using command down
     keystroke "${query}"
     key code 36
 `)]);
   await searchResult;
   assert.ok(duckDuckGoResponses() > before, "DuckDuckGo navigation must use the synthetic response");
+}
+
+async function captureRawNativeFirefoxUi(name) {
+  if (!nativeUi) return;
+  await run("screencapture", ["-x", join(root, `firefox-dock-tabs-${name}.png`)]);
 }
 
 async function captureNativeFirefoxUi(page, name) {
@@ -162,7 +187,8 @@ async function captureNativeTabEvidence(context, page) {
   assert.equal(context.pages().length, 6, "native several-tab evidence has six tabs");
   const lastPage = context.pages().at(-1);
   await captureNativeFirefoxUi(lastPage, "several");
-  await run("osascript", ["-e", nativeBrowserScript("    set size of window 1 to {720, 620}\n")]);
+  const pid = await focusNativeBrowser();
+  await run("osascript", ["-e", nativeBrowserScript(pid, "    set size of window 1 to {720, 620}\n")]);
   await captureNativeFirefoxUi(lastPage, "narrow");
 }
 
@@ -194,6 +220,7 @@ try {
   await databaseValue(page, { restored: true });
   if (nativeUi) {
     await closeOtherPages(context, page);
+    await captureRawNativeFirefoxUi("raw-baseline");
     await captureNativeFirefoxUi(page, "baseline");
   }
   await nativeAddressBarSearch(page, "fresh", duckDuckGoResponses);
