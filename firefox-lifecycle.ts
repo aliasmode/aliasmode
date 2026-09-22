@@ -7,6 +7,8 @@ export interface FirefoxProcessIdentity {
   userDataDir: string;
   ownerBinaryPath: string;
   generation: string;
+  /** Darwin-only exact bundled plugin-container executable. */
+  helperBinaryPath?: string;
 }
 
 function commandArgs(line: string): string[] {
@@ -57,7 +59,12 @@ export function matchFirefoxProcesses(
   if (snapshot.incomplete) return null;
   const browsers: number[] = [];
   const owners: number[] = [];
+  const helpers: typeof snapshot.records = [];
   const profilePath = (value: string) => windows ? win32.normalize(value).toLowerCase() : value;
+  const mainExecutable = executablePath(identity.binaryPath, windows);
+  const helperExecutable = identity.helperBinaryPath && !windows
+    ? executablePath(identity.helperBinaryPath, false)
+    : undefined;
   for (const record of snapshot.records) {
     const args = record.argv ?? commandArgs(record.commandLine ?? "");
     const holdsProfile = args.some((arg, index) => arg === "-profile"
@@ -68,13 +75,16 @@ export function matchFirefoxProcesses(
     if (!record.executablePath || record.executablePathExact === false) return null;
     const actual = executablePath(record.executablePath, windows);
     if (holdsProfile) {
-      if (actual !== executablePath(identity.binaryPath, windows)) return null;
-      browsers.push(record.pid);
+      if (actual === mainExecutable) browsers.push(record.pid);
+      else if (actual === helperExecutable) helpers.push(record);
+      else return null;
     }
     if (ownsWorker) {
       if (actual !== executablePath(identity.ownerBinaryPath, windows)) return null;
       owners.push(record.pid);
     }
   }
+  const primaryPids = new Set(browsers);
+  if (helpers.some((record) => record.parentPid === undefined || !primaryPids.has(record.parentPid))) return null;
   return { browsers, owners };
 }

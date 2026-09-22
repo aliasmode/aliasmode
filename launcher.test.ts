@@ -1534,14 +1534,15 @@ test("Darwin Firefox kernel argv requires the actual executable and exact profil
     generation: "generation-one",
   };
   const raw = [
-    `  101 /tmp/spoofed -profile ${identity.userDataDir}`,
-    `  102 /tmp/spoofed --aliasmode-firefox-owner=${identity.generation}`,
+    `  101 1 /tmp/spoofed -profile ${identity.userDataDir}`,
+    `  102 1 /tmp/spoofed --aliasmode-firefox-owner=${identity.generation}`,
   ].join("\n");
   const snapshot = parseDarwinFirefoxPsSnapshot(raw, (pid) => pid === 101
     ? { executablePath: identity.binaryPath, argv: [identity.binaryPath, "-profile", identity.userDataDir] }
     : { executablePath: identity.ownerBinaryPath, argv: [identity.ownerBinaryPath, "firefox-worker.mjs", `--aliasmode-firefox-owner=${identity.generation}`] });
 
   expect(snapshot.incomplete).toBe(false);
+  expect(snapshot.records[0]?.parentPid).toBe(1);
   expect(matchFirefoxProcesses(identity, snapshot)).toEqual({ browsers: [101], owners: [102] });
 
   const spoofed = parseDarwinFirefoxPsSnapshot(raw, (pid) => pid === 101
@@ -1558,9 +1559,9 @@ test("Darwin Firefox kernel argv rejects split and sibling profiles, bad generat
     generation: "generation-one",
   };
   const raw = [
-    "  201 firefox -profile candidate",
-    "  202 firefox -profile candidate",
-    "  203 bun --aliasmode-firefox-owner=candidate",
+    "  201 1 firefox -profile candidate",
+    "  202 1 firefox -profile candidate",
+    "  203 1 bun --aliasmode-firefox-owner=candidate",
   ].join("\n");
   const snapshot = parseDarwinFirefoxPsSnapshot(raw, (pid) => {
     if (pid === 201) return {

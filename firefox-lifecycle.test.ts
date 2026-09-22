@@ -21,6 +21,40 @@ test("Firefox ownership matches executable and exact profile argument without CD
   })).toEqual({ browsers: [10], owners: [13] });
 });
 
+test("Darwin Firefox accepts only a verified primary browser's exact helper", () => {
+  const darwin = {
+    ...identity,
+    helperBinaryPath: "/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container",
+  };
+  const primary = { pid: 40, executablePath: darwin.binaryPath, argv: [darwin.binaryPath, "-profile", darwin.userDataDir] };
+  const helper = {
+    pid: 41, parentPid: primary.pid, executablePath: darwin.helperBinaryPath,
+    argv: [darwin.helperBinaryPath, "-profile", darwin.userDataDir],
+  };
+  const owner = { pid: 42, executablePath: darwin.ownerBinaryPath, argv: [darwin.ownerBinaryPath, `--aliasmode-firefox-owner=${darwin.generation}`] };
+  expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [helper, primary, owner] }, false))
+    .toEqual({ browsers: [primary.pid], owners: [owner.pid] });
+});
+
+test("Darwin Firefox keeps unverified helpers ambiguous", () => {
+  const darwin = {
+    ...identity,
+    helperBinaryPath: "/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container",
+  };
+  const primary = { pid: 50, executablePath: darwin.binaryPath, argv: [darwin.binaryPath, "-profile", darwin.userDataDir] };
+  const helper = (overrides: Record<string, unknown> = {}) => ({
+    pid: 51, parentPid: primary.pid, executablePath: darwin.helperBinaryPath,
+    argv: [darwin.helperBinaryPath, "-profile", darwin.userDataDir], ...overrides,
+  });
+  expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [primary, helper({ parentPid: 99 })] }, false)).toBeNull();
+  expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [primary, helper({ executablePath: "/opt/other/plugin-container" })] }, false)).toBeNull();
+  expect(matchFirefoxProcesses(darwin, {
+    incomplete: false,
+    records: [primary, helper({ argv: [darwin.helperBinaryPath, "-profile", `${darwin.userDataDir} sibling`] })],
+  }, false)).toEqual({ browsers: [primary.pid], owners: [] });
+  expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [helper()] }, false)).toBeNull();
+});
+
 test("Firefox ownership matches quoted Windows paths and rejects prefix collisions", () => {
   const windows = { ...identity, binaryPath: "C:\\Alias Mode\\firefox.exe", userDataDir: "C:\\Profiles\\profile one", ownerBinaryPath: "C:\\Alias Mode\\node.exe" };
   expect(matchFirefoxProcesses(windows, {
