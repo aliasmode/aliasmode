@@ -388,6 +388,8 @@ async function runProductionCloudPreflight(
     store,
     binaryPath: binary,
     firefoxBinaryPath: binary,
+    expectedBinarySha256: TEST_BINARY_SHA256,
+    expectedFirefoxBinarySha256: TEST_BINARY_SHA256,
     ...(engine === "chromium" ? { expectedBinarySha256: pin } : { expectedFirefoxBinarySha256: pin }),
     dataRoot: join(root, "profiles"),
     hostPlatform: "darwin",
