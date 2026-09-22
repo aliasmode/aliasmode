@@ -141,7 +141,6 @@ jobs:
           "ALIASMODE_FIREFOX_BINARY_SHA256=$((Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
       - name: Prove source setup supplies Cloud browser runtimes
         id: source-setup
-        if: ${{ false }} # Prepublication checks use the verified build artifact above.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -334,7 +333,6 @@ jobs:
           printf 'Firefox native binary: %s\n' "$binary_info"
           printf 'Firefox version: %s\n' "$version"
       - name: Prove source setup supplies Cloud browser runtimes
-        if: ${{ false }} # Prepublication checks use the verified build artifacts below.
         shell: bash
         run: |
           set -euo pipefail
