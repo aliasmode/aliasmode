@@ -3943,6 +3943,14 @@ const darwinLibproc = process.platform === "darwin" ? (() => {
   try {
     return dlopen("/usr/lib/libproc.dylib", {
       proc_pidpath: { args: ["i32", "ptr", "u32"], returns: "i32" },
+    });
+  } catch {
+    return null;
+  }
+})() : null;
+const darwinLibSystem = process.platform === "darwin" ? (() => {
+  try {
+    return dlopen("/usr/lib/libSystem.B.dylib", {
       sysctlnametomib: { args: ["ptr", "ptr", "ptr"], returns: "i32" },
       sysctl: { args: ["ptr", "u32", "ptr", "ptr", "ptr", "u64"], returns: "i32" },
     });
@@ -3972,20 +3980,20 @@ export function parseDarwinKernelArgv(bytes: Uint8Array): string[] | null {
 }
 
 function readDarwinKernelArgv(pid: number): string[] | null {
-  if (!darwinLibproc || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (!darwinLibSystem || !Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     const mib = new Int32Array(3);
     const mibLength = new BigUint64Array([BigInt(mib.length - 1)]);
-    if (darwinLibproc.symbols.sysctlnametomib(DARWIN_PROCARGS2_NAME, mib, mibLength) !== 0
+    if (darwinLibSystem.symbols.sysctlnametomib(DARWIN_PROCARGS2_NAME, mib, mibLength) !== 0
       || mibLength[0] !== 2n) return null;
     mib[2] = pid;
     const requiredLength = new BigUint64Array(1);
-    if (darwinLibproc.symbols.sysctl(mib, 3, null, requiredLength, null, 0n) !== 0) return null;
+    if (darwinLibSystem.symbols.sysctl(mib, 3, null, requiredLength, null, 0n) !== 0) return null;
     const required = requiredLength[0] ?? 0n;
     if (required < 5n || required > BigInt(Number.MAX_SAFE_INTEGER)) return null;
     const bytes = new Uint8Array(Number(required));
     const receivedLength = new BigUint64Array([required]);
-    if (darwinLibproc.symbols.sysctl(mib, 3, bytes, receivedLength, null, 0n) !== 0) return null;
+    if (darwinLibSystem.symbols.sysctl(mib, 3, bytes, receivedLength, null, 0n) !== 0) return null;
     const received = receivedLength[0] ?? 0n;
     if (received < 5n || received > BigInt(bytes.byteLength)) return null;
     return parseDarwinKernelArgv(bytes.subarray(0, Number(received)));
@@ -3994,17 +4002,22 @@ function readDarwinKernelArgv(pid: number): string[] | null {
   }
 }
 
+export function parseDarwinKernelExecutablePath(path: Uint8Array, length: number): string | null {
+  if (!Number.isSafeInteger(length) || length <= 0 || length >= path.byteLength || path[length] !== 0) return null;
+  return DARWIN_TEXT_DECODER.decode(path.subarray(0, length));
+}
+
 function readDarwinFirefoxKernelRecord(pid: number): DarwinFirefoxKernelRecord | null {
-  if (!darwinLibproc || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (!darwinLibproc || !darwinLibSystem || !Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     const path = new Uint8Array(DARWIN_PROC_PIDPATH_SIZE);
     const length = darwinLibproc.symbols.proc_pidpath(pid, path, path.byteLength);
     if (!Number.isSafeInteger(length) || length <= 1 || length >= path.byteLength) return null;
-    const terminator = path.indexOf(0);
-    if (terminator <= 0 || terminator >= length) return null;
+    const executablePath = parseDarwinKernelExecutablePath(path, length);
+    if (!executablePath) return null;
     const argv = readDarwinKernelArgv(pid);
     if (!argv) return null;
-    return { executablePath: DARWIN_TEXT_DECODER.decode(path.subarray(0, terminator)), argv };
+    return { executablePath, argv };
   } catch {
     return null;
   }

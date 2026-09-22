@@ -22,6 +22,7 @@ import {
   matchProfileDirHolderPids,
   parseTasklistImageNames,
   parseDarwinFirefoxPsSnapshot,
+  parseDarwinKernelExecutablePath,
   parseDarwinKernelArgv,
   parseDarwinPsSnapshot,
   parseLinuxProcStat,
@@ -1589,6 +1590,10 @@ test("Darwin Firefox kernel argv rejects split and sibling profiles, bad generat
   expect(parseDarwinKernelArgv(valid)).toEqual([
     "firefox", "-profile", "/Users/test/Alias Profiles/profile one",
   ]);
+
+  const executable = Uint8Array.of(47, 98, 105, 110, 0);
+  expect(parseDarwinKernelExecutablePath(executable, 4)).toBe("/bin");
+  expect(parseDarwinKernelExecutablePath(executable, 3)).toBeNull();
 });
 
 test("bounded process snapshot reader kills a hung scanner and returns unknown", async () => {
