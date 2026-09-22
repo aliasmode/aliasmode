@@ -65,7 +65,6 @@ permissions:
 
 jobs:
   windows:
-    if: ${{ false }} # Re-enable after the new Windows artifact and public release are ready.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +85,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/35581784648 | ConvertFrom-Json
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/35732270026 | ConvertFrom-Json
           if (
             $run.name -cne "Build and Release" -or
             $run.path -cne ".github/workflows/build.yml" -or
@@ -96,7 +95,7 @@ jobs:
             $run.conclusion -cne "success" -or
             $run.event -cne "push" -or
             $run.head_branch -cne "firefox-engine" -or
-            $run.head_sha -cne "0897f6e5404bc74646dd6e457d42ac6f0e19dcd4"
+            $run.head_sha -cne "b4256977d3968662060e371f03ef120b0626f52a"
           ) {
             throw "AliasMode Firefox source build provenance is invalid"
           }
@@ -106,7 +105,7 @@ jobs:
           path: artifacts/firefox
           github-token: ${{ github.token }}
           repository: aliasmode/aliasmode-firefox
-          run-id: "35581784648"
+          run-id: "35732270026"
       - name: Extract verified owned browser
         shell: pwsh
         run: |
@@ -142,6 +141,7 @@ jobs:
           "ALIASMODE_FIREFOX_BINARY_SHA256=$((Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
       - name: Prove source setup supplies Cloud browser runtimes
         id: source-setup
+        if: ${{ false }} # Prepublication checks use the verified build artifact above.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"

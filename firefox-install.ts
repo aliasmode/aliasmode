@@ -28,8 +28,8 @@ export const FIREFOX_RUNTIME_BUILDS: readonly FirefoxRuntimeBuild[] = [
   },
   {
     platform: "win32", arch: "x64", executablePath: "aliasmode.exe",
-    archiveSha256: "af5d8ec61f6805048564932ef49837353993df88e7b62db0dd67011904cfc1c7",
-    executableSha256: "6685cbdcb0da2a129a5e25bd91e4cd3eb79ad3b557d45841537e04cf273deeaa",
+    archiveSha256: "c00c1dafdfe4196600ac7c3e0d659892552f6c001d1113bd599d48c97c36d8ea",
+    executableSha256: "92c568ddabab8dfc9beb0338394c084da22faa78f2c0d688011b698c90db7b87",
   },
 ];
 
