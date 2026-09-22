@@ -116,7 +116,7 @@ for (let index = 0; index < applications.count; index += 1) {
   if (name.toLowerCase().includes("aliasmode")) aliasModeCandidates.push({ pid, name, bundlePath, executablePath });
 }
 if (matches.length !== 1) throw new Error("expected exactly one supplied Firefox application process; matched " + matches.length + "; AliasMode candidates " + JSON.stringify(aliasModeCandidates));
-matches[0].pid;`;
+JSON.stringify(matches[0]);`;
 }
 
 function nativeBrowserScript(pid, commands = "") {
@@ -132,8 +132,10 @@ end tell`;
 
 async function focusNativeBrowser() {
   const { stdout } = await run("osascript", ["-l", "JavaScript", "-e", nativeBrowserLookupScript()]);
-  const pid = Number.parseInt(stdout, 10);
+  const application = JSON.parse(stdout);
+  const pid = application.pid;
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("native Firefox application lookup returned an invalid PID");
+  assert.equal(application.name, "AliasMode Firefox", "native Dock application uses the Firefox-specific name");
   await run("osascript", ["-e", nativeBrowserScript(pid)]);
   return pid;
 }
@@ -181,11 +183,49 @@ async function assertOneNativeWindow() {
   return pid;
 }
 
+async function nativeTabButton(pid, label) {
+  const { stdout } = await run("osascript", ["-e", nativeBrowserScript(pid, `    set targetButtons to {}
+    set observedButtons to ""
+    repeat with candidate in (entire contents of window 1)
+      if role of candidate is "AXButton" then
+        set buttonName to ""
+        set buttonDescription to ""
+        set buttonHelp to ""
+        try
+          set buttonName to name of candidate as text
+        end try
+        try
+          set buttonDescription to description of candidate as text
+        end try
+        try
+          set buttonHelp to value of attribute "AXHelp" of candidate as text
+        end try
+        set observedButtons to observedButtons & buttonName & " / " & buttonDescription & " / " & buttonHelp & linefeed
+        set buttonSize to size of candidate
+        if enabled of candidate and (item 1 of buttonSize) > 0 and (item 2 of buttonSize) > 0 then
+          if buttonName is ${JSON.stringify(label)} or buttonDescription is ${JSON.stringify(label)} or buttonHelp is ${JSON.stringify(label)} then
+            set end of targetButtons to contents of candidate
+          end if
+        end if
+      end if
+    end repeat
+    if (count of targetButtons) is 0 then error "native tab button missing; observed buttons: " & observedButtons
+    if ${JSON.stringify(label)} is "New Tab" and (count of targetButtons) is not 1 then error "native new-tab button is ambiguous"
+    set targetButton to item 1 of targetButtons
+    repeat with candidate in targetButtons
+      if (item 1 of position of candidate) > (item 1 of position of targetButton) then set targetButton to contents of candidate
+    end repeat
+    perform action "AXPress" of targetButton
+    return observedButtons
+`)]);
+  await writeFile(join(root, `firefox-native-buttons-${label === "New Tab" ? "new" : "close"}.txt`), stdout);
+}
+
 async function nativeTab(context, title) {
   const pid = await assertOneNativeWindow();
   const [page] = await Promise.all([
-    context.waitForEvent("page"),
-    run("osascript", ["-e", nativeBrowserScript(pid, "    keystroke \"t\" using command down\n")]),
+    context.waitForEvent("page", { timeout: 30_000 }),
+    nativeTabButton(pid, "New Tab"),
   ]);
   await fixturePage(page, title);
   await assertOneNativeWindow();
@@ -208,6 +248,14 @@ async function captureNativeTabEvidence(context, page) {
   const second = await nativeTab(context, "Tab2");
   assert.equal(context.pages().length, 2, "native two-tab evidence has two tabs");
   await captureNativeFirefoxUi(second, "two");
+  const closePid = await assertOneNativeWindow();
+  await Promise.all([
+    second.waitForEvent("close", { timeout: 30_000 }),
+    nativeTabButton(closePid, "Close tab"),
+  ]);
+  assert.equal(context.pages().length, 1, "native close-tab button closes the selected second tab");
+  await captureNativeFirefoxUi(page, "after-close");
+  await nativeTab(context, "Tab2");
   for (let index = 3; index <= 6; index += 1) {
     await nativeTab(context, `Tab${index}`);
   }
@@ -342,6 +390,8 @@ try {
     indexedDbSnapshot: true,
     nativeAddressBarDuckDuckGo: nativeUi,
     nativeTabAndDockEvidence: nativeUi,
+    nativeNewAndCloseTabButtons: nativeUi,
+    nativeFirefoxDockName: nativeUi,
     previousRuntimeUpgrade: Boolean(previousBrowser),
   };
   await writeFile(join(root, "result.json"), `${JSON.stringify(result, null, 2)}\n`);

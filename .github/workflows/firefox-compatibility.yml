@@ -85,7 +85,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/35732270026 | ConvertFrom-Json
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/35771950376 | ConvertFrom-Json
           if (
             $run.name -cne "Build and Release" -or
             $run.path -cne ".github/workflows/build.yml" -or
@@ -95,7 +95,7 @@ jobs:
             $run.conclusion -cne "success" -or
             $run.event -cne "push" -or
             $run.head_branch -cne "firefox-engine" -or
-            $run.head_sha -cne "b4256977d3968662060e371f03ef120b0626f52a"
+            $run.head_sha -cne "14a5bb27c37e0a5a1fcad753624d02dbfbe82a98"
           ) {
             throw "AliasMode Firefox source build provenance is invalid"
           }
@@ -105,7 +105,7 @@ jobs:
           path: artifacts/firefox
           github-token: ${{ github.token }}
           repository: aliasmode/aliasmode-firefox
-          run-id: "35732270026"
+          run-id: "35771950376"
       - name: Extract verified owned browser
         shell: pwsh
         run: |
@@ -152,7 +152,14 @@ jobs:
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
           }
           $proof = Join-Path $env:RUNNER_TEMP "cloud-launcher-smoke-$([guid]::NewGuid().ToString('N'))"
-          bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" setup --state-root $proof
+          # Prepublication only: use the verified candidate archive until its public release exists.
+          bun --no-env-file -e '
+            import { setupSourceRuntime } from "./source-runtime.ts";
+            import { installFirefox } from "./firefox-install.ts";
+            await setupSourceRuntime(process.argv[1], {
+              installFirefox: (options) => installFirefox({ ...options, archive: process.argv[2] }),
+            });
+          ' $proof (Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\artifacts\firefox" -File -Filter '*.zip').FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun --no-env-file -e '
             import { existsSync, realpathSync, readFileSync } from "node:fs";
@@ -183,12 +190,16 @@ jobs:
           $proof = Join-Path $env:RUNNER_TEMP "source-setup-diagnostic-$([guid]::NewGuid().ToString('N'))"
           bun --no-env-file -e '
             import { setupSourceRuntime } from "./source-runtime.ts";
-            try { await setupSourceRuntime(process.argv[1]); }
-            catch (error) {
+            import { installFirefox } from "./firefox-install.ts";
+            try {
+              await setupSourceRuntime(process.argv[1], {
+                installFirefox: (options) => installFirefox({ ...options, archive: process.argv[2] }),
+              });
+            } catch (error) {
               console.error(error instanceof Error ? error.message : "source setup failed");
               process.exit(1);
             }
-          ' $proof
+          ' $proof (Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\artifacts\firefox" -File -Filter '*.zip').FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: pwsh
@@ -265,7 +276,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          run="$(gh api repos/aliasmode/aliasmode-firefox/actions/runs/35732269979)"
+          run="$(gh api repos/aliasmode/aliasmode-firefox/actions/runs/35783057259)"
           node -e '
             const run = JSON.parse(process.argv[1]);
             const expected = {
@@ -275,7 +286,7 @@ jobs:
               conclusion: "success",
               event: "push",
               head_branch: "firefox-runtime-macos-linux",
-              head_sha: "b4256977d3968662060e371f03ef120b0626f52a",
+              head_sha: "1b688deba7006bf3244c8ee2989ffa728d6883a5",
             };
             for (const [key, value] of Object.entries(expected)) {
               if (run[key] !== value) throw new Error(`invalid source build ${key}`);
@@ -290,7 +301,7 @@ jobs:
           path: artifacts/firefox
           github-token: ${{ github.token }}
           repository: aliasmode/aliasmode-firefox
-          run-id: "35732269979"
+          run-id: "35783057259"
       - name: Install verified owned browser
         shell: bash
         run: |
@@ -339,7 +350,14 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN CLOAKBROWSER_BINARY_PATH CLOAKBROWSER_BINARY_SHA256 ALIASMODE_FIREFOX_BINARY_PATH ALIASMODE_FIREFOX_BINARY_SHA256
           proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
-          bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" setup --state-root "$proof"
+          # Prepublication only: use the verified candidate archive until its public release exists.
+          bun --no-env-file -e '
+            import { setupSourceRuntime } from "./source-runtime.ts";
+            import { installFirefox } from "./firefox-install.ts";
+            await setupSourceRuntime(process.argv[1], {
+              installFirefox: (options) => installFirefox({ ...options, archive: process.argv[2] }),
+            });
+          ' "$proof" "$GITHUB_WORKSPACE"/artifacts/firefox/*.zip
           bun --no-env-file -e '
             import { existsSync, realpathSync, readFileSync } from "node:fs";
             import { applySourceRuntime } from "./source-runtime.ts";
@@ -371,11 +389,11 @@ jobs:
           set -euo pipefail
           archive="$RUNNER_TEMP/previous-firefox.zip"
           destination="$RUNNER_TEMP/previous-firefox"
-          curl --fail --location --silent --show-error 'https://github.com/aliasmode/aliasmode-firefox/releases/download/v152.0.4-beta.30/aliasmode-152.0.4-beta.30-mac.arm64.zip' --output "$archive"
-          printf '%s  %s\n' f7fb8b0e3436544ca1efaeed216687a4a99e23ccd621a9bc9266bd7cebc6738f "$archive" | shasum -a 256 --check
+          curl --fail --location --silent --show-error 'https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-152.0.4-beta.30-r1/aliasmode-152.0.4-beta.30-mac.arm64.zip' --output "$archive"
+          printf '%s  %s\n' fc2cf78d13f91e65772b99f3c059dd4ddc6f951c7b9c5bd3c4cc5bfbeb8db2ca "$archive" | shasum -a 256 --check
           ditto -x -k "$archive" "$destination"
           browser="$destination/AliasMode.app/Contents/MacOS/aliasmode"
-          printf '%s  %s\n' 106e198995286cee91c1d637924f636445fd95d59b372ec8213e48756acd6f2f "$browser" | shasum -a 256 --check
+          printf '%s  %s\n' 5180e6170bb467755a2816f24586a9a5f6ab02a3336e8e0b2df9a58185b2e61d "$browser" | shasum -a 256 --check
           printf 'ALIASMODE_PREVIOUS_FIREFOX_BINARY_PATH=%s\n' "$browser" >> "$GITHUB_ENV"
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: bash
@@ -392,7 +410,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: firefox-macos-native-ui
-          path: ${{ runner.temp }}/firefox-headed-proof/firefox-dock-tabs-*.png
+          path: |
+            ${{ runner.temp }}/firefox-headed-proof/firefox-dock-tabs-*.png
+            ${{ runner.temp }}/firefox-headed-proof/firefox-native-buttons-*.txt
           if-no-files-found: warn
       - name: Prove detached Firefox owner lifecycle
         shell: bash
