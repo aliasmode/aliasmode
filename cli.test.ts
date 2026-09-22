@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  cloudLauncherSmokeEngine,
   cloudRuntimeConfiguration,
   createCloudCrossDeviceFixtureHandler,
   createCloudRestoreFixtureHandler,
@@ -225,6 +226,14 @@ test("compiled sidecar smoke restores before navigation and capture", async () =
     "read:http://127.0.0.1:9222",
     "alive:http://127.0.0.1:9222",
   ]);
+});
+
+test("Cloud launcher smoke selects only supported browser engines", () => {
+  expect(cloudLauncherSmokeEngine([])).toBe("chromium");
+  expect(cloudLauncherSmokeEngine(["--engine", "chromium"])).toBe("chromium");
+  expect(cloudLauncherSmokeEngine(["--engine", "firefox"])).toBe("firefox");
+  expect(() => cloudLauncherSmokeEngine(["--engine"])).toThrow("chromium or firefox");
+  expect(() => cloudLauncherSmokeEngine(["--engine", "webkit"])).toThrow("chromium or firefox");
 });
 
 test("Cloud launcher smoke requires fresh and repeated cached opens to stay alive and close cleanly", async () => {

@@ -62,7 +62,8 @@ import {
 import { McpTunnelRuntime } from "./mcp-tunnel.ts";
 import { PendingSyncQueue, PendingSyncRuntime } from "./pending-sync.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
-import type { Profile } from "./types.ts";
+import { createFirefoxProfileConfig } from "./firefox-config.ts";
+import type { Profile, ProfileEngine } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
 import { runDiagnostics } from "./diagnose.ts";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -2337,12 +2338,21 @@ export async function runCloudCrossDeviceAcceptance(
   return finalState;
 }
 
+export function cloudLauncherSmokeEngine(rest: string[]): ProfileEngine {
+  const engine = flag(rest, "engine") ?? (has(rest, "engine") ? "" : "chromium");
+  if (engine !== "chromium" && engine !== "firefox") {
+    throw new Error("Cloud launcher smoke engine must be chromium or firefox");
+  }
+  return engine;
+}
+
 async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise<void> {
   if (has(rest, "windows-window-acceptance")) {
     await runWindowsWindowAcceptance(paths, rest);
     return;
   }
   const profileId = "aliasmode-cloud-smoke";
+  const engine = cloudLauncherSmokeEngine(rest);
   const canaryWorkerTimeoutMs = has(rest, "unsafe-disable-identity-gates")
     ? UNSAFE_CANARY_TIMEOUT_MS
     : undefined;
@@ -2369,6 +2379,10 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
     1,
     smokeProxy?.profileProxy ?? null,
   );
+  if (engine === "firefox") {
+    profile.engine = engine;
+    profile.firefox = createFirefoxProfileConfig(profile.screenWidth, profile.screenHeight);
+  }
   let payload = encodePortableProfile(profile, JSON.stringify({
     cookies: [{
       name: "auth_token",

@@ -280,6 +280,15 @@ jobs:
           [[ "$version" =~ 152\.0\.4 ]]
           printf 'Firefox native binary: %s\n' "$binary_info"
           printf 'Firefox version: %s\n' "$version"
+      - name: Prove Cloud coordinator lifecycle for both engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
+          cd "$proof"
+          bun "$GITHUB_WORKSPACE/cli.ts" install-browser --state-root "$proof/chromium-state"
+          bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof/chromium-state"
+          bun "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof/firefox-state"
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: bash
         run: |
