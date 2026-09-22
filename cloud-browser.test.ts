@@ -12,6 +12,7 @@ import { PlaywrightWorkerError } from "./playwright-runtime.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { sessionBundleSignature, SessionRestoreError } from "./session.ts";
 import { ProfileStore } from "./store.ts";
+import { handleUiRequest } from "./ui.ts";
 
 function payload(): PortableProfileV1 {
   return {
@@ -369,7 +370,7 @@ async function runProductionCloudPreflight(
   pin: string,
   profileId = "profile1",
   root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-production-launch-")),
-): Promise<{ result: Awaited<ReturnType<CloudBrowserCoordinator["open"]>>; boundaryCalls: number; cleanup(removeRoot?: boolean): void }> {
+): Promise<{ result: Awaited<ReturnType<CloudBrowserCoordinator["open"]>>; status: number; boundaryCalls: number; cleanup(removeRoot?: boolean): void }> {
   const binary = join(root, "approved-browser");
   writeFileSync(binary, TEST_BINARY);
   const store = new ProfileStore(":memory:");
@@ -417,9 +418,18 @@ async function runProductionCloudPreflight(
     readSession: async () => JSON.stringify({ cookies: [] }),
     applySession: async () => {},
   });
-  const result = await coordinator.open(profileId);
+  const response = await handleUiRequest(
+    new Request(`http://x/ui/api/profiles/${profileId}/open`, { method: "POST" }),
+    launcher,
+    store,
+    null,
+    { cloudBrowser: coordinator },
+  );
+  if (!response) throw new Error("dashboard Cloud open route did not respond");
+  const result = await response.json() as Awaited<ReturnType<CloudBrowserCoordinator["open"]>>;
   return {
     result,
+    status: response.status,
     boundaryCalls,
     cleanup(removeRoot = true) {
       queue.close();
@@ -429,16 +439,20 @@ async function runProductionCloudPreflight(
   };
 }
 
-test("real Cloud preflight distinguishes missing engine pins before native boundaries", async () => {
+test("dashboard Cloud preflight distinguishes missing engine pins before native boundaries", async () => {
   for (const [engine, reason] of [
     ["chromium", "chromium_setup"],
     ["firefox", "firefox_setup"],
   ] as const) {
     const missing = await runProductionCloudPreflight(engine, "");
     try {
+      expect(missing.status).toBe(500);
       expect(missing.result).toMatchObject({ ok: false, error: expect.stringContaining("browser_launch/preflight") });
       if (missing.result.ok) throw new Error("missing browser pin unexpectedly opened Cloud profile");
-      expect(missing.result.error).toContain(new BrowserLaunchError("preflight", reason).guidance);
+      const guidance = new BrowserLaunchError("preflight", reason).guidance;
+      if (!guidance) throw new Error("test preflight guidance is missing");
+      expect(missing.result.error).toBeString();
+      expect(missing.result.error).toContain(guidance);
       expect(missing.boundaryCalls).toBe(0);
     } finally {
       missing.cleanup();
@@ -446,8 +460,9 @@ test("real Cloud preflight distinguishes missing engine pins before native bound
 
     const approved = await runProductionCloudPreflight(engine, TEST_BINARY_SHA256);
     try {
+      expect(approved.status).toBe(500);
       expect(approved.result).toMatchObject({ ok: false, error: expect.stringContaining("browser_launch/process_spawn") });
-      expect(approved.boundaryCalls).toBe(1);
+      expect(approved.boundaryCalls).toBe(engine === "chromium" ? 2 : 1);
     } finally {
       approved.cleanup();
     }
@@ -461,8 +476,9 @@ test("legacy Chromium and native Firefox Cloud profiles preflight independently"
       "chromium", TEST_BINARY_SHA256, "legacy-chromium", root,
     );
     try {
+      expect(legacyChromium.status).toBe(500);
       expect(legacyChromium.result).toMatchObject({ error: expect.stringContaining("browser_launch/process_spawn") });
-      expect(legacyChromium.boundaryCalls).toBe(1);
+      expect(legacyChromium.boundaryCalls).toBe(2);
     } finally {
       legacyChromium.cleanup(false);
     }
@@ -470,6 +486,7 @@ test("legacy Chromium and native Firefox Cloud profiles preflight independently"
       "firefox", TEST_BINARY_SHA256, "native-firefox", root,
     );
     try {
+      expect(nativeFirefox.status).toBe(500);
       expect(nativeFirefox.result).toMatchObject({ error: expect.stringContaining("browser_launch/process_spawn") });
       expect(nativeFirefox.boundaryCalls).toBe(1);
     } finally {

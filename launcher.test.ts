@@ -1096,7 +1096,10 @@ test("a restart retires a proxied survivor launched with the old WebRTC persona 
   });
 
   const launcherB = newLauncher(store, f, []);
-  await expect(launcherB.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcherB.start("k1d0cd11")).rejects.toMatchObject({
+    failure: "preflight",
+    preflightReason: "stored_identity",
+  });
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });
@@ -2064,9 +2067,15 @@ test("host policy still blocks mobile and unrecognized personas before spawn", a
   // coherently emulate a mobile persona, and an imported UA must name a
   // recognized desktop platform.
   store.upsertProfile({ ...base, proxy: null, ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/146.0 Mobile Safari/537.36" });
-  await expect(make("win32", "x64").start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(make("win32", "x64").start("k1d0cd11")).rejects.toMatchObject({
+    failure: "preflight",
+    preflightReason: "persona_mobile",
+  });
   store.upsertProfile({ ...base, proxy: null, ua: "not-a-real-user-agent" });
-  await expect(make("darwin", "arm64").start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(make("darwin", "arm64").start("k1d0cd11")).rejects.toMatchObject({
+    failure: "preflight",
+    preflightReason: "persona_unsupported",
+  });
   expect(spawned).toEqual([]);
   // The public error stays closed, but the local log names the real reason.
   expect(logs.some((m) => m.includes("rejected before launch: unsupported mobile persona"))).toBe(true);
@@ -2088,7 +2097,10 @@ test("a custom spawner does not implicitly disable host policy", async () => {
     hostArch: "x64",
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toMatchObject({
+    failure: "preflight",
+    preflightReason: "persona_mobile",
+  });
   expect(spawns).toBe(0);
   store.close();
 });
@@ -2255,7 +2267,10 @@ test("authenticated HTTPS is rejected before spawn", async () => {
     spawn: () => { spawns++; return { pid: 1, kill() {} }; },
   });
 
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toMatchObject({
+    failure: "preflight",
+    preflightReason: "proxy_https_auth",
+  });
   expect(spawns).toBe(0);
   store.close();
 });
@@ -2274,7 +2289,10 @@ test("a quarantined legacy proxy is visible but cannot launch direct", async () 
   });
 
   expect(store.getProfile("k1d0cd11")!.proxyError).toContain("unsupported proxy type");
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toMatchObject({
+    failure: "preflight",
+    preflightReason: "proxy_invalid",
+  });
   expect(spawned).toBe(false);
   store.close();
 });
