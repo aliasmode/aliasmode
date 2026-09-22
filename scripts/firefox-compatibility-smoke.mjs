@@ -188,6 +188,7 @@ async function assertOneNativeWindow() {
 async function nativeTabButton(pid, label) {
   const { stdout } = await run("osascript", ["-e", nativeBrowserScript(pid, `    set targetButtons to {}
     set observedButtons to ""
+    set navigationPosition to missing value
     set browserElements to entire contents of window 1
     repeat with candidate in browserElements
       if role of candidate is "AXButton" then
@@ -204,6 +205,7 @@ async function nativeTabButton(pid, label) {
           set buttonHelp to value of attribute "AXHelp" of candidate as text
         end try
         set observedButtons to observedButtons & buttonName & " / " & buttonDescription & " / " & buttonHelp & linefeed
+        if buttonName is "Back" or buttonDescription is "Back" then set navigationPosition to position of candidate
         set buttonSize to size of candidate
         if enabled of candidate and (item 1 of buttonSize) > 0 and (item 2 of buttonSize) > 0 then
           if buttonName is ${JSON.stringify(label)} or buttonDescription is ${JSON.stringify(label)} or buttonHelp is ${JSON.stringify(label)} then
@@ -223,6 +225,10 @@ async function nativeTabButton(pid, label) {
         set targetPosition to candidatePosition
       end if
     end repeat
+    if ${JSON.stringify(label)} is "New Tab" then
+      if navigationPosition is missing value then error "native navigation toolbar was not found"
+      if (item 2 of targetPosition) >= (item 2 of navigationPosition) then error "new-tab button must be beside the tabs, above the navigation toolbar"
+    end if
     set observedButtons to observedButtons & "Selected ${label} at " & (item 1 of targetPosition) & ", " & (item 2 of targetPosition) & linefeed
     perform action "AXPress" of targetButton
     return observedButtons
