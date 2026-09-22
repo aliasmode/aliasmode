@@ -364,6 +364,8 @@ jobs:
               if (argc < 1 || count !== argc) { fail(-1, receivedLength, "ParseError", 0); break; }
               report({ argc, count });
               } while (false);
+            } catch (error) {
+              fail(-1, 0, error instanceof Error ? error.name : typeof error, -1);
             } finally {
               try { child.kill(); } catch {}
               await child.exited;
