@@ -153,6 +153,23 @@ jobs:
           $proof = Join-Path $env:RUNNER_TEMP "cloud-launcher-smoke-$([guid]::NewGuid().ToString('N'))"
           bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" setup --state-root $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun --no-env-file -e '
+            import { existsSync, realpathSync, readFileSync } from "node:fs";
+            import { applySourceRuntime } from "./source-runtime.ts";
+            const root = process.argv[1];
+            const runtime = JSON.parse(readFileSync(`${root}/browser-runtime.json`, "utf8"));
+            applySourceRuntime(root);
+            const normalize = (path) => {
+              const resolved = realpathSync(path).replace(/^\\\\\?\\/, "");
+              return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+            };
+            const selected = Bun.which("node");
+            if (!selected || normalize(selected) !== normalize(runtime.node)) throw new Error("source setup did not select its managed Node runtime");
+            for (const executable of [runtime.node, runtime.chromium.path, runtime.firefox.path]) {
+              if (!existsSync(executable)) throw new Error("source setup runtime executable is missing");
+            }
+          ' $proof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --headless --state-root $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root $proof
@@ -307,6 +324,22 @@ jobs:
           unset GH_TOKEN GITHUB_TOKEN CLOAKBROWSER_BINARY_PATH CLOAKBROWSER_BINARY_SHA256 ALIASMODE_FIREFOX_BINARY_PATH ALIASMODE_FIREFOX_BINARY_SHA256
           proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
           bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" setup --state-root "$proof"
+          bun --no-env-file -e '
+            import { existsSync, realpathSync, readFileSync } from "node:fs";
+            import { applySourceRuntime } from "./source-runtime.ts";
+            const root = process.argv[1];
+            const runtime = JSON.parse(readFileSync(`${root}/browser-runtime.json`, "utf8"));
+            applySourceRuntime(root);
+            const normalize = (path) => {
+              const resolved = realpathSync(path).replace(/^\\\\\?\\/, "");
+              return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+            };
+            const selected = Bun.which("node");
+            if (!selected || normalize(selected) !== normalize(runtime.node)) throw new Error("source setup did not select its managed Node runtime");
+            for (const executable of [runtime.node, runtime.chromium.path, runtime.firefox.path]) {
+              if (!existsSync(executable)) throw new Error("source setup runtime executable is missing");
+            }
+          ' "$proof"
           # GitHub's Ubuntu runner blocks Chromium's user namespaces.
           if [[ "${{ matrix.platform }}" == "linux" ]]; then
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --no-sandbox --state-root "$proof"
