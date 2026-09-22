@@ -1873,7 +1873,7 @@ export class Launcher {
     const runtime = resolvePlaywrightRuntime();
     const ownerBinaryPath = this.unsafeDisableIdentityGates
       ? runtime.nodeExecutable
-      : realpathSync(Bun.which(runtime.nodeExecutable) ?? runtime.nodeExecutable);
+      : realpathSync(Bun.which(runtime.nodeExecutable, { PATH: process.env.PATH }) ?? runtime.nodeExecutable);
     const reservation = await this.firefoxRuntime.reserve();
     const owner: FirefoxOwner = { ...reservation, pid: 0, browserPid: 0 };
     const port = Number(new URL(owner.endpoint).port);

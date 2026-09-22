@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { Launcher, BrowserLaunchError, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
 import { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
@@ -28,13 +29,15 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   let launches = 0;
   let receivedConfig: unknown;
   let startupPreferences = "";
+  let browserExecutable = "/fake/firefox.exe";
+  let ownerExecutable = "node";
   const navigated: string[][] = [];
   const killed: number[] = [];
   const snapshots = (): HostProcessSnapshot => ({
     incomplete: false,
     records: [
-      ...(browserAlive ? [{ pid: 202, parentPid: 201, processGroupId: 201, startTime: "202", executablePath: "/fake/firefox.exe", argv: ["/fake/firefox.exe", "-profile", join(root, profile.id), "-juggler-pipe"] }] : []),
-      ...(ownerAlive ? [{ pid: 201, parentPid: 1, processGroupId: 201, startTime: "201", executablePath: "node", argv: ["node", "firefox-worker.mjs", `--aliasmode-firefox-owner=${reservation.generation}`] }] : []),
+      ...(browserAlive ? [{ pid: 202, parentPid: 201, processGroupId: 201, startTime: "202", executablePath: browserExecutable, argv: [browserExecutable, "-profile", join(root, profile.id), "-juggler-pipe"] }] : []),
+      ...(ownerAlive ? [{ pid: 201, parentPid: 1, processGroupId: 201, startTime: "201", executablePath: ownerExecutable, argv: [ownerExecutable, "firefox-worker.mjs", `--aliasmode-firefox-owner=${reservation.generation}`] }] : []),
     ],
   });
   const options: LauncherOptions = {
@@ -76,6 +79,10 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
     store, profile, options, killed, launcher: new Launcher(options),
     launches: () => launches, config: () => receivedConfig,
     startupPreferences: () => startupPreferences, navigated,
+    setProcessPaths: (browser: string, owner: string) => {
+      browserExecutable = browser;
+      ownerExecutable = owner;
+    },
     crashOwner: () => { ownerAlive = false; reachable = false; },
   };
 }
@@ -93,6 +100,41 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.launches()).toBe(1);
   expect(await restarted.stop(f.profile.id)).toBe(true);
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
+});
+
+test("Firefox records and matches the managed Node owner after PATH changes", async () => {
+  const f = fixture("linux", "x64");
+  const startupNode = Bun.which("node");
+  if (!startupNode) throw new Error("Node is unavailable for this test");
+  const root = join(f.launcher.userDataDir(f.profile.id), "..");
+  const managedDir = join(root, "managed-node");
+  const managedNode = join(managedDir, "node");
+  const firefox = join(root, "firefox");
+  mkdirSync(managedDir, { recursive: true });
+  copyFileSync(startupNode, managedNode);
+  copyFileSync(startupNode, firefox);
+  chmodSync(managedNode, 0o755);
+  chmodSync(firefox, 0o755);
+  f.setProcessPaths(firefox, managedNode);
+  f.options.unsafeDisableIdentityGates = false;
+  f.options.firefoxBinaryPath = firefox;
+  f.options.expectedFirefoxBinarySha256 = createHash("sha256").update(readFileSync(firefox)).digest("hex");
+
+  const previousPath = process.env.PATH;
+  process.env.PATH = [managedDir, previousPath].filter(Boolean).join(delimiter);
+  try {
+    // Bun's implicit lookup keeps its startup PATH. The explicit lookup in
+    // Launcher must instead select the newly managed executable.
+    expect(realpathSync(Bun.which("node")!)).not.toBe(realpathSync(managedNode));
+    const launcher = new Launcher(f.options);
+    await launcher.start(f.profile.id);
+    expect(f.store.getLaunch(f.profile.id)?.ownerBinaryPath).toBe(realpathSync(managedNode));
+    expect(await launcher.stop(f.profile.id)).toBe(true);
+    expect(f.store.getLaunch(f.profile.id)).toBeNull();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
 });
 
 test("Firefox supports Darwin arm64 and Linux x64 personas without changing saved config", async () => {
