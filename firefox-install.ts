@@ -1,5 +1,6 @@
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { browserEnvText, sha256File } from "./browser-install.ts";
 
 export interface FirefoxRuntimeBuild {
@@ -66,7 +67,8 @@ async function downloadFirefoxArchive(
   try {
     const response = await fetcher(firefoxReleaseArchiveUrl(build));
     if (!response.ok) throw new Error("approved AliasMode Firefox release download failed");
-    await Bun.write(archive, response);
+    // Bun 1.2.21 can leave Bun.write(Response) pending for streamed redirects.
+    await pipeline(response.body as unknown as import("node:stream/web").ReadableStream, createWriteStream(archive));
     return { archive, cleanup: () => rmSync(directory, { recursive: true, force: true }) };
   } catch (error) {
     rmSync(directory, { recursive: true, force: true });

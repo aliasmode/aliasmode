@@ -96,6 +96,40 @@ test("Firefox setup downloads, verifies, and pins the host release without envir
   expect(readdirSync(f.cwd).some((entry) => entry.startsWith(".aliasmode-firefox-download-"))).toBe(false);
 });
 
+test("Firefox setup completes a redirected streaming download before extraction", async () => {
+  const f = fixture("linux", false);
+  const archive = "approved archive".repeat(65_536);
+  f.build.archiveSha256 = hash(archive);
+  const server = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch(request): Response {
+      if (new URL(request.url).pathname === "/release") return Response.redirect(`${server.url}archive`);
+      return new Response(new ReadableStream({
+        async start(controller) {
+          for (let offset = 0; offset < archive.length; offset += 65_536) {
+            controller.enqueue(new TextEncoder().encode(archive.slice(offset, offset + 65_536)));
+            await Bun.sleep(1);
+          }
+          controller.close();
+        },
+      }));
+    },
+  });
+  try {
+    const result = await installFirefox({ cwd: f.cwd, platform: "linux", arch: "x64", writeEnv: false }, {
+      builds: [f.build], fetch: () => fetch(`${server.url}release`),
+      extract: async (path, destination) => {
+        expect(readFileSync(path, "utf8")).toBe(archive);
+        await f.extract(path, destination);
+      },
+    });
+    expect(result.sha256).toBe(f.build.executableSha256);
+    expect(readdirSync(f.cwd).some((entry) => entry.startsWith(".aliasmode-firefox-download-"))).toBe(false);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("Firefox setup removes its failed public release download", async () => {
   const f = fixture("linux", false);
   await expect(installFirefox({ cwd: f.cwd, platform: "linux", arch: "x64", writeEnv: false }, {
