@@ -347,6 +347,19 @@ jobs:
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof"
           fi
           bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof"
+      - name: Install previous macOS runtime for profile upgrade proof
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/previous-firefox.zip"
+          destination="$RUNNER_TEMP/previous-firefox"
+          curl --fail --location --silent --show-error 'https://github.com/aliasmode/aliasmode-firefox/releases/download/v152.0.4-beta.30/aliasmode-152.0.4-beta.30-mac.arm64.zip' --output "$archive"
+          printf '%s  %s\n' f7fb8b0e3436544ca1efaeed216687a4a99e23ccd621a9bc9266bd7cebc6738f "$archive" | shasum -a 256 --check
+          ditto -x -k "$archive" "$destination"
+          browser="$destination/AliasMode.app/Contents/MacOS/aliasmode"
+          printf '%s  %s\n' 106e198995286cee91c1d637924f636445fd95d59b372ec8213e48756acd6f2f "$browser" | shasum -a 256 --check
+          printf 'ALIASMODE_PREVIOUS_FIREFOX_BINARY_PATH=%s\n' "$browser" >> "$GITHUB_ENV"
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: bash
         run: |
@@ -355,7 +368,7 @@ jobs:
           if [[ "${{ matrix.platform }}" == "linux" ]]; then
             xvfb-run -a node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed
           else
-            node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed --native-ui
+            node scripts/firefox-compatibility-smoke.mjs "$ALIASMODE_FIREFOX_BINARY_PATH" "$RUNNER_TEMP/firefox-headed-proof" --headed --native-ui --previous-browser "$ALIASMODE_PREVIOUS_FIREFOX_BINARY_PATH"
           fi
       - name: Upload macOS native Firefox UI evidence
         if: always() && matrix.platform == 'darwin'
