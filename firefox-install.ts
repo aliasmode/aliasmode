@@ -12,18 +12,19 @@ export interface FirefoxRuntimeBuild {
 }
 
 export const FIREFOX_RUNTIME_VERSION = "152.0.4-beta.30";
-const FIREFOX_RELEASE_BASE = `https://github.com/aliasmode/aliasmode-firefox/releases/download/v${FIREFOX_RUNTIME_VERSION}`;
+const FIREFOX_RUNTIME_RELEASE = `aliasmode-runtime-${FIREFOX_RUNTIME_VERSION}-r1`;
+const FIREFOX_RELEASE_BASE = `https://github.com/aliasmode/aliasmode-firefox/releases/download/${FIREFOX_RUNTIME_RELEASE}`;
 
 export const FIREFOX_RUNTIME_BUILDS: readonly FirefoxRuntimeBuild[] = [
   {
     platform: "linux", arch: "x64", executablePath: "aliasmode",
-    archiveSha256: "cf32b90bf4404a4b2eb1abb8347dfe487a218acd71f8a1dd98fea9c5c6a64754",
-    executableSha256: "5e3c886a7a00ab1ef124fd69c8d726970f0c8da51188098590fe0b1960bea072",
+    archiveSha256: "d009c6ec97536d8e07ed4020473583ca3347a12c95ccd7cfaab6fdc7ba3fd64e",
+    executableSha256: "4fb8b8e052efa114240e959cefb97518c6abea197448e8542ef47f84d2284b90",
   },
   {
     platform: "darwin", arch: "arm64", executablePath: "AliasMode.app/Contents/MacOS/aliasmode",
-    archiveSha256: "f7fb8b0e3436544ca1efaeed216687a4a99e23ccd621a9bc9266bd7cebc6738f",
-    executableSha256: "106e198995286cee91c1d637924f636445fd95d59b372ec8213e48756acd6f2f",
+    archiveSha256: "fc2cf78d13f91e65772b99f3c059dd4ddc6f951c7b9c5bd3c4cc5bfbeb8db2ca",
+    executableSha256: "5180e6170bb467755a2816f24586a9a5f6ab02a3336e8e0b2df9a58185b2e61d",
   },
   {
     platform: "win32", arch: "x64", executablePath: "aliasmode.exe",
