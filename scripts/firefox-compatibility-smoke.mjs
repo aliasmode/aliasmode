@@ -186,7 +186,8 @@ async function assertOneNativeWindow() {
 async function nativeTabButton(pid, label) {
   const { stdout } = await run("osascript", ["-e", nativeBrowserScript(pid, `    set targetButtons to {}
     set observedButtons to ""
-    repeat with candidate in (entire contents of window 1)
+    set browserElements to entire contents of window 1
+    repeat with candidate in browserElements
       if role of candidate is "AXButton" then
         set buttonName to ""
         set buttonDescription to ""
