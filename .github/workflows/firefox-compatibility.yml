@@ -304,7 +304,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          proof="$RUNNER_TEMP/firefox-launcher-source-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          proof="$RUNNER_TEMP/firefox launcher source-$(uuidgen | tr '[:upper:]' '[:lower:]')"
           bun scripts/firefox-launcher-acceptance.ts "$ALIASMODE_FIREFOX_BINARY_PATH" "$proof" "$ALIASMODE_FIREFOX_BINARY_SHA256"
       - name: Prove source CLI and script runners
         shell: bash
