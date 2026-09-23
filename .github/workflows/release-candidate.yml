@@ -1026,7 +1026,7 @@ jobs:
               --header 'Accept: application/vnd.github+json' \
               --header 'X-GitHub-Api-Version: 2022-11-28' \
               --header 'Content-Type: application/octet-stream' \
-              --data-binary "@$root/$name" \
+              --upload-file "$root/$name" \
               "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$encoded" \
               >/dev/null
           done
