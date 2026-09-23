@@ -281,6 +281,9 @@ async function captureNativeTabEvidence(context, page) {
   await run("osascript", ["-e", nativeBrowserScript(pid, "    set size of window 1 to {720, 620}\n")]);
   await assertOneNativeWindow();
   await captureNativeFirefoxUi(lastPage, "narrow");
+  const overflowTab = await nativeTab(context, "Tab7");
+  assert.equal(context.pages().length, 7, "native new-tab button works while tabs overflow");
+  await captureNativeFirefoxUi(overflowTab, "narrow-new");
 }
 
 async function databaseValue(page, value) {
@@ -315,7 +318,12 @@ try {
     await captureNativeFirefoxUi(page, "baseline");
   }
   await nativeAddressBarSearch(page, "fresh", duckDuckGoResponses);
-  if (nativeUi) await page.goto(origin);
+  if (nativeUi) {
+    await page.goto(origin);
+    const freshTab = await nativeTab(context, "Fresh tab");
+    await captureNativeFirefoxUi(freshTab, "fresh-new");
+    await freshTab.close();
+  }
 
   official = await connectOfficial("firefox-proof", async () => nonClosingContext(context));
   assert.ok(official.tools.some((tool) => tool.name === "browser_snapshot"));
@@ -377,6 +385,17 @@ try {
     assert.equal(await page.evaluate(() => localStorage.getItem("previous-proof")), "saved");
     assert.deepEqual(await databaseValue(page, null), { upgraded: true });
     await nativeAddressBarSearch(page, "upgraded", duckDuckGoResponses);
+    await closeOtherPages(context, page);
+    const upgradedTab = await nativeTab(context, "Upgraded tab");
+    await captureNativeFirefoxUi(upgradedTab, "upgraded-new");
+    await context.close();
+    contexts.delete(context);
+
+    context = await launch("previous-runtime-profile");
+    page = await openFixture(context);
+    await closeOtherPages(context, page);
+    const reopenedTab = await nativeTab(context, "Upgraded reopened tab");
+    await captureNativeFirefoxUi(reopenedTab, "upgraded-reopened-new");
     await context.close();
     contexts.delete(context);
   }
