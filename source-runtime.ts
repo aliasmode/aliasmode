@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { installCloakBrowser } from "./browser-install.ts";
 import { installFirefox } from "./firefox-install.ts";
@@ -109,6 +109,15 @@ export async function setupSourceRuntime(root: string, dependencies: SetupDepend
     const temporary = join(staging, "browser-runtime.json");
     writeFileSync(temporary, `${JSON.stringify(runtime, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temporary, join(root, "browser-runtime.json"));
+    // Superseded copies are ~1 GB each. Best effort: a locked file (a browser still
+    // running on Windows) must not fail an already-published setup.
+    try {
+      for (const entry of readdirSync(cache)) {
+        const previous = join(cache, entry);
+        if (!entry.startsWith("source-") || previous === staging) continue;
+        try { rmSync(previous, { recursive: true, force: true }); } catch {}
+      }
+    } catch {}
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
     throw error;

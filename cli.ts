@@ -2533,8 +2533,14 @@ async function main() {
   const paths = statePaths(resolveStateRoot(rest));
   if (cmd === "setup") {
     ensureStateDirectories(paths);
-    await setupSourceRuntime(paths.root);
-    console.log(`AliasMode source runtime is ready. Start it with:\n  bun cli.ts start --state-root ${paths.root}`);
+    try {
+      await setupSourceRuntime(paths.root);
+    } catch (error) {
+      // Setup errors describe downloads, hashes, and disk space, never credentials.
+      console.error(`[aliasmode] setup failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      throw error;
+    }
+    console.log(`AliasMode source runtime is ready. Restart AliasMode to use it:\n  bun cli.ts start --state-root ${paths.root}`);
     return;
   }
   if (!compiled) applySourceRuntime(paths.root);

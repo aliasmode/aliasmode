@@ -123,6 +123,20 @@ test("setup commits verified runtimes together without changing mode or dotenv",
   expect(process.env.PATH).toBe(originalPath);
 });
 
+test("successful setup removes superseded runtime copies", async () => {
+  const path = root();
+  const old = join(path, "runtime", "source-old");
+  mkdirSync(join(old, "browser"), { recursive: true });
+  writeFileSync(join(old, "browser", "chrome"), "old browser");
+  writeFileSync(join(path, "runtime", "unrelated"), "kept");
+  await setupSourceRuntime(path, installers());
+  const saved = JSON.parse(readFileSync(join(path, "browser-runtime.json"), "utf8")) as SourceRuntime;
+  expect(existsSync(old)).toBe(false);
+  expect(existsSync(saved.firefox.path)).toBe(true);
+  expect(readdirSync(join(path, "runtime")).filter((entry) => entry.startsWith("source-"))).toHaveLength(1);
+  expect(readFileSync(join(path, "runtime", "unrelated"), "utf8")).toBe("kept");
+});
+
 test("failed setup keeps prior configuration and runtimes and removes only its staging", async () => {
   const path = root();
   const prior = runtime(path);
