@@ -7,8 +7,8 @@ export interface FirefoxProcessIdentity {
   userDataDir: string;
   ownerBinaryPath: string;
   generation: string;
-  /** Darwin-only exact bundled plugin-container executable. */
-  helperBinaryPath?: string;
+  /** Darwin-only exact bundled helper executables (content, GPU, and media). */
+  helperBinaryPaths?: readonly string[];
 }
 
 function commandArgs(line: string): string[] {
@@ -62,9 +62,7 @@ export function matchFirefoxProcesses(
   const helpers: typeof snapshot.records = [];
   const profilePath = (value: string) => windows ? win32.normalize(value).toLowerCase() : value;
   const mainExecutable = executablePath(identity.binaryPath, windows);
-  const helperExecutable = identity.helperBinaryPath && !windows
-    ? executablePath(identity.helperBinaryPath, false)
-    : undefined;
+  const helperExecutables = new Set(windows ? [] : (identity.helperBinaryPaths ?? []).map((path) => executablePath(path, false)));
   for (const record of snapshot.records) {
     const args = record.argv ?? commandArgs(record.commandLine ?? "");
     const holdsProfile = args.some((arg, index) => arg === "-profile"
@@ -76,7 +74,7 @@ export function matchFirefoxProcesses(
     const actual = executablePath(record.executablePath, windows);
     if (holdsProfile) {
       if (actual === mainExecutable) browsers.push(record.pid);
-      else if (actual === helperExecutable) helpers.push(record);
+      else if (helperExecutables.has(actual)) helpers.push(record);
       else return null;
     }
     if (ownsWorker) {

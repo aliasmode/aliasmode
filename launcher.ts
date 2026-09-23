@@ -83,10 +83,15 @@ function supportsFirefoxHost(platform: NodeJS.Platform, arch: string): boolean {
     || (platform === "win32" && arch === "x64");
 }
 
-function firefoxHelperBinaryPath(binaryPath: string): string | undefined {
-  return process.platform === "darwin"
-    ? join(dirname(binaryPath), "plugin-container.app", "Contents", "MacOS", "plugin-container")
-    : undefined;
+function firefoxHelperBinaryPaths(binaryPath: string): string[] {
+  if (process.platform !== "darwin") return [];
+  const helper = (app: string, executable: string) => join(dirname(binaryPath), app, "Contents", "MacOS", executable);
+  return [
+    helper("plugin-container.app", "plugin-container"),
+    // Headed windows start a GPU process; media playback starts the media plugin helper.
+    helper("gpu-helper.app", "AliasMode GPU Helper"),
+    helper("media-plugin-helper.app", "AliasMode Media Plugin Helper"),
+  ];
 }
 
 export type BrowserLaunchFailure =
@@ -2029,7 +2034,7 @@ export class Launcher {
     return snapshot ? matchFirefoxProcesses({
       binaryPath: launch.binaryPath, userDataDir: launch.userDataDir,
       ownerBinaryPath: launch.ownerBinaryPath, generation: launch.firefoxOwner.generation,
-      helperBinaryPath: firefoxHelperBinaryPath(launch.binaryPath),
+      helperBinaryPaths: firefoxHelperBinaryPaths(launch.binaryPath),
     }, snapshot, this.hostPlatform === "win32") : null;
   }
 

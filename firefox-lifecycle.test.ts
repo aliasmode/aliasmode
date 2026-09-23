@@ -24,33 +24,52 @@ test("Firefox ownership matches executable and exact profile argument without CD
 test("Darwin Firefox accepts only a verified primary browser's exact helper", () => {
   const darwin = {
     ...identity,
-    helperBinaryPath: "/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container",
+    helperBinaryPaths: ["/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container"],
   };
   const primary = { pid: 40, executablePath: darwin.binaryPath, argv: [darwin.binaryPath, "-profile", darwin.userDataDir] };
   const helper = {
-    pid: 41, parentPid: primary.pid, executablePath: darwin.helperBinaryPath,
-    argv: [darwin.helperBinaryPath, "-profile", darwin.userDataDir],
+    pid: 41, parentPid: primary.pid, executablePath: darwin.helperBinaryPaths[0]!,
+    argv: [darwin.helperBinaryPaths[0]!, "-profile", darwin.userDataDir],
   };
   const owner = { pid: 42, executablePath: darwin.ownerBinaryPath, argv: [darwin.ownerBinaryPath, `--aliasmode-firefox-owner=${darwin.generation}`] };
   expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [helper, primary, owner] }, false))
     .toEqual({ browsers: [primary.pid], owners: [owner.pid] });
 });
 
+test("Darwin headed Firefox accepts its exact GPU and media helper apps", () => {
+  const helpers = [
+    "/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container",
+    "/opt/aliasmode/gpu-helper.app/Contents/MacOS/AliasMode GPU Helper",
+    "/opt/aliasmode/media-plugin-helper.app/Contents/MacOS/AliasMode Media Plugin Helper",
+  ];
+  const darwin = { ...identity, helperBinaryPaths: helpers };
+  const primary = { pid: 60, executablePath: darwin.binaryPath, argv: [darwin.binaryPath, "-profile", darwin.userDataDir] };
+  const records = [primary, ...helpers.map((path, index) => ({
+    pid: 61 + index, parentPid: primary.pid, executablePath: path, argv: [path, "-profile", darwin.userDataDir],
+  }))];
+  expect(matchFirefoxProcesses(darwin, { incomplete: false, records }, false))
+    .toEqual({ browsers: [primary.pid], owners: [] });
+  expect(matchFirefoxProcesses(darwin, {
+    incomplete: false,
+    records: [...records, { ...records[2]!, pid: 70, parentPid: 99 }],
+  }, false)).toBeNull();
+});
+
 test("Darwin Firefox keeps unverified helpers ambiguous", () => {
   const darwin = {
     ...identity,
-    helperBinaryPath: "/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container",
+    helperBinaryPaths: ["/opt/aliasmode/plugin-container.app/Contents/MacOS/plugin-container"],
   };
   const primary = { pid: 50, executablePath: darwin.binaryPath, argv: [darwin.binaryPath, "-profile", darwin.userDataDir] };
   const helper = (overrides: Record<string, unknown> = {}) => ({
-    pid: 51, parentPid: primary.pid, executablePath: darwin.helperBinaryPath,
-    argv: [darwin.helperBinaryPath, "-profile", darwin.userDataDir], ...overrides,
+    pid: 51, parentPid: primary.pid, executablePath: darwin.helperBinaryPaths[0]!,
+    argv: [darwin.helperBinaryPaths[0]!, "-profile", darwin.userDataDir], ...overrides,
   });
   expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [primary, helper({ parentPid: 99 })] }, false)).toBeNull();
   expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [primary, helper({ executablePath: "/opt/other/plugin-container" })] }, false)).toBeNull();
   expect(matchFirefoxProcesses(darwin, {
     incomplete: false,
-    records: [primary, helper({ argv: [darwin.helperBinaryPath, "-profile", `${darwin.userDataDir} sibling`] })],
+    records: [primary, helper({ argv: [darwin.helperBinaryPaths[0]!, "-profile", `${darwin.userDataDir} sibling`] })],
   }, false)).toEqual({ browsers: [primary.pid], owners: [] });
   expect(matchFirefoxProcesses(darwin, { incomplete: false, records: [helper()] }, false)).toBeNull();
 });

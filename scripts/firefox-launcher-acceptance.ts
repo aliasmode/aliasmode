@@ -505,13 +505,7 @@ async def run(*, context, inputs, log, **_kwargs):
     assert.ok(nativeLaunch?.firefoxOwner, "native AXClose profile has a Firefox owner");
     const nativeStatus = await callFirefoxOwner<{ browserPid: number }>(nativeLaunch.firefoxOwner!, "status", {}, { timeoutMs: 800 });
     assert.ok(Number.isSafeInteger(nativeStatus.browserPid) && nativeStatus.browserPid > 0, "native AXClose browser PID is valid");
-    // Headed Cloud opens verify identity right after launch; synthetic scan candidates explain failures.
-    const { stdout: processList } = await promisify(execFile)("ps", ["-axww", "-o", "pid=,ppid=,args="], { maxBuffer: 16 * 1024 * 1024 });
-    console.log(`firefox-launcher-acceptance:headed-scan browserPid=${nativeStatus.browserPid} ownerPid=${nativeLaunch.firefoxOwner!.pid}`);
-    for (const line of processList.split("\n")) {
-      if (!line.includes("-profile") && !line.includes("--aliasmode-firefox-owner=")) continue;
-      console.log(`  candidate ${line.trim().replaceAll(nativeLaunch.userDataDir!, "<profile>").slice(0, 400)}`);
-    }
+    // Cloud opens verify identity right after launch; headed macOS adds GPU helper processes.
     await localLauncher.verifyRunningIdentity(nativeCloseId);
     await closeNativeFirefoxWindow(nativeStatus.browserPid);
     await waitForNativeFirefoxClose(nativeCloseId);
