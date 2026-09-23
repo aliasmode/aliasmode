@@ -194,11 +194,14 @@ async function run() {
   const pageIds = new WeakMap();
   let nextPageId = 1;
   const observedOrigins = new Set();
+  // Closed-origin storage last read by capture; a page load of that origin invalidates it.
+  const storageCache = new Map();
   let observedTelegramClient;
   const observeUrl = (value) => {
     const url = observedFirefoxCaptureUrl(value);
     if (!url) return;
     observedOrigins.add(url.origin);
+    storageCache.delete(url.origin);
     if (url.origin === "https://web.telegram.org") {
       if (url.pathname === "/a" || url.pathname.startsWith("/a/")) observedTelegramClient = "a";
       if (url.pathname === "/k" || url.pathname.startsWith("/k/")) observedTelegramClient = "k";
@@ -342,7 +345,8 @@ async function run() {
       return null;
     }
     if (name === "playwright-endpoint") return { endpoint: await initializePlaywrightServer() };
-    return operatePersistentContext(browser, context, name, payload, { nativeStorage: true });
+    if (name === "session-restore") storageCache.clear();
+    return operatePersistentContext(browser, context, name, payload, { nativeStorage: true, storageCache });
   };
 
   server = createServer((request, response) => {
