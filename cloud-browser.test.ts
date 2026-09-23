@@ -3795,6 +3795,22 @@ test("Cloud browser reports a safe restore stage and retains the verified browse
   state.store.close();
 });
 
+test("Cloud browser logs the launcher identity check behind a session_restore failure", async () => {
+  const state = setup();
+  (state.coordinator as any).options.launcher.verifyRunningIdentity = async () => {
+    if (state.startCalls() === 0) return;
+    throw new Error("cannot verify survivor profile1: browser identity/CDP is unavailable");
+  };
+  const result = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(result).toMatchObject({ ok: false, error: "Cloud profile open failed at session_restore (transport_error)" });
+  expect(state.logs.filter((l) => l.includes("Cloud open failed"))).toEqual([
+    "profile1: Cloud open failed at session_restore (transport_error, Error): " +
+      "cannot verify survivor profile1: browser identity/CDP is unavailable",
+  ]);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud lease renewal continues while checkpoint capture is blocked", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);

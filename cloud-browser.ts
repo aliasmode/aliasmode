@@ -651,6 +651,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     let cleanupGeneration: { debugPort: number; startedAt: number } | undefined;
     let retainedGeneration: { debugPort: number; startedAt: number; ws: string } | undefined;
     let retainAfterSessionFailure = false;
+    let identityCheckFailed = false;
+    const verifyIdentity = () => this.options.launcher.verifyRunningIdentity(profileId).catch((error) => {
+      identityCheckFailed = true;
+      throw error;
+    });
     // Stage timing into the persistent log file: fixed stage names + ms only.
     const openStartedAt = Date.now();
     let lastStageAt = openStartedAt;
@@ -778,7 +783,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       stage = "session_restore";
       logStage("session_restore");
       this.diagnosticEvents.record("session_restore_started");
-      await this.options.launcher.verifyRunningIdentity(profileId);
+      await verifyIdentity();
       const verifiedLaunch = this.options.store.getLaunch(profileId);
       if (
         !verifiedLaunch ||
@@ -826,7 +831,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       const renewal = this.heartbeatInFlight.get(profileId);
       if (renewal?.registrationId === registrationId) await renewal.promise;
-      await this.options.launcher.verifyRunningIdentity(profileId);
+      await verifyIdentity();
       if (startupLease.error) throw startupLease.error;
       const restoredLaunch = this.options.store.getLaunch(profileId);
       if (
@@ -901,7 +906,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       // Before registration only the local pending-sync queue is touched, so a
       // failure there is a local queue/database error whose message holds no
       // session material and is the only clue an operator gets.
-      const localDetail = stage === "pending_sync" && error instanceof Error ? `: ${error.message}` : "";
+      // Launcher identity checks name only local runtime state; restore errors may carry page detail.
+      const localDetail = error instanceof Error && (stage === "pending_sync" || identityCheckFailed)
+        ? `: ${error.message}` : "";
       const guidance = error instanceof BrowserLaunchError && error.guidance ? `: ${error.guidance}` : "";
       this.log(`${profileId}: Cloud open failed at ${failureStage} (${code}, ${safeErrorType(error)})${localDetail}${guidance}`);
       const currentLaunch = retainAfterSessionFailure && retainedGeneration
