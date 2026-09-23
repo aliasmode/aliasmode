@@ -208,7 +208,9 @@ async function nativeTabButton(pid, label) {
         if buttonName is "Back" or buttonDescription is "Back" then set navigationPosition to position of candidate
         set buttonSize to size of candidate
         if enabled of candidate and (item 1 of buttonSize) > 0 and (item 2 of buttonSize) > 0 then
-          if buttonName is ${JSON.stringify(label)} or buttonDescription is ${JSON.stringify(label)} or buttonHelp is ${JSON.stringify(label)} then
+          set matchesLabel to buttonName is ${JSON.stringify(label)} or buttonDescription is ${JSON.stringify(label)} or buttonHelp is ${JSON.stringify(label)}
+          if ${JSON.stringify(label)} is "New Tab" and buttonDescription starts with "Open a new tab (" then set matchesLabel to true
+          if matchesLabel then
             set end of targetButtons to contents of candidate
           end if
         end if
