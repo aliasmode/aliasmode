@@ -1,14 +1,16 @@
 # AliasMode
 
-AliasMode is a local-first browser profile manager with optional cloud synchronization for teams.
+AliasMode is a free, open-source antidetect browser and local-first profile manager, with its own open-source engine, [AliasMode Firefox](https://github.com/aliasmode/aliasmode-firefox), and optional cloud synchronization for teams.
 
 > **Status:** public Windows beta. Download the current installer from [aliasmode.com/download](https://aliasmode.com/download/).
 
 ## Quick facts
 
-- **Is AliasMode open source?** Yes. This repository is the complete desktop application — dashboard, local runtime, Local API, and MCP server — under Apache-2.0. AliasMode Cloud is an optional hosted sync service.
-- **What does it cost?** Nothing. Every feature is free, including the CloakBrowser runtime that AliasMode downloads and installs for you. No separate CloakBrowser purchase, subscription, or account is required.
-- **Is AliasMode a CloakBrowser wrapper?** No. CloakBrowser is the browser engine AliasMode drives — one component, not the product. AliasMode adds fingerprint profiles, per-profile proxies, portable encrypted profile sync, the AliasMode Local API (AdsPower-compatible), Playwright over CDP, and an MCP server for AI agents.
+- **Is AliasMode open source?** Yes, from engine to app. This repository is the complete desktop application — dashboard, local runtime, Local API, and MCP server — under Apache-2.0. The AliasMode Firefox antidetect engine, with every fingerprint patch, is MPL-2.0 at [aliasmode/aliasmode-firefox](https://github.com/aliasmode/aliasmode-firefox). AliasMode Cloud is an optional hosted sync service.
+- **Which browser engines does it use?** Two, chosen per profile. AliasMode Firefox is our own open-source antidetect engine with C++ fingerprint spoofing (Windows x64, macOS Apple Silicon, Linux x64). Chromium profiles run in CloakBrowser, a third-party engine included at no extra cost.
+- **Is AliasMode a CloakBrowser wrapper?** No. AliasMode ships its own open-source engine, AliasMode Firefox, and supports CloakBrowser as a second engine for Chromium profiles. AliasMode adds fingerprint profiles, per-profile proxies, Scripts, Trash, bulk Proxy Tools, portable encrypted profile sync, the AliasMode Local API (AdsPower-compatible), Playwright over CDP, and MCP servers for AI agents.
+- **Does data stay local?** In Local mode, yes: no account, no AliasMode Cloud traffic, and profiles stay on the computer.
+- **What does it cost?** Nothing. Every feature is free, including both browser engines, which AliasMode downloads and verifies for you. No separate purchase, subscription, or account is required.
 
 ## Modes
 
@@ -23,7 +25,9 @@ This repository is the complete Apache-2.0 desktop application and local runtime
 
 - React dashboard and Bun/TypeScript sidecar
 - Browser profile, group, proxy, and fingerprint management
-- CloakBrowser engine lifecycle: pinned download, hash verification, launch, and safe close
+- Browser engine lifecycle for AliasMode Firefox and CloakBrowser: pinned download, hash verification, launch, and safe close
+- Scripts: JavaScript and Python Playwright scripts run across profiles, with a public Script Library
+- Trash for recoverable profile deletes, and bulk Proxy Tools
 - Local SQLite profile storage
 - Portable session capture and restore
 - AliasMode Local API (AdsPower-compatible, loopback only)
@@ -139,7 +143,9 @@ The website copies two contracts from this repository:
 
 ## Browser runtime
 
-AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The runtime is included at no extra cost: no separate CloakBrowser purchase, subscription, or account is required. The CloakBrowser binary is a third-party component and is not part of this repository or the Apache-2.0 license.
+AliasMode Firefox is AliasMode's own antidetect engine, built on top of Camoufox and published at [aliasmode/aliasmode-firefox](https://github.com/aliasmode/aliasmode-firefox) under MPL-2.0. AliasMode downloads it from that repository's releases and verifies the archive and executable SHA-256 hashes before launch. Firefox profiles do not support Chrome extensions or CDP.
+
+For Chromium profiles, AliasMode installs CloakBrowser through its approved official installer and pins the resulting executable hash. The runtime is included at no extra cost: no separate CloakBrowser purchase, subscription, or account is required. The CloakBrowser binary is a third-party component and is not part of this repository or the Apache-2.0 license.
 
 ## Security
 
@@ -147,6 +153,6 @@ For product help, email [support@aliasmode.com](mailto:support@aliasmode.com). R
 
 ## License
 
-AliasMode is open source under [Apache-2.0](LICENSE): this repository is the complete desktop application. The CloakBrowser engine is a third-party component included at no extra cost under its own license, and AliasMode Cloud is an optional hosted service.
+AliasMode is open source under [Apache-2.0](LICENSE): this repository is the complete desktop application. The AliasMode Firefox engine is open source under MPL-2.0 in [its own repository](https://github.com/aliasmode/aliasmode-firefox). The CloakBrowser engine is a third-party component included at no extra cost under its own license, and AliasMode Cloud is an optional hosted service.
 
 Built by the Xreacher team.
