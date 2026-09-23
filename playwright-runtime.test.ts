@@ -299,6 +299,38 @@ test("native capture reads closed observed origins through storageState without 
   });
 });
 
+test("native closed-origin capture reads each closed origin once until it loads again", async () => {
+  let storageStateCalls = 0;
+  let value = "first";
+  const pages: { url: () => string }[] = [];
+  const context = {
+    pages: () => pages,
+    async cookies() { return []; },
+    async storageState() {
+      storageStateCalls++;
+      return { origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value }] }] };
+    },
+  };
+  const storageCache = new Map();
+  const capture = async () => JSON.parse(await captureSession({ contexts: () => [context] }, {
+    captureSeed: { origins: ["https://closed.example"] },
+  }, { nativeStorage: true, storageCache })).origins[0].localStorage[0].value;
+  expect(await capture()).toBe("first");
+  value = "changed without a page";
+  expect(await capture()).toBe("first");
+  expect(storageStateCalls).toBe(1);
+  storageCache.delete("https://closed.example");
+  expect(await capture()).toBe("changed without a page");
+  expect(storageStateCalls).toBe(2);
+  // A read taken while a page is still open is not reused.
+  pages.push({ url: () => "https://closed.example/" });
+  storageCache.clear();
+  await capture();
+  pages.length = 0;
+  await capture();
+  expect(storageStateCalls).toBe(4);
+});
+
 test("native closed-origin capture scopes storageState to the requested origin", async () => {
   const origins = new Set(["https://live.example"]);
   const context = {

@@ -647,6 +647,12 @@ async function nativeOriginStorage(context, origin) {
   }
 }
 
+function hasOriginPage(context, origin) {
+  return context.pages().some((page) => {
+    try { return new URL(page.url()).origin === origin; } catch { return false; }
+  });
+}
+
 function registerNativeOrigins(context, origins) {
   const native = context?._connection?.toImpl?.(context);
   if (typeof native?.addVisitedOrigin !== "function") return;
@@ -689,8 +695,14 @@ export async function captureSession(browser, payload, options = {}) {
       let storage = await captureLiveOrigin(context, origin, !!options.nativeStorage);
       if (!storage) {
         if (options.nativeStorage) {
-          storage = await sessionStep("origin_storage", () => nativeOriginStorage(context, origin));
-          if (!storage) throw sessionError("origin_storage");
+          // Firefox reads a closed origin through a visible temporary window. Storage
+          // cannot change until that origin loads again, which clears its cache entry.
+          storage = options.storageCache?.get(origin);
+          if (!storage) {
+            storage = await sessionStep("origin_storage", () => nativeOriginStorage(context, origin));
+            if (!storage) throw sessionError("origin_storage");
+            if (!hasOriginPage(context, origin)) options.storageCache?.set(origin, storage);
+          }
         } else {
           reader ??= await sessionStep("hidden_target", () => createReadOnlyStorageReader(browser, context));
           storage = await sessionStep("origin_storage", () => reader.read(origin));
@@ -1014,7 +1026,9 @@ async function searchProvider(chromium, payload) {
 
 export async function operatePersistentContext(browser, context, operation, payload, options = {}) {
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
-  if (operation === "session-capture") return captureSession(browser, payload, { nativeStorage: !!options.nativeStorage });
+  if (operation === "session-capture") {
+    return captureSession(browser, payload, { nativeStorage: !!options.nativeStorage, storageCache: options.storageCache });
+  }
   if (operation === "session-restore") return restoreSession(browser, context, payload, { nativeStorage: !!options.nativeStorage });
   if (operation === "cookie-add") {
     await context.addCookies(payload.cookies);
