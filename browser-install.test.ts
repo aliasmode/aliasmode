@@ -84,14 +84,15 @@ test("installCloakBrowser can return a verified binary without writing environme
   const dir = mkdtempSync(join(tmpdir(), "aliasmode-browser-install-no-env-"));
   dirs.push(dir);
   const binary = join(dir, "cache", "chrome");
+  const sha256 = process.platform === "win32" ? CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256 : "b".repeat(64);
 
   await expect(installCloakBrowser({
     cwd: dir,
     writeEnv: false,
     runInstaller: async () => ({ code: 0, output: `${binary}\n` }),
     exists: (path) => path === binary,
-    hashFile: async () => "b".repeat(64),
-  })).resolves.toEqual({ path: binary, sha256: "b".repeat(64) });
+    hashFile: async () => sha256,
+  })).resolves.toEqual({ path: binary, sha256 });
 
   expect(existsSync(join(dir, ".env"))).toBe(false);
 });

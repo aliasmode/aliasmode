@@ -155,7 +155,7 @@ for (const platform of ["linux", "darwin"] as const) {
     const f = fixture(platform);
     const result = await installFirefox({ archive: f.archive, cwd: f.cwd, platform, arch: f.build.arch }, { builds: [f.build], extract: f.extract });
     expect(result.sha256).toBe(f.build.executableSha256);
-    expect(result.path.endsWith(f.build.executablePath)).toBe(true);
+    expect(result.path.replaceAll("\\", "/").endsWith(f.build.executablePath)).toBe(true);
     expect(readFileSync(result.path, "utf8")).toBe("approved executable");
     if (process.platform !== "win32") expect(() => accessSync(result.path, constants.X_OK)).not.toThrow();
     const directories = readdirSync(join(f.cwd, "browser"));

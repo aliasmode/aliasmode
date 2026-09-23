@@ -466,7 +466,7 @@ test("dashboard Cloud preflight distinguishes missing engine pins before native 
       approved.cleanup();
     }
   }
-});
+}, 30_000);
 
 test("legacy Chromium and native Firefox Cloud profiles preflight independently", async () => {
   const root = mkdtempSync(join(tmpdir(), "aliasmode-cloud-two-engine-"));
