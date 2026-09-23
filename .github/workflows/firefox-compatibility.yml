@@ -152,14 +152,7 @@ jobs:
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
           }
           $proof = Join-Path $env:RUNNER_TEMP "cloud-launcher-smoke-$([guid]::NewGuid().ToString('N'))"
-          # Prepublication only: use the verified candidate archive until its public release exists.
-          bun --no-env-file -e '
-            import { setupSourceRuntime } from "./source-runtime.ts";
-            import { installFirefox } from "./firefox-install.ts";
-            await setupSourceRuntime(process.argv[1], {
-              installFirefox: (options) => installFirefox({ ...options, archive: process.argv[2] }),
-            });
-          ' $proof (Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\artifacts\firefox" -File -Filter '*.zip').FullName
+          bun --no-env-file "$env:GITHUB_WORKSPACE\cli.ts" setup --state-root $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           bun --no-env-file -e '
             import { existsSync, realpathSync, readFileSync } from "node:fs";
@@ -190,16 +183,13 @@ jobs:
           $proof = Join-Path $env:RUNNER_TEMP "source-setup-diagnostic-$([guid]::NewGuid().ToString('N'))"
           bun --no-env-file -e '
             import { setupSourceRuntime } from "./source-runtime.ts";
-            import { installFirefox } from "./firefox-install.ts";
             try {
-              await setupSourceRuntime(process.argv[1], {
-                installFirefox: (options) => installFirefox({ ...options, archive: process.argv[2] }),
-              });
+              await setupSourceRuntime(process.argv[1]);
             } catch (error) {
               console.error(error instanceof Error ? error.message : "source setup failed");
               process.exit(1);
             }
-          ' $proof (Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE\artifacts\firefox" -File -Filter '*.zip').FullName
+          ' $proof
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove persistent contexts, MCP, scripts, and storage
         shell: pwsh
@@ -350,14 +340,7 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN CLOAKBROWSER_BINARY_PATH CLOAKBROWSER_BINARY_SHA256 ALIASMODE_FIREFOX_BINARY_PATH ALIASMODE_FIREFOX_BINARY_SHA256
           proof="$(mktemp -d "$RUNNER_TEMP/cloud-launcher-smoke-${{ matrix.platform }}-XXXXXX")"
-          # Prepublication only: use the verified candidate archive until its public release exists.
-          bun --no-env-file -e '
-            import { setupSourceRuntime } from "./source-runtime.ts";
-            import { installFirefox } from "./firefox-install.ts";
-            await setupSourceRuntime(process.argv[1], {
-              installFirefox: (options) => installFirefox({ ...options, archive: process.argv[2] }),
-            });
-          ' "$proof" "$GITHUB_WORKSPACE"/artifacts/firefox/*.zip
+          bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" setup --state-root "$proof"
           bun --no-env-file -e '
             import { existsSync, realpathSync, readFileSync } from "node:fs";
             import { applySourceRuntime } from "./source-runtime.ts";
