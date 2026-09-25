@@ -273,6 +273,9 @@ export function serveDashboard(opts: DashboardServerOptions) {
     // Queue wait plus a complete remote restore can legitimately hold a lifecycle
     // response for several minutes while the shared transition cap does its job.
     idleTimeout: 240,
+    // Development mode watches the app folder for hot reload. On Windows that
+    // watcher leaks kernel memory on every database write until the host stalls.
+    development: false,
     routes: { "/": index },
     websocket: {
       maxPayloadLength: AGENT_CONTROL_MAX_MESSAGE_BYTES,

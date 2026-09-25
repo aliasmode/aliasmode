@@ -41,6 +41,15 @@ test("identity cards load stored Chromium and Firefox metadata without egress lo
   }
 });
 
+test("dashboard serves in production mode so it never watches the app folder", async () => {
+  const server = serveDashboard({ port: 0, launcher: {} as any, store: {} as any, log: () => {} });
+  try {
+    expect(server.development).toBe(false);
+  } finally {
+    await server.stop(true);
+  }
+});
+
 test("dashboard health route blocks browser cross-origin submissions on loopback", async () => {
   let publishes = 0;
   const server = serveDashboard({
