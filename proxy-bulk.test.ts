@@ -110,6 +110,17 @@ test("list assignment is stable, reports unmatched rows, and never reuses a prox
   expect(buildProxyPreview([profile("a")], { scope: { all: true }, mode: "list", input: "a.example:80\nb.example:80" }).unusedProxies).toBe(1);
 });
 
+test("list assignment reuses each proxy for profilesPerProxy profiles", () => {
+  const result = buildProxyPreview(["a", "b", "c", "d", "e"].map((id) => profile(id)), {
+    scope: { all: true }, mode: "list", input: "one.example:8000\ntwo.example:8000\nthree.example:8000", profilesPerProxy: 2,
+  });
+  expect(result.rows.map((r) => r.view.proxy)).toEqual([
+    "http://one.example:8000", "http://one.example:8000", "http://two.example:8000", "http://two.example:8000", "http://three.example:8000",
+  ]);
+  expect(result.unusedProxies).toBe(0);
+  expect(() => buildProxyPreview([profile("a")], { scope: { all: true }, mode: "list", input: "a.example:80", profilesPerProxy: 0 })).toThrow("Invalid proxy input");
+});
+
 test("invalid input errors do not expose pasted credentials", () => {
   expect(() => buildProxyPreview([profile("a")], { scope: { all: true }, mode: "list", input: "bad://sensitive-user:sensitive-pass@host:90" })).toThrow("Invalid proxy input");
 });

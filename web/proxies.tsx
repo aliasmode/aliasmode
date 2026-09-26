@@ -177,6 +177,7 @@ export function ProxiesPage({ groups, onChanged, active }: {
   const [task, setTask] = useState<"check" | "replace">("check");
   const [mode, setMode] = useState<ProxyReplacementMode>("list");
   const [input, setInput] = useState("");
+  const [perProxy, setPerProxy] = useState(1);
   const [preview, setPreview] = useState<ProxyPreview | null>(null);
   const [checks, setChecks] = useState<ProxyCheckView[]>([]);
   const [checkSummary, setCheckSummary] = useState<Extract<ProxyProgressEvent, { type: "summary" }> | null>(null);
@@ -231,7 +232,7 @@ export function ProxiesPage({ groups, onChanged, active }: {
     try {
       const next = retry && preview
         ? await previewResponse(await proxyRequest("retry-preview", { previewId: preview.previewId, ids: retries }, current.signal))
-        : await requestProxyPreview({ scope, mode, input }, current.signal);
+        : await requestProxyPreview({ scope, mode, input, ...(mode === "list" ? { profilesPerProxy: perProxy } : {}) }, current.signal);
       if (controller.current !== current || current.signal.aborted) return;
       setPreview(next); setReplacementPage(0); setReplacementFailures(false);
       setNotice("Review these assignments before applying. Open profiles are skipped.");
@@ -349,11 +350,12 @@ export function ProxiesPage({ groups, onChanged, active }: {
         <div className="tools-panel-head"><div><h3><span className="tools-step">2</span>Add replacement proxies</h3><p>Nothing changes until you review and apply the assignments.</p></div></div>
         <div className="tools-panel-body">
           <label className="fld"><span>Assignment method</span><select value={mode} disabled={!!busy} onChange={(event) => { setMode(event.target.value as ProxyReplacementMode); invalidatePreview(); }}>
-            <option value="list">One proxy per profile — paste a list</option><option value="profileId">Match specific profile IDs — CSV</option><option value="oldProxy">Replace matching old proxies — CSV</option>
+            <option value="list">Paste a proxy list</option><option value="profileId">Match specific profile IDs — CSV</option><option value="oldProxy">Replace matching old proxies — CSV</option>
           </select></label>
           <p className="tools-hint">{mode === "profileId" ? <>Include a header row: <code>profileId,type,host,port,user,pass</code>.</>
             : mode === "oldProxy" ? <>Include a header row: <code>oldProxy,newProxy</code>. Each old proxy is replaced wherever it appears in the selected folders.</>
-            : "Paste one proxy per line. We match them to profiles in profile-ID order, without reusing entries. You will see every assignment next."}</p>
+            : "Paste one proxy per line. We match them to profiles in profile-ID order. Each proxy is used for the number of profiles you set below. You will see every assignment next."}</p>
+          {mode === "list" && <label className="fld"><span>Profiles per proxy</span><input type="number" aria-label="Profiles per proxy" min={1} step={1} value={perProxy} disabled={!!busy} onChange={(event) => { setPerProxy(Math.max(1, Math.floor(Number(event.target.value)) || 1)); invalidatePreview(); }} /></label>}
           <label className="fld"><span>{mode === "list" ? "Your new proxy list" : "Your replacement CSV"}</span><textarea aria-label="Replacement input" rows={5} value={input} disabled={!!busy} spellCheck={false} autoComplete="off" placeholder={mode === "list" ? "proxy.example.com:8080:username:password\nsocks5://username:password@proxy.example.com:1080" : mode === "profileId" ? "profileId,type,host,port,user,pass" : "oldProxy,newProxy"} onChange={(event) => { setInput(event.target.value); invalidatePreview(); }} /></label>
           <div className="tools-result-bar"><label className="proxy-upload">Or upload a file<input type="file" accept=".csv,.txt,text/csv,text/plain" disabled={!!busy} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void loadFile(file); }} /></label>
             <button type="button" className="btn primary" disabled={!!busy || !scopeReady || !input.trim()} onClick={() => void makePreview()}>{busy === "preview" ? "Preparing preview…" : "Preview changes"}</button></div>

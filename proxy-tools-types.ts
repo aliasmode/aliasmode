@@ -12,6 +12,7 @@ export interface ProxyPreviewInput {
   scope: ProxyScope;
   mode: ProxyReplacementMode;
   input: string;
+  profilesPerProxy?: number;
 }
 
 export interface ProxyReplacementView {

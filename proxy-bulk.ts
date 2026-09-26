@@ -96,8 +96,10 @@ export function buildProxyPreview(profiles: ProxyInventoryProfile[], input: Prox
         if (!proxy) throw new Error("empty");
         return proxy;
       });
-      selected.forEach((profile, index) => add(profile, proxies[index]));
-      unusedProxies = Math.max(0, proxies.length - selected.length);
+      const perProxy = input.profilesPerProxy ?? 1;
+      if (!Number.isInteger(perProxy) || perProxy < 1) throw new Error("profilesPerProxy");
+      selected.forEach((profile, index) => add(profile, proxies[Math.floor(index / perProxy)]));
+      unusedProxies = Math.max(0, proxies.length - Math.ceil(selected.length / perProxy));
     } else throw new Error("mode");
   } catch {
     throw new ProxyToolsError("Invalid proxy input. Check the selected format and proxy settings.");
