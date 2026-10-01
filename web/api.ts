@@ -115,6 +115,27 @@ export async function fetchAppMode(): Promise<AppModeConfig> {
   return body as AppModeConfig;
 }
 
+/** Shell UI language (BCP47 tag), persisted server-side: localStorage is
+ *  origin-scoped and the desktop shell serves the UI from a random loopback
+ *  port each launch. */
+export async function fetchShellLanguage(): Promise<string> {
+  const path = "/ui/api/shell-language";
+  const response = await fetch(path);
+  const body = await apiJson(response, path);
+  return typeof body.language === "string" && body.language.length > 0 ? body.language : "en-US";
+}
+
+export async function saveShellLanguage(language: string): Promise<void> {
+  const path = "/ui/api/shell-language";
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language }),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Could not save language preference");
+}
+
 export async function selectAppMode(mode: "local" | "cloud"): Promise<any> {
   const path = "/ui/api/app-mode";
   const response = await fetch(path, {

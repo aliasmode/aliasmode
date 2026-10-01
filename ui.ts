@@ -54,8 +54,8 @@ import { normalizeProxySpec, proxyHostPort, proxyLegacyString, type ProxyInput }
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { addBrowserCookie } from "./session.ts";
-import { join, resolve } from "node:path";
-import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { validAgentAuthorization } from "./agent-control.ts";
 import { ScriptError, type ScriptLibrary, type ScriptSupervisor } from "./scripts.ts";
 
@@ -335,6 +335,38 @@ function cloudCloseResponse(result: CloudBrowserCloseResult): Response {
 
 function noStoreJson(body: unknown, status = 200): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+// Shell UI language preference. localStorage cannot persist it: the desktop
+// shell serves the UI from a random loopback port each launch, and localStorage
+// is origin-scoped (http://127.0.0.1:PORT), so it is wiped on every restart.
+// Persist to <state-root>/shell.json instead. The value is a BCP47 language
+// tag validated by pattern only, so adding a locale never needs backend changes.
+const SHELL_LANGUAGE_PATTERN = /^[a-z]{2,3}(-[A-Za-z]{2,8})?$/;
+
+function shellLanguagePath(paths?: StatePaths): string | null {
+  if (!paths?.root) return null;
+  return join(paths.root, "shell.json");
+}
+
+export function readShellLanguage(paths?: StatePaths): string {
+  try {
+    const file = shellLanguagePath(paths);
+    if (!file) return "en-US";
+    const raw = JSON.parse(readFileSync(file, "utf8")) as { language?: unknown };
+    if (typeof raw.language === "string" && SHELL_LANGUAGE_PATTERN.test(raw.language)) return raw.language;
+  } catch {
+    // Missing or corrupt file: fall back to English.
+  }
+  return "en-US";
+}
+
+export function writeShellLanguage(paths: StatePaths | undefined, language: string): void {
+  if (!SHELL_LANGUAGE_PATTERN.test(language)) throw new Error(`Invalid language tag: ${language}`);
+  const file = shellLanguagePath(paths);
+  if (!file) throw new Error("Shell language storage is unavailable");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify({ language })}\n`, "utf8");
 }
 
 function proxyCheckView(result: ProxyCheckResult): ProxyCheckResult {
@@ -619,6 +651,23 @@ export async function handleUiRequest(
       ...(remote ? { legacyRemote: true } : {}),
       ...(options.runtimeMode ? { restartRequired: config.mode !== options.runtimeMode } : {}),
     });
+  }
+
+  if (pathname === "/ui/api/shell-language" && req.method === "GET") {
+    return noStoreJson({ language: readShellLanguage(options.paths) });
+  }
+
+  if (pathname === "/ui/api/shell-language" && req.method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as { language?: unknown };
+    const language = typeof body.language === "string" && SHELL_LANGUAGE_PATTERN.test(body.language)
+      ? body.language
+      : "en-US";
+    try {
+      writeShellLanguage(options.paths, language);
+    } catch {
+      return noStoreJson({ ok: false, error: "Could not save language preference" }, 500);
+    }
+    return noStoreJson({ ok: true, language });
   }
 
   if (pathname === "/ui/api/cloud-events" && req.method === "GET") {
