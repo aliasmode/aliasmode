@@ -35,7 +35,7 @@ test("dashboard exposes account settings and confirms mode switching", () => {
   expect(app).toContain("does not upload them to Cloud automatically");
   expect(app).toContain("Accept and continue to Cloud");
   expect(app).not.toContain(">Stay Local</button>");
-  expect(app).toContain('Switch to {isCloudMode ? "Local" : "Cloud"}');
+  expect(app).toContain('t("Switch to {target}", { target: isCloudMode ? t("Local") : t("Cloud") })');
   expect(app).toContain('invoke("restart_after_mode_change")');
 });
 
@@ -112,7 +112,7 @@ test("Account settings offers fenced Cloud sign-out and clears account state", (
   expect(app).toContain("generation !== authGeneration.current");
 
   const account = app.slice(
-    app.indexOf('<h2 className="sect-title">Account information</h2>'),
+    app.indexOf('<h2 className="sect-title">{t("Account information")}</h2>'),
     app.indexOf('className="settings-card remote-mcp-settings"'),
   );
   expect(account).toContain('{authErr && <p className="modal-err" role="alert">{authErr}</p>}');
@@ -128,17 +128,17 @@ test("Account settings prepares and protects one app-owned Remote MCP connector"
   expect(app).toContain('createCloudConnector()');
   expect(app).toContain('fetchCloudConnector(stored.connectorId)');
   expect(app).toContain('storeDesktopRemoteMcpCredential({ version: 1, state: "disabled" })');
-  expect(app).toContain('>Remote MCP</h2>');
-  expect(app).toContain('>MCP server URL</span>');
-  expect(app).toContain('>Access key</span>');
+  expect(app).toContain('{t("Remote MCP")}</h2>');
+  expect(app).toContain('{t("MCP server URL")}</span>');
+  expect(app).toContain('{t("Access key")}</span>');
   expect(app).toContain('remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"');
-  expect(app).toContain('>Connect Claude.ai or ChatGPT</strong>');
-  expect(app).toContain('Paste the MCP server URL and select Connect.');
-  expect(app).toContain('Sign into AliasMode and select Allow.');
-  expect(app).toContain('Claude.ai and ChatGPT use OAuth and do not need the access key.');
+  expect(app).toContain('{t("Connect Claude.ai or ChatGPT")}</strong>');
+  expect(app).toContain('t("Paste the MCP server URL and select Connect.")');
+  expect(app).toContain('t("Sign into AliasMode and select Allow.")');
+  expect(app).toContain('t("Claude.ai and ChatGPT use OAuth and do not need the access key.")');
   expect(app).not.toContain('web connectors are not supported');
-  expect(app).toContain('Regenerate key');
-  expect(app).toContain('Enable Remote MCP');
+  expect(app).toContain('t("Regenerate key")');
+  expect(app).toContain('t("Enable Remote MCP")');
   expect(app).toContain('if (remoteMcpAccountExit.current) return Promise.resolve();');
   expect(app).toContain('await prepareRemoteMcpForAccountExit(true);\n      await forgetCloudSession();');
   expect(app).toContain('if (view !== "settings" || !isCloudMode || !workspaceReady || restartRequired) return;');
@@ -360,15 +360,15 @@ test("sidebar creates persistent groups and gates Cloud deletion to workspace ma
 });
 
 test("Team settings guide invitations and explicit folder access", () => {
-  for (const heading of ["Members", "Invitations", "Join another workspace"]) expect(app).toContain(`>${heading}</h3>`);
+  for (const heading of ["Members", "Invitations", "Join another workspace"]) expect(app).toContain(`{t("${heading}")}</h3>`);
   // The "Your folder access" self-listing was removed on request: an owner or
   // admin already sees every folder, so the list said nothing.
   expect(app).not.toContain("Your folder access");
-  expect(app).toContain("New members see no folders until you grant access here.");
-  expect(app).toContain("It works only for the email you signed in with.");
-  expect(app).toContain('invite.expiresAt <= Date.now() ? "Expired" : "Pending"');
-  expect(app).toContain('aria-label={`${folder.name} access for ${member.email}`}');
-  expect(app).toContain('aria-label={`Resend invitation to ${invite.email}`}');
+  expect(app).toContain('t("Invitations go to that exact verified email. New members see no folders until you grant access here.")');
+  expect(app).toContain('t("Paste the code from your invitation email. It works only for the email you signed in with.")');
+  expect(app).toContain('t(statusCode === "expired" ? "Expired" : "Pending")');
+  expect(app).toContain('t("{folder} access for {email}", { folder: folder.name, email: member.email })');
+  expect(app).toContain('t("Resend invitation to {email}", { email: invite.email })');
   expect(app).toContain('if (ok) setTeamEmail("")');
   expect(app).toContain('className="notice" role="status"');
   expect(styles).toContain(".team-tag");
@@ -883,8 +883,8 @@ test("extensions can be assigned to Cloud profiles and groups without losing mis
 
 test("Settings carries the Remote MCP connector card in Cloud mode", () => {
   expect(app).toContain('className="settings-card remote-mcp-settings"');
-  expect(app).toContain("MCP server URL");
-  expect(app).toContain('aria-label="Remote MCP access key"');
+  expect(app).toContain('t("MCP server URL")');
+  expect(app).toContain('t("Remote MCP access key")');
   // Leaving the account (sign out, forget session) always revokes and forgets
   // the connector so a stale key cannot outlive the session that made it.
   expect(app).toContain("prepareRemoteMcpForAccountExit");
