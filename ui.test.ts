@@ -4601,3 +4601,39 @@ test("Cloud restore-session route reports the restored version and refusals", as
   s.close();
   rmSync(root, { recursive: true, force: true });
 });
+
+test("shell-language round-trips through the server and rejects invalid tags", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "shell-lang-"));
+  const paths = { root } as any;
+  const call = (req: Request) => handleUiRequest(req, {} as any, s, null, { paths });
+
+  // Default is English when nothing is stored.
+  let res = await call(new Request("http://x/ui/api/shell-language"));
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toEqual({ language: "en-US" });
+
+  // Store Chinese, read it back.
+  res = await call(new Request("http://x/ui/api/shell-language", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language: "zh-CN" }),
+  }));
+  expect(await res!.json()).toMatchObject({ ok: true, language: "zh-CN" });
+  res = await call(new Request("http://x/ui/api/shell-language"));
+  expect(await res!.json()).toEqual({ language: "zh-CN" });
+  expect(existsSync(join(root, "shell.json"))).toBe(true);
+
+  // Invalid tags fall back to English instead of being stored.
+  res = await call(new Request("http://x/ui/api/shell-language", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language: "../../etc/passwd" }),
+  }));
+  expect(await res!.json()).toMatchObject({ ok: true, language: "en-US" });
+  res = await call(new Request("http://x/ui/api/shell-language"));
+  expect(await res!.json()).toEqual({ language: "en-US" });
+
+  s.close();
+  rmSync(root, { recursive: true, force: true });
+});

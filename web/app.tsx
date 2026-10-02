@@ -8,6 +8,7 @@ import { ProxyProviderOffer } from "./proxy-offer.tsx";
 import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
+import { I18nProvider, availableLanguages, languageNativeName, useTranslation } from "./i18n.tsx";
 import { THEME_KEY, readThemeChoice, themeCookie, type ThemeChoice } from "./theme.ts";
 import {
   describeDesktopUpdateResult,
@@ -1037,6 +1038,7 @@ function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: Pro
 }
 
 function App() {
+  const { t, language, setLanguage } = useTranslation();
   const [profiles, setProfiles] = useState<UiProfile[]>([]);
   const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);
   const [appMode, setAppMode] = useState<AppModeConfig | null>(null);
@@ -3224,7 +3226,7 @@ function App() {
 
       <div className="main">
       <header className="pagehead">
-        <h1>{PAGE_TITLES[view]}</h1>
+        <h1>{t(PAGE_TITLES[view])}</h1>
         {view === "profiles" && (
           <span className="pagesub">
             {filtered.length === profiles.length ? `${profiles.length} total` : `${filtered.length} of ${profiles.length}`}
@@ -3845,7 +3847,7 @@ function App() {
       </div>
       ) : view === "settings" ? (
       <div className="workspace">
-        <div className="tabs" role="tablist" aria-label="Settings sections">
+        <div className="tabs" role="tablist" aria-label={t("Settings sections")}>
           {SETTINGS_TABS.map((tab) => (
             <button
               key={tab.key}
@@ -3855,34 +3857,34 @@ function App() {
               className={`tab${settingsTab === tab.key ? " active" : ""}`}
               onClick={() => setSettingsTab(tab.key)}
             >
-              {tab.key === "team" && isCloudMode ? "Team" : tab.label}
+              {tab.key === "team" && isCloudMode ? t("Team") : t(tab.label)}
             </button>
           ))}
         </div>
         <div className="settingspage">
           {settingsTab === "account" && (
             <>
-              <h2 className="sect-title">Account information</h2>
+              <h2 className="sect-title">{t("Account information")}</h2>
               <div className="identity-card">
                 <span className="identity-avatar"><Icon name="user" className="lg" /></span>
                 <span className="identity-lines">
-                  <b>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local workspace"}</b>
+                  <b>{isCloudMode ? cloudAuth?.user?.email ?? t("Cloud account") : t("Local workspace")}</b>
                   <span>
                     {isCloudMode
-                      ? `${cloudAuth?.workspace?.role ?? "member"} · ${cloudAuth?.workspace?.name ?? "Cloud workspace"}`
-                      : "No account · profile data stays on this computer"}
+                      ? `${t(cloudAuth?.workspace?.role ?? "member")} · ${cloudAuth?.workspace?.name ?? t("Cloud workspace")}`
+                      : t("No account · profile data stays on this computer")}
                   </span>
                 </span>
-                <span className="chip">{isCloudMode ? "Cloud" : "Local"}</span>
+                <span className="chip">{isCloudMode ? t("Cloud") : t("Local")}</span>
               </div>
 <section className="settings-card">
-            <header><Icon name="user" className="sm" /><h2>Account</h2></header>
+            <header><Icon name="user" className="sm" /><h2>{t("Account")}</h2></header>
             <div className="card-body">
-            <div className="settings-row"><span>Signed in as</span><strong>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local · no account"}</strong></div>
-            <div className="settings-row"><span>Profiles stored</span><strong>{profiles.length}</strong></div>
+            <div className="settings-row"><span>{t("Signed in as")}</span><strong>{isCloudMode ? cloudAuth?.user?.email ?? t("Cloud account") : t("Local · no account")}</strong></div>
+            <div className="settings-row"><span>{t("Profiles stored")}</span><strong>{profiles.length}</strong></div>
             {isCloudMode && cloudAuth?.authenticated && (
               <button className="btn danger" type="button" disabled={authBusy} onClick={() => void signOut()}>
-                <Icon name="power" className="sm" />{authBusy ? "Signing out…" : "Sign out / Switch account"}
+                <Icon name="power" className="sm" />{authBusy ? t("Signing out…") : t("Sign out / Switch account")}
               </button>
             )}
             {authErr && <p className="modal-err" role="alert">{authErr}</p>}
@@ -3892,67 +3894,74 @@ function App() {
           {isCloudMode && cloudAuth?.authenticated && (
             <section className="settings-card remote-mcp-settings">
               <header>
-                <Icon name="cloud" className="sm" /><h2>Remote MCP</h2>
+                <Icon name="cloud" className="sm" /><h2>{t("Remote MCP")}</h2>
                 <span className={`remote-mcp-status ${remoteMcp.state}`}>
-                  {remoteMcp.state === "active" ? "Ready" : remoteMcp.state === "disabled" ? "Disabled" : remoteMcp.state === "loading" ? "Preparing" : remoteMcp.state === "error" ? "Unavailable" : "Not ready"}
+                  {remoteMcp.state === "active" ? t("Ready") : remoteMcp.state === "disabled" ? t("Disabled") : remoteMcp.state === "loading" ? t("Preparing") : remoteMcp.state === "error" ? t("Unavailable") : t("Not ready")}
                 </span>
               </header>
               <div className="card-body">
-                <p>Connect an AI client on another computer. Browser windows open on this Windows PC, so keep AliasMode running.</p>
-                {remoteMcp.state === "loading" && <p className="hint" role="status">Preparing your secure connection…</p>}
+                <p>{t("Connect an AI client on another computer. Browser windows open on this Windows PC, so keep AliasMode running.")}</p>
+                {remoteMcp.state === "loading" && <p className="hint" role="status">{t("Preparing your secure connection…")}</p>}
                 {remoteMcp.state === "active" && remoteMcp.url && remoteMcp.token && (
                   <>
                     <label className="fld remote-mcp-field">
-                      <span>MCP server URL</span>
+                      <span>{t("MCP server URL")}</span>
                       <span className="remote-mcp-value">
                         <input className="mono" value={remoteMcp.url} readOnly />
-                        <button className="btn" type="button" disabled={authBusy} onClick={() => void copyRemoteMcp("url", remoteMcp.url!)}>{remoteMcpCopied === "url" ? "Copied" : "Copy"}</button>
+                        <button className="btn" type="button" disabled={authBusy} onClick={() => void copyRemoteMcp("url", remoteMcp.url!)}>{remoteMcpCopied === "url" ? t("Copied") : t("Copy")}</button>
                       </span>
                     </label>
                     <label className="fld remote-mcp-field">
-                      <span>Access key</span>
+                      <span>{t("Access key")}</span>
                       <span className="remote-mcp-value">
-                        <input className="mono" value={remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"} readOnly aria-label="Remote MCP access key" />
-                        <button className="btn" type="button" disabled={authBusy} onClick={() => setRemoteMcpTokenVisible((visible) => !visible)}>{remoteMcpTokenVisible ? "Hide" : "Reveal"}</button>
-                        <button className="btn" type="button" disabled={authBusy} onClick={() => void copyRemoteMcp("token", remoteMcp.token!)}>{remoteMcpCopied === "token" ? "Copied" : "Copy"}</button>
+                        <input className="mono" value={remoteMcpTokenVisible ? remoteMcp.token : "••••••••••••••••••••••••"} readOnly aria-label={t("Remote MCP access key")} />
+                        <button className="btn" type="button" disabled={authBusy} onClick={() => setRemoteMcpTokenVisible((visible) => !visible)}>{remoteMcpTokenVisible ? t("Hide") : t("Reveal")}</button>
+                        <button className="btn" type="button" disabled={authBusy} onClick={() => void copyRemoteMcp("token", remoteMcp.token!)}>{remoteMcpCopied === "token" ? t("Copied") : t("Copy")}</button>
                       </span>
                     </label>
                     <div className="hint remote-mcp-guide">
-                      <strong>Connect Claude.ai or ChatGPT</strong>
+                      <strong>{t("Connect Claude.ai or ChatGPT")}</strong>
                       <ol>
-                        <li>Add a custom MCP connector or app.</li>
-                        <li>Paste the MCP server URL and select Connect.</li>
-                        <li>Sign into AliasMode and select Allow.</li>
+                        <li>{t("Add a custom MCP connector or app.")}</li>
+                        <li>{t("Paste the MCP server URL and select Connect.")}</li>
+                        <li>{t("Sign into AliasMode and select Allow.")}</li>
                       </ol>
                       <details>
-                        <summary>Claude Code and other clients</summary>
-                        <p>Claude Code uses an HTTP entry in <code>.mcp.json</code>. Keep the access key in an environment variable. Other bearer-capable MCP clients can use the same URL and secret header.</p>
-                        <p>Claude.ai and ChatGPT use OAuth and do not need the access key.</p>
+                        <summary>{t("Claude Code and other clients")}</summary>
+                        <p>{t("Claude Code uses an HTTP entry in {file}. Keep the access key in an environment variable. Other bearer-capable MCP clients can use the same URL and secret header.", { file: ".mcp.json" })}</p>
+                        <p>{t("Claude.ai and ChatGPT use OAuth and do not need the access key.")}</p>
                       </details>
                     </div>
                     <div className="update-actions">
-                      <button className="btn" type="button" disabled={authBusy} onClick={() => void regenerateRemoteMcp()}>Regenerate key</button>
-                      <button className="btn danger" type="button" disabled={authBusy} onClick={() => void disableRemoteMcp()}>Disable</button>
+                      <button className="btn" type="button" disabled={authBusy} onClick={() => void regenerateRemoteMcp()}>{t("Regenerate key")}</button>
+                      <button className="btn danger" type="button" disabled={authBusy} onClick={() => void disableRemoteMcp()}>{t("Disable")}</button>
                     </div>
                   </>
                 )}
                 {remoteMcp.state === "disabled" && (
                   <>
-                    <p>Remote connections are disabled for this Windows device.</p>
-                    <button className="btn" type="button" disabled={authBusy} onClick={() => void enableRemoteMcp()}>Enable Remote MCP</button>
+                    <p>{t("Remote connections are disabled for this Windows device.")}</p>
+                    <button className="btn" type="button" disabled={authBusy} onClick={() => void enableRemoteMcp()}>{t("Enable Remote MCP")}</button>
                   </>
                 )}
-                {remoteMcp.error && <div className="modal-err" role="alert">{remoteMcp.error}</div>}
-                {remoteMcp.state === "error" && <button className="btn" type="button" disabled={authBusy} onClick={() => void loadRemoteMcp()}>Try again</button>}
+                {remoteMcp.error && <div className="modal-err" role="alert">{t(remoteMcp.error)}</div>}
+                {remoteMcp.state === "error" && <button className="btn" type="button" disabled={authBusy} onClick={() => void loadRemoteMcp()}>{t("Try again")}</button>}
               </div>
             </section>
           )}
 
 <section className="settings-card">
-            <header><Icon name="sun" className="sm" /><h2>Appearance</h2></header>
+            <header><Icon name="sun" className="sm" /><h2>{t("Appearance")}</h2></header>
             <div className="card-body">
-              <p>Choose how AliasMode looks. System follows your operating system setting.</p>
-              <div className="segmented" role="radiogroup" aria-label="Theme">
+              <p>{t("Choose how AliasMode looks. System follows your operating system setting.")}</p>
+              <label className="fld"><span>{t("language.label")}</span>
+                <select className="select" value={language} onChange={(event) => setLanguage(event.target.value)}>
+                  {availableLanguages().map((lang) => (
+                    <option key={lang} value={lang}>{languageNativeName(lang)}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="segmented" role="radiogroup" aria-label={t("Theme")}>
                 {THEMES.map((option) => (
                   <button
                     key={option.key}
@@ -3962,19 +3971,19 @@ function App() {
                     className={theme === option.key ? "active" : ""}
                     onClick={() => chooseTheme(option.key)}
                   >
-                    <Icon name={option.icon} className="sm" />{option.label}
+                    <Icon name={option.icon} className="sm" />{t(option.label)}
                   </button>
                 ))}
               </div>
             </div>
           </section>
           <section className="settings-card">
-            <header><Icon name={isCloudMode ? "laptop" : "cloud"} className="sm" /><h2>Switch mode</h2></header>
+            <header><Icon name={isCloudMode ? "laptop" : "cloud"} className="sm" /><h2>{t("Switch mode")}</h2></header>
             <div className="card-body settings-mode">
-              <p>{isCloudMode ? "Local mode keeps this installation offline from AliasMode Cloud." : "Cloud mode requires an account and does not upload Local profiles automatically."}</p>
+              <p>{isCloudMode ? t("Local mode keeps this installation offline from AliasMode Cloud.") : t("Cloud mode requires an account and does not upload Local profiles automatically.")}</p>
               <button className="btn" type="button" disabled={modeBusy || desktopUpdateInstalling} onClick={() => requestModeSwitch(isCloudMode ? "local" : "cloud")}>
                 <Icon name={isCloudMode ? "laptop" : "cloud"} className="sm" />
-                Switch to {isCloudMode ? "Local" : "Cloud"}
+                {t("Switch to {target}", { target: isCloudMode ? t("Local") : t("Cloud") })}
               </button>
             </div>
           </section>
@@ -3983,72 +3992,73 @@ function App() {
           )}
           {settingsTab === "team" && (
             <>
-              <h2 className="sect-title">{isCloudMode ? "Team and folder access" : "Workspace"}</h2>
+              <h2 className="sect-title">{isCloudMode ? t("Team and folder access") : t("Workspace")}</h2>
 <section className="settings-card">
-            <header><Icon name="folders" className="sm" /><h2>{isCloudMode ? "Team" : "Workspace"}</h2></header>
+            <header><Icon name="folders" className="sm" /><h2>{isCloudMode ? t("Team") : t("Workspace")}</h2></header>
             <div className="card-body">
             {isCloudMode ? (
               <>
-                <div className="settings-row"><span>Workspace</span><strong>{cloudAuth?.workspace?.name ?? "Cloud workspace"}</strong></div>
-                <div className="settings-row"><span>Role</span><strong>{cloudAuth?.workspace?.role ?? "member"}</strong></div>
-                {teamBusy && !team && <p className="hint" role="status">Loading team…</p>}
-                <h3 className="settings-subhead">Members</h3>
+                <div className="settings-row"><span>{t("Workspace")}</span><strong>{cloudAuth?.workspace?.name ?? t("Cloud workspace")}</strong></div>
+                <div className="settings-row"><span>{t("Role")}</span><strong>{t(cloudAuth?.workspace?.role ?? "member")}</strong></div>
+                {teamBusy && !team && <p className="hint" role="status">{t("Loading team…")}</p>}
+                <h3 className="settings-subhead">{t("Members")}</h3>
                 {team?.members.map((member) => (
                   <div className="team-member" key={member.accountId}>
                     <div className="settings-row">
-                      <span>{member.email}<small> · {member.grants.map((grant) => `${grant.folderName}: ${grant.permission}`).join(", ") || "No folder access"}</small></span>
-                      {member.role === "owner" || cloudAuth?.workspace?.role !== "owner" ? <strong>{member.role}</strong> : (
-                        <select className="select" aria-label={`Role for ${member.email}`} value={member.role} disabled={teamBusy} onChange={(event) => void runTeamAction("role", { accountId: member.accountId, role: event.target.value })}>
-                          <option value="member">member</option><option value="admin">admin</option>
+                      <span>{member.email}<small> · {member.grants.map((grant) => `${grant.folderName}: ${grant.permission}`).join(", ") || t("No folder access")}</small></span>
+                      {member.role === "owner" || cloudAuth?.workspace?.role !== "owner" ? <strong>{t(member.role)}</strong> : (
+                        <select className="select" aria-label={t("Role for {email}", { email: member.email })} value={member.role} disabled={teamBusy} onChange={(event) => void runTeamAction("role", { accountId: member.accountId, role: event.target.value })}>
+                          <option value="member">{t("member")}</option><option value="admin">{t("admin")}</option>
                         </select>
                       )}
                       {member.role !== "owner" && (cloudAuth?.workspace?.role === "owner" || (cloudAuth?.workspace?.role === "admin" && member.role === "member")) && (
-                        <button className="btn xs" type="button" aria-label={`Send password reset to ${member.email}`} disabled={teamBusy} onClick={() => void runTeamAction("reset-password", { accountId: member.accountId }, `Password reset email sent to ${member.email}`)}>Reset password</button>
+                        <button className="btn xs" type="button" aria-label={t("Send password reset to {email}", { email: member.email })} disabled={teamBusy} onClick={() => void runTeamAction("reset-password", { accountId: member.accountId }, t("Password reset email sent to {email}", { email: member.email }))}>{t("Reset password")}</button>
                       )}
                     </div>
                     {member.role === "member" && (cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin") && (
                       <div className="team-grants">
                         {team.folders.filter((folder) => !folder.archivedAt).map((folder) => {
                           const permission = member.grants.find((grant) => grant.folderName === folder.name)?.permission ?? "";
-                          return <label key={folder.name}>{folder.name}<select className="select" aria-label={`${folder.name} access for ${member.email}`} value={permission} disabled={teamBusy} onChange={(event) => void runTeamAction(event.target.value ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission: event.target.value })}><option value="">No access</option><option value="view">View</option><option value="edit">Edit</option></select></label>;
+                          return <label key={folder.name}>{folder.name}<select className="select" aria-label={t("{folder} access for {email}", { folder: folder.name, email: member.email })} value={permission} disabled={teamBusy} onChange={(event) => void runTeamAction(event.target.value ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission: event.target.value })}><option value="">{t("No access")}</option><option value="view">{t("View")}</option><option value="edit">{t("Edit")}</option></select></label>;
                         })}
-                        <button className="btn xs danger" type="button" aria-label={`Remove ${member.email}`} disabled={teamBusy} onClick={() => void runTeamAction("remove-member", { accountId: member.accountId }, `Removed ${member.email}`)}>Remove</button>
+                        <button className="btn xs danger" type="button" aria-label={t("Remove {email}", { email: member.email })} disabled={teamBusy} onClick={() => void runTeamAction("remove-member", { accountId: member.accountId }, t("Removed {email}", { email: member.email }))}>{t("Remove")}</button>
                       </div>
                     )}
                   </div>
                 ))}
                 {(cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin") && (
                   <>
-                    <h3 className="settings-subhead">Invitations</h3>
+                    <h3 className="settings-subhead">{t("Invitations")}</h3>
                     <form className="team-code" onSubmit={(event) => { event.preventDefault(); void inviteTeamMember(); }}>
-                      <input className="input" type="email" aria-label="Invite email" aria-describedby="invite-team-help" placeholder="Staff email address" value={teamEmail} disabled={teamBusy} onChange={(event) => setTeamEmail(event.target.value)} />
-                      {cloudAuth?.workspace?.role === "owner" && <select className="select" aria-label="Invitation role" value={teamRole} disabled={teamBusy} onChange={(event) => setTeamRole(event.target.value as "admin" | "member")}><option value="member">Member</option><option value="admin">Admin</option></select>}
-                      <button className="btn primary" type="submit" disabled={teamBusy || !teamEmail.trim()}>Send invite</button>
+                      <input className="input" type="email" aria-label={t("Invite email")} aria-describedby="invite-team-help" placeholder={t("Staff email address")} value={teamEmail} disabled={teamBusy} onChange={(event) => setTeamEmail(event.target.value)} />
+                      {cloudAuth?.workspace?.role === "owner" && <select className="select" aria-label={t("Invitation role")} value={teamRole} disabled={teamBusy} onChange={(event) => setTeamRole(event.target.value as "admin" | "member")}><option value="member">{t("Member")}</option><option value="admin">{t("Admin")}</option></select>}
+                      <button className="btn primary" type="submit" disabled={teamBusy || !teamEmail.trim()}>{t("Send invite")}</button>
                     </form>
-                    <p className="hint" id="invite-team-help">Invitations go to that exact verified email. New members see no folders until you grant access here.</p>
+                    <p className="hint" id="invite-team-help">{t("Invitations go to that exact verified email. New members see no folders until you grant access here.")}</p>
                     {team?.invitations.filter((invite) => !invite.acceptedAt && !invite.revokedAt).map((invite) => {
-                      const status = invite.expiresAt <= Date.now() ? "Expired" : "Pending";
+                      const statusCode = invite.expiresAt <= Date.now() ? "expired" : "pending";
+                      const status = t(statusCode === "expired" ? "Expired" : "Pending");
                       return <div className="settings-row" key={invite.id}>
                         <span>{invite.email}<small>{invite.role}</small></span>
                         <span>
-                          <span className={`team-tag ${status.toLowerCase()}`}>{status}</span>
-                          {(cloudAuth?.workspace?.role === "owner" || invite.role === "member") && <> <button className="btn xs" type="button" aria-label={`Resend invitation to ${invite.email}`} disabled={teamBusy} onClick={() => void runTeamAction("resend", { id: invite.id }, "Invitation resent")}>Resend</button> <button className="btn xs danger" type="button" aria-label={`Revoke invitation to ${invite.email}`} disabled={teamBusy} onClick={() => void runTeamAction("revoke", { id: invite.id }, "Invitation revoked")}>Revoke</button></>}
+                          <span className={`team-tag ${statusCode}`}>{status}</span>
+                          {(cloudAuth?.workspace?.role === "owner" || invite.role === "member") && <> <button className="btn xs" type="button" aria-label={t("Resend invitation to {email}", { email: invite.email })} disabled={teamBusy} onClick={() => void runTeamAction("resend", { id: invite.id }, t("Invitation resent"))}>{t("Resend")}</button> <button className="btn xs danger" type="button" aria-label={t("Revoke invitation to {email}", { email: invite.email })} disabled={teamBusy} onClick={() => void runTeamAction("revoke", { id: invite.id }, t("Invitation revoked"))}>{t("Revoke")}</button></>}
                         </span>
                       </div>;
                     })}
                   </>
                 )}
-                {teamErr && <p className="modal-err" role="alert">{teamErr}</p>}
-                <h3 className="settings-subhead">Join another workspace</h3>
+                {teamErr && <p className="modal-err" role="alert">{t(teamErr)}</p>}
+                <h3 className="settings-subhead">{t("Join another workspace")}</h3>
                 <form className="team-code" onSubmit={(event) => { event.preventDefault(); void acceptInvitation(); }}>
-                  <input className="input" aria-label="Invitation code" placeholder="Paste invitation code" value={invitationCode} onChange={(event) => setInvitationCode(event.target.value)} />
-                  <button className="btn primary" type="submit" disabled={authBusy || !invitationCode.trim()}>Accept</button>
+                  <input className="input" aria-label={t("Invitation code")} placeholder={t("Paste invitation code")} value={invitationCode} onChange={(event) => setInvitationCode(event.target.value)} />
+                  <button className="btn primary" type="submit" disabled={authBusy || !invitationCode.trim()}>{t("Accept")}</button>
                 </form>
-                <p className="hint">Paste the code from your invitation email. It works only for the email you signed in with.</p>
-                {authNotice && <p className="hint" role="status">{authNotice}</p>}
-                {authErr && <p className="modal-err" role="alert">{authErr}</p>}
+                <p className="hint">{t("Paste the code from your invitation email. It works only for the email you signed in with.")}</p>
+                {authNotice && <p className="hint" role="status">{t(authNotice)}</p>}
+                {authErr && <p className="modal-err" role="alert">{t(authErr)}</p>}
               </>
-            ) : <p>Local mode has no Cloud workspace.</p>}
+            ) : <p>{t("Local mode has no Cloud workspace.")}</p>}
             </div>
           </section>
           
@@ -4056,37 +4066,37 @@ function App() {
           )}
           {settingsTab === "advanced" && (
             <>
-              <h2 className="sect-title">Updates and diagnostics</h2>
+              <h2 className="sect-title">{t("Updates and diagnostics")}</h2>
 <section className="settings-card update-settings">
-            <header><Icon name="import" className="sm" /><h2>Updates</h2></header>
+            <header><Icon name="import" className="sm" /><h2>{t("Updates")}</h2></header>
             <div className="card-body">
-            <div className="settings-row"><span>Installed version</span><strong className="mono">{appVersion || desktopUpdate?.currentVersion || "—"}</strong></div>
+            <div className="settings-row"><span>{t("Installed version")}</span><strong className="mono">{appVersion || desktopUpdate?.currentVersion || "—"}</strong></div>
             {desktopUpdateResultSummary && (
               <div
                 className={`update-last-result ${desktopUpdateResultSummary.tone}`}
                 role={desktopUpdateResultSummary.tone === "success" ? "status" : "alert"}
               >
-                <strong>{desktopUpdateResultSummary.title}</strong>
-                <span>{desktopUpdateResultSummary.detail}</span>
+                <strong>{t(desktopUpdateResultSummary.title)}</strong>
+                <span>{t(desktopUpdateResultSummary.detail)}</span>
               </div>
             )}
-            {desktopUpdate?.state === "upToDate" && <p role="status">AliasMode is up to date.</p>}
+            {desktopUpdate?.state === "upToDate" && <p role="status">{t("AliasMode is up to date.")}</p>}
             {desktopUpdate?.state === "available" && (
               <>
-                <p role="status">Version {desktopUpdate.version} is ready. Active browsers will be saved and closed.</p>
+                <p role="status">{t("Version {version} is ready. Active browsers will be saved and closed.", { version: desktopUpdate.version })}</p>
                 <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
               </>
             )}
-            {!desktopUpdate && !desktopUpdateChecking && <p>AliasMode checks for updates when it starts.</p>}
+            {!desktopUpdate && !desktopUpdateChecking && <p>{t("AliasMode checks for updates when it starts.")}</p>}
             {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
-            {desktopUpdateErr && <div className="modal-err" role="alert">{desktopUpdateErr}</div>}
+            {desktopUpdateErr && <div className="modal-err" role="alert">{t(desktopUpdateErr)}</div>}
             <div className="update-actions">
               <button className="btn" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void checkDesktopUpdate(true)}>
-                <Icon name="refresh" className="sm" />{desktopUpdateChecking ? "Checking…" : "Check for updates"}
+                <Icon name="refresh" className="sm" />{desktopUpdateChecking ? t("Checking…") : t("Check for updates")}
               </button>
               {desktopUpdate?.state === "available" && (
                 <button className="btn primary" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
-                  {desktopUpdateInstalling ? "Updating…" : "Update now"}
+                  {desktopUpdateInstalling ? t("Updating…") : t("Update now")}
                 </button>
               )}
             </div>
@@ -4096,52 +4106,52 @@ function App() {
 {isCloudMode && (
             <section className="settings-card diagnostics-section">
               <header>
-                <Icon name="activity" className="sm" /><h2>Recent diagnostics</h2>
+                <Icon name="activity" className="sm" /><h2>{t("Recent diagnostics")}</h2>
                 <button className="btn xs" type="button" disabled={cloudEventsBusy} onClick={() => void loadCloudEvents()}>
-                  {cloudEventsBusy ? "Loading…" : "Refresh"}
+                  {cloudEventsBusy ? t("Loading…") : t("Refresh")}
                 </button>
               </header>
               <div className="card-body">
-              {cloudEventsErr && <div className="diagnostics-error" role="alert">{cloudEventsErr}</div>}
+              {cloudEventsErr && <div className="diagnostics-error" role="alert">{t(cloudEventsErr)}</div>}
               {!cloudEventsErr && cloudEvents.length === 0 && (
-                <p>{cloudEventsBusy ? "Loading recent Cloud events…" : "No Cloud lifecycle events in this run."}</p>
+                <p>{cloudEventsBusy ? t("Loading recent Cloud events…") : t("No Cloud lifecycle events in this run.")}</p>
               )}
               {cloudEvents.length > 0 && (
-                <div className="diagnostics-list" role="log" aria-label="Recent Cloud diagnostics">
+                <div className="diagnostics-list" role="log" aria-label={t("Recent Cloud diagnostics")}>
                   {cloudEvents.map((event, index) => (
                     <div className={`diagnostics-row${cloudDiagnosticFailed(event.type) ? " failed" : ""}`} key={`${event.timestamp}-${index}`}>
                       <time dateTime={new Date(event.timestamp).toISOString()}>{new Date(event.timestamp).toLocaleTimeString()}</time>
-                      <span>{CLOUD_DIAGNOSTIC_LABELS[event.type]}</span>
+                      <span>{t(CLOUD_DIAGNOSTIC_LABELS[event.type])}</span>
                     </div>
                   ))}
                 </div>
               )}
-              <p>Diagnostics contain fixed lifecycle labels only. They exclude profile data and credentials.</p>
+              <p>{t("Diagnostics contain fixed lifecycle labels only. They exclude profile data and credentials.")}</p>
               </div>
             </section>
           )}
           {/* Logs are not a Cloud feature — a Local install needs them just as
               much, so this card is the one part of Advanced that always shows. */}
           <section className="settings-card">
-            <header><Icon name="logs" className="sm" /><h2>Logs</h2></header>
+            <header><Icon name="logs" className="sm" /><h2>{t("Logs")}</h2></header>
             <div className="card-body">
-              <p>The detailed log records launches, proxy setup and browser lifecycle for this installation.</p>
+              <p>{t("The detailed log records launches, proxy setup and browser lifecycle for this installation.")}</p>
               <button type="button" className="btn" onClick={() => {
                 setLogErr(null);
                 fetchLogs().then(setLogView).catch((e) => setLogErr(e instanceof Error ? e.message : String(e)));
-              }}><Icon name="logs" className="sm" />View detailed logs</button>
-              {logErr && <p className="cardnote">Logs: {logErr}</p>}
-              {logDir && <p className="cardnote">File: {logDir}</p>}
+              }}><Icon name="logs" className="sm" />{t("View detailed logs")}</button>
+              {logErr && <p className="cardnote">{t("Logs")}: {t(logErr)}</p>}
+              {logDir && <p className="cardnote">{t("File")}: {logDir}</p>}
             </div>
           </section>
           
             </>
           )}
-          {modeErr && <div className="modal-err" role="alert"><Icon name="alert" className="sm" />{modeErr}</div>}
+          {modeErr && <div className="modal-err" role="alert"><Icon name="alert" className="sm" />{t(modeErr)}</div>}
         </div>
         <footer className="pagefoot">
           <span className="spacer" />
-          <button className="btn primary" type="button" onClick={() => setView("profiles")}>Done</button>
+          <button className="btn primary" type="button" onClick={() => setView("profiles")}>{t("Done")}</button>
         </footer>
       </div>
       ) : null}
@@ -4735,4 +4745,8 @@ function App() {
 }
 
 const root = createRoot(document.getElementById("root")!);
-root.render(<App />);
+root.render(
+  <I18nProvider>
+    <App />
+  </I18nProvider>
+);
