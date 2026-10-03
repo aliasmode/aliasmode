@@ -3307,7 +3307,7 @@ function App() {
         <h1>{t(PAGE_TITLES[view])}</h1>
         {view === "profiles" && (
           <span className="pagesub">
-            {filtered.length === profiles.length ? `${profiles.length} total` : `${filtered.length} of ${profiles.length}`}
+            {filtered.length === profiles.length ? t("{count} total", { count: profiles.length }) : t("{filtered} of {total}", { filtered: filtered.length, total: profiles.length })}
           </span>
         )}
         <span className="spacer" />
@@ -3322,13 +3322,13 @@ function App() {
             <button
               type="button"
               className={`iconbtn tip${nodesOpen ? " on" : ""}`}
-              data-tip="Automation nodes"
-              aria-label="Automation node freshness"
+              data-tip={t("Automation nodes")}
+              aria-label={t("Automation node freshness")}
               onClick={() => setNodesOpen((o) => !o)}
             ><Icon name="activity" /></button>
             {nodesOpen && (
               <div className="popover below-right">
-                <div className="pop-head">Automation nodes</div>
+                <div className="pop-head">{t("Automation nodes")}</div>
                 <HealthSources sources={healthSources} />
               </div>
             )}
@@ -3337,8 +3337,8 @@ function App() {
           <button
             type="button"
             className="iconbtn tip"
-            data-tip="Refresh"
-            aria-label="Refresh profiles"
+            data-tip={t("Refresh")}
+            aria-label={t("Refresh profiles")}
             disabled={refreshing}
             onClick={() => void refreshRoster()}
           ><Icon name="refresh" /></button>
@@ -3346,13 +3346,13 @@ function App() {
             <button
               type="button"
               className={`iconbtn tip${colsOpen ? " on" : ""}`}
-              data-tip="Columns"
-              aria-label="Choose visible columns"
+              data-tip={t("Columns")}
+              aria-label={t("Choose visible columns")}
               onClick={() => setColsOpen((o) => !o)}
             ><Icon name="columns" /></button>
             {colsOpen && (
               <div className="popover below-right">
-                <div className="pop-head">Visible columns</div>
+                <div className="pop-head">{t("Visible columns")}</div>
                 {COLUMNS.map((column) => (
                   <label className="pop-item" key={column.key}>
                     <input type="checkbox" checked={columnVisible(column.key)} onChange={() => toggleColumn(column.key)} />
@@ -3366,8 +3366,8 @@ function App() {
           <button
             className="account-button"
             type="button"
-            aria-label="Open Account and Settings"
-            title="Account & Settings"
+            aria-label={t("Open Account and Settings")}
+            title={t("Account & Settings")}
             onClick={openAccountSettings}
           >
             <span className="avatar"><Icon name="user" /></span>
@@ -3384,7 +3384,7 @@ function App() {
         <div className="error">
           <Icon name="alert" />
           <span>{actionErr ?? connErr}</span>
-          <button className="dismiss" aria-label="Dismiss error" onClick={() => { setActionErr(null); setConnErr(null); }}>
+          <button className="dismiss" aria-label={t("Dismiss error")} onClick={() => { setActionErr(null); setConnErr(null); }}>
             <Icon name="close" className="sm" />
           </button>
         </div>
@@ -3415,7 +3415,7 @@ function App() {
           <button
             className="update-result-dismiss"
             type="button"
-            aria-label="Dismiss last update result"
+            aria-label={t("Dismiss last update result")}
             onClick={() => setDesktopUpdateResultDismissed(true)}
           >
             <Icon name="close" className="sm" />
@@ -3463,22 +3463,22 @@ function App() {
             <Icon name="search" className="sm" />
             <input
               className="input search"
-              placeholder="Search by No., id, name or tag…"
-              aria-label="Search profiles"
+              placeholder={t("Search by No., id, name or tag…")}
+              aria-label={t("Search profiles")}
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
-            {q && <button type="button" className="clear" aria-label="Clear search" onClick={() => setQ("")}><Icon name="close" className="sm" /></button>}
+            {q && <button type="button" className="clear" aria-label={t("Clear search")} onClick={() => setQ("")}><Icon name="close" className="sm" /></button>}
           </div>
         </div>
 
         {filtered.length > 0 && (
           <div className="toolbar" role="status">
             <button type="button" className="btn" disabled={deleting || allFilteredSelected} onClick={selectAllFiltered}>
-              {allFilteredSelected ? `All ${selectionScope} selected` : `Select all ${selectionScope}`}
+              {allFilteredSelected ? t("All {scope} selected", { scope: selectionScope }) : t("Select all {scope}", { scope: selectionScope })}
             </button>
             <span className="muted">{deleting ? "Moving selected profiles…" : "Across all pages"}</span>
-            {!allFilteredSelected && selectedOutsideFilter > 0 && <span className="muted">This replaces your selection, excluding {selectedOutsideFilter} outside this view.</span>}
+            {!allFilteredSelected && selectedOutsideFilter > 0 && <span className="muted">{t("This replaces your selection, excluding {count} outside this view.", { count: selectedOutsideFilter })}</span>}
           </div>
         )}
 
@@ -3488,13 +3488,13 @@ function App() {
         <div className="toolbar active">
           <span className="selcount">
             <Icon name="check" className="sm" />
-            {selected.size} selected
+            {t("{count} selected", { count: selected.size })}
           </span>
-          <button type="button" className="btn ghost" aria-label="Clear selection" onClick={() => setSelected(new Set())}>Clear selection</button>
-          <button className="btn primary tip" data-tip="Open selected browsers" disabled={!selected.size} onClick={openSelected}>
+          <button type="button" className="btn ghost" aria-label={t("Clear selection")} onClick={() => setSelected(new Set())}>{t("Clear selection")}</button>
+          <button className="btn primary tip" data-tip={t("Open selected browsers")} disabled={!selected.size} onClick={openSelected}>
             <Icon name="play" className="sm" />Open
           </button>
-          <button className="btn solid-danger tip" data-tip="Close selected browsers" disabled={!selected.size} onClick={closeSelected}>
+          <button className="btn solid-danger tip" data-tip={t("Close selected browsers")} disabled={!selected.size} onClick={closeSelected}>
             <Icon name="power" className="sm" />Close
           </button>
           {(!isCloudMode || selectedEditable) && <>
@@ -3505,7 +3505,7 @@ function App() {
               setScriptRunProfiles(profiles.filter((profile) => selected.has(profile.id)));
               setScriptRunOpen(true);
             }}
-          ><Icon name="play" className="sm" />Run script</button>
+          ><Icon name="play" className="sm" />{t("Run script")}</button>
           <span className="vsep" />
           {!isCloudMode && selectedMobileCount > 0 && (
             <button className="btn warn" onClick={convertSelectedMobile}>
@@ -3514,65 +3514,65 @@ function App() {
           )}
           {/* Export and file edits work in Cloud; mobile conversion remains Local-only. */}
           <div className="menuwrap" ref={exportRef}>
-            <button className="btn tip" data-tip="Export selected profiles" disabled={!selected.size || !!exportProgress} onClick={() => setExportOpen((o) => !o)}>
-              <Icon name="export" className="sm" />Export<Icon name="chevronDown" className="sm" />
+            <button className="btn tip" data-tip={t("Export selected profiles")} disabled={!selected.size || !!exportProgress} onClick={() => setExportOpen((o) => !o)}>
+              <Icon name="export" className="sm" />{t("Export")}<Icon name="chevronDown" className="sm" />
             </button>
             {exportOpen && selected.size > 0 && !exportProgress && (
               <div className="exportmenu popover below-left" onMouseLeave={() => setExportOpen(false)}>
-                <button className="pop-item" onClick={() => exportSelected("csv")}><Icon name="file" className="sm" />Export as CSV (credentials)</button>
-                <button className="pop-item" onClick={() => exportSelected("txt")}><Icon name="file" className="sm" />Export as .txt (full profile)</button>
-                <button className="pop-item" onClick={() => exportSelected("xlsx")}><Icon name="file" className="sm" />Export as Excel (full profile)</button>
+                <button className="pop-item" onClick={() => exportSelected("csv")}><Icon name="file" className="sm" />{t("Export as CSV (credentials)")}</button>
+                <button className="pop-item" onClick={() => exportSelected("txt")}><Icon name="file" className="sm" />{t("Export as .txt (full profile)")}</button>
+                <button className="pop-item" onClick={() => exportSelected("xlsx")}><Icon name="file" className="sm" />{t("Export as Excel (full profile)")}</button>
               </div>
             )}
           </div>
-          <button className="btn tip" data-tip="Export → edit → re-upload" disabled={!selected.size || !!exportProgress} onClick={openUpdate} title="Export → edit → re-upload to change credentials in bulk">
+          <button className="btn tip" data-tip={t("Export → edit → re-upload")} disabled={!selected.size || !!exportProgress} onClick={openUpdate} title={t("Export → edit → re-upload to change credentials in bulk")}>
             <Icon name="edit" className="sm" />Edit from file
           </button>
           <span className="vsep" />
           <div className="movewrap">
             {newMode ? (
-              <input className="input" autoFocus placeholder="new group name" value={newGroup} onChange={(e) => setNewGroup(e.target.value)} />
+              <input className="input" autoFocus placeholder={t("new group name")} value={newGroup} onChange={(e) => setNewGroup(e.target.value)} />
             ) : (
               <select
                 className="select move-group"
-                aria-label="Move to group"
+                aria-label={t("Move to group")}
                 title={moveTarget || "Choose group"}
                 disabled={!selected.size || !selectedMovable}
                 value={moveTarget}
                 onChange={(e) => (e.target.value === "__new__" ? setNewMode(true) : setMoveTarget(e.target.value))}
               >
-                <option value="">Move to…</option>
+                <option value="">{t("Move to…")}</option>
                 {editableGroups.map((g) => (
                   <option key={g} value={g}>{g}</option>
                 ))}
-                <option value="__new__">+ new group…</option>
+                <option value="__new__">{t("+ new group…")}</option>
               </select>
             )}
             {newMode && (
-              <button className="btn ghost" onClick={() => { setNewMode(false); setNewGroup(""); }}>cancel</button>
+              <button className="btn ghost" onClick={() => { setNewMode(false); setNewGroup(""); }}>{t("cancel")}</button>
             )}
             <button className="btn accent" disabled={!selected.size || !selectedMovable || (newMode ? !newGroup.trim() : !moveTarget)} onClick={moveSelected}>
-              <Icon name="move" className="sm" />Move
+              <Icon name="move" className="sm" />{t("Move")}
             </button>
           </div>
           {!isCloudMode && extensions.length > 0 && selectedProfilesSupportChromeExtensions && (
             <>
               <span className="vsep" />
               <div className="extctl">
-                <span className="extctl-lbl"><Icon name="puzzle" className="sm" />Extension</span>
-                <select className="select extctl-sel" aria-label="Extension for bulk assignment" disabled={!selected.size} value={bulkExt} onChange={(e) => setBulkExt(e.target.value)}>
-                  <option value="">choose…</option>
+                <span className="extctl-lbl"><Icon name="puzzle" className="sm" />{t("Extension")}</span>
+                <select className="select extctl-sel" aria-label={t("Extension for bulk assignment")} disabled={!selected.size} value={bulkExt} onChange={(e) => setBulkExt(e.target.value)}>
+                  <option value="">{t("choose…")}</option>
                   {extensions.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
                 </select>
-                <button className="btn xs" disabled={!selected.size || !bulkExt} onClick={() => bulkAssignExt("add")}>Add</button>
-                <button className="btn xs" disabled={!selected.size || !bulkExt} onClick={() => bulkAssignExt("remove")}>Remove</button>
+                <button className="btn xs" disabled={!selected.size || !bulkExt} onClick={() => bulkAssignExt("add")}>{t("Add")}</button>
+                <button className="btn xs" disabled={!selected.size || !bulkExt} onClick={() => bulkAssignExt("remove")}>{t("Remove")}</button>
               </div>
             </>
           )}
           <span className="spacer" />
           {(!isCloudMode || selectedEditable) && (
-            <button className="btn danger tip" data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size || deleting} onClick={deleteSelected}>
-              <Icon name="trash" className="sm" />{deleting ? "Processing…" : appMode?.legacyRemote ? "Delete" : `Move ${selected.size.toLocaleString()} to Trash`}
+            <button className="btn danger tip" data-tip={appMode?.legacyRemote ? t("Delete selected profiles") : t("Move selected profiles to Trash")} disabled={!selected.size || deleting} onClick={deleteSelected}>
+              <Icon name="trash" className="sm" />{deleting ? t("Processing…") : appMode?.legacyRemote ? t("Delete") : t("Move {count} to Trash", { count: selected.size.toLocaleString() })}
             </button>
           )}
           </>}
@@ -3587,7 +3587,7 @@ function App() {
             <thead>
               <tr>
                 <th className="chk" style={{ width: CHECKBOX_COLUMN_WIDTH }}>
-                  <input type="checkbox" aria-label="Select all visible profiles" checked={allVisibleSelected} onChange={toggleAll} />
+                  <input type="checkbox" aria-label={t("Select all visible profiles")} checked={allVisibleSelected} onChange={toggleAll} />
                 </th>
                 {shownColumns.map(columnHead)}
               </tr>
@@ -3658,7 +3658,7 @@ function App() {
                           <button
                             className={`iconbtn twofa tip${twoFaFlash?.id === p.id ? " flash" : ""}`}
                             data-tip={twoFaFlash?.id === p.id ? `Copied ${twoFaFlash.code}` : "Copy current 2FA code"}
-                            aria-label="Copy current 2FA code"
+                            aria-label={t("Copy current 2FA code")}
                             onClick={() => copy2fa(p.id)}
                           >
                             <Icon name={twoFaFlash?.id === p.id ? "check" : "key"} className="sm" />
@@ -3666,7 +3666,7 @@ function App() {
                         )}
                         {isCloudMode && canManageCloudFolders && <button className="iconbtn tip" data-tip={t("Manage access")} aria-label={t("Manage access for {profile}", { profile: p.name })} onClick={() => openAccess({ kind: "profile", id: p.id, name: p.name, folder: p.group })}><Icon name="user" className="sm" /></button>}
                         {canEditRow && (
-                          <button className="iconbtn tip" data-tip="Edit profile" aria-label={`Edit ${p.name}`} onClick={() => openEdit(p.id)}>
+                          <button className="iconbtn tip" data-tip={t("Edit profile")} aria-label={`Edit ${p.name}`} onClick={() => openEdit(p.id)}>
                             <Icon name="edit" className="sm" />
                           </button>
                         )}
@@ -3675,14 +3675,14 @@ function App() {
                             {p.engine === "chromium" && <>
                               <button
                                 className="iconbtn tip"
-                                data-tip="Add cookie"
+                                data-tip={t("Add cookie")}
                                 aria-label={`Add a cookie to ${p.name}`}
                                 onClick={() => openCookie(p)}
                               ><Icon name="cookie" className="sm" /></button>
                               <button
                                 className="iconbtn tip"
-                                data-tip="Bring to front"
-                                aria-label="Bring this browser window to the front"
+                                data-tip={t("Bring to front")}
+                                aria-label={t("Bring this browser window to the front")}
                                 disabled={busy[p.id]}
                                 onClick={() => act(p.id, raiseProfile)}
                               ><Icon name="raise" className="sm" /></button>
@@ -3693,7 +3693,7 @@ function App() {
                           </>
                         ) : p.mobilePersona ? (
                           !p.lockedBy && (!isCloudMode || p.permission === "edit") ? (
-                            <button className="btn sm warn" disabled={busy[p.id]} title="Convert this mobile persona to a desktop device" onClick={() => openEdit(p.id)}>
+                            <button className="btn sm warn" disabled={busy[p.id]} title={t("Convert this mobile persona to a desktop device")} onClick={() => openEdit(p.id)}>
                               <Icon name="laptop" className="sm" />Convert
                             </button>
                           ) : null
@@ -3741,18 +3741,18 @@ function App() {
                       <span className="glyph"><Icon name="profiles" /></span>
                       {profiles.length === 0 ? (
                         <>
-                          <b>No profiles yet</b>
-                          <p>Create a profile or import a readable export from another browser.</p>
+                          <b>{t("No profiles yet")}</b>
+                          <p>{t("Create a profile or import a readable export from another browser.")}</p>
                           <div className="empty-actions">
-                            <button className="btn primary" disabled={!canEditCloud} onClick={openCreate}><Icon name="plus" className="sm" />New Profile</button>
-                            <button className="btn" disabled={!canEditCloud} onClick={openBulk}><Icon name="fileImport" className="sm" />Import profiles</button>
+                            <button className="btn primary" disabled={!canEditCloud} onClick={openCreate}><Icon name="plus" className="sm" />{t("New Profile")}</button>
+                            <button className="btn" disabled={!canEditCloud} onClick={openBulk}><Icon name="fileImport" className="sm" />{t("Import profiles")}</button>
                           </div>
                         </>
                       ) : (
                         <>
-                          <b>No matches</b>
-                          <p>No profiles match the current filters.</p>
-                          <button className="btn" onClick={() => { setQ(""); setGroup("all"); }}>Clear filters</button>
+                          <b>{t("No matches")}</b>
+                          <p>{t("No profiles match the current filters.")}</p>
+                          <button className="btn" onClick={() => { setQ(""); setGroup("all"); }}>{t("Clear filters")}</button>
                         </>
                       )}
                     </div>
@@ -3773,8 +3773,8 @@ function App() {
         )}
 
         <footer className="statusbar">
-          <span className="stat"><b>{profiles.length}</b> profiles</span>
-          <span className="stat"><StatusDot running={runningCount > 0} /><b>{runningCount}</b> running</span>
+          <span className="stat"><b>{profiles.length}</b> {t("profiles")}</span>
+          <span className="stat"><StatusDot running={runningCount > 0} /><b>{runningCount}</b> {t("running")}</span>
           {diag && (
             <span className="diag" onClick={() => setShowDiag((s) => !s)}>
               Diagnose · last {diagWhen}
@@ -3785,20 +3785,20 @@ function App() {
             <button
               type="button"
               className="iconbtn"
-              aria-label="Previous page"
+              aria-label={t("Previous page")}
               disabled={visibleProfilePage === 0}
               onClick={() => setProfilePage(visibleProfilePage - 1)}
             ><Icon name="chevronLeft" className="sm" /></button>
-            <span className="page-of">Page <b>{visibleProfilePage + 1}</b> / {profilePageCount}</span>
+            <span className="page-of">{t("Page")} <b>{visibleProfilePage + 1}</b> / {profilePageCount}</span>
             <button
               type="button"
               className="iconbtn"
-              aria-label="Next page"
+              aria-label={t("Next page")}
               disabled={visibleProfilePage + 1 >= profilePageCount}
               onClick={() => setProfilePage(visibleProfilePage + 1)}
             ><Icon name="chevronRight" className="sm" /></button>
-            <select className="select" aria-label="Rows per page" value={pageSize} onChange={(e) => applyPageSize(Number(e.target.value))}>
-              {PAGE_SIZES.map((size) => <option key={size} value={size}>{size} / page</option>)}
+            <select className="select" aria-label={t("Rows per page")} value={pageSize} onChange={(e) => applyPageSize(Number(e.target.value))}>
+              {PAGE_SIZES.map((size) => <option key={size} value={size}>{t("{size} / page", { size })}</option>)}
             </select>
           </span>
         </footer>
@@ -4277,37 +4277,37 @@ function App() {
             onSubmit={(event) => { event.preventDefault(); void submitCookie(); }}
           >
             <div className="modal-head" id="add-cookie-title">
-              <Icon name="cookie" />Add cookie<span className="mono muted">{cookieProfile.name}</span>
-              <button type="button" className="modal-close" aria-label="Close" disabled={cookieSaving} onClick={closeCookie}><Icon name="close" className="sm" /></button>
+              <Icon name="cookie" />{t("Add cookie")}<span className="mono muted">{cookieProfile.name}</span>
+              <button type="button" className="modal-close" aria-label={t("Close")} disabled={cookieSaving} onClick={closeCookie}><Icon name="close" className="sm" /></button>
             </div>
             <div className="modal-body">
               {cookieErr && <div className="modal-err"><Icon name="alert" className="sm" />{cookieErr}</div>}
-              <p className="hint">Add one cookie directly to this open browser.</p>
+              <p className="hint">{t("Add one cookie directly to this open browser.")}</p>
               <div className="fld-row">
                 <label className="fld grow">
-                  <span>Name</span>
+                  <span>{t("Name")}</span>
                   <input autoFocus value={cookieForm.name} onChange={(event) => setCookieField("name", event.target.value)} />
                 </label>
                 <label className="fld grow">
-                  <span>Value</span>
+                  <span>{t("Value")}</span>
                   <input type="password" autoComplete="off" value={cookieForm.value} onChange={(event) => setCookieField("value", event.target.value)} />
                 </label>
               </div>
               <div className="fld-row">
                 <label className="fld grow">
-                  <span>Domain</span>
+                  <span>{t("Domain")}</span>
                   <input value={cookieForm.domain} placeholder="example.com" onChange={(event) => setCookieField("domain", event.target.value)} />
                 </label>
                 <label className="fld port">
-                  <span>Path</span>
+                  <span>{t("Path")}</span>
                   <input value={cookieForm.path} onChange={(event) => setCookieField("path", event.target.value)} />
                 </label>
               </div>
             </div>
             <div className="modal-foot">
-              <button className="btn ghost" type="button" disabled={cookieSaving} onClick={closeCookie}>Cancel</button>
+              <button className="btn ghost" type="button" disabled={cookieSaving} onClick={closeCookie}>{t("Cancel")}</button>
               <button className="btn primary" type="submit" disabled={cookieSaving || !cookieForm.name || !cookieForm.domain.trim() || !cookieForm.path.startsWith("/")}>
-                {cookieSaving ? "Adding…" : "Add cookie"}
+                {cookieSaving ? t("Adding…") : t("Add cookie")}
               </button>
             </div>
           </form>
@@ -4355,13 +4355,13 @@ function App() {
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="create-profile-title" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head" id="create-profile-title">
               <Icon name="plus" />New profile
-              <button type="button" className="modal-close" aria-label="Close" onClick={closeCreate}><Icon name="close" className="sm" /></button>
+              <button type="button" className="modal-close" aria-label={t("Close")} onClick={closeCreate}><Icon name="close" className="sm" /></button>
             </div>
             <div className="modal-body">
               {createErr && <div className="modal-err"><Icon name="alert" className="sm" />{createErr}</div>}
               <div className="fld-row">
                 <label className="fld grow">
-                  <span>Name</span>
+                  <span>{t("Name")}</span>
                   <input value={form.name} placeholder="auto if blank" onChange={(e) => setF("name", e.target.value)} />
                 </label>
                 {!isCloudMode && (
@@ -4669,18 +4669,18 @@ function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">
               <Icon name="fileImport" />Import profiles
-              <button type="button" className="modal-close" aria-label="Close" onClick={closeBulk}><Icon name="close" className="sm" /></button>
+              <button type="button" className="modal-close" aria-label={t("Close")} onClick={closeBulk}><Icon name="close" className="sm" /></button>
             </div>
             <div className="modal-body">
               {bulkErr && <div className="modal-err"><Icon name="alert" className="sm" />{bulkErr}</div>}
               <ol className="steps">
-                <li>Export profiles from your previous browser as TXT, CSV, JSON, or XLSX.</li>
-                <li>Add the files below and choose a destination group.</li>
-                <li>Click Import profiles. Only data included in the export can transfer.</li>
+                <li>{t("Export profiles from your previous browser as TXT, CSV, JSON, or XLSX.")}</li>
+                <li>{t("Add the files below and choose a destination group.")}</li>
+                <li>{t("Click Import profiles. Only data included in the export can transfer.")}</li>
               </ol>
-              <p className="hint">Encrypted or proprietary profile archives cannot be imported. Use a readable export instead.</p>
+              <p className="hint">{t("Encrypted or proprietary profile archives cannot be imported. Use a readable export instead.")}</p>
 
-              <div className="segmented" role="tablist" aria-label="Import source">
+              <div className="segmented" role="tablist" aria-label={t("Import source")}>
                 <button
                   type="button"
                   role="tab"
@@ -4688,7 +4688,7 @@ function App() {
                   className={bulkSource === "file" ? "active" : ""}
                   onClick={() => { setBulkSource("file"); setBulkText(""); }}
                 >
-                  <Icon name="fileImport" className="sm" />From file
+                  <Icon name="fileImport" className="sm" />{t("From file")}
                 </button>
                 <button
                   type="button"
@@ -4697,7 +4697,7 @@ function App() {
                   className={bulkSource === "paste" ? "active" : ""}
                   onClick={() => { setBulkSource("paste"); setBulkFiles([]); }}
                 >
-                  <Icon name="copy" className="sm" />Paste text
+                  <Icon name="copy" className="sm" />{t("Paste text")}
                 </button>
               </div>
 
@@ -4711,7 +4711,7 @@ function App() {
                     onDrop={(e) => { e.preventDefault(); setBulkOver(false); if (e.dataTransfer.files?.length) setBulkFiles(Array.from(e.dataTransfer.files)); }}
                   >
                     <Icon name="fileImport" />
-                    <b>Drag &amp; drop files, or click to choose</b>
+                    <b>{t("Drag &amp; drop files, or click to choose")}</b>
                     <div className="sub">Readable TXT, CSV, JSON, or XLSX exports from AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut, and similar browsers</div>
                   </div>
                   {bulkFiles.length > 0 && (
@@ -4727,13 +4727,13 @@ function App() {
                           ><Icon name="close" className="sm" /></button>
                         </span>
                       ))}
-                      <button type="button" className="btn xs ghost" onClick={() => setBulkFiles([])}>Clear all</button>
+                      <button type="button" className="btn xs ghost" onClick={() => setBulkFiles([])}>{t("Clear all")}</button>
                     </div>
                   )}
                 </>
               ) : (
                 <label className="fld">
-                  <span>AdsPower TXT records</span>
+                  <span>{t("AdsPower TXT records")}</span>
                   <textarea
                     rows={9}
                     value={bulkText}
@@ -4741,8 +4741,10 @@ function App() {
                     onChange={(event) => setBulkText(event.target.value)}
                   />
                   <small>{pastedRecordCount === null
-                    ? "Paste one or more key=value records, separated by a line of asterisks."
-                    : `${pastedRecordCount} record${pastedRecordCount === 1 ? "" : "s"} detected — each one starts with its own id= line.`}</small>
+                    ? t("Paste one or more key=value records, separated by a line of asterisks.")
+                    : pastedRecordCount === 1
+                      ? t("1 record detected — each one starts with its own id= line.")
+                      : t("{count} records detected — each one starts with its own id= line.", { count: pastedRecordCount })}</small>
                 </label>
               )}
 
@@ -4761,15 +4763,14 @@ function App() {
                   <GroupPicker value={bulkGroup} onChange={setBulkGroup} groups={isCloudMode ? editableGroups : existingGroups} allowCreate={!isCloudMode} />
                 </label>
                 <label className="fld grow">
-                  <span>Platform</span>
+                  <span>{t("Platform")}</span>
                   <select value={bulkPlatform} onChange={(e) => setBulkPlatform(e.target.value)}>
                     {KNOWN_PLATFORMS.map((platform) => <option key={platform.value} value={platform.value}>{platform.label}</option>)}
                   </select>
                 </label>
               </div>
               <p className="formnote">
-                Anything chosen above overrides that field on every imported record, including
-                provider exports that already carry a group.
+                {t("Anything chosen above overrides that field on every imported record, including provider exports that already carry a group.")}
               </p>
               <p className="formnote">
                 An AliasMode export also carries <code>seed</code>, <code>timezone</code> and{" "}
@@ -4780,15 +4781,15 @@ function App() {
             </div>
             <div className="modal-foot">
               <button className="tlink" onClick={() => downloadText("aliasmode-template.csv", CSV_TEMPLATE, "text/csv")}>
-                <Icon name="export" className="sm" />CSV template
+                <Icon name="export" className="sm" />{t("CSV template")}
               </button>
               <button className="tlink" onClick={() => downloadText("aliasmode-example.txt", TXT_EXAMPLE, "text/plain")}>
-                <Icon name="export" className="sm" />.txt example
+                <Icon name="export" className="sm" />{t(".txt example")}
               </button>
               <span className="spacer" />
-              <button className="btn ghost" onClick={closeBulk}>Cancel</button>
+              <button className="btn ghost" onClick={closeBulk}>{t("Cancel")}</button>
               <button className="btn primary" disabled={bulkBusy || (!bulkFiles.length && !bulkText.trim()) || (isCloudMode && !bulkGroup)} onClick={submitBulk}>
-                <Icon name="fileImport" className="sm" />{bulkBusy ? "Importing…" : "Import profiles"}
+                <Icon name="fileImport" className="sm" />{bulkBusy ? t("Importing…") : t("Import profiles")}
               </button>
             </div>
           </div>
@@ -4800,32 +4801,32 @@ function App() {
            close via Cancel, the X, or Escape (the backdrop has no onClick). */
         <div className="modal-backdrop">
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head">Update profiles from file<button type="button" className="modal-close" aria-label="Close" onClick={() => setShowUpdate(false)}><Icon name="close" className="sm" /></button></div>
+            <div className="modal-head">{t("Update profiles from file")}<button type="button" className="modal-close" aria-label={t("Close")} onClick={() => setShowUpdate(false)}><Icon name="close" className="sm" /></button></div>
             <div className="modal-body">
               {updateErr && <div className="modal-err"><Icon name="alert" className="sm" />{updateErr}</div>}
               {updateResult && <div className="modal-ok"><Icon name="check" className="sm" />{updateResult}</div>}
               <ol className="steps">
-                <li><b>Export</b> the profiles you want to change — that gives you a file with each profile's <code>id</code> (how rows are matched).</li>
-                <li><b>Edit</b> the columns you want (name, username, password, 2FA, proxy…). Keep the <code>id</code> column; delete any column you don't want to touch.</li>
-                {!isCloudMode && <li>Add a <code>custom_no</code> column to renumber profiles in bulk — that number shows in the roster and in the launched browser's window title.</li>}
-                <li><b>Re-upload</b> the edited file below. IDs in the file determine which profiles change, not the current selection. Cookies &amp; fingerprints are preserved — editing a <code>cookie</code> or <code>ua</code> column has no effect.</li>
-                {isCloudMode && <li>Close profiles before updating. Each Cloud profile saves separately; successful updates remain saved if other profiles fail.</li>}
+                <li><b>{t("Export")}</b> {t("the profiles you want to change — that gives you a file with each profile's")} — that gives you a file with each profile's <code>id</code> {t("(how rows are matched).")}</li>
+                <li><b>{t("Edit")}</b> {t("the columns you want (name, username, password, 2FA, proxy…). Keep the")} <code>id</code> {t("column; delete any column you don't want to touch.")}</li>
+                {!isCloudMode && <li>{t("Add a")} <code>custom_no</code> {t("column to renumber profiles in bulk — that number shows in the roster and in the launched browser's window title.")}</li>}
+                <li><b>{t("Re-upload")}</b> {t("the edited file below. IDs in the file determine which profiles change, not the current selection. Cookies &amp; fingerprints are preserved — editing a")} <code>cookie</code> or <code>ua</code> {t("column has no effect.")}</li>
+                {isCloudMode && <li>{t("Close profiles before updating. Each Cloud profile saves separately; successful updates remain saved if other profiles fail.")}</li>}
               </ol>
               <div className="updexport">
                 {selected.size > 0 ? (
                   <span>
-                    Export {selected.size} selected:&nbsp;
-                    <button className="tlink" onClick={() => exportSelected("csv")}><Icon name="export" className="sm" />CSV</button>
+                    {t("Export {count} selected:", { count: selected.size })}&nbsp;
+                    <button className="tlink" onClick={() => exportSelected("csv")}><Icon name="export" className="sm" />{t("CSV")}</button>
                     &nbsp;·&nbsp;
-                    <button className="tlink" onClick={() => exportSelected("txt")}><Icon name="export" className="sm" />.txt</button>
+                    <button className="tlink" onClick={() => exportSelected("txt")}><Icon name="export" className="sm" />{t(".txt")}</button>
                     &nbsp;·&nbsp;
-                    <button className="tlink" onClick={() => exportSelected("xlsx")}><Icon name="export" className="sm" />Excel</button>
+                    <button className="tlink" onClick={() => exportSelected("xlsx")}><Icon name="export" className="sm" />{t("Excel")}</button>
                   </span>
                 ) : (
-                  <span className="hint">Tip: select profiles first, then export here to get an editable file.</span>
+                  <span className="hint">{t("Tip: select profiles first, then export here to get an editable file.")}</span>
                 )}
                 <span className="grow" />
-                <button className="tlink" onClick={() => downloadText("aliasmode-update-template.csv", UPDATE_TEMPLATE_CSV, "text/csv")}><Icon name="export" className="sm" />example sheet</button>
+                <button className="tlink" onClick={() => downloadText("aliasmode-update-template.csv", UPDATE_TEMPLATE_CSV, "text/csv")}><Icon name="export" className="sm" />{t("example sheet")}</button>
               </div>
               <div
                 className={`bulkdrop${updateOver ? " over" : ""}`}
@@ -4835,7 +4836,7 @@ function App() {
                 onDrop={(e) => { e.preventDefault(); setUpdateOver(false); if (e.dataTransfer.files?.[0]) setUpdateFile(e.dataTransfer.files[0]); }}
               >
                 <Icon name="export" />
-                <b>Drag &amp; drop the edited file, or click to choose</b>
+                <b>{t("Drag &amp; drop the edited file, or click to choose")}</b>
                 <div className="sub">CSV, <code>.txt</code> or Excel <code>.xlsx</code> with an <code>id</code> column</div>
               </div>
               <input
@@ -4845,11 +4846,11 @@ function App() {
                 style={{ display: "none" }}
                 onChange={(e) => { if (e.target.files?.[0]) setUpdateFile(e.target.files[0]); e.target.value = ""; }}
               />
-              {updateFile && <div className="bulkfiles"><Icon name="file" className="sm" />Selected: <b>{updateFile.name}</b></div>}
+              {updateFile && <div className="bulkfiles"><Icon name="file" className="sm" />{t("Selected:")} <b>{updateFile.name}</b></div>}
             </div>
             <div className="modal-foot">
               <button className="btn ghost" onClick={() => setShowUpdate(false)}>Close</button>
-              <button className="btn primary" disabled={updateBusy || !updateFile} onClick={submitUpdate}>{updateBusy ? "Updating…" : "Update profiles"}</button>
+              <button className="btn primary" disabled={updateBusy || !updateFile} onClick={submitUpdate}>{updateBusy ? t("Updating…") : t("Update profiles")}</button>
             </div>
           </div>
         </div>

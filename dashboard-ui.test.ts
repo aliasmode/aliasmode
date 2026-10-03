@@ -29,7 +29,7 @@ test("dashboard renders the approved Alias Loop logo and it survives dark mode",
 });
 
 test("dashboard exposes account settings and confirms mode switching", () => {
-  expect(app).toContain('aria-label="Open Account and Settings"');
+  expect(app).toContain('aria-label={t("Open Account and Settings")}');
   expect(app).toContain("<ModeSwitchConfirmation");
   expect(app).toContain("Cloud profiles will not appear until you switch back");
   expect(app).toContain("does not upload them to Cloud automatically");
@@ -75,7 +75,7 @@ test("dashboard shows the durable result in its banner and Updates panel", () =>
   expect(app).toContain('invoke("last_update_result")');
   expect(app).toContain('setDesktopUpdateResult(parseDesktopUpdateResult(value))');
   expect(app).toContain('className={`update-banner update-result ${desktopUpdateResultSummary.tone}`}');
-  expect(app).toContain('aria-label="Dismiss last update result"');
+  expect(app).toContain('aria-label={t("Dismiss last update result")}');
   expect(app).toContain('className={`update-last-result ${desktopUpdateResultSummary.tone}`}');
   expect(app).toContain('{desktopUpdateResultSummary.title}');
   expect(app).toContain('{desktopUpdateResultSummary.detail}');
@@ -270,8 +270,8 @@ test("Local timezone lookup is explicit", () => {
 });
 
 test("running profile rows expose Bring to front in Local and Cloud mode", () => {
-  expect(app).toContain('data-tip="Bring to front"');
-  expect(app).toContain('aria-label="Bring this browser window to the front"');
+  expect(app).toContain('data-tip={t("Bring to front")}');
+  expect(app).toContain('aria-label={t("Bring this browser window to the front")}');
   expect(app).toContain('onClick={() => act(p.id, raiseProfile)}');
   // The running-row branch must stay mode-agnostic: raising a window is a local
   // action on a browser this machine already opened, in Cloud mode too.
@@ -281,7 +281,7 @@ test("running profile rows expose Bring to front in Local and Cloud mode", () =>
 });
 
 test("running profile rows expose live cookie addition in every mode", () => {
-  expect(app).toContain('data-tip="Add cookie"');
+  expect(app).toContain('data-tip={t("Add cookie")}');
   expect(app).toContain('aria-label={`Add a cookie to ${p.name}`}');
   expect(app).toContain('onClick={() => openCookie(p)}');
 
@@ -290,10 +290,10 @@ test("running profile rows expose live cookie addition in every mode", () => {
   expect(runningBranch).not.toContain("isCloudMode");
 
   expect(app).toContain('aria-labelledby="add-cookie-title"');
-  expect(app).toContain('<span>Name</span>');
-  expect(app).toContain('<span>Value</span>');
-  expect(app).toContain('<span>Domain</span>');
-  expect(app).toContain('<span>Path</span>');
+  expect(app).toContain('<span>{t("Name")}</span>');
+  expect(app).toContain('<span>{t("Value")}</span>');
+  expect(app).toContain('<span>{t("Domain")}</span>');
+  expect(app).toContain('<span>{t("Path")}</span>');
   expect(app).toContain('type="password" autoComplete="off"');
   expect(app).toContain("await addProfileCookie(cookieProfile.id, cookieForm);");
   expect(app).toContain('flash("Cookie added to the open browser.");');
@@ -305,7 +305,7 @@ test("Cloud rows expose Edit and Convert device only with effective Edit permiss
   // locked by ANOTHER session stay read-only.
   expect(app).toContain('(p.permission === "edit" && !p.lockedBy)');
   expect(app).toContain('(!isCloudMode || p.permission === "edit")');
-  expect(app).toContain('title="Convert this mobile persona to a desktop device"');
+  expect(app).toContain('title={t("Convert this mobile persona to a desktop device")}');
   expect(app).toContain("setEditExpectedVersion(p.expectedVersion ?? null)");
   expect(app).toContain("isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined");
   expect(app).toContain("!isCloudMode && editTotp");
@@ -397,7 +397,7 @@ test("Admin invitations are read-only for Admin viewers", () => {
 test("Cloud Delete requires edit permission for every selected profile", () => {
   expect(app).toContain('const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");');
   expect(app).toContain('{(!isCloudMode || selectedEditable) && (');
-  expect(app).toContain('data-tip={appMode?.legacyRemote ? "Delete selected profiles" : "Move selected profiles to Trash"} disabled={!selected.size || deleting} onClick={deleteSelected}');
+  expect(app).toContain('data-tip={appMode?.legacyRemote ? t("Delete selected profiles") : t("Move selected profiles to Trash")} disabled={!selected.size || deleting} onClick={deleteSelected}');
   expect(app).toContain('setSelected(new Set([...(r.locked ?? []), ...(r.failed ?? [])]));');
 });
 
@@ -436,8 +436,8 @@ test("the roster is sortable, pageable and its columns are selectable", () => {
   // A running browser is the row an operator acts on next, so it outranks the sort column.
   expect(app).toContain("if (a.running !== b.running) return a.running ? -1 : 1;");
   expect(app).toContain('aria-sort={sort.key === key ? (sort.dir === 1 ? "ascending" : "descending") : "none"}');
-  expect(app).toContain('aria-label="Choose visible columns"');
-  expect(app).toContain('aria-label="Rows per page"');
+  expect(app).toContain('aria-label={t("Choose visible columns")}');
+  expect(app).toContain('aria-label={t("Rows per page")}');
   expect(app).toContain("const PAGE_SIZES = [25, 50, 100, 200];");
   expect(app).toContain('const DEFAULT_HIDDEN_COLUMNS: ColumnKey[] = ["tags"];');
   // Layout preferences are a convenience; disabled storage must not break the roster.
@@ -535,7 +535,7 @@ test("selection controls expose scope selection and clearing without changing ex
   expect(app).not.toContain("allVisibleSelected && !allFilteredSelected");
   expect(app).toContain("disabled={deleting || allFilteredSelected}");
   expect(app).toContain("onClick={selectAllFiltered}");
-  expect(app).toContain('aria-label="Clear selection" onClick={() => setSelected(new Set())}');
+  expect(app).toContain('aria-label={t("Clear selection")} onClick={() => setSelected(new Set())}');
   expect(app).toContain('q ? "matching profiles" : "profiles"');
   expect(app).toContain('group === "all" ? "" :');
   expect(app).toContain("const ids = [...selected];");
@@ -593,9 +593,9 @@ test("header controls stay reachable and dismissable", () => {
   expect(app).toContain("function useDismiss<T extends HTMLElement>(open: boolean, close: () => void)");
   expect(app).toContain('document.addEventListener("mousedown", onDown);');
   expect(app).toContain('if (event.key === "Escape") onClose.current();');
-  expect(app).toContain('aria-label="Refresh profiles"');
+  expect(app).toContain('aria-label={t("Refresh profiles")}');
   expect(app).toContain('aria-label="Automation node freshness"');
-  expect(app).toContain('aria-label="Open Account and Settings"');
+  expect(app).toContain('aria-label={t("Open Account and Settings")}');
 });
 
 test("the dashboard typeface is bundled, never fetched at runtime", () => {
@@ -701,7 +701,7 @@ test("every row action sits beside Open in the Action cell — nothing hides on 
   expect(app).toContain('aria-label={`Open ${p.name}`}');
   expect(app).toContain('aria-label={`Close ${p.name}`}');
   expect(app).toContain('aria-label={`Edit ${p.name}`}');
-  expect(app).toContain('aria-label="Copy current 2FA code"');
+  expect(app).toContain('aria-label={t("Copy current 2FA code")}');
   // The hover-revealed overlay is gone: it overlapped the profile name.
   expect(app).not.toContain("rowquick");
   expect(styles).not.toContain(".rowquick");
@@ -740,17 +740,18 @@ test("small windows keep navigation and dialogs keep typed input", () => {
 test("import offers one source at a time and counts what was pasted", () => {
   // Two full-height inputs stacked left it ambiguous which one Import would read.
   expect(app).toContain('const [bulkSource, setBulkSource] = useState<"file" | "paste">("file");');
-  expect(app).toContain('aria-label="Import source"');
+  expect(app).toContain('aria-label={t("Import source")}');
   // Switching sources clears the other, so a stale value cannot be submitted.
   expect(app).toContain('onClick={() => { setBulkSource("file"); setBulkText(""); }}');
   expect(app).toContain('onClick={() => { setBulkSource("paste"); setBulkFiles([]); }}');
   // Every AdsPower record opens with its own id= line, so this count is exact.
   expect(app).toContain("function countPastedRecords(text: string): number {");
   expect(app).toContain('return (text.match(/^id=/gm) ?? []).length;');
-  expect(app).toContain("} detected — each one starts with its own id= line.");
+  expect(app).toContain('t("1 record detected — each one starts with its own id= line.")');
+  expect(app).toContain('t("{count} records detected — each one starts with its own id= line.", { count: pastedRecordCount })');
   // Chosen files are individually removable rather than a comma-joined string.
   expect(app).toContain('aria-label={`Remove ${file.name}`}');
-  expect(app).toContain(">Clear all</button>");
+  expect(app).toContain(">{t(\"Clear all\")}</button>");
   expect(styles).toContain(".filechip");
   expect(styles).toContain(".segmented");
 });
