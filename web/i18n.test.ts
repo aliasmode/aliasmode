@@ -8,13 +8,17 @@ const tables = {
   "zh-CN": zhCN as Record<string, string>,
 };
 
-test("zh-CN is a subset of en-US (missing keys fall back to English)", () => {
-  const enKeys = new Set(Object.keys(tables["en-US"]));
-  const zhKeys = new Set(Object.keys(tables["zh-CN"]));
-  const extra = [...zhKeys].filter((k) => !enKeys.has(k));
-  expect(extra).toEqual([]);
-  expect(enKeys.size).toBeGreaterThan(0);
-  expect(zhKeys.size).toBeGreaterThan(0);
+// Keys are the English source strings, so en-US only carries the keys whose
+// value differs from the key. Every translated key must still exist in the UI
+// source, or the translation is dead.
+test("every zh-CN key is an English string used in the web source", async () => {
+  const sources = await Promise.all(
+    ["app.tsx", "proxies.tsx", "scripts.tsx", "trash.tsx", "proxy-offer.tsx"]
+      .map((file) => Bun.file(new URL(`./${file}`, import.meta.url)).text()),
+  );
+  const source = sources.join("\n");
+  const stale = Object.keys(tables["zh-CN"]).filter((key) => !key.startsWith("language.") && !source.includes(key));
+  expect(stale).toEqual([]);
 });
 
 test("t() returns the translation for the active language", () => {
