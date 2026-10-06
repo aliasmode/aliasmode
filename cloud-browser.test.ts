@@ -9,7 +9,8 @@ import type { OpenProfileResponse, PortableProfileV1 } from "./contracts/cloud-v
 import { BrowserLaunchError, Launcher as ProductionLauncher } from "./launcher.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
 import { PlaywrightWorkerError } from "./playwright-runtime.ts";
-import { decodePortableProfile } from "./portable-profile.ts";
+import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
+import { completeProfileFingerprint } from "./firefox-config.ts";
 import { sessionBundleSignature, SessionRestoreError } from "./session.ts";
 import { ProfileStore } from "./store.ts";
 import { handleUiRequest } from "./ui.ts";
@@ -539,11 +540,16 @@ test("Firefox Cloud checkpoints use owner polling and preserve V2 through offlin
     const roster = await state.coordinator.listRoster();
     expect(roster.profiles[0]?.engine).toBe("firefox");
     expect(roster.profiles[0]).not.toHaveProperty("debugPort");
+    const migrated = state.store.getProfile("profile1")!;
+    expect(migrated.locale).toBe("en-US");
+    expect(migrated.firefox!.config.fonts).toBeArray();
+    const openingCheckpoint = state.queue.get(state.queue.list("account1")[0]!.id, "account1")!;
+    expect(openingCheckpoint.payload.profile).toEqual(encodePortableProfile(migrated).profile);
     expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "pending" });
     const pending = state.queue.get(state.queue.list("account1")[0]!.id, "account1")!;
     expect(pending.readyToSubmit).toBe(true);
     expect(pending.payload.schemaVersion).toBe(2);
-    expect(pending.payload.profile).toEqual(firefoxPayload.profile);
+    expect(pending.payload.profile).toEqual(encodePortableProfile(migrated).profile);
     expect(pending.payload.session).toEqual(session);
   } finally {
     await state.coordinator.releaseAll(true);
@@ -583,7 +589,7 @@ test("Cloud browser imports one encoded batch without populating the Local store
   expect(state.imports).toHaveLength(1);
   expect(state.imports[0]!.destination).toBe("Sales");
   expect(JSON.parse(decodePortableProfile(state.imports[0]!.profiles[0]!).sessionBundle)).toMatchObject(JSON.parse(sessionBundle));
-  expect(state.imports[0]!.profiles.map((item) => decodePortableProfile(item).profile)).toEqual([first, second]);
+  expect(state.imports[0]!.profiles.map((item) => decodePortableProfile(item).profile)).toEqual([first, second].map(completeProfileFingerprint));
   expect(state.store.getProfile("profile1")).toBeNull();
   expect(state.store.getProfile("profile2")).toBeNull();
   state.queue.close();

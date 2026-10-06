@@ -171,6 +171,7 @@ export function deriveFingerprintFlags(profile: Profile): string[] {
   // forced old version beside a newer kernel is not.
   // Match the browser clock to the proxy's geolocation (resolved at import).
   if (profile.timezone) flags.push(`--fingerprint-timezone=${profile.timezone}`);
+  if (profile.locale) flags.push(`--fingerprint-locale=${profile.locale}`);
   // CloakBrowser's default ~500 MB storage quota is the classic incognito
   // signal, so Google treats the profile as private. Report a real-disk size.
   flags.push(`--fingerprint-storage-quota=${100_000 + (profile.fingerprintSeed % 400_000)}`);

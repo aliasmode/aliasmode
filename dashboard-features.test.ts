@@ -327,7 +327,7 @@ test("the export carries the restored identity fields", () => {
 test("full exports fill a blank UA from its capture without changing launch flags", async () => {
   const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/146.0.0.0";
   const original = profile({
-    platformOs: "windows", timezone: "America/New_York", fingerprintSeed: 1685817975,
+    platformOs: "windows", timezone: "America/New_York", locale: "en-US", fingerprintSeed: 1685817975,
     fpObserved: { ua, platform: "Win32", canvas: "captured-canvas" },
     cookies: [{ name: "session", value: "test-value", domain: ".example.com", path: "/", httpOnly: false, secure: false }],
   });

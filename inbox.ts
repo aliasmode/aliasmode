@@ -9,6 +9,8 @@
 
 import { readdirSync, existsSync, mkdirSync, watch, statSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { completeProfileFingerprint } from "./firefox-config.ts";
 import type { ParsedProfileImport } from "./parse.ts";
 import { parseImportFile } from "./import-formats.ts";
 import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
@@ -88,8 +90,11 @@ function unsafeImportError(problems: string[], status = 400): ProfileImportError
   return new ProfileImportError(`unsafe import rejected; no profiles were changed: ${problems.join("; ")}`, status);
 }
 
-function sameFirefoxConfig(a: Profile["firefox"], b: Profile["firefox"]): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+function sameFirefoxConfig(existing: Profile, incoming: Profile): boolean {
+  return isDeepStrictEqual(
+    completeProfileFingerprint(existing).firefox,
+    completeProfileFingerprint({ ...existing, firefox: incoming.firefox }).firefox,
+  );
 }
 
 /** Merge only fields actually present in an AdsPower re-export. */
@@ -118,6 +123,7 @@ function mergeExisting(existing: Profile, incoming: SourcedImport): Profile {
     if (Number.isInteger(seed) && seed >= 1 && seed <= 0xffff_ffff) out.fingerprintSeed = p.fingerprintSeed;
   }
   if (present.has("timezone") && p.timezone) out.timezone = p.timezone;
+  if (present.has("locale") && p.locale) out.locale = p.locale;
   if (present.has("platform_os") && p.platformOs) out.platformOs = p.platformOs;
   if (present.has("extensions")) out.extensions = [...(p.extensions ?? [])];
   if (present.has("tags")) out.tags = [...(p.tags ?? [])];
@@ -217,7 +223,7 @@ export async function importBuffers(
     if (present.has("engine") || present.has("firefox_config")) {
       if ((entry.profile.engine ?? "chromium") !== (existing.engine ?? "chromium")) {
         problems.push(`${entry.source}: profile ${entry.profile.id}: profile engine cannot change in place`);
-      } else if (existing.engine === "firefox" && !sameFirefoxConfig(existing.firefox, entry.profile.firefox)) {
+      } else if (existing.engine === "firefox" && !sameFirefoxConfig(existing, entry.profile)) {
         problems.push(`${entry.source}: profile ${entry.profile.id}: Firefox config cannot change through import`);
       }
     }

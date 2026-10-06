@@ -2,6 +2,7 @@ import { normalizeProfileEngine } from "./firefox-config.ts";
 import type { CookieRecord, Profile } from "./types.ts";
 import { MAX_CUSTOM_NO_LENGTH, MAX_SCREEN_DIMENSION, MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH } from "./parse.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
+import { normalizeProfileLocale } from "./profile-locale.ts";
 
 const REQUIRED_STRING_FIELDS = [
   "accId",
@@ -106,6 +107,7 @@ export function assertValidProfile(value: unknown): asserts value is Profile {
   profile.cookies.forEach(assertCookie);
   if (typeof profile.seeded !== "boolean") throw new Error("profile seeded must be boolean");
 
+  normalizeProfileLocale(profile.locale);
   const timezone = profile.timezone as string;
   if (timezone) {
     try {

@@ -35,6 +35,7 @@ const STRING_FIELDS: Array<[string, string[]]> = [
   ["fakey", ["fakey", "twofa", "2fa", "totp", "otp", "totpsecret", "otpsecret", "twofasecret", "accounttwofa"]],
   ["ua", ["ua", "useragent", "useragentstring", "browseruseragent", "profileuseragent", "navigatoruseragent", "fingerprintnavigatoruseragent"]],
   ["seed", ["seed", "fingerprintseed", "profileseed"]],
+  ["locale", ["locale", "profilelocale"]],
 ];
 
 const PROXY_VALUE_ALIASES = [

@@ -230,7 +230,7 @@ export async function handleUserApi(
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
       // Match the browser clock to the proxy's geo, exactly as /ui/api create and
       // AdsPower's automatic_timezone do. Best-effort: never fail create on geoip.
-      if (profile.proxy) await attachTimezones([profile], geoipFetch).catch(() => {});
+      if (profile.proxy) await attachTimezones([profile], geoipFetch, true).catch(() => {});
       if (roster?.createProfile) return ok(await roster.createProfile(profile));
       store.upsertProfile(profile);
       return ok({ id: profile.id });

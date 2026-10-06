@@ -36,7 +36,8 @@ import { handleProxyToolsRequest } from "./proxy-tools.ts";
 import { handleTrashRequest } from "./trash.ts";
 import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, type ImportOverrides } from "./inbox.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
-import { attachTimezones, lookupExitTimezone, type FetchLike } from "./geoip.ts";
+import { attachTimezones, lookupExitLocation, type FetchLike } from "./geoip.ts";
+import { localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictTimezone, parseStrictCustomNo, decodeText } from "./parse.ts";
 import type { ProfileExport } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
@@ -438,7 +439,8 @@ function fingerprintChanges(p: Profile, set: Record<string, unknown>): boolean {
   const screen = "resolution" in set ? parseStrictResolution(set.resolution) : null;
   return !!(screen && (screen.width !== p.screenWidth || screen.height !== p.screenHeight)) ||
     ("platformOs" in set && parseStrictPlatformOs(set.platformOs) !== (p.platformOs ?? "")) ||
-    ("timezone" in set && parseStrictTimezone(set.timezone) !== p.timezone);
+    ("timezone" in set && parseStrictTimezone(set.timezone) !== p.timezone) ||
+    ("locale" in set && (normalizeProfileLocale(set.locale) ?? p.locale) !== p.locale);
 }
 
 /**
@@ -471,6 +473,7 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
     }
     p.platformOs = platformOs;
   }
+  if ("locale" in set) p.locale = normalizeProfileLocale(set.locale) ?? p.locale;
   if ("timezone" in set) {
     p.timezone = parseStrictTimezone(set.timezone);
     syncFirefoxTimezone(p);
@@ -1213,7 +1216,7 @@ export async function handleUiRequest(
       // Cloud keeps its existing server-side identity flow. Local profiles only
       // resolve proxy geography after the operator explicitly requests it.
       if (options.cloudBrowser && profile.proxy) {
-        await attachTimezones([profile], options.timezoneFetch).catch(() => {});
+        await attachTimezones([profile], options.timezoneFetch, true).catch(() => {});
         syncFirefoxTimezone(profile);
       }
       if (options.cloudBrowser) {
@@ -1860,8 +1863,8 @@ export async function handleUiRequest(
       if (store.getLaunch(id)) {
         return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
       }
-      const timezone = await lookupExitTimezone(profile.proxy, options.timezoneFetch);
-      if (!timezone) return Response.json({ ok: false, error: "Could not determine the connection timezone. The saved timezone is unchanged." }, { status: 502 });
+      const location = await lookupExitLocation(profile.proxy, options.timezoneFetch);
+      if (!location) return Response.json({ ok: false, error: "Could not determine the connection timezone. The saved timezone is unchanged." }, { status: 502 });
       const current = store.getProfile(id);
       if (!current || current.proxyError || JSON.stringify(current.proxy) !== JSON.stringify(profile.proxy)) {
         return Response.json({ ok: false, error: "Profile connection changed. Reopen Edit and try again." }, { status: 409 });
@@ -1869,10 +1872,11 @@ export async function handleUiRequest(
       if (store.getLaunch(id)) {
         return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
       }
-      current.timezone = timezone;
+      current.timezone = location.timezone;
+      current.locale = localeForCountry(location.country) ?? localeForTimezone(location.timezone);
       syncFirefoxTimezone(current);
       store.upsertProfile(current);
-      return Response.json({ ok: true, timezone });
+      return Response.json({ ok: true, timezone: current.timezone });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 500 });
     }
@@ -2038,7 +2042,8 @@ export async function handleUiRequest(
           }
           const liveProxyChanged = applyEdits(live, set);
           if (liveProxyChanged && live.proxy && !("timezone" in set)) {
-            await attachTimezones([live], options.timezoneFetch).catch(() => {});
+            const location = await lookupExitLocation(live.proxy, options.timezoneFetch);
+            if (location) live.timezone = location.timezone;
             syncFirefoxTimezone(live);
           } else if (liveProxyChanged && !("timezone" in set)) {
             live.timezone = "";

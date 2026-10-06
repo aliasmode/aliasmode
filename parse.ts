@@ -28,6 +28,7 @@ import { normalizeProxyType, parseProxySpec, proxyLegacyString } from "./proxy.t
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { attestationFields, expectationFromRecord, FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
 import { parseCapturedSessionBundle } from "./session.ts";
+import { normalizeProfileLocale } from "./profile-locale.ts";
 
 /** Full export transport; session state never belongs in the roster profile. */
 export interface ProfileExport extends Profile {
@@ -385,6 +386,9 @@ export function recordToProfile(
     validationErrors.push(proxyError);
   }
 
+  let locale: string | undefined;
+  try { locale = normalizeProfileLocale(rec.locale); }
+  catch (error) { validationErrors.push(error instanceof Error ? error.message : String(error)); }
   const fpExpected = expectationFromRecord(rec);
   const browser = parseFirefoxExport(rec, validationErrors);
   const profile: Profile = {
@@ -411,6 +415,7 @@ export function recordToProfile(
     // An exported timezone is the profile's own resolved value; keep it. When
     // absent or unparseable, geoip resolves one at import exactly as before.
     timezone: parseTimezone(rec.timezone),
+    ...(locale ? { locale } : {}),
     screenWidth: width,
     screenHeight: height,
     fingerprintSeed: parseSeed(rec.seed) ?? deterministicSeed(id),
@@ -527,6 +532,7 @@ const UPDATE_KEYMAP: Record<string, string> = {
   "proxy type": "proxyType",
   resolution: "resolution",
   screen: "resolution",
+  locale: "locale",
   // Operator-chosen serial. Exports do not emit this column (that would change a
   // shape downstream tooling already parses), but an update file may add it.
   custom_no: "customNo",
@@ -685,6 +691,7 @@ function profileFields(p: ProfileExport): Record<string, string> {
     // seed was not id-derived (see marketplace.ts).
     seed: String(p.fingerprintSeed),
     timezone: p.timezone,
+    locale: p.locale ?? "",
     platform_os: platform || "",
     extensions: (p.extensions ?? []).join(","),
     tags: (p.tags ?? []).join(","),
@@ -699,7 +706,7 @@ function profileFields(p: ProfileExport): Record<string, string> {
  * Fields that are read back on import and change what the browser launches as.
  * Distinct from the fp_* group, which is only ever compared against.
  */
-const RESTORED_KEYS = ["seed", "timezone", "platform_os", "extensions", "tags"] as const;
+const RESTORED_KEYS = ["seed", "timezone", "locale", "platform_os", "extensions", "tags"] as const;
 
 /** Field order of the `key=value` block export. */
 const TXT_KEYS = [

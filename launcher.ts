@@ -42,7 +42,8 @@ import { applySessionToEndpoint, bundleTabUrls, bundleTelegramClient, canonicalU
 import { resolvePlaywrightRuntime, runPlaywrightWorker } from "./playwright-runtime.ts";
 import { callFirefoxOwner, closeFirefoxOwner, firefoxEndpoint, forgetFirefoxOwner, reserveFirefoxOwner, startFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
-import { FIREFOX_RUNTIME_VERSION } from "./firefox-config.ts";
+import { isDeepStrictEqual } from "node:util";
+import { completeProfileFingerprint, FIREFOX_RUNTIME_VERSION } from "./firefox-config.ts";
 
 // Chromium ignores inline user:pass@ on --proxy-server. Rather than an MV3 extension answering
 // onAuthRequired (whose service worker can't answer reliably during a page-load burst), the browser
@@ -875,6 +876,7 @@ export class Launcher {
       proxy: profile.proxy,
       ...(profile.proxy ? { proxyWebRtcPolicy: webRtcPolicy(profile) } : { webRtcPolicy: webRtcPolicy(profile) }),
       timezone: profile.timezone,
+      ...(profile.locale ? { locale: profile.locale } : {}),
       screen: [profile.screenWidth, profile.screenHeight],
       fingerprintSeed: profile.fingerprintSeed,
       extensions,
@@ -1046,6 +1048,7 @@ export class Launcher {
       profile.proxy,
       profile.proxyError ?? null,
       profile.timezone,
+      profile.locale,
       profile.platform,
       profile.extensions,
       profile.screenWidth,
@@ -1271,6 +1274,7 @@ export class Launcher {
     // which recovers this run without ever double-launching the profile.
     const pendingSession = opts.restoreLocalSession === false ? null : this.store.getPendingSessionBundle(profileId);
     let existing = this.store.getLaunch(profileId);
+    const hadLaunch = !!existing;
     if (existing && pendingSession) {
       return await this.rejectUnsafeExistingLaunch(profileId, "pending session restore", new SessionRestoreError("origin_storage", "failed"));
     }
@@ -1411,6 +1415,15 @@ export class Launcher {
       }
     }
 
+    if (hadLaunch) {
+      // Clearing a stopped legacy launch completes its saved locale and fonts.
+      const current = this.store.getProfile(profileId);
+      if (!isDeepStrictEqual(current, completeProfileFingerprint(profile))) {
+        throw new Error(`profile ${profileId} changed during closed-profile migration; launch aborted`);
+      }
+      profile = current!;
+      profileSnapshot = JSON.stringify(profile);
+    }
     if (profile.engine === "firefox") {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession);
     }

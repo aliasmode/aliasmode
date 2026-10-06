@@ -181,6 +181,7 @@ test.each(["chromium", "firefox"] as const)("new %s profiles preserve every expl
       store.upsertProfile(profile);
       const saved = store.getProfile(profile.id)!;
       expect(saved.platformOs).toBe(platformOs);
+      expect(saved.locale).toBe(profile.locale);
       expect(saved.firefox).toEqual(profile.firefox);
       expect(saved.fingerprintSeed).toBe(profile.fingerprintSeed);
     }

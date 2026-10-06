@@ -267,6 +267,7 @@ export interface PortableProfileV1 {
     tags: string[];
     ua: string;
     timezone: string;
+    locale?: string;
     screenWidth: number;
     screenHeight: number;
     fingerprintSeed: number;

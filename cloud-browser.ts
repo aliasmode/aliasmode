@@ -27,6 +27,7 @@ import {
 } from "./pending-sync.ts";
 import { PlaywrightWorkerError } from "./playwright-runtime.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
+import { completeProfileFingerprint } from "./firefox-config.ts";
 import { proxyHostPort } from "./proxy.ts";
 import {
   bundleHasRestorableLogin,
@@ -588,7 +589,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   async create(profile: Profile): Promise<{ id: string }> {
     this.requireContext(false);
     const created = await this.options.cloud.createProfile({
-      payload: encodePortableProfile(profile),
+      payload: encodePortableProfile(completeProfileFingerprint(profile)),
     });
     if (created.profile.id !== profile.id) {
       throw new Error("Cloud returned a mismatched created profile");
@@ -601,7 +602,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const ids = profiles.map((profile) => profile.id);
     const imported = await this.options.cloud.importProfiles({
       destination,
-      profiles: profiles.map((profile) => encodePortableProfile(profile, profile.sessionBundle)),
+      profiles: profiles.map((profile) => encodePortableProfile(completeProfileFingerprint(profile), profile.sessionBundle)),
     });
     if (
       imported.imported !== ids.length
@@ -724,10 +725,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
       stage = "payload_restore";
       logStage("payload_restore");
-      const { profile, sessionBundle } = decodePortableProfile(opened.payload);
-      if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
-      this.options.store.upsertProfile(profile);
-      this.options.store.setTimezone(profile.id, profile.timezone);
+      const { profile: decoded, sessionBundle } = decodePortableProfile(opened.payload);
+      if (decoded.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
+      this.options.store.upsertProfile(completeProfileFingerprint(decoded));
+      this.options.store.setTimezone(decoded.id, decoded.timezone);
+      const profile = this.options.store.getProfile(profileId)!;
       this.proxyCacheVersions.set(profileId, opened.baseVersion);
 
       stage = "browser_launch";

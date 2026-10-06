@@ -117,6 +117,8 @@ export interface Profile {
    * the timezone flag and CloakBrowser falls back to its default.
    */
   timezone: string;
+  /** Saved BCP-47 locale. Missing only on profiles awaiting closed-profile migration. */
+  locale?: string;
   screenWidth: number;
   screenHeight: number;
   /** Deterministic per-profile CloakBrowser fingerprint seed. */

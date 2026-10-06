@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { CloudApiError } from "./cloud-client.ts";
 import { CloudProfileEditor } from "./cloud-profile-editor.ts";
 import type { PortableProfileV1, PortableProfileV2 } from "./contracts/cloud-v1.ts";
+import { completeProfileFingerprint } from "./firefox-config.ts";
+import { decodePortableProfile } from "./portable-profile.ts";
 
 function payload(): PortableProfileV1 {
   return {
@@ -57,6 +59,8 @@ test("Cloud fingerprint edits round-trip manual timezone and OS without changing
     const authoritative = { ...response(), payload: engine === "firefox" ? firefoxPayload() : payload() };
     const session = structuredClone(authoritative.payload.session);
     const calls: string[][] = [];
+    authoritative.payload.profile.locale = "fr-CA";
+    const expected = completeProfileFingerprint(decodePortableProfile(authoritative.payload).profile);
     const editor = new CloudProfileEditor({
       getProfile: async () => authoritative,
       updateProfile: async (_id: string, request: any) => { authoritative.payload = request.payload; },
@@ -69,9 +73,13 @@ test("Cloud fingerprint edits round-trip manual timezone and OS without changing
       const view = await editor.get("cloud1");
       expect(view.timezone).toBe(timezone);
       if (engine === "chromium") expect(view.platformOs).toBe("macos");
-      else expect((authoritative.payload as PortableProfileV2).profile.firefox!.config).toEqual({
-        "navigator.userAgent": "Mozilla/5.0 Firefox/152.0", ...(timezone ? { timezone } : {}),
-      });
+      else {
+        const { timezone: _timezone, ...config } = expected.firefox!.config;
+        expect((authoritative.payload as PortableProfileV2).profile.firefox.config).toEqual({
+          ...config, ...(timezone ? { timezone } : {}),
+        });
+      }
+      expect(authoritative.payload.profile.locale).toBe("fr-CA");
       expect(authoritative.payload.session).toEqual(session);
       expect(authoritative.payload.profile.fingerprintSeed).toBe(1234);
     }
@@ -92,7 +100,7 @@ test("Firefox Cloud edits preserve saved identity and session without automatic 
   expect(calls).toEqual([]);
   expect(updated.payload.schemaVersion).toBe(2);
   expect(updated.payload.profile.engine).toBe("firefox");
-  expect(updated.payload.profile.firefox).toEqual(authoritative.payload.profile.firefox);
+  expect(updated.payload.profile.firefox).toEqual(completeProfileFingerprint(decodePortableProfile(authoritative.payload).profile).firefox);
   expect(updated.payload.profile.timezone).toBe("Etc/UTC");
   expect(updated.payload.session).toEqual(authoritative.payload.session);
 });

@@ -5,6 +5,9 @@ import inputNetworkDefinitionPath from "./node_modules/header-generator/data_fil
 // @ts-expect-error Bun embeds this package data in compiled sidecars.
 import headerNetworkDefinitionPath from "./node_modules/header-generator/data_files/header-network-definition.zip" with { type: "file" };
 import type { FirefoxProfileConfig, JsonValue, Profile, ProfileEngine } from "./types.ts";
+import fonts from "camoufox-js/dist/mappings/fonts.config.js";
+import { platformFromUA } from "./fingerprint.ts";
+import { localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
 
 const generatorAssetInputs = [
   ["fingerprint-network-definition.zip", fingerprintNetworkDefinitionPath],
@@ -39,6 +42,49 @@ export function createFirefoxProfileConfig(
     runtimeVersion: FIREFOX_RUNTIME_VERSION,
     config,
   });
+}
+
+function configuredFirefoxLocale(config: Record<string, JsonValue>): string | undefined {
+  const language = config["locale:language"];
+  const region = config["locale:region"];
+  const explicit = config["locale:all"] || config["navigator.language"];
+  const value = typeof explicit === "string" ? explicit.split(",")[0]?.trim()
+    : typeof language === "string" ? [language, config["locale:script"], region].filter(Boolean).join("-")
+    : undefined;
+  return normalizeProfileLocale(value);
+}
+
+/** Complete missing identity only at creation or closed-profile persistence boundaries. */
+export function completeProfileFingerprint(profile: Profile): Profile {
+  const saved = profile.firefox?.config;
+  const locale = normalizeProfileLocale(profile.locale)
+    ?? (saved ? configuredFirefoxLocale(saved) : undefined)
+    ?? localeForTimezone(profile.timezone);
+  if (profile.engine !== "firefox" || !profile.firefox) return { ...profile, locale };
+
+  const config = { ...profile.firefox.config };
+  const tag = new Intl.Locale(locale);
+  const previousLocale = configuredFirefoxLocale(config);
+  config["locale:language"] = tag.language;
+  if (tag.region) config["locale:region"] = tag.region;
+  else delete config["locale:region"];
+  if (tag.script) config["locale:script"] = tag.script;
+  else delete config["locale:script"];
+  config["navigator.language"] = locale;
+  if (!config["locale:all"] || previousLocale !== locale) {
+    config["locale:all"] = [...new Set([locale, tag.language])].join(", ");
+  }
+  if (config["navigator.languages"] !== undefined && previousLocale !== locale) {
+    config["navigator.languages"] = [...new Set([locale, tag.language])];
+  }
+  if (config.fonts === undefined) {
+    const ua = typeof config["navigator.userAgent"] === "string" ? config["navigator.userAgent"] : "";
+    const platform = profile.platformOs || platformFromUA(profile.ua) || platformFromUA(ua)
+      || (config["navigator.platform"] === "MacIntel" ? "macos"
+        : String(config["navigator.platform"] ?? "").startsWith("Linux") ? "linux" : "windows");
+    config.fonts = [...fonts[platform === "macos" ? "mac" : platform === "linux" ? "lin" : "win"]];
+  }
+  return { ...profile, locale, firefox: { ...profile.firefox, config } };
 }
 
 export function syncFirefoxTimezone(profile: Profile): void {

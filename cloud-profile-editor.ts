@@ -3,7 +3,8 @@ import type { PortableProfile } from "./contracts/cloud-v1.ts";
 import { convertMobilePersonaToDesktop, isMobileUserAgent } from "./fingerprint.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
 import { parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictTimezone } from "./parse.ts";
-import { syncFirefoxTimezone } from "./firefox-config.ts";
+import { completeProfileFingerprint, syncFirefoxTimezone } from "./firefox-config.ts";
+import { normalizeProfileLocale } from "./profile-locale.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { proxyLegacyString } from "./proxy.ts";
@@ -119,6 +120,7 @@ function applyEdits(profile: Profile, set: Record<string, unknown>): boolean {
     }
     profile.platformOs = platformOs;
   }
+  if ("locale" in set) profile.locale = normalizeProfileLocale(set.locale) ?? profile.locale;
   if ("timezone" in set) {
     profile.timezone = parseStrictTimezone(set.timezone);
     syncFirefoxTimezone(profile);
@@ -213,7 +215,7 @@ export class CloudProfileEditor {
       await attachTimezones([profile], this.timezoneFetch).catch(() => {});
     }
 
-    const encoded = encodePortableProfile(profile, JSON.stringify(authoritative.payload.session));
+    const encoded = encodePortableProfile(completeProfileFingerprint(profile), JSON.stringify(authoritative.payload.session));
     const encodedProfile = {
       ...authoritative.payload.profile,
       ...encoded.profile,

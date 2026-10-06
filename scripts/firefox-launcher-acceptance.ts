@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { buildNewProfile } from "../create.ts";
 import { Launcher } from "../launcher.ts";
-import { createFirefoxProfileConfig } from "../firefox-config.ts";
+import { completeProfileFingerprint, createFirefoxProfileConfig, syncFirefoxTimezone } from "../firefox-config.ts";
 import { callFirefoxOwner, FirefoxOwnerError } from "../firefox-runtime.ts";
 import { decodePortableProfile, encodePortableProfile } from "../portable-profile.ts";
 import { resolvePlaywrightRuntime } from "../playwright-runtime.ts";
@@ -135,7 +135,7 @@ async function ownerScript(
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  if (exitCode !== 0) throw new Error("Firefox external script runner failed");
+  if (exitCode !== 0) throw new Error(`Firefox external ${language} script runner failed: ${stderr || stdout}`);
   const result = JSON.parse(await readFile(resultPath, "utf8"));
   return { result, logs: `${stdout}${stderr}`.split(/\r?\n/).filter(Boolean) };
 }
@@ -162,7 +162,7 @@ function profile(id: string, config: ReturnType<typeof createFirefoxProfileConfi
     screenWidth: 1440,
     screenHeight: 900,
     fingerprintSeed: 101,
-    platformOs: "Windows",
+    platformOs: "windows",
     cookies: [],
     seeded: false,
   };
@@ -173,6 +173,11 @@ try {
   assert.equal(await sha256File(binary), expectedSha256, "CI passes the approved Firefox executable hash");
 
   server = createServer((request, response) => {
+    if (request.url === "/headers") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ acceptLanguage: request.headers["accept-language"] }));
+      return;
+    }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end(`<!doctype html><title>AliasMode local Firefox fixture</title><main>${request.url}</main>`);
   });
@@ -239,6 +244,36 @@ try {
   const telegramTab = `${telegramOrigin}/k/`;
   const mutator = join(root, "mutate.mjs");
   const verifier = join(root, "verify.mjs");
+  const identityProbe = `async () => {
+    const workerUrl = URL.createObjectURL(new Blob([
+      'postMessage({ language: navigator.language, languages: [...navigator.languages], locale: Intl.DateTimeFormat().resolvedOptions().locale, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })'
+    ], { type: 'text/javascript' }));
+    const worker = new Worker(workerUrl);
+    let workerIdentity;
+    try {
+      workerIdentity = await new Promise((resolve, reject) => { worker.onmessage = (event) => resolve(event.data); worker.onerror = reject; });
+    } finally { worker.terminate(); URL.revokeObjectURL(workerUrl); }
+    const context = document.createElement('canvas').getContext('2d');
+    const fonts = {};
+    for (const name of ['Arial', 'SimSun', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', 'AliasMode Missing Font']) {
+      let local = false;
+      try { await new FontFace('probe', 'local("' + name + '")').load(); local = true; } catch {}
+      context.font = '32px "' + name + '", monospace';
+      fonts[name] = { local, width: context.measureText('ABC abc 0123 中文').width };
+    }
+    return {
+      userAgent: navigator.userAgent, platform: navigator.platform,
+      language: navigator.language, languages: [...navigator.languages],
+      locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      acceptLanguage: (await (await fetch('/headers')).json()).acceptLanguage,
+      worker: workerIdentity, fonts,
+      touch: navigator.maxTouchPoints,
+      coarsePointer: matchMedia('(pointer: coarse)').matches,
+      finePointer: matchMedia('(pointer: fine)').matches,
+      screen: [screen.width, screen.height, screen.colorDepth],
+    };
+  }`;
   await writeFile(mutator, `
 import { writeFile } from "node:fs/promises";
 export default async ({ context, inputs, log }) => {
@@ -286,13 +321,7 @@ export default async ({ context, inputs, log }) => {
   });
   await telegram.close();
   const result = {
-    identity: await first.evaluate(() => ({
-      userAgent: navigator.userAgent,
-      platform: navigator.platform,
-      languages: [...navigator.languages],
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      screen: [screen.width, screen.height, screen.colorDepth],
-    })),
+    identity: await first.evaluate(${identityProbe}),
     tabs: context.pages().map((page) => page.url()),
   };
   await writeFile(inputs.resultPath, JSON.stringify(result) + "\\n");
@@ -337,13 +366,7 @@ export default async ({ context, inputs, log }) => {
     };
   })) : null;
   const result = {
-    identity: await page.evaluate(() => ({
-      userAgent: navigator.userAgent,
-      platform: navigator.platform,
-      languages: [...navigator.languages],
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      screen: [screen.width, screen.height, screen.colorDepth],
-    })),
+    identity: await page.evaluate(${identityProbe}),
     localStorage: await page.evaluate(() => localStorage.getItem("launcher-proof")),
     indexedDB: stored,
     telegramAuth,
@@ -377,10 +400,13 @@ async def run(*, context, inputs, log, **_kwargs):
   const generatedConfig = createFirefoxProfileConfig(1440, 900);
   const savedProfile: Profile = {
     ...profile(profileId, generatedConfig),
+    timezone: "America/New_York",
     proxy: { type: "http", host: "127.0.0.1", port: String(proxyPort), user: proxyUser, pass: proxyPassword },
   };
+  syncFirefoxTimezone(savedProfile);
   localStore.upsertProfile(savedProfile);
-  assert.deepEqual(localStore.getProfile(profileId)?.firefox, generatedConfig, "generated Firefox identity persists in ProfileStore");
+  const savedConfig = completeProfileFingerprint(savedProfile).firefox;
+  assert.deepEqual(localStore.getProfile(profileId)?.firefox, savedConfig, "completed Firefox identity persists in ProfileStore");
 
   localLauncher = new Launcher({
     store: localStore,
@@ -399,7 +425,15 @@ async def run(*, context, inputs, log, **_kwargs):
   assert.equal(await localLauncher.certifiedActive(profileId), true, "Launcher certifies the owned Firefox process");
   const mutationRun = await ownerScript(localLauncher, profileId, mutator, { origin, firstTab, secondTab, telegramTab });
   assert.ok(mutationRun.logs.includes("Fixture state saved"), "external JavaScript runner returns fixture logs");
-  const mutated = mutationRun.result as { identity: unknown; tabs: string[] };
+  const mutated = mutationRun.result as { identity: any; tabs: string[] };
+  assert.equal(mutated.identity.language, "en-US", "page uses the saved US locale");
+  assert.equal(mutated.identity.locale, "en-US", "page Intl uses the saved locale");
+  assert.equal(mutated.identity.acceptLanguage.split(",")[0], "en-US", "HTTP uses the saved locale");
+  assert.equal(mutated.identity.worker.language, "en-US", "worker uses the saved locale");
+  assert.equal(mutated.identity.worker.locale, "en-US", "worker Intl uses the saved locale");
+  assert.equal(mutated.identity.timezone, savedProfile.timezone);
+  assert.equal(mutated.identity.worker.timezone, savedProfile.timezone);
+  assert.equal(mutated.identity.fonts["AliasMode Missing Font"].local, false);
   assert.equal(proxyFailure, undefined, "Launcher relays Firefox through the authenticated proxy");
   assert.ok(proxyRequests > 0 && proxyFixtureRequests > 0, "Firefox reaches the loopback fixture through the Launcher proxy relay");
   assert.ok(mutated.tabs.includes(firstTab) && mutated.tabs.includes(secondTab), "fixture opens two local tabs");
@@ -434,7 +468,7 @@ async def run(*, context, inputs, log, **_kwargs):
   const portable = encodePortableProfile(localStore.getProfile(profileId)!, captured);
   const handoff = decodePortableProfile(portable);
   assert.equal(handoff.profile.engine, "firefox", "portable profile keeps the Firefox engine");
-  assert.deepEqual(handoff.profile.firefox, generatedConfig, "portable profile keeps the exact generated Firefox identity");
+  assert.deepEqual(handoff.profile.firefox, savedConfig, "portable profile keeps the exact saved Firefox identity");
 
   assert.equal(await localLauncher.stop(profileId), true, "Launcher stops Firefox before disabled native reopen");
   const nativeRestoreDisabled = await localLauncher.start(profileId, [], { autoNavigate: false, restoreLastSession: false });
@@ -542,6 +576,7 @@ async def run(*, context, inputs, log, **_kwargs):
     binarySha256: expectedSha256,
     localNativePersistence: true,
     cloudPortableHandoff: true,
+    identity: mutated.identity,
     initialPort: initial.port,
     cloudPort: cloud.port,
   }));

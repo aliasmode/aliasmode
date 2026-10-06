@@ -20,7 +20,7 @@ import type {
   ProfileEngine,
   ProxySpec,
 } from "./types.ts";
-import { normalizeProfileEngine } from "./firefox-config.ts";
+import { completeProfileFingerprint, normalizeProfileEngine } from "./firefox-config.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { assertValidProfile } from "./profile-validation.ts";
@@ -48,6 +48,7 @@ export class ProfileStore {
         proxy_json TEXT,
         ua TEXT NOT NULL DEFAULT '',
         timezone TEXT NOT NULL DEFAULT '',
+        locale TEXT NOT NULL DEFAULT '',
         screen_width INTEGER NOT NULL DEFAULT 1920,
         screen_height INTEGER NOT NULL DEFAULT 1080,
         fingerprint_seed INTEGER NOT NULL,
@@ -222,6 +223,7 @@ export class ProfileStore {
     // the comparison between them.
     for (const col of [
       "platform_os TEXT NOT NULL DEFAULT ''",
+      "locale TEXT NOT NULL DEFAULT ''",
       "fp_observed_json TEXT NOT NULL DEFAULT ''",
       "fp_expected_json TEXT NOT NULL DEFAULT ''",
       "fp_verdict_json TEXT NOT NULL DEFAULT ''",
@@ -244,6 +246,27 @@ export class ProfileStore {
         /* column already exists */
       }
     }
+    this.completeClosedFingerprints();
+  }
+
+  private completeClosedFingerprints(profileId?: string): void {
+    this.db.transaction(() => {
+      const rows = this.db.query<any, [string | null]>(
+        `SELECT * FROM profiles WHERE (?1 IS NULL OR id = ?1)
+         AND id NOT IN (SELECT profile_id FROM launches)
+         AND (locale = '' OR engine = 'firefox')`,
+      ).all(profileId ?? null);
+      const update = this.db.query("UPDATE profiles SET locale = ?, firefox_config_json = ? WHERE id = ?");
+      for (const row of rows) {
+        // Corrupt identities must still fail when read, not prevent the whole store from opening.
+        let profile: Profile;
+        try { profile = completeProfileFingerprint(rowToProfile(row)); } catch { continue; }
+        const firefox = profile.firefox ? JSON.stringify(profile.firefox) : "";
+        if (profile.locale !== row.locale || firefox !== row.firefox_config_json) {
+          update.run(profile.locale!, firefox, profile.id);
+        }
+      }
+    })();
   }
 
   close(): void {
@@ -255,13 +278,15 @@ export class ProfileStore {
     // Defense in depth for direct hub/API/remote callers that bypass the import
     // parser. Invalid full-profile JSON must never reach persistent identity.
     assertValidProfile(p);
+    const existing = this.db
+      .query<{ seeded: number; trashed_at: number; engine: unknown; locale: string }, [string]>("SELECT seeded, trashed_at, engine, locale FROM profiles WHERE id = ?")
+      .get(p.id);
+    if (!p.locale && existing?.locale) p = { ...p, locale: existing.locale };
+    if (!this.getLaunch(p.id)) p = completeProfileFingerprint(p);
     const browser = normalizeProfileEngine(p.engine, p.firefox);
     if (p.proxy && p.proxyError) throw new Error("profile cannot contain both a valid proxy and a proxy quarantine error");
     const proxy = p.proxyError ? null : normalizeProxySpec(p.proxy);
     const proxyError = p.proxyError?.trim() ?? "";
-    const existing = this.db
-      .query<{ seeded: number; trashed_at: number; engine: unknown }, [string]>("SELECT seeded, trashed_at, engine FROM profiles WHERE id = ?")
-      .get(p.id);
     if (existing?.trashed_at) throw new Error("Profile is in Trash; restore it before importing or editing it");
     if (existing && storedProfileEngine(existing.engine) !== browser.engine) {
       throw new Error("profile engine cannot change in place");
@@ -270,13 +295,13 @@ export class ProfileStore {
     this.db
       .query(
         `INSERT INTO profiles
-           (id, engine, firefox_config_json, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone,
+           (id, engine, firefox_config_json, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone, locale,
             screen_width, screen_height, fingerprint_seed, platform_os, fp_observed_json, fp_expected_json, fp_verdict_json, cookies_json, seeded, created_at)
          -- fp_verdict_json is literal '': a verdict is a COMPUTED fact, written
          -- only by saveObservedFingerprint from a real measurement. If a caller
          -- could supply one, an import could hand itself a "verified" badge and
          -- the badge would mean nothing.
-         VALUES ($id,$engine,$firefox,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
+         VALUES ($id,$engine,$firefox,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$locale,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
          ON CONFLICT(id) DO UPDATE SET
            engine=$engine, firefox_config_json=$firefox,
            acc_id=$acc, name=$name, "group"=$group, platform=$platform, username=$user, password=$pass,
@@ -302,7 +327,7 @@ export class ProfileStore {
              WHEN proxy_json IS $proxy THEN timezone
              ELSE ''
            END,
-           screen_width=$w, screen_height=$h,
+           screen_width=$w, screen_height=$h, locale=$locale,
            fingerprint_seed=$seed, platform_os=$platformOs,
            -- An ordinary profile edit carries no capture. Preserving the stored
            -- one keeps a rename from erasing a measurement that is still true.
@@ -339,6 +364,7 @@ export class ProfileStore {
         $customNo: p.customNo ?? "",
         $ua: p.ua,
         $tz: p.timezone ?? "",
+        $locale: p.locale ?? "",
         $w: p.screenWidth,
         $h: p.screenHeight,
         $seed: p.fingerprintSeed,
@@ -893,7 +919,10 @@ export class ProfileStore {
   }
 
   clearLaunch(profileId: string): void {
-    this.db.query(`DELETE FROM launches WHERE profile_id = ?`).run(profileId);
+    this.db.transaction(() => {
+      this.db.query(`DELETE FROM launches WHERE profile_id = ?`).run(profileId);
+      this.completeClosedFingerprints(profileId);
+    })();
   }
 }
 
@@ -952,6 +981,7 @@ function rowToProfile(row: any): Profile {
     customNo: typeof row.custom_no === "string" ? row.custom_no : "",
     ua: row.ua ?? "",
     timezone: row.timezone ?? "",
+    ...(row.locale ? { locale: row.locale } : {}),
     screenWidth: row.screen_width ?? 1920,
     screenHeight: row.screen_height ?? 1080,
     fingerprintSeed: row.fingerprint_seed,

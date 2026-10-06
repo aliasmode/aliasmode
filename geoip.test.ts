@@ -1,5 +1,33 @@
 import { test, expect, spyOn } from "bun:test";
-import { lookupExitTimezone, attachTimezones } from "./geoip.ts";
+import { lookupExitLocation, lookupExitTimezone, attachTimezones } from "./geoip.ts";
+
+test("location lookup carries country through IPv4 and IPv6 responses", async () => {
+  for (const ipv6 of [false, true]) {
+    const location = await lookupExitLocation(null, async (url) => {
+      if (ipv6 && url.includes("ip-api.com")) throw new Error("IPv6 only");
+      return { json: async () => ipv6
+        ? { timezone: "America/Mexico_City", country: "MX" }
+        : { status: "success", timezone: "America/Mexico_City", countryCode: "MX" } };
+    });
+    expect(location).toEqual({ timezone: "America/Mexico_City", country: "MX" });
+  }
+});
+
+test("country defaults fill missing locales but never replace saved choices without refresh", async () => {
+  const profiles = [
+    { proxy: proxy("gate.example.net"), timezone: "", locale: undefined as string | undefined },
+    { proxy: proxy("gate.example.net"), timezone: "", locale: "fr-CA" },
+  ];
+  const fetch = async () => ({ json: async () => ({ status: "success", timezone: "America/New_York", countryCode: "MX" }) });
+  await attachTimezones(profiles, fetch);
+  expect(profiles.map((p) => p.locale)).toEqual(["es-MX", "fr-CA"]);
+  await attachTimezones(profiles, fetch, true);
+  expect(profiles.map((p) => p.locale)).toEqual(["es-MX", "es-MX"]);
+  await attachTimezones(profiles, async () => { throw new Error("offline"); }, true);
+  expect(profiles.map((p) => [p.timezone, p.locale])).toEqual([
+    ["America/New_York", "es-MX"], ["America/New_York", "es-MX"],
+  ]);
+});
 
 const proxy = (host: string) => ({ type: "http" as const, host, port: "8080", user: "", pass: "" });
 

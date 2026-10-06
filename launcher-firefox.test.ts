@@ -78,7 +78,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
     },
   };
   return {
-    store, profile, options, killed, launcher: new Launcher(options),
+    store, profile: store.getProfile(profile.id)!, options, killed, launcher: new Launcher(options),
     launches: () => launches, config: () => receivedConfig,
     startupPreferences: () => startupPreferences, navigated,
     setProcessPaths: (browser: string, owner: string) => {
@@ -104,6 +104,42 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.launches()).toBe(1);
   expect(await restarted.stop(f.profile.id)).toBe(true);
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
+});
+
+test.each([false, true])("legacy Firefox keeps its old digest until confirmed close (stale=%s)", async (stale) => {
+  const f = fixture();
+  const legacyConfig = { version: 1 as const, runtimeVersion: "152.0.4-beta.30", config: { "navigator.userAgent": "Mozilla/5.0 Firefox/152.0" } };
+  (f.store as any).db.query("UPDATE profiles SET locale = '', firefox_config_json = ? WHERE id = ?")
+    .run(JSON.stringify(legacyConfig), f.profile.id);
+  const legacy = f.store.getProfile(f.profile.id)!;
+  await f.launcher.start(legacy.id);
+  const launch = f.store.getLaunch(legacy.id)!;
+  const oldDigest = createHash("sha256").update(JSON.stringify({
+    schema: 2, engine: "firefox", firefox: legacy.firefox,
+    binarySha256: "0".repeat(64), host: ["win32", "x64"], headless: false,
+    windowScale: [0.65, 0.9], ua: legacy.ua, platform: legacy.platform,
+    proxy: null, webRtcPolicy: "default_public_interface_only", timezone: legacy.timezone,
+    screen: [legacy.screenWidth, legacy.screenHeight], fingerprintSeed: legacy.fingerprintSeed, extensions: [],
+  })).digest("hex");
+  expect(launch.personaDigest).toBe(oldDigest);
+  const restarted = new Launcher(f.options);
+  if (stale) {
+    await f.options.firefoxRuntime!.close(launch.firefoxOwner!);
+  } else {
+    await restarted.start(legacy.id);
+    expect(f.launches()).toBe(1);
+    expect(f.store.getProfile(legacy.id)!.locale).toBeUndefined();
+    expect(f.store.getProfile(legacy.id)!.firefox).toEqual(legacyConfig);
+    expect(await restarted.stop(legacy.id)).toBe(true);
+  }
+  await restarted.start(legacy.id);
+  const completed = f.store.getProfile(legacy.id)!;
+  expect(completed.locale).toBe("en-US");
+  expect(completed.firefox!.config.fonts).toBeArray();
+  expect(f.config()).toEqual(completed.firefox!.config);
+  expect(f.store.getLaunch(legacy.id)!.personaDigest).not.toBe(oldDigest);
+  expect(f.launches()).toBe(2);
+  expect(await restarted.stop(legacy.id)).toBe(true);
 });
 
 test("Firefox uses its authenticated owner when an external close leaves the host scan inconclusive", async () => {

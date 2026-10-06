@@ -1363,7 +1363,8 @@ test("an explicit timezone action updates a Local proxy timezone", async () => {
   );
   expect(res!.status).toBe(200);
   expect(await res!.json()).toMatchObject({ ok: true, timezone: "Europe/London" });
-  expect(calls).toEqual([["http://ip-api.com/json/?fields=status,timezone"]]);
+  expect(calls).toEqual([["http://ip-api.com/json/?fields=status,timezone,countryCode"]]);
+  expect(s.getProfile("k1d0cd11")!.locale).toBe("en-GB");
   expect(s.getProfile("k1d0cd11")!.timezone).toBe("Europe/London");
   s.close();
 });
@@ -1385,7 +1386,8 @@ test("an explicit timezone action updates Firefox configuration", async () => {
   expect(res!.status).toBe(200);
   expect(s.getProfile("firefox-timezone")!).toMatchObject({
     timezone: "Europe/London",
-    firefox: { config: { timezone: "Europe/London" } },
+    locale: "en-GB",
+    firefox: { config: { timezone: "Europe/London", "navigator.language": "en-GB", "locale:all": "en-GB, en" } },
   });
   s.close();
 });
@@ -1712,7 +1714,7 @@ test("open Local and Cloud profiles allow account edits but reject fingerprint c
       canEditLive: () => true,
       commitLiveEdit: async (profile: Profile) => { s.upsertProfile(profile); return true; },
     } as any } : {};
-    for (const set of [{ resolution: "1366x768" }, { platformOs: "macos" }, { timezone: "Europe/Paris" }]) {
+    for (const set of [{ resolution: "1366x768" }, { platformOs: "macos" }, { timezone: "Europe/Paris" }, { locale: "fr-FR" }]) {
       const res = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/update", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ set }),
       }), {} as any, s, null, options);
@@ -1744,11 +1746,13 @@ test("closed fingerprint edits persist and preserve the rest of the identity", a
       expect(res!.status).toBe(200);
       const saved = s.getProfile(id)!;
       expect(saved.timezone).toBe(timezone);
+      expect(saved.locale).toBe(before.locale);
       expect(saved.cookies).toEqual(before.cookies);
       expect(saved.fingerprintSeed).toBe(before.fingerprintSeed);
       expect(saved.ua).toBe(before.ua);
       if (engine === "firefox") {
-        expect(saved.firefox!.config).toEqual(timezone ? { timezone } : {});
+        const { timezone: _timezone, ...config } = before.firefox!.config;
+        expect(saved.firefox!.config).toEqual({ ...config, ...(timezone ? { timezone } : {}) });
       } else {
         expect(saved).toMatchObject({ platformOs: "macos", screenWidth: 1920, screenHeight: 1080 });
         const flags = deriveFingerprintFlags(saved);
@@ -4442,6 +4446,28 @@ test("Cloud profile open on this device is edited live through the local cache",
   expect(staleResponse!.status).toBe(409);
   expect((await staleResponse!.json()).error).toContain("reopen Edit");
   s.close();
+});
+
+test("Cloud live proxy edits leave a legacy locale absent until confirmed close", async () => {
+  const s = store();
+  try {
+    s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
+    (s as any).db.query("UPDATE profiles SET locale = '' WHERE id = ?").run("k1d0cd11");
+    const response = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ set: { proxy: "new-proxy.example:8080" } }),
+    }), {} as any, s, null, {
+      cloudBrowser: {
+        canEditLive: () => true,
+        commitLiveEdit: async (profile: Profile) => { s.upsertProfile(profile); return true; },
+      } as any,
+      timezoneFetch: async () => ({ json: async () => ({ status: "success", timezone: "Europe/Paris", countryCode: "FR" }) }),
+    });
+    expect(response!.status).toBe(200);
+    expect(s.getProfile("k1d0cd11")!.locale).toBeUndefined();
+    s.clearLaunch("k1d0cd11");
+    expect(s.getProfile("k1d0cd11")!.locale).toBe("fr-FR");
+  } finally { s.close(); }
 });
 
 test("Cloud live edit rejects a save that loses the close race", async () => {

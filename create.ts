@@ -11,7 +11,7 @@
  */
 
 import type { Profile, ProfileEngine, ProxySpec } from "./types.ts";
-import { createFirefoxProfileConfig } from "./firefox-config.ts";
+import { completeProfileFingerprint, createFirefoxProfileConfig } from "./firefox-config.ts";
 import { deterministicSeed, hostPlatformOs } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { parseStrictCustomNo, parseStrictResolution, parsePlatformOs } from "./parse.ts";
@@ -84,7 +84,7 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
   const firefoxScreenHeight = firefox?.config["screen.height"];
   const firefoxTimezone = firefox?.config.timezone;
 
-  return {
+  return completeProfileFingerprint({
     id,
     engine,
     ...(firefox ? { firefox } : {}),
@@ -111,5 +111,5 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     fingerprintSeed: deterministicSeed(id),
     cookies: [],
     seeded: false,
-  };
+  });
 }
