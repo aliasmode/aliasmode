@@ -203,7 +203,7 @@
   "Select all {scope}": "全选{scope}",
   "{size} / page": "{size} / 页",
   "{count} selected": "已选 {count} 个",
-  "This replaces your selection, excluding {count} outside this view.": "这将替换你的选择，不包括视图外的 {count} 个。",
+  "This replaces your selection, excluding {count} outside this view.": "这将替换你的选择，该选择不包括视图外已经选择的 {count} 个。",
   "Delete selected profiles": "删除选中的配置文件",
   "Move selected profiles to Trash": "将选中的配置文件移入回收站",
   "Processing…": "处理中…",
