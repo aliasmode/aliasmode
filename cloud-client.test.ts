@@ -87,6 +87,26 @@ test("Cloud client encodes folder and account path segments", async () => {
   expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({ permission: "view" });
 });
 
+test("Cloud client sends explicit folder parents and encoded profile grants", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return Response.json({ ok: true });
+  });
+  await cloud.createFolder("Fitness", "Facebook");
+  await cloud.createFolder("Literal/Root");
+  await cloud.moveFolder("Facebook/Fitness", null);
+  await cloud.setProfileGrant("profile/1", "account/1", "edit");
+  await cloud.removeProfileGrant("profile/1", "account/1");
+  expect(calls.map(({ url, init }) => [url.replace("https://cloud.aliasmode.test/v1", ""), init?.method, init?.body ? JSON.parse(String(init.body)) : null])).toEqual([
+    ["/workspace/folders", "POST", { name: "Fitness", parentName: "Facebook" }],
+    ["/workspace/folders", "POST", { name: "Literal/Root" }],
+    ["/workspace/folders/Facebook%2FFitness/move", "POST", { parentName: null }],
+    ["/profiles/profile%2F1/grants/account%2F1", "PUT", { permission: "edit" }],
+    ["/profiles/profile%2F1/grants/account%2F1", "DELETE", null],
+  ]);
+});
+
 test("Cloud client uses invitation and move request shapes", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const cloud = client(async (url, init) => {

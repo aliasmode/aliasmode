@@ -9,6 +9,7 @@ import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
 import { I18nProvider, availableLanguages, languageNativeName, useTranslation } from "./i18n.tsx";
+import { folderTree, folderScope, folderGrantPermission, type FolderInfo } from "../folders.ts";
 import { THEME_KEY, readThemeChoice, themeCookie, type ThemeChoice } from "./theme.ts";
 import {
   describeDesktopUpdateResult,
@@ -81,6 +82,7 @@ import {
   updateFromFile,
   createGroup,
   renameGroup,
+  moveGroup,
   deleteGroup,
   fetchTotp,
 } from "./api.ts";
@@ -1037,10 +1039,37 @@ function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: Pro
   );
 }
 
+function GrantControl({ label, direct, inherited, busy, onChange }: {
+  label: string; direct: string; inherited: string; busy: boolean; onChange: (permission: string) => void;
+}) {
+  const { t } = useTranslation();
+  const effective = direct === "edit" || inherited === "edit" ? "edit" : direct || inherited;
+  const permissionLabel = (value: string) => value === "edit" ? t("Edit") : value === "view" ? t("View") : t("No access");
+  return <label className="grant-control">
+    <span>{label}</span>
+    <select className="select" aria-label={label} value={direct} disabled={busy} onChange={(event) => onChange(event.target.value)}>
+      <option value="">{inherited ? t("Inherited: {permission}", { permission: permissionLabel(inherited) }) : t("No access")}</option>
+      <option value="view">{t("View")}</option><option value="edit">{t("Edit")}</option>
+    </select>
+    <small>{t("Effective access: {permission}", { permission: permissionLabel(effective) })}{inherited && direct ? ` · ${t("Inherited: {permission}", { permission: permissionLabel(inherited) })}` : ""}</small>
+  </label>;
+}
+
 function App() {
   const { t, language, setLanguage } = useTranslation();
   const [profiles, setProfiles] = useState<UiProfile[]>([]);
   const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);
+  const [localFolders, setLocalFolders] = useState<FolderInfo[]>([]);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  const [sharedOnly, setSharedOnly] = useState(false);
+  const [folderMenu, setFolderMenu] = useState<string | null>(null);
+  const [folderMenuPosition, setFolderMenuPosition] = useState({ left: 0, top: 0 });
+  const [newFolderParent, setNewFolderParent] = useState<string | null>(null);
+  const [movingFolder, setMovingFolder] = useState<string | null>(null);
+  const [folderParent, setFolderParent] = useState("");
+  const [folderMoveBusy, setFolderMoveBusy] = useState(false);
+  const [folderMoveErr, setFolderMoveErr] = useState<string | null>(null);
+  const [accessTarget, setAccessTarget] = useState<{ kind: "folder" | "profile"; id: string; name: string; folder: string } | null>(null);
   const [appMode, setAppMode] = useState<AppModeConfig | null>(null);
   const [modeBusy, setModeBusy] = useState(false);
   const [modeErr, setModeErr] = useState<string | null>(null);
@@ -1206,7 +1235,7 @@ function App() {
   const isCloudMode = appMode?.mode === "cloud";
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
-    profiles.some((profile) => profile.permission === "edit") || team?.folders.some((folder) => folder.permission === "edit") === true;
+    team?.folders.some((folder) => folder.permission === "edit" && !folder.archivedAt) === true;
   const canManageCloudFolders = cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin";
 
   // The app resolves "system" itself and stamps the result on <html>, so the
@@ -1236,6 +1265,8 @@ function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (accessTarget) { if (!teamBusy) setAccessTarget(null); return; }
+      if (movingFolder) { if (!folderMoveBusy) setMovingFolder(null); return; }
       if (pendingMode) { if (!modeBusy) setPendingMode(null); return; }
       if (logView || logErr) { setLogView(null); setLogErr(null); return; }
       if (showUpdate) { setShowUpdate(false); return; }
@@ -1261,6 +1292,7 @@ function App() {
       const roster = await fetchProfiles();
       setProfiles(roster.profiles);
       setRegisteredGroups(roster.groups);
+      setLocalFolders(roster.folders ?? []);
       setHealthSources(roster.healthSources);
       setConnErr(null); // manages connectivity only; never clears an action error
     } catch (e) {
@@ -1977,15 +2009,20 @@ function App() {
     return () => { alive = false; clearInterval(timer); };
   }, [editId, isCloudMode]);
 
-  const groups = useMemo(
-    () => ["all", ...Array.from(new Set([
-      ...profiles.map((profile) => profile.group).filter(Boolean),
-      ...(isCloudMode
-        ? (team?.folders.filter((folder) => !folder.archivedAt).map((folder) => folder.name) ?? [])
-        : registeredGroups),
-    ])).sort()],
-    [profiles, isCloudMode, registeredGroups, team?.folders],
-  );
+  const folders = useMemo<FolderInfo[]>(() => {
+    if (isCloudMode) return team?.folders.filter((folder) => !folder.archivedAt) ?? [];
+    const metadata = new Map(localFolders.map((folder) => [folder.name, folder]));
+    return [...new Set([...registeredGroups, ...profiles.map((profile) => profile.group).filter(Boolean)])]
+      .map((name) => metadata.get(name) ?? { name });
+  }, [isCloudMode, team?.folders, localFolders, registeredGroups, profiles]);
+  const tree = useMemo(() => folderTree(folders), [folders]);
+  const groups = useMemo(() => ["all", ...tree.map((folder) => folder.name)], [tree]);
+  const selectedScope = useMemo(() => folderScope(folders, group), [folders, group]);
+  const sharedProfiles = useMemo(() => isCloudMode
+    ? profiles.filter((profile) => !folders.some((folder) => folder.name === profile.group)) : [], [isCloudMode, profiles, folders]);
+  const breadcrumb = tree.find((folder) => folder.name === group);
+  const selectFolder = (name: string) => { setSharedOnly(false); setGroup(name); setView("profiles"); };
+  const folderLabel = (name: string) => folders.find((folder) => folder.name === name)?.label ?? name;
 
   /**
    * Every profile's visible "No.", resolved once against the unsorted roster so
@@ -2011,7 +2048,7 @@ function App() {
 
   const filtered = useMemo(() => {
     const matched = profiles.filter((p) => {
-      if (group !== "all" && p.group !== group) return false;
+      if (sharedOnly ? !sharedProfiles.includes(p) : group !== "all" && !selectedScope.has(p.group)) return false;
       if (q) {
         const needle = q.toLowerCase();
         const no = numbering.get(p.id)?.value ?? "";
@@ -2034,12 +2071,12 @@ function App() {
       if (left > right) return sort.dir;
       return a.id.localeCompare(b.id);
     });
-  }, [profiles, group, q, sort, numbering]);
+  }, [profiles, group, sharedOnly, sharedProfiles, selectedScope, q, sort, numbering]);
 
   const profilePageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visibleProfilePage = Math.min(profilePage, profilePageCount - 1);
   const visibleProfiles = filtered.slice(visibleProfilePage * pageSize, (visibleProfilePage + 1) * pageSize);
-  useEffect(() => setProfilePage(0), [q, group, pageSize]);
+  useEffect(() => setProfilePage(0), [q, group, sharedOnly, pageSize]);
 
   const editSerial = editId ? profiles.find((profile) => profile.id === editId)?.serial ?? null : null;
   const editRunning = editId ? profiles.find((profile) => profile.id === editId)?.running === true : false;
@@ -2050,6 +2087,7 @@ function App() {
 
   const pastedRecordCount = bulkText.trim() ? countPastedRecords(bulkText) : null;
 
+  const folderMenuRef = useDismiss<HTMLSpanElement>(folderMenu !== null, () => setFolderMenu(null));
   const colsRef = useDismiss<HTMLDivElement>(colsOpen, () => setColsOpen(false));
   const nodesRef = useDismiss<HTMLDivElement>(nodesOpen, () => setNodesOpen(false));
   const exportRef = useDismiss<HTMLDivElement>(exportOpen, () => setExportOpen(false));
@@ -2078,7 +2116,7 @@ function App() {
     setSort((current) => (current.key === key ? { key, dir: current.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
   const refreshRoster = async () => {
     setRefreshing(true);
-    try { await load(); } finally { setRefreshing(false); }
+    try { await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]); } finally { setRefreshing(false); }
   };
   useEffect(() => {
     if (profilePage !== visibleProfilePage) setProfilePage(visibleProfilePage);
@@ -2088,16 +2126,23 @@ function App() {
   const selectedMobileCount = profiles.filter((p) => selected.has(p.id) && p.mobilePersona).length;
   const existingGroups = groups.slice(1); // drop the "all" pseudo-group
   const editableGroups = isCloudMode
-    ? (team?.folders.filter((folder) => folder.permission === "edit" && !folder.archivedAt).map((folder) => folder.name) ??
-      existingGroups.filter((name) => profiles.some((profile) => profile.group === name && profile.permission === "edit")))
+    ? existingGroups.filter((name) => team?.folders.some((folder) => folder.name === name && folder.permission === "edit" && !folder.archivedAt))
     : existingGroups;
   const selectedEditable = [...selected].every((id) => profiles.find((profile) => profile.id === id)?.permission === "edit");
   const selectedProfilesSupportChromeExtensions = [...selected].every((id) =>
     profiles.find((profile) => profile.id === id)?.engine === "chromium");
-  const countFor = (g: string) => profiles.filter((p) => p.group === g).length;
+  const folderCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    const byName = new Map(tree.map((folder) => [folder.name, folder]));
+    for (const profile of profiles) {
+      for (const name of [profile.group, ...(byName.get(profile.group)?.ancestors ?? [])]) counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return counts;
+  }, [tree, profiles]);
+  const countFor = (g: string) => folderCounts.get(g) ?? 0;
   const canEditGroup = (name: string) => !isCloudMode ||
-    team?.folders.some((folder) => folder.name === name && folder.permission === "edit" && !folder.archivedAt) === true ||
-    profiles.some((profile) => profile.group === name && profile.permission === "edit");
+    team?.folders.some((folder) => folder.name === name && folder.permission === "edit" && !folder.archivedAt) === true;
+  const selectedMovable = !isCloudMode || [...selected].every((id) => canEditGroup(profiles.find((profile) => profile.id === id)?.group ?? ""));
   const editableDefaultGroups = groupExtensionDefaults.filter((item) => item.permission === "edit");
   const installedExtensionIds = new Set(extensions.map((item) => item.id));
   const storedGroupDefaultExts = groupExtensionDefaults.find((item) => item.name === groupDefaultName)?.extensions ?? [];
@@ -2805,31 +2850,55 @@ function App() {
     setActionErr(null);
     try {
       const result = isCloudMode
-        ? await cloudWorkspaceAction("create-folder", { name })
-        : await createGroup(name);
+        ? await cloudWorkspaceAction("create-folder", { name, parentName: newFolderParent })
+        : await createGroup(name, newFolderParent);
       if (result.ok === false) {
         setActionErr(result.error || "create failed");
         return;
       }
       await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]);
-      setGroup(name);
+      selectFolder(result.folder?.name ?? name);
+      setCollapsedFolders((current) => new Set([...current].filter((folder) => folder !== newFolderParent)));
       setSidebarGroupName("");
       setAddingGroup(false);
     } catch (error) {
       setActionErr(error instanceof Error ? error.message : String(error));
     }
   };
-  const startRename = (g: string) => { setRenaming(g); setRenameVal(g); };
+  const startRename = (g: string) => { setRenaming(g); setRenameVal(folderLabel(g)); };
+  const remapSelectedFolder = (from: string, to: string) => {
+    if (folderScope(folders, from).has(group)) selectFolder(to + group.slice(from.length));
+  };
+  const commitFolderMove = async () => {
+    if (!movingFolder) return;
+    setFolderMoveBusy(true);
+    setFolderMoveErr(null);
+    try {
+      const result = isCloudMode
+        ? await cloudWorkspaceAction("move-folder", { name: movingFolder, parentName: folderParent || null })
+        : await moveGroup(movingFolder, folderParent || null);
+      if (result.ok === false) throw new Error(result.error || "Move failed");
+      remapSelectedFolder(movingFolder, result.folder.name);
+      setMovingFolder(null);
+      await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]);
+    } catch (error) {
+      setFolderMoveErr(error instanceof Error ? error.message : String(error));
+    } finally { setFolderMoveBusy(false); }
+  };
+  const openAccess = (target: NonNullable<typeof accessTarget>) => {
+    setAccessTarget(target);
+    void loadTeam();
+  };
   const commitRename = async () => {
     const from = renaming, to = renameVal.trim();
     setRenaming(null);
-    if (!from || !to || to === from) return;
+    if (!from || !to || to === folderLabel(from)) return;
     setActionErr(null);
     try {
       const r = await renameGroup(from, to);
       if (r.ok === false) setActionErr(r.error || "rename failed");
       else {
-        if (group === from) setGroup(to);
+        remapSelectedFolder(from, r.folder?.name ?? to);
         await Promise.all([load(), isCloudMode ? loadTeam() : Promise.resolve()]);
       }
     } catch (e) {
@@ -3061,14 +3130,17 @@ function App() {
         <nav className="sidenav" aria-label="Sections">
           <button
             type="button"
-            className={`navitem${view === "profiles" && group === "all" ? " active" : ""}`}
+            className={`navitem${view === "profiles" && group === "all" && !sharedOnly ? " active" : ""}`}
             data-tip="All profiles"
             title="All profiles"
-            onClick={() => { setView("profiles"); setGroup("all"); }}
+            onClick={() => selectFolder("all")}
           >
             <Icon name="profiles" /><span className="navlabel">All profiles</span>
             <span className="cnt">{profiles.length}</span>
           </button>
+          {isCloudMode && sharedProfiles.length > 0 && <button type="button" className={`navitem${view === "profiles" && sharedOnly ? " active" : ""}`} title={t("Shared with me")} onClick={() => { setGroup("all"); setSharedOnly(true); setView("profiles"); }}>
+            <Icon name="user" /><span className="navlabel">{t("Shared with me")}</span><span className="cnt">{sharedProfiles.length}</span>
+          </button>}
           {!appMode?.legacyRemote && <>
             <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip="Proxies" title="Proxies" onClick={() => setView("proxies")}>
               <Icon name="activity" /><span className="navlabel">Proxies</span>
@@ -3118,11 +3190,12 @@ function App() {
           {groupsOpen && <>
             <div className="folders">
             {existingGroups.length === 0 && <div className="folders-empty">No {isCloudMode ? "folders" : "groups"} yet</div>}
-            {existingGroups.map((g) => (
+            {tree.filter((folder) => !folder.ancestors.some((name) => collapsedFolders.has(name))).map(({ name: g, label, depth }) => (
               <div
                 key={g}
-                className={`folder${view === "profiles" && group === g ? " active" : ""}`}
-                onClick={() => { if (renaming !== g) { setView("profiles"); setGroup(g); } }}
+                style={{ paddingLeft: 10 + depth * 16 }}
+                className={`folder${view === "profiles" && !sharedOnly && group === g ? " active" : ""}`}
+                onClick={() => { if (renaming !== g) selectFolder(g); }}
               >
                 {renaming === g ? (
                   <input
@@ -3136,20 +3209,24 @@ function App() {
                   />
                 ) : (
                   <>
-                    <Icon name="folder" className="sm" />
-                    <span className="fname" title={g}>{g}</span>
-                    {(canEditGroup(g) || (isCloudMode && canManageCloudFolders)) && (
-                      <span className="gactions">
-                        {canEditGroup(g) && (
-                          <button title={isCloudMode ? "Rename folder" : "Rename group"} onClick={(e) => { e.stopPropagation(); startRename(g); }}>
-                            <Icon name="edit" className="sm" />
-                          </button>
-                        )}
-                        {(!isCloudMode || canManageCloudFolders) && (
-                          <button className="danger" title={isCloudMode ? "Delete folder" : "Delete group"} onClick={(e) => { e.stopPropagation(); removeGroup(g); }}>
-                            <Icon name="trash" className="sm" />
-                          </button>
-                        )}
+                    {folders.some((folder) => folder.parentName === g) ? <button className="folder-toggle" type="button" aria-label={t("Expand or collapse {folder}", { folder: g })} aria-expanded={!collapsedFolders.has(g)} onClick={(event) => {
+                      event.stopPropagation(); setCollapsedFolders((current) => { const next = new Set(current); if (next.has(g)) next.delete(g); else next.add(g); return next; });
+                    }}><Icon name={collapsedFolders.has(g) ? "chevronRight" : "chevronDown"} className="sm" /></button> : <Icon name="folder" className="sm" />}
+                    <button className="fname folder-select" title={g} onClick={() => selectFolder(g)}>{label ?? g}</button>
+                    {!appMode?.legacyRemote && (canEditGroup(g) || canManageCloudFolders) && (
+                      <span className="gactions menuwrap" ref={folderMenu === g ? folderMenuRef : undefined} onClick={(event) => event.stopPropagation()}>
+                        <button type="button" title={t("Folder actions")} aria-label={t("Actions for {folder}", { folder: g })} aria-expanded={folderMenu === g} onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setFolderMenuPosition({ left: rect.right + 8, top: Math.min(rect.top, window.innerHeight - 220) }); setFolderMenu(folderMenu === g ? null : g); }}><Icon name="more" className="sm" /></button>
+                        {folderMenu === g && <span className="popover folder-menu" style={folderMenuPosition} onClick={() => setFolderMenu(null)}>
+                          {canEditGroup(g) && <>
+                            <button className="pop-item" onClick={() => { setNewFolderParent(g); setSidebarGroupName(""); setAddingGroup(true); }}><Icon name="plus" className="sm" />{t("New subfolder")}</button>
+                            <button className="pop-item" onClick={() => startRename(g)}><Icon name="edit" className="sm" />{t("Rename")}</button>
+                          </>}
+                          {(!isCloudMode || canManageCloudFolders) && <>
+                            <button className="pop-item" onClick={() => { setMovingFolder(g); setFolderParent(folders.find((folder) => folder.name === g)?.parentName ?? ""); setFolderMoveErr(null); }}><Icon name="move" className="sm" />{t("Move to…")}</button>
+                            <button className="pop-item danger" disabled={folders.some((folder) => folder.parentName === g)} onClick={() => void removeGroup(g)}><Icon name="trash" className="sm" />{t("Delete")}</button>
+                          </>}
+                          {isCloudMode && canManageCloudFolders && <button className="pop-item" onClick={() => openAccess({ kind: "folder", id: g, name: g, folder: g })}><Icon name="user" className="sm" />{t("Manage access")}</button>}
+                        </span>}
                       </span>
                     )}
                     <span className="cnt">{countFor(g)}</span>
@@ -3159,7 +3236,8 @@ function App() {
             ))}
             </div>
             {addingGroup ? (
-              <div className="newgroup">
+              <div className="newgroup" title={newFolderParent ?? undefined}>
+                {newFolderParent && <small>{t("In {folder}", { folder: folderLabel(newFolderParent) })}</small>}
                 <input
                   autoFocus
                   aria-label={isCloudMode ? "New folder name" : "New group name"}
@@ -3174,7 +3252,7 @@ function App() {
                 <button type="button" title="Cancel" onClick={() => { setAddingGroup(false); setSidebarGroupName(""); }}><Icon name="close" className="sm" /></button>
               </div>
             ) : (
-              <button className="newgroup" type="button" disabled={!canEditCloud} onClick={() => setAddingGroup(true)}>
+              <button className="newgroup" type="button" disabled={!canEditCloud || appMode?.legacyRemote} onClick={() => { setNewFolderParent(null); setAddingGroup(true); }}>
                 <Icon name="plus" className="sm" />{isCloudMode ? "New folder" : "New group"}
               </button>
             )}
@@ -3361,18 +3439,22 @@ function App() {
 
       {!appMode?.legacyRemote && <>
         <ProxiesPage key={`proxies:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
-          active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} onChanged={load} />
+          active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} folders={folders} onChanged={load} />
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
-          active={view === "trash"} onChanged={load} />
+          active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
       {view === "profiles" ? (
       <div className="workspace">
+        {(breadcrumb || sharedOnly) && <nav className="folder-breadcrumb" aria-label={t("Folder path")}>
+          <button className="btn ghost xs" onClick={() => selectFolder("all")}>{t("All profiles")}</button>
+          {sharedOnly ? <span>{t("Shared with me")}</span> : [...(breadcrumb?.ancestors ?? []), group].map((name) => <span key={name}> / <button className="btn ghost xs" onClick={() => selectFolder(name)}>{folderLabel(name)}</button></span>)}
+        </nav>}
         <div className="filterbar">
           <select
             className="select group-filter"
             aria-label={isCloudMode ? "Folder filter" : "Group filter"}
             value={group}
-            onChange={(e) => setGroup(e.target.value)}
+            onChange={(e) => selectFolder(e.target.value)}
           >
             <option value="all">All {isCloudMode ? "folders" : "groups"}</option>
             {existingGroups.map((g) => <option key={g} value={g}>{g}</option>)}
@@ -3455,7 +3537,7 @@ function App() {
                 className="select move-group"
                 aria-label="Move to group"
                 title={moveTarget || "Choose group"}
-                disabled={!selected.size}
+                disabled={!selected.size || !selectedMovable}
                 value={moveTarget}
                 onChange={(e) => (e.target.value === "__new__" ? setNewMode(true) : setMoveTarget(e.target.value))}
               >
@@ -3469,7 +3551,7 @@ function App() {
             {newMode && (
               <button className="btn ghost" onClick={() => { setNewMode(false); setNewGroup(""); }}>cancel</button>
             )}
-            <button className="btn accent" disabled={!selected.size || (newMode ? !newGroup.trim() : !moveTarget)} onClick={moveSelected}>
+            <button className="btn accent" disabled={!selected.size || !selectedMovable || (newMode ? !newGroup.trim() : !moveTarget)} onClick={moveSelected}>
               <Icon name="move" className="sm" />Move
             </button>
           </div>
@@ -3582,6 +3664,7 @@ function App() {
                             <Icon name={twoFaFlash?.id === p.id ? "check" : "key"} className="sm" />
                           </button>
                         )}
+                        {isCloudMode && canManageCloudFolders && <button className="iconbtn tip" data-tip={t("Manage access")} aria-label={t("Manage access for {profile}", { profile: p.name })} onClick={() => openAccess({ kind: "profile", id: p.id, name: p.name, folder: p.group })}><Icon name="user" className="sm" /></button>}
                         {canEditRow && (
                           <button className="iconbtn tip" data-tip="Edit profile" aria-label={`Edit ${p.name}`} onClick={() => openEdit(p.id)}>
                             <Icon name="edit" className="sm" />
@@ -4019,7 +4102,7 @@ function App() {
                       <div className="team-grants">
                         {team.folders.filter((folder) => !folder.archivedAt).map((folder) => {
                           const permission = member.grants.find((grant) => grant.folderName === folder.name)?.permission ?? "";
-                          return <label key={folder.name}>{folder.name}<select className="select" aria-label={t("{folder} access for {email}", { folder: folder.name, email: member.email })} value={permission} disabled={teamBusy} onChange={(event) => void runTeamAction(event.target.value ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission: event.target.value })}><option value="">{t("No access")}</option><option value="view">{t("View")}</option><option value="edit">{t("Edit")}</option></select></label>;
+                          return <GrantControl key={folder.name} label={t("{folder} access for {email}", { folder: folder.name, email: member.email })} direct={permission} inherited={folderGrantPermission(team.folders, member.grants, folder.name, false)} busy={teamBusy} onChange={(permission) => void runTeamAction(permission ? "grant" : "remove-grant", { folderName: folder.name, accountId: member.accountId, permission })} />;
                         })}
                         <button className="btn xs danger" type="button" aria-label={t("Remove {email}", { email: member.email })} disabled={teamBusy} onClick={() => void runTeamAction("remove-member", { accountId: member.accountId }, t("Removed {email}", { email: member.email }))}>{t("Remove")}</button>
                       </div>
@@ -4231,6 +4314,40 @@ function App() {
         </div>
       )}
 
+      {movingFolder && <div className="modal-backdrop" onClick={() => { if (!folderMoveBusy) setMovingFolder(null); }}>
+        <div className="modal mode-confirm" role="dialog" aria-modal="true" aria-labelledby="folder-move-title" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-head" id="folder-move-title">{t("Move {folder}", { folder: movingFolder })}</div>
+          <div className="modal-body">
+            <label className="fld"><span>{t("Parent folder")}</span><select value={folderParent} disabled={folderMoveBusy} onChange={(event) => setFolderParent(event.target.value)}>
+              <option value="">{t("Top level")}</option>
+              {tree.filter((folder) => folder.name !== movingFolder && !folder.ancestors.includes(movingFolder)).map((folder) => <option key={folder.name} value={folder.name}>{folder.name}</option>)}
+            </select></label>
+            {isCloudMode && <p className="hint">{t("Inherited access follows the new parent folder.")}</p>}
+            {folderMoveErr && <div className="modal-err" role="alert">{folderMoveErr}</div>}
+          </div>
+          <div className="modal-foot"><button className="btn ghost" disabled={folderMoveBusy} onClick={() => setMovingFolder(null)}>{t("Cancel")}</button><button className="btn primary" disabled={folderMoveBusy} onClick={() => void commitFolderMove()}>{t("Move")}</button></div>
+        </div>
+      </div>}
+
+      {accessTarget && isCloudMode && canManageCloudFolders && <div className="modal-backdrop" onClick={() => { if (!teamBusy) setAccessTarget(null); }}>
+        <div className="modal mode-confirm" role="dialog" aria-modal="true" aria-labelledby="manage-access-title" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-head" id="manage-access-title">{t("Manage access")} · {accessTarget.name}</div>
+          <div className="modal-body">
+            <p className="hint">{t("Owners and admins have access to all folders and profiles.")}</p>
+            <p className="hint">{accessTarget.kind === "folder" ? t("Folder access includes all subfolders. The strongest grant applies.") : t("Profile access shares only this profile and follows it when moved.")}</p>
+            {team?.members.filter((member) => member.role === "member").map((member) => {
+              const profile = accessTarget.kind === "profile";
+              const direct = profile ? member.profileGrants?.find((grant) => grant.profileId === accessTarget.id)?.permission ?? ""
+                : member.grants.find((grant) => grant.folderName === accessTarget.id)?.permission ?? "";
+              return <GrantControl key={member.accountId} label={member.email} direct={direct} inherited={folderGrantPermission(team.folders, member.grants, accessTarget.folder, profile)} busy={teamBusy} onChange={(permission) => void runTeamAction(profile ? permission ? "profile-grant" : "remove-profile-grant" : permission ? "grant" : "remove-grant", { ...(profile ? { profileId: accessTarget.id } : { folderName: accessTarget.id }), accountId: member.accountId, permission })} />;
+            })}
+            {team && !team.members.some((member) => member.role === "member") && <p>{t("Invite members in Settings → Team to share access.")}</p>}
+            {teamErr && <div className="modal-err" role="alert">{teamErr}</div>}
+          </div>
+          <div className="modal-foot"><button className="btn" disabled={teamBusy} onClick={() => setAccessTarget(null)}>{t("Close")}</button></div>
+        </div>
+      </div>}
+
       {showCreate && (
         /* Form dialog: a stray backdrop click must not discard typed input —
            close via Cancel, the X, or Escape (the backdrop has no onClick). */
@@ -4415,7 +4532,9 @@ function App() {
                   <div className="fld-row">
                     <label className="fld grow">
                       <span>Folder</span>
-                      <GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />
+                      {canEditGroup(profiles.find((profile) => profile.id === editId)?.group ?? "")
+                        ? <GroupPicker value={editForm.group ?? ""} onChange={(v) => setEF("group", v)} groups={editableGroups} allowCreate={!isCloudMode} />
+                        : <input value={editForm.group ?? ""} readOnly />}
                     </label>
                     <label className="fld grow">
                       <span>Platform</span>

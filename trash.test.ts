@@ -79,14 +79,16 @@ test("Local trash hides active entries and restores the same serial, identity, a
 
 test("re-import cannot overwrite a trashed profile and group edits leave its saved data unchanged", () => {
   const { store, profile } = fixture();
+  const saved = store.getProfile("p1")!;
   store.trashProfile("p1");
   expect(() => store.upsertProfile({ ...profile, name: "overwrite" })).toThrow("Trash");
   store.renameGroup("original", "renamed");
   store.deleteGroup("original");
-  expect(store.listTrashed()[0]!.group).toBe("original");
+  expect(store.listTrashed()[0]!.group).toBe("renamed");
   store.restoreProfile("p1");
-  expect(store.getProfile("p1")!.name).toBe("Retain me");
-  expect(store.listGroups()).toContain("original");
+  expect(store.getProfile("p1")).toEqual({ ...saved, group: "renamed" });
+  expect(store.getSessionBundle("p1")).toBe("fixture-session");
+  expect(store.listGroups()).toContain("renamed");
 });
 
 test("imports report a recoverable Trash conflict before the atomic write", async () => {

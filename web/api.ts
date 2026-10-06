@@ -9,6 +9,7 @@ import type {
   ScriptSummary,
 } from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
+import type { FolderInfo } from "../folders.ts";
 import {
   CLOUD_DIAGNOSTIC_TYPES,
   type CloudDiagnosticEvent,
@@ -87,6 +88,7 @@ export interface UiRoster {
   profiles: UiProfile[];
   healthSources: HealthSource[];
   groups: string[];
+  folders?: FolderInfo[];
 }
 
 export interface DiagnoseReport {
@@ -327,8 +329,7 @@ export const fetchCloudConnector = (connectorId: string) => cloudConnectorAction
 export const revokeCloudConnector = (connectorId: string) => cloudConnectorAction("revoke", connectorId);
 
 export interface CloudTeamState {
-  folders: Array<{
-    name: string;
+  folders: Array<FolderInfo & {
     archivedAt: number | null;
     permission: "view" | "edit";
     extensionDefaults: string[];
@@ -336,6 +337,7 @@ export interface CloudTeamState {
   members: Array<{
     accountId: string; email: string; role: "owner" | "admin" | "member"; joinedAt: number;
     grants: Array<{ folderName: string; accountId: string; permission: "view" | "edit" }>;
+    profileGrants?: Array<{ profileId: string; accountId: string; permission: "view" | "edit" }>;
   }>;
   invitations: Array<{
     id: string; email: string; role: "admin" | "member"; expiresAt: number;
@@ -351,7 +353,7 @@ export async function fetchCloudTeam(): Promise<CloudTeamState> {
   return { folders: body.folders, members: body.members, invitations: body.invitations };
 }
 
-export async function cloudWorkspaceAction(action: string, input: Record<string, string>): Promise<any> {
+export async function cloudWorkspaceAction(action: string, input: Record<string, string | null>): Promise<any> {
   const path = "/ui/api/cloud-workspace";
   const response = await fetch(path, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -417,6 +419,7 @@ export async function fetchProfiles(): Promise<UiRoster> {
     }),
     healthSources: Array.isArray(body.healthSources) ? body.healthSources : [],
     groups: Array.isArray(body.groups) ? body.groups.filter((name: unknown) => typeof name === "string") : [],
+    ...(Array.isArray(body.folders) ? { folders: body.folders } : {}),
   };
 }
 
@@ -825,11 +828,11 @@ export async function updateFromFile(files: FileList | File[]): Promise<any> {
 }
 
 // ---- Group create / rename / delete -----------------------------------------
-export async function createGroup(name: string): Promise<any> {
+export async function createGroup(name: string, parentName?: string | null): Promise<any> {
   const r = await fetch("/ui/api/groups/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, parentName }),
   });
   return apiJson(r, "/ui/api/groups/create");
 }
@@ -841,6 +844,16 @@ export async function renameGroup(from: string, to: string): Promise<any> {
     body: JSON.stringify({ from, to }),
   });
   return apiJson(r, "/ui/api/groups/rename");
+}
+
+export async function moveGroup(name: string, parentName: string | null): Promise<any> {
+  const path = "/ui/api/groups/move";
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, parentName }),
+  });
+  return apiJson(r, path);
 }
 
 export async function deleteGroup(name: string): Promise<any> {

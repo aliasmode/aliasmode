@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -296,6 +297,85 @@ test("setGroup reassigns multiple profiles and ignores unknown ids", () => {
   expect(n).toBe(2); // unknown "ghost" ignored
   expect(store.getProfile("k1d0cd11")!.group).toBe("moved");
   expect(store.getProfile("k1d0cd22")!.group).toBe("moved");
+  store.close();
+});
+
+test("legacy folder migration and explicit hierarchy survive reopening", () => {
+  const dir = mkdtempSync(join(tmpdir(), "aliasmode-folder-migration-"));
+  const path = join(dir, "profiles.sqlite");
+  let store = new ProfileStore(path);
+  try {
+    store.registerGroup("Facebook/Literal");
+    store.close();
+    const legacy = new Database(path);
+    legacy.exec("ALTER TABLE groups DROP COLUMN parent_name; ALTER TABLE groups DROP COLUMN label;");
+    legacy.close();
+    store = new ProfileStore(path);
+    expect(store.listFolders()).toContainEqual({ name: "Facebook/Literal", parentName: null, label: "Facebook/Literal" });
+    store.createGroup("Facebook");
+    store.createGroup("Fitness", "Facebook");
+    store.close();
+    store = new ProfileStore(path);
+    expect(store.listFolders()).toContainEqual({ name: "Facebook/Fitness", parentName: "Facebook", label: "Fitness" });
+    expect(store.listFolders().find((folder) => folder.name === "Facebook/Literal")?.parentName).toBeNull();
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("nested groups keep legacy slash names flat and distinguish identical child labels", () => {
+  const store = memStore();
+  store.registerGroup("Facebook/Literal");
+  store.createGroup("Facebook");
+  store.createGroup("TikTok");
+  expect(store.createGroup("Fitness", "Facebook")).toEqual({ name: "Facebook/Fitness", label: "Fitness", parentName: "Facebook" });
+  expect(store.createGroup("Fitness", "TikTok").name).toBe("TikTok/Fitness");
+  expect(store.listFolders().find((folder) => folder.name === "Facebook/Literal")?.parentName).toBeNull();
+  expect(() => store.createGroup("Literal", "Facebook")).toThrow();
+  expect(() => store.createGroup("Orphan", "Missing")).toThrow();
+  store.close();
+});
+
+test("nested group rename and move preserve live and trashed profiles and defaults", () => {
+  const store = memStore();
+  store.createGroup("Facebook");
+  store.createGroup("Fitness", "Facebook");
+  store.createGroup("Gym", "Facebook/Fitness");
+  store.registerGroup("Facebook/Unrelated");
+  store.setGroupExtensionDefaults("Facebook/Fitness/Gym", ["extension-a"]);
+  const profile = parseExport(SAMPLE).profiles[0]!;
+  store.upsertProfile({ ...profile, group: "Facebook/Fitness/Gym", extensions: ["extension-a"] });
+  store.upsertProfile({ ...profile, id: "trashed", group: "Facebook/Fitness/Gym" });
+  store.trashProfile("trashed");
+  store.renameGroup("Facebook", "Social");
+  expect(store.getProfile(profile.id)?.group).toBe("Social/Fitness/Gym");
+  expect(store.listTrashed()[0]?.group).toBe("Social/Fitness/Gym");
+  expect(store.getGroupExtensionDefaults("Social/Fitness/Gym")).toEqual(["extension-a"]);
+  expect(store.listFolders().find((folder) => folder.name === "Facebook/Unrelated")?.parentName).toBeNull();
+  expect(() => store.moveGroup("Social", "Social/Fitness/Gym")).toThrow();
+  expect(() => store.deleteGroup("Social")).toThrow();
+  store.moveGroup("Social/Fitness", null);
+  expect(store.getProfile(profile.id)?.group).toBe("Fitness/Gym");
+  expect(store.listTrashed()[0]?.group).toBe("Fitness/Gym");
+  store.restoreProfile("trashed");
+  expect(store.getProfile("trashed")?.group).toBe("Fitness/Gym");
+  store.deleteGroup("Fitness/Gym");
+  expect(store.getProfile(profile.id)?.group).toBe("");
+  expect(store.getProfile(profile.id)?.extensions).toEqual(["extension-a"]);
+  store.close();
+});
+
+test("subtree name collisions leave local profiles and folders unchanged", () => {
+  const store = memStore();
+  store.createGroup("A");
+  store.createGroup("Child", "A");
+  store.registerGroup("B/Child");
+  const before = store.listFolders();
+  expect(() => store.renameGroup("A", "B")).toThrow();
+  expect(store.listFolders()).toEqual(before);
+  store.renameGroup("A", "A/Child");
+  expect(store.listGroups()).toContain("A/Child/Child");
   store.close();
 });
 

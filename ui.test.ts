@@ -645,7 +645,7 @@ test("Local group creation keeps an empty group in the profile roster", async ()
     s,
   );
   expect(created!.status).toBe(200);
-  expect(await created!.json()).toEqual({ ok: true, name: "Empty group" });
+  expect(await created!.json()).toEqual({ ok: true, name: "Empty group", folder: { name: "Empty group", parentName: null, label: "Empty group" } });
 
   const reserved = await handleUiRequest(
     new Request("http://x/ui/api/groups/create", {
@@ -665,6 +665,23 @@ test("Local group creation keeps an empty group in the profile roster", async ()
   );
   expect((await roster!.json()).groups).toContain("Empty group");
   s.close();
+});
+
+test("Local folder routes preserve explicit parents through create, rename and move", async () => {
+  const s = store();
+  const request = (path: string, body: unknown) => handleUiRequest(new Request(`http://x/ui/api/groups/${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), {} as any, s);
+  try {
+    await request("create", { name: "Facebook" });
+    const created = await request("create", { name: "Fitness", parentName: "Facebook" });
+    expect((await created!.json()).folder).toEqual({ name: "Facebook/Fitness", parentName: "Facebook", label: "Fitness" });
+    const renamed = await request("rename", { from: "Facebook/Fitness", to: "Health" });
+    expect((await renamed!.json()).folder.name).toBe("Facebook/Health");
+    expect((await request("move", { name: "Facebook", parentName: "Facebook/Health" }))!.status).toBe(400);
+    const moved = await request("move", { name: "Facebook/Health", parentName: null });
+    expect((await moved!.json()).folder).toEqual({ name: "Health", parentName: null, label: "Health" });
+  } finally { s.close(); }
 });
 
 test("move route reassigns selected profiles' group", async () => {
@@ -2948,6 +2965,29 @@ test("Cloud workspace API combines team state and forwards grants", async () => 
   expect(calls).toEqual([{ folderName: "Sales", accountId: "account1", permission: "view" }]);
   s.close();
 });
+test("Cloud workspace forwards hierarchy and direct profile grants without local writes", async () => {
+  const s = store();
+  const calls: unknown[] = [];
+  const forward = (method: string) => async (...args: unknown[]) => { calls.push([method, ...args]); return { ok: true }; };
+  const client = { createFolder: forward("create"), moveFolder: forward("move"), setProfileGrant: forward("grant"), removeProfileGrant: forward("remove") };
+  const before = s.listFolders();
+  try {
+    for (const body of [
+      { action: "create-folder", name: "Fitness", parentName: "Facebook" },
+      { action: "move-folder", name: "Facebook/Fitness", parentName: null },
+      { action: "profile-grant", profileId: "p1", accountId: "member", permission: "edit" },
+      { action: "remove-profile-grant", profileId: "p1", accountId: "member" },
+    ]) {
+      const response = await handleUiRequest(new Request("http://x/ui/api/cloud-workspace", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      }), {} as any, s, null, { cloudConnection: { client } as unknown as CloudConnectionRuntime });
+      expect(response!.status).toBe(200);
+    }
+    expect(calls).toEqual([["create", "Fitness", "Facebook"], ["move", "Facebook/Fitness", null], ["grant", "p1", "member", "edit"], ["remove", "p1", "member"]]);
+    expect(s.listFolders()).toEqual(before);
+  } finally { s.close(); }
+});
+
 test("Cloud workspace API forwards member password resets", async () => {
   const s = store();
   const resets: string[] = [];

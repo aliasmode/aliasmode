@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { TrashProfileView } from "../proxy-tools-types.ts";
 import { filterTrash, TrashPage } from "./trash.tsx";
 import { proxyResultPage } from "./proxies.tsx";
+import { folderScope } from "../folders.ts";
 
 const profiles: TrashProfileView[] = Array.from({ length: 8000 }, (_, i) => ({
   id: `p${i}`, name: `Profile ${i}`, group: i % 9 ? `Folder ${i % 9}` : "",
@@ -28,6 +29,12 @@ test("Trash folder scope includes every profile across pages and remains indepen
   expect(new Set(scope.map((p) => p.group))).toEqual(new Set(folders));
   expect(filterTrash(profiles, folders, "Profile 10").length).toBeLessThan(scope.length);
   expect(filterTrash(profiles, [], "")).toEqual([]);
+});
+
+test("Trash parent scope includes explicit descendants but not literal slash roots", () => {
+  const folders = [{ name: "Parent" }, { name: "Parent/Child", parentName: "Parent" }, { name: "Parent/Literal" }];
+  const rows = folders.map(({ name }, i) => ({ ...profiles[i]!, group: name }));
+  expect(filterTrash(rows, [...folderScope(folders, "Parent")], "").map((row) => row.group)).toEqual(["Parent", "Parent/Child"]);
 });
 
 test("Trash stays mounted but hidden during page navigation", () => {

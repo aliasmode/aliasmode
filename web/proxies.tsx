@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { folderScope, type FolderInfo } from "../folders.ts";
 import { ProxyProviderOffer } from "./proxy-offer.tsx";
 import type {
   ProxyCheckView,
@@ -168,8 +169,9 @@ function AffectedProfiles({ profiles }: { profiles: ProxyCheckView["profiles"] }
   </details>;
 }
 
-export function ProxiesPage({ groups, onChanged, active }: {
+export function ProxiesPage({ groups, folders = [], onChanged, active }: {
   groups: string[];
+  folders?: FolderInfo[];
   onChanged: () => Promise<void>;
   active: boolean;
 }) {
@@ -306,7 +308,9 @@ export function ProxiesPage({ groups, onChanged, active }: {
         <label className={`folder-chip${all ? " selected" : ""}`}><input type="checkbox" checked={all} disabled={!!busy} onChange={(event) => { setAll(event.target.checked); setSelectedGroups([]); invalidateScope(); }} />All folders</label>
         {folderNames.map((name) => <label className={`folder-chip${!all && selectedGroups.includes(name) ? " selected" : ""}`} key={name}>
           <input type="checkbox" checked={all || selectedGroups.includes(name)} disabled={!!busy} onChange={(event) => {
-            setSelectedGroups(all ? folderNames.filter((group) => group !== name) : event.target.checked ? [...selectedGroups, name] : selectedGroups.filter((group) => group !== name));
+            const branch = new Set([name, ...folderScope(folders, name)]);
+            const current = all ? folderNames : selectedGroups;
+            setSelectedGroups(event.target.checked ? [...new Set([...current, ...branch])] : current.filter((group) => !branch.has(group)));
             setAll(false); invalidateScope();
           }} />{name || "Ungrouped"}
         </label>)}

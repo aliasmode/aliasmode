@@ -69,6 +69,8 @@ export interface CloudWorkspace {
 
 export interface CloudFolder {
   name: string;
+  parentName?: string | null;
+  label?: string;
   archivedAt: number | null;
   permission: FolderPermission;
   extensionDefaults: string[];
@@ -76,6 +78,12 @@ export interface CloudFolder {
 
 export interface CloudFolderGrant {
   folderName: string;
+  accountId: string;
+  permission: FolderPermission;
+}
+
+export interface CloudProfileGrant {
+  profileId: string;
   accountId: string;
   permission: FolderPermission;
 }
@@ -96,6 +104,7 @@ export interface CloudMember {
   role: WorkspaceRole;
   joinedAt: number;
   grants: CloudFolderGrant[];
+  profileGrants?: CloudProfileGrant[];
 }
 
 export interface CloudDevice {
@@ -373,6 +382,16 @@ export interface ListFoldersResponse {
 
 export interface CreateFolderRequest {
   name: string;
+  parentName?: string | null;
+}
+
+export interface MoveFolderRequest {
+  parentName: string | null;
+}
+
+export interface SetProfileGrantResponse {
+  ok: true;
+  grant: CloudProfileGrant;
 }
 
 export interface RenameFolderRequest {

@@ -1080,7 +1080,10 @@ export async function handleUiRequest(
       const body = await req.json() as Record<string, unknown>;
       const action = String(body.action ?? "");
       if (action === "invite") return Response.json(await cloud.createInvitation(String(body.email ?? ""), body.role === "admin" ? "admin" : "member"));
-      if (action === "create-folder") return Response.json(await cloud.createFolder(String(body.name ?? "")));
+      if (action === "create-folder") return Response.json(await cloud.createFolder(String(body.name ?? ""), typeof body.parentName === "string" ? body.parentName : null));
+      if (action === "move-folder") return Response.json(await cloud.moveFolder(String(body.name ?? ""), typeof body.parentName === "string" ? body.parentName : null));
+      if (action === "profile-grant") return Response.json(await cloud.setProfileGrant(String(body.profileId ?? ""), String(body.accountId ?? ""), body.permission === "edit" ? "edit" : "view"));
+      if (action === "remove-profile-grant") return Response.json(await cloud.removeProfileGrant(String(body.profileId ?? ""), String(body.accountId ?? "")));
       if (action === "delete-folder") return Response.json(await cloud.deleteFolder(String(body.name ?? "")));
       if (action === "resend") return Response.json(await cloud.resendInvitation(String(body.id ?? "")));
       if (action === "revoke") return Response.json(await cloud.revokeInvitation(String(body.id ?? "")));
@@ -1185,7 +1188,7 @@ export async function handleUiRequest(
       // otherwise show "running" forever and hide the Open action. reconcileOrphans
       // probes active() per launch and drops dead rows (it never kills processes).
       await launcher.reconcileOrphans();
-      return Response.json({ profiles: listUiProfiles(store), healthSources: [], groups: store.listGroups() });
+      return Response.json({ profiles: listUiProfiles(store), healthSources: [], groups: store.listGroups(), folders: store.listFolders() });
     } catch (error) {
       // Bun renders an uncaught route exception as an HTML 500 page. The React
       // client then cannot expose the actual hub/reconciliation error and only
@@ -1621,12 +1624,12 @@ export async function handleUiRequest(
   if (pathname === "/ui/api/groups/create" && req.method === "POST") {
     if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
     try {
-      const body = (await req.json()) as { name?: unknown };
+      const body = (await req.json()) as { name?: unknown; parentName?: unknown };
       const name = String(body.name ?? "").trim();
       if (!name) return Response.json({ ok: false, error: "group name required" }, { status: 400 });
       if (name === "all") return Response.json({ ok: false, error: "group name is reserved" }, { status: 400 });
-      store.registerGroup(name);
-      return Response.json({ ok: true, name });
+      const folder = store.createGroup(name, typeof body.parentName === "string" ? body.parentName : null);
+      return Response.json({ ok: true, name: folder.name, folder });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }
@@ -1642,9 +1645,27 @@ export async function handleUiRequest(
         const renamed = await options.cloudConnection!.client.renameFolder(from, to);
         return Response.json({ ok: true, moved: 0, folder: renamed.folder });
       }
-      return Response.json({ ok: true, moved: store.renameGroup(from, to) });
+      const source = store.listFolders().find((folder) => folder.name === from);
+      const moved = store.renameGroup(from, to);
+      const name = source?.parentName ? `${source.parentName}/${to}` : to;
+      return Response.json({ ok: true, moved, folder: store.listFolders().find((folder) => folder.name === name) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/ui/api/groups/move" && req.method === "POST") {
+    if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    try {
+      const body = await req.json() as { name?: unknown; parentName?: unknown };
+      if (typeof body.name !== "string" || (body.parentName !== null && typeof body.parentName !== "string")) {
+        return Response.json({ ok: false, error: "name and parentName are required" }, { status: 400 });
+      }
+      return Response.json({ ok: true, folder: store.moveGroup(body.name, body.parentName) });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: 400 });
     }
   }
 

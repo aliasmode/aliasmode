@@ -347,9 +347,22 @@ test("Cloud workspace loads independently and refreshes with Account Settings", 
   expect(app).toContain("await Promise.all([load(), loadTeam()]);");
 });
 
+test("manual Cloud refresh reloads folder access as well as profiles", async () => {
+  const source = app.slice(app.indexOf("  const refreshRoster ="), app.indexOf("  useEffect(() => {", app.indexOf("  const refreshRoster =")));
+  for (const cloud of [false, true]) {
+    const calls: string[] = [];
+    const refresh = new Function("load", "loadTeam", "isCloudMode", "setRefreshing", `${source}\nreturn refreshRoster;`)(
+      async () => { calls.push("profiles"); }, async () => { calls.push("team"); }, cloud, () => {},
+    );
+    await refresh();
+    expect(calls).toEqual(cloud ? ["profiles", "team"] : ["profiles"]);
+  }
+});
+
 test("sidebar creates persistent groups and gates Cloud deletion to workspace managers", () => {
   expect(app).toContain("const [registeredGroups, setRegisteredGroups] = useState<string[]>([]);");
-  expect(app).toContain("team?.folders.filter((folder) => !folder.archivedAt).map((folder) => folder.name)");
+  expect(app).toContain("team?.folders.filter((folder) => !folder.archivedAt) ?? []");
+  expect(app).toContain("folderTree(folders)");
   expect(app).toContain("const canManageCloudFolders = cloudAuth?.workspace?.role === \"owner\" || cloudAuth?.workspace?.role === \"admin\";");
   expect(app).toContain('className="newgroup"');
   expect(app).toContain('{isCloudMode ? "New folder" : "New group"}');
@@ -434,7 +447,7 @@ test("the roster is sortable, pageable and its columns are selectable", () => {
 
 test("tag search shares the existing folder, number, name, and ID filter", () => {
   const source = app.slice(app.indexOf("    const matched = profiles.filter"), app.indexOf("    // Running profiles stay on top"));
-  const filter = new Function("profiles", "group", "q", "numbering", `${source}\nreturn matched;`);
+  const filter = new Function("profiles", "group", "q", "numbering", "sharedOnly = false", "sharedProfiles = []", "selectedScope = new Set([group])", `${source}\nreturn matched;`);
   const profiles = [
     { id: "alpha", name: "First", group: "A", tags: ["Warm", "Priority"] },
     { id: "beta", name: "Second", group: "B", tags: ["warm"] },
@@ -451,6 +464,8 @@ test("tag search shares the existing folder, number, name, and ID filter", () =>
   expect(ids("103")).toEqual(["gamma"]);
   expect(ids("missing")).toEqual([]);
   expect(ids("", "A")).toEqual(["alpha", "gamma", "delta"]);
+  expect(filter(profiles, "Parent", "warm", numbering, false, [], new Set(["Parent", "A"])).map((p: { id: string }) => p.id)).toEqual(["alpha"]);
+  expect(filter(profiles, "all", "warm", numbering, true, [profiles[1]]).map((p: { id: string }) => p.id)).toEqual(["beta"]);
 
   const tagged = Array.from({ length: 60 }, (_, i) => ({ id: `p-${i}`, name: "Profile", group: "A", tags: ["Warm"] }));
   const matched = filter(tagged, "A", "warm", new Map());
@@ -824,7 +839,9 @@ test("the sidebar offers extension management in both modes and a support link",
   // assignments and load matching local uploads at launch.
   expect(app).toContain('<Icon name="puzzle" /><span className="navlabel">Manage extensions</span>');
   const nav = app.slice(app.indexOf('className="sidenav"'), app.indexOf("</nav>"));
-  expect(nav).not.toContain("isCloudMode");
+  expect(nav).not.toMatch(/\{isCloudMode\s*&&\s*\(?\s*<button[^>]*setView\("extensions"\)/);
+  const extensions = nav.slice(nav.lastIndexOf("<button", nav.indexOf('data-tip="Manage extensions"')), nav.indexOf("</button>", nav.indexOf('data-tip="Manage extensions"')));
+  expect(extensions).not.toContain("isCloudMode");
   // Small support entry that forwards to the Telegram group.
   expect(app).toContain('href="https://t.me/aliasmode"');
   expect(app).toContain('<Icon name="help" /><span className="navlabel">Support</span>');

@@ -10,6 +10,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { folderTree } from "./folders.ts";
 import type {
   CookieRecord,
   FingerprintVerdict,
@@ -131,6 +132,13 @@ export class ProfileStore {
       this.db.exec(`ALTER TABLE groups ADD COLUMN extension_defaults_json TEXT NOT NULL DEFAULT '[]'`);
     } catch {
       /* column already exists */
+    }
+    for (const column of ["parent_name TEXT", "label TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE groups ADD COLUMN ${column}`);
+      } catch {
+        /* column already exists */
+      }
     }
     this.db.exec(`INSERT OR IGNORE INTO groups (name) SELECT DISTINCT "group" FROM profiles WHERE "group" <> '' AND trashed_at = 0`);
     this.db.exec(`
@@ -509,6 +517,72 @@ export class ProfileStore {
     if (n) this.db.query(`INSERT OR IGNORE INTO groups (name) VALUES (?)`).run(n);
   }
 
+  listFolders(): Array<{ name: string; parentName: string | null; label: string }> {
+    return this.db.query<{ name: string; parentName: string | null; label: string }, []>(
+      `SELECT name, parent_name AS parentName, COALESCE(label, name) AS label FROM groups ORDER BY name`,
+    ).all();
+  }
+
+  createGroup(label: string, parentName: string | null = null): { name: string; parentName: string | null; label: string } {
+    const value = label.trim();
+    if (!value) throw new Error("group name required");
+    return this.db.transaction(() => {
+      const folders = this.listFolders();
+      if (parentName !== null && !folders.some((folder) => folder.name === parentName)) throw new Error("parent folder not found");
+      const name = parentName === null ? value : `${parentName}/${value}`;
+      const existing = folders.find((folder) => folder.name === name);
+      if (existing && (existing.parentName !== parentName || existing.label !== value)) throw new Error("folder already exists");
+      if (!existing) this.db.query(`INSERT INTO groups (name, parent_name, label) VALUES (?, ?, ?)`).run(name, parentName, value);
+      return { name, parentName, label: value };
+    })();
+  }
+
+  private rewriteGroup(from: string, label: string, parentName?: string | null): { moved: number; name: string } {
+    return this.db.transaction(() => {
+      const folders = this.listFolders();
+      const branch = folderTree(folders).filter((folder) => folder.name === from || folder.ancestors.includes(from));
+      const root = branch[0];
+      if (!root) throw new Error("folder not found");
+      const parent = parentName === undefined ? root.parentName : parentName;
+      if (!label.trim()) throw new Error("group name required");
+      if (parent !== null && (!folders.some((folder) => folder.name === parent) || branch.some((folder) => folder.name === parent))) {
+        throw new Error("invalid parent folder");
+      }
+      const names = new Map<string, string>();
+      for (const folder of branch) {
+        const nextParent = folder === root ? parent : names.get(folder.parentName!)!;
+        const nextLabel = folder === root ? label.trim() : folder.label;
+        names.set(folder.name, nextParent === null ? nextLabel : `${nextParent}/${nextLabel}`);
+      }
+      const targets = new Set(names.values());
+      if (targets.size !== names.size || folders.some((folder) => !names.has(folder.name) && targets.has(folder.name))) throw new Error("folder already exists");
+      let moved = 0;
+      const temporary = new Map(branch.map((folder) => [folder.name, `folder-move-${crypto.randomUUID()}`]));
+      for (const folder of branch) {
+        const temp = temporary.get(folder.name)!;
+        this.db.query(`UPDATE groups SET name = ? WHERE name = ?`).run(temp, folder.name);
+        this.db.query(`UPDATE groups SET parent_name = ? WHERE parent_name = ?`).run(temp, folder.name);
+        moved += this.db.query(`UPDATE profiles SET "group" = ? WHERE "group" = ?`).run(temp, folder.name).changes;
+      }
+      for (const folder of branch) {
+        const name = names.get(folder.name)!;
+        const temp = temporary.get(folder.name)!;
+        this.db.query(`UPDATE groups SET name = ?, parent_name = ?, label = ? WHERE name = ?`)
+          .run(name, folder === root ? parent : names.get(folder.parentName!)!, folder === root ? label.trim() : folder.label, temp);
+        this.db.query(`UPDATE groups SET parent_name = ? WHERE parent_name = ?`).run(name, temp);
+        this.db.query(`UPDATE profiles SET "group" = ? WHERE "group" = ?`).run(name, temp);
+      }
+      return { moved, name: names.get(from)! };
+    })();
+  }
+
+  moveGroup(name: string, parentName: string | null): { name: string; parentName: string | null; label: string } {
+    const folder = this.listFolders().find((item) => item.name === name);
+    if (!folder) throw new Error("folder not found");
+    const result = this.rewriteGroup(name, folder.label, parentName);
+    return { name: result.name, parentName, label: folder.label };
+  }
+
   getGroupExtensionDefaults(name: string): string[] {
     const n = name.trim();
     if (!n) return [];
@@ -563,11 +637,19 @@ export class ProfileStore {
 
   /**
    * Rename a group: move every member profile from `from` to `to`, and migrate
-   * its defaults. If `to` exists the groups merge and its defaults win.
+   * its defaults. Existing flat leaf groups retain their legacy merge behavior.
    */
   renameGroup(from: string, to: string): number {
     const source = from.trim(), destination = to.trim();
     if (!source || !destination || source === destination) return 0;
+    const folders = this.listFolders();
+    const sourceFolder = folders.find((folder) => folder.name === source);
+    if (!sourceFolder) return 0;
+    const destinationFolder = folders.find((folder) => folder.name === destination);
+    if (!destinationFolder || sourceFolder.parentName !== null || destinationFolder.parentName !== null ||
+        folders.some((folder) => folder.parentName === source || folder.parentName === destination)) {
+      return this.rewriteGroup(source, destination).moved;
+    }
     const rename = this.db.transaction(() => {
       const destinationExists = !!this.db
         .query<{ found: number }, [string]>(`SELECT 1 AS found FROM groups WHERE name = ?`)
@@ -591,6 +673,7 @@ export class ProfileStore {
   deleteGroup(name: string): number {
     const n = name.trim();
     const remove = this.db.transaction(() => {
+      if (this.db.query(`SELECT 1 FROM groups WHERE parent_name = ?`).get(n)) throw new Error("Move or delete subfolders first.");
       const res = this.db.query(`UPDATE profiles SET "group" = '' WHERE "group" = ? AND trashed_at = 0`).run(n);
       this.db.query(`DELETE FROM groups WHERE name = ?`).run(n);
       return Number(res.changes);

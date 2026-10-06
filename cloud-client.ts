@@ -25,6 +25,7 @@ import {
   type ImportProfilesRequest,
   type ImportProfilesResponse,
   type SetFolderGrantResponse,
+  type SetProfileGrantResponse,
   type SetFolderExtensionDefaultsRequest,
   type SetFolderExtensionDefaultsResponse,
   type ListFoldersResponse,
@@ -269,8 +270,24 @@ export class CloudClient {
     return this.call("/workspace/folders");
   }
 
-  createFolder(name: string): Promise<{ ok: true; folder: CloudFolder }> {
-    return this.call("/workspace/folders", { method: "POST", body: JSON.stringify({ name }) });
+  createFolder(name: string, parentName?: string | null): Promise<{ ok: true; folder: CloudFolder }> {
+    return this.call("/workspace/folders", { method: "POST", body: JSON.stringify({ name, parentName }) });
+  }
+
+  moveFolder(name: string, parentName: string | null): Promise<{ ok: true; folder: CloudFolder }> {
+    return this.call(`/workspace/folders/${encodeURIComponent(name)}/move`, {
+      method: "POST", body: JSON.stringify({ parentName }),
+    });
+  }
+
+  setProfileGrant(profileId: string, accountId: string, permission: FolderPermission): Promise<SetProfileGrantResponse> {
+    return this.call(`/profiles/${encodeURIComponent(profileId)}/grants/${encodeURIComponent(accountId)}`, {
+      method: "PUT", body: JSON.stringify({ permission }),
+    });
+  }
+
+  removeProfileGrant(profileId: string, accountId: string): Promise<{ ok: true }> {
+    return this.call(`/profiles/${encodeURIComponent(profileId)}/grants/${encodeURIComponent(accountId)}`, { method: "DELETE" });
   }
 
   renameFolder(name: string, nextName: string): Promise<{ ok: true; folder: CloudFolder }> {

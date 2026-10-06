@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { folderScope, type FolderInfo } from "../folders.ts";
 import type { TrashMutationResult, TrashProfileView } from "../proxy-tools-types.ts";
 import { proxyResultPage } from "./proxies.tsx";
 
@@ -15,7 +16,7 @@ async function trashJson(response: Response): Promise<any> {
   return body;
 }
 
-export function TrashPage({ active, onChanged }: { active: boolean; onChanged: () => Promise<void> }) {
+export function TrashPage({ active, onChanged, folderTree = [] }: { active: boolean; onChanged: () => Promise<void>; folderTree?: FolderInfo[] }) {
   const [profiles, setProfiles] = useState<TrashProfileView[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
   const [search, setSearch] = useState("");
@@ -29,7 +30,11 @@ export function TrashPage({ active, onChanged }: { active: boolean; onChanged: (
   const filtered = filterTrash(profiles, folders.length ? folders : null, search);
   const paged = proxyResultPage(filtered, page);
   const chosen = profiles.filter((profile) => selected.has(profile.id));
-  const groups = [...new Set(profiles.map((profile) => profile.group))].sort();
+  const folderScopes = new Map(folderTree.map((folder) => [folder.name, folderScope(folderTree, folder.name)]));
+  const groups = [...new Set([
+    ...profiles.map((profile) => profile.group),
+    ...folderTree.filter((folder) => profiles.some((profile) => folderScopes.get(folder.name)!.has(profile.group))).map((folder) => folder.name),
+  ])].sort();
   const pageSelected = paged.items.filter((profile) => selected.has(profile.id)).length;
   const allResultsSelected = filtered.length > 0 && filtered.every((profile) => selected.has(profile.id));
   const restoreDenied = chosen.some((profile) => !profile.canRestore);
@@ -43,7 +48,7 @@ export function TrashPage({ active, onChanged }: { active: boolean; onChanged: (
       setProfiles(body.profiles);
       const ids = new Set(body.profiles.map((profile: TrashProfileView) => profile.id));
       const remainingFolders = new Set(body.profiles.map((profile: TrashProfileView) => profile.group));
-      setFolders((previous) => previous.filter((name) => remainingFolders.has(name)));
+      setFolders((previous) => previous.filter((name) => remainingFolders.has(name) || [...(folderScopes.get(name) ?? [])].some((group) => remainingFolders.has(group))));
       setSelected((previous) => new Set([...previous].filter((id) => ids.has(id))));
     }
   };
@@ -107,8 +112,11 @@ export function TrashPage({ active, onChanged }: { active: boolean; onChanged: (
         </button>
         <div className="trash-folder-list">
           {groups.map((name) => <label className={`folder-choice${folders.includes(name) ? " selected" : ""}`} key={name}>
-            <input type="checkbox" aria-label={`Folder ${name || "Ungrouped"}`} disabled={!!busy} checked={folders.includes(name)} onChange={(event) => changeFolders(event.target.checked ? [...folders, name] : folders.filter((group) => group !== name))} />
-            <span>{name || "Ungrouped"}</span><small>{profiles.filter((profile) => profile.group === name).length.toLocaleString()}</small>
+            <input type="checkbox" aria-label={`Folder ${name || "Ungrouped"}`} disabled={!!busy} checked={folders.includes(name)} onChange={(event) => {
+              const branch = new Set([name, ...folderScope(folderTree, name)]);
+              changeFolders(event.target.checked ? [...new Set([...folders, ...branch])] : folders.filter((group) => !branch.has(group)));
+            }} />
+            <span>{name || "Ungrouped"}</span><small>{profiles.filter((profile) => profile.group === name || folderScopes.get(name)?.has(profile.group)).length.toLocaleString()}</small>
           </label>)}
           {!groups.length && <p className="tools-hint">Deleted folders appear here.</p>}
         </div>

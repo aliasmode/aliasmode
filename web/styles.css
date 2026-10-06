@@ -574,7 +574,16 @@ a.navitem { box-sizing: border-box; text-decoration: none; cursor: pointer; }
   font-size: 11px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums;
 }
 .folder.active .cnt { color: var(--accent-ink); background: var(--raised); }
-.folder .gactions { display: none; gap: 1px; }
+.folder .gactions { display: inline-flex; gap: 1px; }
+.folder-select, .folder-toggle { padding: 0; border: 0; background: none; text-align: left; }
+.folder-toggle { flex: 0 0 auto; }
+.folder .gactions .folder-menu { position: fixed; min-width: 190px; }
+.folder .gactions .folder-menu button { width: 100%; height: auto; padding: 8px 9px; justify-content: flex-start; }
+.folder-breadcrumb { display: flex; flex-wrap: wrap; align-items: center; padding: 8px 14px 0; color: var(--muted); }
+.grant-control { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.grant-control small { color: var(--muted); }
+.newgroup:has(small) { flex-wrap: wrap; }
+.newgroup > small { width: 100%; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder:hover .gactions { display: inline-flex; }
 .folder:hover .cnt { display: none; }
 .folder .gactions button {

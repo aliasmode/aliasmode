@@ -16,7 +16,9 @@
     "membershipsPerAccount": 1,
     "roles": ["owner", "admin", "member"],
     "folderPermissions": ["view", "edit"],
-    "profileVisibility": "folder_permission",
+    "profileVisibility": "inherited_folder_or_direct_profile_permission",
+    "folderHierarchy": "explicit_parent_name",
+    "grantResolution": "strongest_additive_permission",
     "addMember": "invitation_only"
   },
   "profiles": {
@@ -45,6 +47,8 @@
     "folder": "PATCH|DELETE /v1/workspace/folders/:name; POST /v1/workspace/folders/:name/archive",
     "folderGrants": "PUT|DELETE /v1/workspace/folders/:name/grants/:accountId",
     "folderExtensions": "PUT /v1/workspace/folders/:name/extensions",
+    "moveFolder": "POST /v1/workspace/folders/:name/move",
+    "profileGrants": "PUT|DELETE /v1/profiles/:id/grants/:accountId",
     "moveProfile": "POST /v1/profiles/:id/move",
     "invitations": "GET|POST /v1/workspace/invitations",
     "invitation": "POST /v1/workspace/invitations/:id/resend; POST /v1/workspace/invitations/:id/revoke",
