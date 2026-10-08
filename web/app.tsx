@@ -3054,7 +3054,7 @@ function App() {
     // The Action column carries no header text: its buttons explain themselves,
     // and a floating "ACTION" label over a right-aligned cluster read as an
     // empty column. The column chooser still lists it by its registry label.
-    const label = column.key === "action" ? "" : column.key === "group" && isCloudMode ? "Folder" : column.label;
+    const label = column.key === "action" ? "" : column.key === "group" && isCloudMode ? t("Folder") : t(column.label);
     // Every column declares its width, so a wide window's extra space spreads
     // proportionally across all of them — an even layout, no dead gap.
     const style = { width: column.width } as CSSProperties;
@@ -3356,7 +3356,7 @@ function App() {
                 {COLUMNS.map((column) => (
                   <label className="pop-item" key={column.key}>
                     <input type="checkbox" checked={columnVisible(column.key)} onChange={() => toggleColumn(column.key)} />
-                    {column.label}
+                    {t(column.label)}
                   </label>
                 ))}
               </div>
