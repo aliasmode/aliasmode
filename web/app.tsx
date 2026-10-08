@@ -2171,7 +2171,7 @@ function App() {
   const selectedFilteredCount = filtered.filter((p) => selected.has(p.id)).length;
   const selectedOutsideFilter = selected.size - selectedFilteredCount;
   const allFilteredSelected = filtered.length > 0 && selectedFilteredCount === filtered.length && selectedOutsideFilter === 0;
-  const selectionScope = `${filtered.length.toLocaleString()} ${q ? "matching profiles" : "profiles"}${group === "all" ? "" : ` in “${group}”`}`;
+  const selectionScope = `${filtered.length.toLocaleString()} ${q ? t("matching profiles") : t("profiles")}${group === "all" ? "" : ` in “${group}”`}`;
   const selectAllFiltered = () => setSelected(new Set(filtered.map((p) => p.id)));
   const toggleAll = () =>
     setSelected((s) => {
@@ -3477,7 +3477,7 @@ function App() {
             <button type="button" className="btn" disabled={deleting || allFilteredSelected} onClick={selectAllFiltered}>
               {allFilteredSelected ? t("All {scope} selected", { scope: selectionScope }) : t("Select all {scope}", { scope: selectionScope })}
             </button>
-            <span className="muted">{deleting ? "Moving selected profiles…" : "Across all pages"}</span>
+            <span className="muted">{deleting ? t("Moving selected profiles…") : t("Across all pages")}</span>
             {!allFilteredSelected && selectedOutsideFilter > 0 && <span className="muted">{t("This replaces your selection, excluding {count} outside this view.", { count: selectedOutsideFilter })}</span>}
           </div>
         )}
@@ -3492,10 +3492,10 @@ function App() {
           </span>
           <button type="button" className="btn ghost" aria-label={t("Clear selection")} onClick={() => setSelected(new Set())}>{t("Clear selection")}</button>
           <button className="btn primary tip" data-tip={t("Open selected browsers")} disabled={!selected.size} onClick={openSelected}>
-            <Icon name="play" className="sm" />Open
+            <Icon name="play" className="sm" />{t("Open")}
           </button>
           <button className="btn solid-danger tip" data-tip={t("Close selected browsers")} disabled={!selected.size} onClick={closeSelected}>
-            <Icon name="power" className="sm" />Close
+            <Icon name="power" className="sm" />{t("Close")}
           </button>
           {(!isCloudMode || selectedEditable) && <>
           <button
@@ -3526,7 +3526,7 @@ function App() {
             )}
           </div>
           <button className="btn tip" data-tip={t("Export → edit → re-upload")} disabled={!selected.size || !!exportProgress} onClick={openUpdate} title={t("Export → edit → re-upload to change credentials in bulk")}>
-            <Icon name="edit" className="sm" />Edit from file
+            <Icon name="edit" className="sm" />{t("Edit from file")}
           </button>
           <span className="vsep" />
           <div className="movewrap">
@@ -3688,7 +3688,7 @@ function App() {
                               ><Icon name="raise" className="sm" /></button>
                             </>}
                             <button className="btn sm solid-danger" aria-label={`Close ${p.name}`} disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>
-                              <Icon name="power" className="sm" />Close
+                              <Icon name="power" className="sm" />{t("Close")}
                             </button>
                           </>
                         ) : p.mobilePersona ? (
@@ -3714,7 +3714,7 @@ function App() {
                               disabled={busy[p.id]}
                               onClick={() => act(p.id, openProfile)}
                             >
-                              <Icon name="play" className="sm" />Open
+                              <Icon name="play" className="sm" />{t("Open")}
                             </button>
                           </>
                         ) : (
@@ -3725,7 +3725,7 @@ function App() {
                             disabled={busy[p.id]}
                             onClick={() => act(p.id, openProfile)}
                           >
-                            <Icon name="play" className="sm" />Open
+                            <Icon name="play" className="sm" />{t("Open")}
                           </button>
                         )}
                       </span>
