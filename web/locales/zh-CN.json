@@ -228,5 +228,8 @@
   "Group": "分组",
   "Tags": "标签",
   "Proxy": "代理",
-  "Action": "操作"
+  "Action": "操作",
+  "matching profiles": "匹配的环境",
+  "Moving selected profiles…": "正在将选中的环境移至回收站…",
+  "Edit from file": "从文件编辑"
 }
