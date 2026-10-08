@@ -223,5 +223,10 @@
   "the edited file below. IDs in the file determine which profiles change, not the current selection. Cookies &amp; fingerprints are preserved — editing a": "下方编辑好的文件。文件中的 ID 决定哪些环境会被更改，而非当前选择。Cookie &amp; 指纹会被保留 — 编辑",
   "column has no effect.": "该列无效。",
   "Close profiles before updating. Each Cloud profile saves separately; successful updates remain saved if other profiles fail.": "更新前请关闭环境。每个云端环境单独保存；即使其他环境更新失败，成功的更新仍会保留。",
-  "Anything chosen above overrides that field on every imported record, including provider exports that already carry a group.": "上方所选内容将覆盖每条导入记录的该字段，包括已自带分组的服务商导出。"
+  "Anything chosen above overrides that field on every imported record, including provider exports that already carry a group.": "上方所选内容将覆盖每条导入记录的该字段，包括已自带分组的服务商导出。",
+  "No.": "编号",
+  "Group": "分组",
+  "Tags": "标签",
+  "Proxy": "代理",
+  "Action": "操作"
 }
