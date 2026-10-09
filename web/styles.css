@@ -1002,17 +1002,27 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .proxy-check-result.failed { color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-line); }
 .proxy-check-result.unavailable { color: var(--muted); background: var(--surface-sunken); border-color: var(--line); }
 .proxy-referral {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 8px;
-  padding: 9px 12px; color: var(--accent-ink); background: var(--accent-soft); border: 1px solid var(--accent-line);
-  border-radius: var(--r-md); font-size: 12.5px; font-weight: 650; text-decoration: none;
+  display: flex; align-items: center; gap: 11px;
+  padding: 10px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); text-decoration: none;
   transition: background .12s ease, border-color .12s ease;
 }
-.proxy-referral:hover { background: var(--accent-soft-hover); border-color: var(--accent); }
+.proxy-referral:hover { background: var(--accent-soft); border-color: var(--accent-line); }
 .proxy-referral:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.proxy-referral-off {
-  padding: 2px 7px; color: var(--on-fill); background: var(--accent-fill); border-radius: var(--r-pill);
-  font-size: 11px; font-weight: 700; white-space: nowrap;
+.proxy-referral-icon {
+  display: grid; place-items: center; flex: 0 0 32px; height: 32px;
+  color: var(--accent); background: var(--accent-soft); border-radius: var(--r-sm);
 }
+.proxy-referral:hover .proxy-referral-icon { background: var(--raised); }
+.proxy-referral-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.proxy-referral-text strong { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12.5px; font-weight: 650; }
+.proxy-referral-text small { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.proxy-referral-tag {
+  padding: 1px 7px; color: var(--accent-ink); background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
+}
+.proxy-referral-go { color: var(--muted); font-size: 14px; }
+.proxy-referral:hover .proxy-referral-go { color: var(--accent); }
 
 /* Remote MCP settings card (Cloud mode). Fields/buttons reuse .fld and .btn;
    only the status pill and connect guide need their own rules. */

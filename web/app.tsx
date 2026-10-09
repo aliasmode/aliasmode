@@ -3151,8 +3151,8 @@ function App() {
                 href={PROXY_PROVIDER_URL}
                 target="_blank"
                 rel="noreferrer"
-                title="Buy proxies — 40% OFF"
-                aria-label="Buy proxies at NobleProxy, 40% off (opens externally)"
+                title="Buy proxies at the AliasMode price"
+                aria-label="Buy proxies from NobleProxy at the AliasMode user price (opens externally)"
               ><CartIcon /></a>
             </div>
             <button type="button" className={`navitem${view === "trash" ? " active" : ""}`} data-tip="Trash" title="Trash" onClick={() => setView("trash")}>

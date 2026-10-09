@@ -347,14 +347,15 @@ export function ProxiesPage({ groups, folders = [], onChanged, active }: {
             </tr>)}</tbody></table></div>
           {!checkResults.total && <p className="tools-hint tools-result-empty">No problems found in the completed checks.</p>}
           <Pager {...checkResults} onPage={setCheckPage} />
-          {!busy && checks.some((row) => row.status === "failed" || row.status === "unstable") && <ProxyProviderOffer replacement />}
         </> : <div className="tools-empty"><span className="tools-empty-symbol" aria-hidden="true">↗</span><h3>{busy === "check" ? "Checking selected folders…" : "Ready when you are"}</h3><p>Choose your folders above, then check which proxies are alive, dead, or need attention.</p></div>}
       </section>
+      <ProxyProviderOffer replacement={!busy && checks.some((row) => row.status === "failed" || row.status === "unstable")} />
       <p className="tools-footnote">Supports HTTP and SOCKS5. HTTPS checks are not supported. Unknown means a result could not be confirmed.</p>
     </> : <>
       <section className="tools-panel proxy-input-panel">
         <div className="tools-panel-head"><div><h3><span className="tools-step">2</span>Add replacement proxies</h3><p>Nothing changes until you review and apply the assignments.</p></div></div>
         <div className="tools-panel-body">
+          <ProxyProviderOffer replacement />
           <label className="fld"><span>Assignment method</span><select value={mode} disabled={!!busy} onChange={(event) => { setMode(event.target.value as ProxyReplacementMode); invalidatePreview(); }}>
             <option value="list">Paste a proxy list</option><option value="profileId">Match specific profile IDs — CSV</option><option value="oldProxy">Replace matching old proxies — CSV</option>
           </select></label>
