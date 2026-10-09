@@ -210,9 +210,12 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(proxyOffer).toContain('target="_blank"');
   expect(proxyOffer).toContain('rel="noreferrer"');
-  expect(proxyOffer).toContain('aria-label="Buy static residential proxies at NobleProxy, 40% off (opens externally)"');
+  expect(proxyOffer).toContain('aria-label="Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)"');
   expect(proxyOffer).toContain('"Buy Replacement Proxy" : "Buy Static Residential Proxy"');
-  expect(proxyOffer).toContain("40% OFF");
+  // The offer is an AliasMode-only price, not a sale banner.
+  expect(proxyOffer).toContain("AliasMode price");
+  expect(proxyOffer).toContain("Only AliasMode users pay 40% less");
+  expect(proxyOffer).not.toContain("40% OFF");
   expect(proxyOffer).not.toContain("Need a proxy?");
   expect(app).toContain('if (k === "proxyType" || k === "host" || k === "port" || k === "user" || k === "pass")');
   expect(app).toContain('if (k === "proxy" || k === "proxyType") {\n      resetEditProxyCheck();');
@@ -227,6 +230,9 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(styles).toContain(".proxy-referral {");
   expect(styles).toContain(".proxy-referral:focus-visible");
+  // Both Proxies tools (check and replace) show the offer.
+  const proxiesPage = readFileSync(join(import.meta.dir, "web", "proxies.tsx"), "utf8");
+  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(2);
   // Sidebar cart beside Proxies opens the same offer; the icon rail hides it.
   expect(app).toContain('className="navbuy"');
   expect(app).toContain("href={PROXY_PROVIDER_URL}");

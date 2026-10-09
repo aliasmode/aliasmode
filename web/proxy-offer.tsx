@@ -16,11 +16,17 @@ export function ProxyProviderOffer({ replacement = false }: { replacement?: bool
       href={PROXY_PROVIDER_URL}
       target="_blank"
       rel="noreferrer"
-      aria-label="Buy static residential proxies at NobleProxy, 40% off (opens externally)"
+      aria-label="Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)"
     >
-      <CartIcon />
-      <span>{replacement ? "Buy Replacement Proxy" : "Buy Static Residential Proxy"}</span>
-      <span className="proxy-referral-off">40% OFF</span>
+      <span className="proxy-referral-icon"><CartIcon /></span>
+      <span className="proxy-referral-text">
+        <strong>
+          {replacement ? "Buy Replacement Proxy" : "Buy Static Residential Proxy"}
+          <span className="proxy-referral-tag">AliasMode price</span>
+        </strong>
+        <small>Only AliasMode users pay 40% less than NobleProxy's public price.</small>
+      </span>
+      <span className="proxy-referral-go" aria-hidden="true">↗</span>
     </a>
   );
 }
