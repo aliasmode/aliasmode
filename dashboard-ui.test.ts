@@ -491,12 +491,13 @@ test("import entry points keep permission checks and collapsed labels", () => {
 
 function rosterSelection(filtered: { id: string }[], selected = new Set<string>(), group = "all", q = "", page = 0) {
   const source = app.slice(app.indexOf("  const allVisibleSelected ="), app.indexOf("  const moveSelected ="));
-  const controls = new Function("visibleProfiles", "filtered", "selected", "group", "q", "setSelected", `${source}
+  const controls = new Function("visibleProfiles", "filtered", "selected", "group", "q", "setSelected", "t", `${source}
     return { toggleAll, selectAllFiltered, allFilteredSelected, selectedOutsideFilter, selectionScope };`)(
     filtered.slice(page * 50, (page + 1) * 50), filtered, selected, group, q,
     (next: Set<string> | ((current: Set<string>) => Set<string>)) => {
       selected = typeof next === "function" ? next(selected) : next;
     },
+    (s: string) => s,
   );
   return { ...controls, selected: () => selected };
 }
@@ -536,7 +537,7 @@ test("selection controls expose scope selection and clearing without changing ex
   expect(app).toContain("disabled={deleting || allFilteredSelected}");
   expect(app).toContain("onClick={selectAllFiltered}");
   expect(app).toContain('aria-label={t("Clear selection")} onClick={() => setSelected(new Set())}');
-  expect(app).toContain('q ? "matching profiles" : "profiles"');
+  expect(app).toContain('q ? t("matching profiles") : t("profiles")');
   expect(app).toContain('group === "all" ? "" :');
   expect(app).toContain("const ids = [...selected];");
   expect(app).toContain("await exportProfiles(ids, format, (progress) => setExportProgress(progress));");
