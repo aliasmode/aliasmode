@@ -38,10 +38,10 @@ jobs:
             $run.path -cne ".github/workflows/ci.yml" -or
             $run.status -cne "completed" -or
             $run.conclusion -cne "success" -or
-            $run.event -cne "push" -or
+            $run.event -cne "workflow_dispatch" -or
             $run.head_branch -cne "main"
           ) {
-            throw "installer run must be a successful main push through Client CI"
+            throw "installer run must be a successful manually dispatched Client CI run from main"
           }
           if (
             $run.repository.full_name -cne $env:GITHUB_REPOSITORY -or

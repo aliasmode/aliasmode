@@ -1,5 +1,9 @@
 name: Client CI
 
+# Pushes and pull requests run only the Ubuntu job. The Windows packaging and
+# acceptance pipeline runs on a manual dispatch from main (Actions > Client CI >
+# Run workflow) before a release. release-candidate.yml and
+# client-compatibility.yml take the installer from that dispatched run.
 on:
   push:
     branches: [main]
@@ -51,6 +55,7 @@ jobs:
 
   windows_firefox:
     name: Pinned AliasMode Firefox runtime
+    if: github.event_name == 'workflow_dispatch' || inputs.client_ci_reusable_call == true
     runs-on: windows-latest
     outputs:
       archive_sha256: ${{ steps.verify.outputs.archive_sha256 }}
@@ -1229,7 +1234,7 @@ jobs:
     if: >-
       ${{
         always() &&
-        github.event_name == 'push' &&
+        github.event_name == 'workflow_dispatch' &&
         github.ref == 'refs/heads/main' &&
         needs.windows_cache.result == 'success' &&
         needs.windows_cache.outputs.cache_hit == 'false' &&
@@ -1299,6 +1304,7 @@ jobs:
     steps:
       - name: Enforce Windows DAG result
         env:
+          WINDOWS_PIPELINE: ${{ github.event_name == 'workflow_dispatch' || inputs.client_ci_reusable_call == true }}
           FIREFOX_RESULT: ${{ needs.windows_firefox.result }}
           CACHE_HIT: ${{ needs.windows_cache.outputs.cache_hit }}
           CACHE_RESULT: ${{ needs.windows_cache.result }}
@@ -1322,6 +1328,15 @@ jobs:
               exit 1
             fi
           }
+
+          if [[ "$WINDOWS_PIPELINE" != "true" ]]; then
+            # A push or pull request: no Windows job may have run.
+            for result in "$FIREFOX_RESULT" "$CACHE_RESULT" "$SUCCESSOR_RESULT" "$PREPARE_RESULT" "$FULL_RESULT" "$SLIM_RESULT" "$SOURCE_RESULT" "$CANDIDATE_RESULT" "$RUNTIME_RESULT" "$BROWSER_RESULT" "$CLOUD_RESULT"; do
+              require_result "Windows pipeline job" "$result" skipped
+            done
+            echo "The Windows pipeline runs only on a manual dispatch. Run Client CI on main before a release."
+            exit 0
+          fi
 
           require_result windows_firefox "$FIREFOX_RESULT" success
           require_result windows_cache "$CACHE_RESULT" success

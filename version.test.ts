@@ -383,7 +383,18 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(ciWorkflow).not.toContain("nsis-updater");
   expect(compatibilityWorkflow).toContain("name: aliasmode-windows-candidate");
   expect(compatibilityWorkflow).toContain('role -cne "candidate"');
-  expect(compatibilityWorkflow).toContain('event -cne "push"');
+  // Pushes and pull requests run only the Ubuntu job. The Windows pipeline runs
+  // on a manual dispatch from main, and the release workflows accept only that run.
+  expect(compatibilityWorkflow).toContain('event -cne "workflow_dispatch"');
+  expect(releaseWorkflow).toContain('event -cne "workflow_dispatch"');
+  expect(compatibilityWorkflow).not.toContain('event -cne "push"');
+  expect(releaseWorkflow).not.toContain('event -cne "push"');
+  expect(ciWorkflow).toContain(
+    "  windows_firefox:\n    name: Pinned AliasMode Firefox runtime\n    if: github.event_name == 'workflow_dispatch' || inputs.client_ci_reusable_call == true\n",
+  );
+  expect(ciWorkflow).toContain('require_result "Windows pipeline job" "$result" skipped');
+  expect(windowsCacheSaveJob).toContain("github.event_name == 'workflow_dispatch' &&");
+  expect(windowsCacheSaveJob).not.toContain("github.event_name == 'push'");
   expect(compatibilityWorkflow).toContain("scripts/windows-artifact-manifest.ts verify");
   expect(compatibilityWorkflow).not.toContain("aliasmode-windows-unsigned");
   expect(ciWorkflow).not.toContain("-cjoin");
