@@ -250,7 +250,7 @@ export class ProfileStore {
   }
 
   private completeClosedFingerprints(profileId?: string): void {
-    this.db.transaction(() => {
+    this.transaction(() => {
       const rows = this.db.query<any, [string | null]>(
         `SELECT * FROM profiles WHERE (?1 IS NULL OR id = ?1)
          AND id NOT IN (SELECT profile_id FROM launches)
@@ -271,6 +271,28 @@ export class ProfileStore {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Use this in place of bun:sqlite's db.transaction(). That API prepares
+   * statements that close() never finalizes, so the database file stays open
+   * after close() and Windows refuses to delete or rename it. Nested calls
+   * become savepoints, as they do there.
+   */
+  private transaction<A extends unknown[], T>(fn: (...args: A) => T): (...args: A) => T {
+    return (...args) => {
+      const nested = this.db.inTransaction;
+      this.db.exec(nested ? "SAVEPOINT store_tx" : "BEGIN");
+      try {
+        const result = fn(...args);
+        this.db.exec(nested ? "RELEASE store_tx" : "COMMIT");
+        return result;
+      } catch (error) {
+        // SQLite has already ended the transaction after some errors.
+        if (this.db.inTransaction) this.db.exec(nested ? "ROLLBACK TO store_tx; RELEASE store_tx" : "ROLLBACK");
+        throw error;
+      }
+    };
   }
 
   /** Insert or replace a profile's identity. Preserves the existing seeded flag. */
@@ -388,7 +410,7 @@ export class ProfileStore {
 
   /** Apply a prevalidated profile batch atomically (all rows or none). */
   upsertProfiles(profiles: Profile[], sessions: ReadonlyMap<string, string> = new Map()): void {
-    const apply = this.db.transaction((items: Profile[]) => {
+    const apply = this.transaction((items: Profile[]) => {
       for (const profile of items) {
         this.upsertProfile(profile);
         const bundle = sessions.get(profile.id);
@@ -448,7 +470,7 @@ export class ProfileStore {
   }
 
   trashProfile(id: string): boolean {
-    return this.db.transaction(() => {
+    return this.transaction(() => {
       const changed = this.db.query(`UPDATE profiles SET trashed_at = ? WHERE id = ? AND trashed_at = 0`).run(Date.now(), id);
       if (changed.changes) this.clearAgentTemporary(id);
       return changed.changes > 0;
@@ -456,7 +478,7 @@ export class ProfileStore {
   }
 
   restoreProfile(id: string): boolean {
-    return this.db.transaction(() => {
+    return this.transaction(() => {
       const row = this.db.query<{ group: string }, [string]>(
         `SELECT "group" FROM profiles WHERE id = ? AND trashed_at > 0`,
       ).get(id);
@@ -520,7 +542,7 @@ export class ProfileStore {
   setGroup(ids: string[], group: string): number {
     if (ids.length === 0) return 0;
     const destination = group.trim();
-    const move = this.db.transaction((profileIds: string[]) => {
+    const move = this.transaction((profileIds: string[]) => {
       if (destination) this.registerGroup(destination);
       let changed = 0;
       for (const id of profileIds) {
@@ -552,7 +574,7 @@ export class ProfileStore {
   createGroup(label: string, parentName: string | null = null): { name: string; parentName: string | null; label: string } {
     const value = label.trim();
     if (!value) throw new Error("group name required");
-    return this.db.transaction(() => {
+    return this.transaction(() => {
       const folders = this.listFolders();
       if (parentName !== null && !folders.some((folder) => folder.name === parentName)) throw new Error("parent folder not found");
       const name = parentName === null ? value : `${parentName}/${value}`;
@@ -564,7 +586,7 @@ export class ProfileStore {
   }
 
   private rewriteGroup(from: string, label: string, parentName?: string | null): { moved: number; name: string } {
-    return this.db.transaction(() => {
+    return this.transaction(() => {
       const folders = this.listFolders();
       const branch = folderTree(folders).filter((folder) => folder.name === from || folder.ancestors.includes(from));
       const root = branch[0];
@@ -632,7 +654,7 @@ export class ProfileStore {
     const group = name.trim();
     if (!group) throw new Error("group name required");
     const defaultExtensions = normalizeExtensionIds(extensionIds);
-    const apply = this.db.transaction(() => {
+    const apply = this.transaction(() => {
       this.registerGroup(group);
       this.db.query(`UPDATE groups SET extension_defaults_json = ? WHERE name = ?`)
         .run(JSON.stringify(defaultExtensions), group);
@@ -676,7 +698,7 @@ export class ProfileStore {
         folders.some((folder) => folder.parentName === source || folder.parentName === destination)) {
       return this.rewriteGroup(source, destination).moved;
     }
-    const rename = this.db.transaction(() => {
+    const rename = this.transaction(() => {
       const destinationExists = !!this.db
         .query<{ found: number }, [string]>(`SELECT 1 AS found FROM groups WHERE name = ?`)
         .get(destination);
@@ -698,7 +720,7 @@ export class ProfileStore {
    */
   deleteGroup(name: string): number {
     const n = name.trim();
-    const remove = this.db.transaction(() => {
+    const remove = this.transaction(() => {
       if (this.db.query(`SELECT 1 FROM groups WHERE parent_name = ?`).get(n)) throw new Error("Move or delete subfolders first.");
       const res = this.db.query(`UPDATE profiles SET "group" = '' WHERE "group" = ? AND trashed_at = 0`).run(n);
       this.db.query(`DELETE FROM groups WHERE name = ?`).run(n);
@@ -760,7 +782,7 @@ export class ProfileStore {
 
   /** Remove an extension id from every profile and group default that contains it. */
   unassignExtension(id: string): void {
-    const unassign = this.db.transaction(() => {
+    const unassign = this.transaction(() => {
       for (const group of this.listGroupExtensionDefaults()) {
         if (!group.extensions.includes(id)) continue;
         this.db.query(`UPDATE groups SET extension_defaults_json = ? WHERE name = ?`)
@@ -919,7 +941,7 @@ export class ProfileStore {
   }
 
   clearLaunch(profileId: string): void {
-    this.db.transaction(() => {
+    this.transaction(() => {
       this.db.query(`DELETE FROM launches WHERE profile_id = ?`).run(profileId);
       this.completeClosedFingerprints(profileId);
     })();

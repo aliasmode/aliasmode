@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileStore } from "./store.ts";
@@ -298,6 +298,26 @@ test("setGroup reassigns multiple profiles and ignores unknown ids", () => {
   expect(store.getProfile("k1d0cd11")!.group).toBe("moved");
   expect(store.getProfile("k1d0cd22")!.group).toBe("moved");
   store.close();
+});
+
+// Windows refuses to delete or rename a database that a closed store still
+// holds open. Linux shows the same leak as an open descriptor, so it fails here too.
+const linuxTest = process.platform === "linux" ? test : test.skip;
+linuxTest("close releases the database file after transactions ran", () => {
+  const dir = mkdtempSync(join(tmpdir(), "aliasmode-store-close-"));
+  const path = join(dir, "profiles.sqlite");
+  try {
+    const store = new ProfileStore(path);
+    store.createGroup("Facebook");
+    store.createGroup("Fitness", "Facebook");
+    store.close();
+    const held = readdirSync("/proc/self/fd").filter((fd) => {
+      try { return readlinkSync(`/proc/self/fd/${fd}`).startsWith(path); } catch { return false; }
+    });
+    expect(held).toEqual([]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("legacy folder migration and explicit hierarchy survive reopening", () => {
