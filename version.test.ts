@@ -352,7 +352,21 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(windowsRuntimeJob).toContain(
     "name: aliasmode-windows-${{ matrix.shard }}-diagnostics-${{ github.run_attempt }}",
   );
+  // A pull request that changes only dashboard UI or documentation skips the
+  // Windows pipeline. A push to main never does: release-candidate.yml takes the
+  // installer from that exact push run.
+  const changesJob = ciWorkflow.slice(ciWorkflow.indexOf("\n  changes:"), ciWorkflow.indexOf("\n  windows_firefox:"));
+  expect(changesJob).toContain('if [[ "$EVENT_NAME" == "pull_request" && "$REUSABLE_CALL" != "true" ]]; then');
+  expect(changesJob).toContain('""|web/*|docs/*|*.md|dashboard-ui.test.ts) ;;');
+  expect(changesJob).toContain("*) windows=true ;;");
+  expect(ciWorkflow).toContain(
+    "  windows_firefox:\n    name: Pinned AliasMode Firefox runtime\n    needs: changes\n    if: needs.changes.outputs.windows == 'true'\n",
+  );
+  expect(ciWorkflow).toContain('require_result changes "$CHANGES_RESULT" success');
+  expect(ciWorkflow).toContain('require_result "Windows pipeline job" "$result" skipped');
+  expect(ciWorkflow).toContain('require_result "changes windows output" "$WINDOWS_PIPELINE" true');
   expect(windowsGateNeeds).toEqual([
+    "changes",
     "windows_firefox",
     "windows_cache",
     "windows_synthetic_successor",

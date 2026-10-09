@@ -49,8 +49,43 @@ jobs:
       - run: bun run i18n:locales:check
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
+  changes:
+    name: Change scope
+    runs-on: ubuntu-latest
+    outputs:
+      windows: ${{ steps.scope.outputs.windows }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Decide whether the Windows pipeline runs
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REUSABLE_CALL: ${{ inputs.client_ci_reusable_call == true }}
+        run: |
+          set -euo pipefail
+          # Only a pull request can skip the Windows pipeline, and only when every
+          # changed file is dashboard UI or documentation. A push to main always
+          # runs it: release-candidate.yml takes the installer from that exact run.
+          windows=true
+          if [[ "$EVENT_NAME" == "pull_request" && "$REUSABLE_CALL" != "true" ]]; then
+            files="$(git diff --no-renames --name-only HEAD^1 HEAD)"
+            windows=false
+            while IFS= read -r file; do
+              case "$file" in
+                ""|web/*|docs/*|*.md|dashboard-ui.test.ts) ;;
+                *) windows=true ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+          echo "Windows pipeline: $windows"
+
   windows_firefox:
     name: Pinned AliasMode Firefox runtime
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
     runs-on: windows-latest
     outputs:
       archive_sha256: ${{ steps.verify.outputs.archive_sha256 }}
@@ -1283,6 +1318,7 @@ jobs:
   windows:
     name: Windows NSIS installer
     needs:
+      - changes
       - windows_firefox
       - windows_cache
       - windows_synthetic_successor
@@ -1299,6 +1335,8 @@ jobs:
     steps:
       - name: Enforce Windows DAG result
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          WINDOWS_PIPELINE: ${{ needs.changes.outputs.windows }}
           FIREFOX_RESULT: ${{ needs.windows_firefox.result }}
           CACHE_HIT: ${{ needs.windows_cache.outputs.cache_hit }}
           CACHE_RESULT: ${{ needs.windows_cache.result }}
@@ -1322,6 +1360,17 @@ jobs:
               exit 1
             fi
           }
+
+          require_result changes "$CHANGES_RESULT" success
+          if [[ "$WINDOWS_PIPELINE" == "false" ]]; then
+            # A simple-edit pull request: no Windows job may have run.
+            for result in "$FIREFOX_RESULT" "$CACHE_RESULT" "$SUCCESSOR_RESULT" "$PREPARE_RESULT" "$FULL_RESULT" "$SLIM_RESULT" "$SOURCE_RESULT" "$CANDIDATE_RESULT" "$RUNTIME_RESULT" "$BROWSER_RESULT" "$CLOUD_RESULT"; do
+              require_result "Windows pipeline job" "$result" skipped
+            done
+            echo "Only dashboard UI or documentation changed. The Windows pipeline runs on main after the merge."
+            exit 0
+          fi
+          require_result "changes windows output" "$WINDOWS_PIPELINE" true
 
           require_result windows_firefox "$FIREFOX_RESULT" success
           require_result windows_cache "$CACHE_RESULT" success
