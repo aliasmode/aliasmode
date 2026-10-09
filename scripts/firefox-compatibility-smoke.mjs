@@ -288,6 +288,77 @@ async function captureNativeTabEvidence(context, page) {
   await captureNativeFirefoxUi(overflowTab, "narrow-new");
 }
 
+async function closedOriginStorage(context, fixture, keepUserWindow = true) {
+  const userPage = keepUserWindow ? await context.newPage() : undefined;
+  if (userPage) await userPage.setContent("<title>Capture must preserve this tab</title>");
+  await fixture.close();
+  assert.ok(context.pages().every((page) => !page.url().startsWith(origin)));
+  let observe;
+  let baseline;
+  if (nativeUi) {
+    const { stdout } = await run("osascript", ["-l", "JavaScript", "-e", nativeBrowserLookupScript()]);
+    const { pid } = JSON.parse(stdout);
+    if (userPage) await userPage.bringToFront();
+    await run("osascript", ["-e", 'tell application "Finder" to activate']);
+    observe = async () => {
+      const { stdout } = await run("osascript", ["-e", `tell application "System Events"
+        set browserProcess to first application process whose unix id is ${pid}
+        set foregroundProcess to first application process whose frontmost is true
+        set windowCount to count of windows of browserProcess
+        set windowTitle to ""
+        if windowCount > 0 then set windowTitle to name of window 1 of browserProcess
+        return {windowCount, unix id of foregroundProcess, windowTitle}
+      end tell`]);
+      return stdout.trim();
+    };
+    const deadline = Date.now() + 30_000;
+    do {
+      baseline = await observe();
+      const [windows, foreground] = baseline.split(",").map(Number);
+      if (windows === (keepUserWindow ? 1 : 0) && foreground !== pid) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } while (Date.now() < deadline);
+    assert.equal(Number(baseline.split(",")[0]), keepUserWindow ? 1 : 0, "capture starts with the expected native windows");
+    assert.notEqual(Number(baseline.split(",")[1]), pid, "capture starts with Firefox in the background");
+  }
+  const visibility = userPage && await userPage.evaluate(() => document.visibilityState);
+  const native = context._connection.toImpl(context);
+  const createPage = native.newPage;
+  let helpers = 0;
+  // Pause each helper while it exists, so before/after equality cannot hide a flashing window.
+  native.newPage = async function (progress, forStorageState) {
+    const helper = await createPage.call(this, progress, forStorageState);
+    if (forStorageState) {
+      helpers += 1;
+      try {
+        if (observe) assert.equal(await observe(), baseline, "capture preserves native windows, focus and selected tab");
+        if (userPage) assert.equal(await userPage.evaluate(() => document.visibilityState), visibility);
+      } catch (error) {
+        await helper.close();
+        throw error;
+      }
+    }
+    return helper;
+  };
+  try {
+    let state;
+    for (let index = 0; index < 3; index += 1) {
+      state = await context.storageState({ indexedDB: true });
+      assert.equal(context.pages().length, keepUserWindow ? 1 : 0, "capture removes only its temporary helper");
+      if (userPage) assert.equal(context.pages()[0], userPage);
+      if (observe) assert.equal(await observe(), baseline);
+      const saved = state.origins.find((entry) => entry.origin === origin);
+      assert.ok(saved?.localStorage.some((entry) => entry.name === "proof" && entry.value === "saved"));
+      assert.ok(saved?.indexedDB?.length, "closed-origin capture preserves IndexedDB");
+      assert.ok(state.cookies.some((cookie) => cookie.name === "proof" && cookie.value === "saved"));
+    }
+    assert.equal(helpers, 3, "each closed-origin capture exercises the temporary-page path");
+    return state;
+  } finally {
+    native.newPage = createPage;
+  }
+}
+
 async function databaseValue(page, value) {
   return page.evaluate((value) => new Promise((resolve, reject) => {
     const request = indexedDB.open("aliasmode-proof", 1);
@@ -352,7 +423,7 @@ try {
     localStorage: await page.evaluate(() => Object.entries(localStorage)),
     indexedDB: await databaseValue(page, null),
   };
-  const nativeState = await context.storageState({ indexedDB: true });
+  const nativeState = await closedOriginStorage(context, page);
   assert.ok(nativeState.origins.some((entry) => entry.origin === origin && entry.indexedDB?.length));
   await context.close();
   contexts.delete(context);
@@ -402,6 +473,37 @@ try {
     contexts.delete(context);
   }
 
+  const windowlessBrowser = await firefox.launch({
+    executablePath: resolve(executablePath), headless: !headed, timeout: 120_000,
+    ...(nativeUi ? { firefoxUserPrefs: { "accessibility.force_disabled": -1 } } : {}),
+  });
+  try {
+    const isolated = await windowlessBrowser.newContext();
+    const other = await windowlessBrowser.newContext();
+    const fixture = await openFixture(isolated);
+    await isolated.addCookies([{ name: "proof", value: "saved", url: origin }]);
+    await fixture.evaluate(() => localStorage.setItem("proof", "saved"));
+    await databaseValue(fixture, { restored: true });
+    const otherPage = await openFixture(other);
+    await other.addCookies([{ name: "proof", value: "other-context", url: origin }]);
+    await otherPage.evaluate(() => localStorage.setItem("proof", "other-context"));
+    await databaseValue(otherPage, { other: true });
+    await otherPage.close();
+    const saved = await closedOriginStorage(isolated, fixture, false);
+    assert.deepEqual(saved.origins.find((entry) => entry.origin === origin)?.indexedDB[0].stores[0].records,
+      [{ key: "session", value: { restored: true } }]);
+    await isolated.close();
+    const otherState = await other.storageState({ indexedDB: true });
+    assert.ok(otherState.cookies.some((cookie) => cookie.name === "proof" && cookie.value === "other-context"));
+    assert.deepEqual(otherState.origins.find((entry) => entry.origin === origin)?.localStorage,
+      [{ name: "proof", value: "other-context" }]);
+    assert.deepEqual(otherState.origins.find((entry) => entry.origin === origin)?.indexedDB[0].stores[0].records,
+      [{ key: "session", value: { other: true } }]);
+    assert.equal(other.pages().length, 0, "closing another context leaves no storage helper behind");
+  } finally {
+    await windowlessBrowser.close();
+  }
+
   context = await launch("transferred-profile");
   await context.addCookies(transferred.cookies);
   page = await openFixture(context);
@@ -424,6 +526,9 @@ try {
     scriptContext: true,
     selectedStateTransfer: true,
     indexedDbSnapshot: true,
+    windowlessStorageCapture: true,
+    storageContextIsolation: true,
+    nativeCapturePreservesWindowsAndFocus: nativeUi,
     nativeAddressBarDuckDuckGo: nativeUi,
     nativeTabAndDockEvidence: nativeUi,
     nativeNewAndCloseTabButtons: nativeUi,

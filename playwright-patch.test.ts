@@ -147,6 +147,35 @@ describe("Playwright CDP compatibility patch", () => {
     }]);
   });
 
+  test("Firefox hides storage helpers but keeps normal pages visible", async () => {
+    const { FFBrowserContext } = require(fileURLToPath(new URL(
+      "./node_modules/playwright-core/lib/server/firefox/ffBrowser.js", import.meta.url,
+    )));
+    const sent: Array<{ method: string; params: unknown }> = [];
+    const page = {};
+    const context = Object.create(FFBrowserContext.prototype);
+    Object.assign(context, {
+      _browserContextId: "context-1",
+      _browser: {
+        session: {
+          async send(method: string, params: unknown) {
+            sent.push({ method, params });
+            return { targetId: "target-1" };
+          },
+        },
+        _ffPages: new Map([["target-1", { _page: page }]]),
+      },
+    });
+    for (const storagePage of [false, true, false]) {
+      context._creatingStorageStatePage = storagePage;
+      expect(await context.doCreateNewPage()).toBe(page);
+      expect(sent.at(-1)).toEqual({
+        method: "Browser.newPage",
+        params: { browserContextId: "context-1", ...(storagePage ? { hidden: true } : {}) },
+      });
+    }
+  });
+
   test("unfiltered cookie clearing skips the unnecessary cookie read", async () => {
     const { BrowserContext } = require(browserContextPath);
     const events: string[] = [];
