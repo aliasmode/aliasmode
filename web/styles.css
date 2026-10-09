@@ -1022,6 +1022,9 @@ td.col-tags .chip + .chip { margin-left: 4px; }
   border-radius: var(--r-pill); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
 }
 .proxy-referral-go { color: var(--muted); font-size: 14px; }
+/* Offer shown above the profile list after an import, with a dismiss button. */
+.import-offer { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.import-offer .proxy-referral { flex: 1; min-width: 0; }
 .proxy-referral:hover .proxy-referral-go { color: var(--accent); }
 
 /* Remote MCP settings card (Cloud mode). Fields/buttons reuse .fld and .btn;

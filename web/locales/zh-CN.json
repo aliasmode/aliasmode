@@ -231,5 +231,16 @@
   "Action": "操作",
   "matching profiles": "匹配的环境",
   "Moving selected profiles…": "正在将选中的环境移至回收站…",
-  "Edit from file": "从文件编辑"
+  "Edit from file": "从文件编辑",
+  "Buy Static Residential Proxy": "购买静态住宅代理",
+  "Buy Replacement Proxy": "购买替换代理",
+  "AliasMode price": "AliasMode 专属价",
+  "Only AliasMode users pay 40% less than NobleProxy's public price.": "仅限 AliasMode 用户：比 NobleProxy 公开价低 40%。",
+  "1 profile has no proxy": "1 个环境未配置代理",
+  "{count} profiles have no proxy": "{count} 个环境未配置代理",
+  "Get one static residential IP for each. Only AliasMode users pay 40% less than NobleProxy's public price.": "为每个环境配置一个静态住宅 IP。仅限 AliasMode 用户：比 NobleProxy 公开价低 40%。",
+  "Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)": "以 AliasMode 专属价在 NobleProxy 购买静态住宅代理（在外部打开）",
+  "Buy proxies at the AliasMode price": "以 AliasMode 专属价购买代理",
+  "Buy proxies from NobleProxy at the AliasMode user price (opens externally)": "以 AliasMode 专属价在 NobleProxy 购买代理（在外部打开）",
+  "Dismiss": "关闭"
 }

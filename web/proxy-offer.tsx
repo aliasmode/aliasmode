@@ -1,4 +1,18 @@
-export const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";
+import { useTranslation } from "./i18n.tsx";
+
+const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";
+
+/**
+ * Offer link for one placement. `src` tells NobleProxy which button was
+ * clicked, `qty` preselects a quantity, and `lang` lets it pick a translated page.
+ */
+export function proxyOfferUrl(placement: string, language: string, quantity = 0): string {
+  const url = new URL(PROXY_PROVIDER_URL);
+  url.searchParams.set("src", placement);
+  if (quantity > 0) url.searchParams.set("qty", String(quantity));
+  if (language !== "en-US") url.searchParams.set("lang", language);
+  return url.toString();
+}
 
 export function CartIcon({ className }: { className?: string }) {
   return (
@@ -9,22 +23,42 @@ export function CartIcon({ className }: { className?: string }) {
   );
 }
 
-export function ProxyProviderOffer({ replacement = false }: { replacement?: boolean }) {
+/**
+ * `missing` is the number of profiles without a proxy. When it is set, the
+ * card names that number and the link asks for the same quantity.
+ */
+export function ProxyProviderOffer({
+  placement,
+  replacement = false,
+  missing = 0,
+}: {
+  placement: string;
+  replacement?: boolean;
+  missing?: number;
+}) {
+  const { t, language } = useTranslation();
+  const title = missing === 1
+    ? t("1 profile has no proxy")
+    : missing > 1
+      ? t("{count} profiles have no proxy", { count: missing })
+      : replacement ? t("Buy Replacement Proxy") : t("Buy Static Residential Proxy");
   return (
     <a
       className="proxy-referral"
-      href={PROXY_PROVIDER_URL}
+      href={proxyOfferUrl(placement, language, missing)}
       target="_blank"
       rel="noreferrer"
-      aria-label="Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)"
+      aria-label={t("Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)")}
     >
       <span className="proxy-referral-icon"><CartIcon /></span>
       <span className="proxy-referral-text">
         <strong>
-          {replacement ? "Buy Replacement Proxy" : "Buy Static Residential Proxy"}
-          <span className="proxy-referral-tag">AliasMode price</span>
+          {title}
+          <span className="proxy-referral-tag">{t("AliasMode price")}</span>
         </strong>
-        <small>Only AliasMode users pay 40% less than NobleProxy's public price.</small>
+        <small>{missing > 0
+          ? t("Get one static residential IP for each. Only AliasMode users pay 40% less than NobleProxy's public price.")
+          : t("Only AliasMode users pay 40% less than NobleProxy's public price.")}</small>
       </span>
       <span className="proxy-referral-go" aria-hidden="true">↗</span>
     </a>

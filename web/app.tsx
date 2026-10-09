@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./proxies.css";
 import { ProxiesPage } from "./proxies.tsx";
-import { CartIcon, PROXY_PROVIDER_URL, ProxyProviderOffer } from "./proxy-offer.tsx";
+import { CartIcon, ProxyProviderOffer, proxyOfferUrl } from "./proxy-offer.tsx";
 import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
@@ -982,7 +982,7 @@ function proxyFailureMessage(reason: ProxyCheckResult["reason"]): string {
 }
 
 function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: ProxyCheckUiState }) {
-  if (!hasProxy) return <ProxyProviderOffer />;
+  if (!hasProxy) return <ProxyProviderOffer placement="profile-dialog" />;
   if (state.error) {
     const invalid = state.error === "invalid";
     return (
@@ -993,7 +993,7 @@ function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: Pro
             ? "Proxy details are invalid. Check them and try again."
             : "Proxy check is unavailable. Try again later."}</span>
         </div>
-        {invalid && <ProxyProviderOffer replacement />}
+        {invalid && <ProxyProviderOffer placement="profile-dialog-check-failed" replacement />}
       </>
     );
   }
@@ -1016,7 +1016,7 @@ function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: Pro
           <Icon name="warning" className="sm" />
           <span><strong>Proxy checks were mixed.</strong> {result.successes} of {result.attempts} succeeded.</span>
         </div>
-        <ProxyProviderOffer replacement />
+        <ProxyProviderOffer placement="profile-dialog-check-failed" replacement />
       </>
     );
   }
@@ -1027,7 +1027,7 @@ function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: Pro
           <Icon name="alert" className="sm" />
           <span>{proxyFailureMessage(result.reason)}</span>
         </div>
-        <ProxyProviderOffer replacement />
+        <ProxyProviderOffer placement="profile-dialog-check-failed" replacement />
       </>
     );
   }
@@ -1223,6 +1223,8 @@ function App() {
   // One source at a time: two full-height inputs stacked made it ambiguous which
   // one the Import button would actually read.
   const [bulkSource, setBulkSource] = useState<"file" | "paste">("file");
+  // After an import, offer proxies for the profiles that have none, until dismissed.
+  const [showImportOffer, setShowImportOffer] = useState(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const authGeneration = useRef(0);
   const remoteMcpInFlight = useRef<Promise<void> | null>(null);
@@ -1233,6 +1235,9 @@ function App() {
   const savedSessionRestoreEnabled = useRef(true);
   const desktopUpdateCheckStarted = useRef(false);
   const isCloudMode = appMode?.mode === "cloud";
+  // Profiles that need a proxy. Local mode only: a Cloud profile shows no
+  // proxy until its encrypted payload is fetched, so the count would be wrong.
+  const profilesWithoutProxy = isCloudMode ? 0 : profiles.filter((p) => !p.proxy?.trim()).length;
   const workspaceReady = appMode?.mode === "local" || (isCloudMode && cloudWorkspaceReady(cloudAuth));
   const canEditCloud = !isCloudMode || cloudAuth?.workspace?.role === "owner" || cloudAuth?.workspace?.role === "admin" ||
     team?.folders.some((folder) => folder.permission === "edit" && !folder.archivedAt) === true;
@@ -2344,6 +2349,7 @@ function App() {
       if (r.ok) {
         closeBulk();
         await load();
+        setShowImportOffer(true);
         const issues = r.errors?.length ? ` Reported ${r.errors.length} invalid record(s); invalid proxies were quarantined for repair.` : "";
         alert(`Imported ${r.profiles} profile(s) from ${r.files} file(s).${issues}`);
       }
@@ -3148,11 +3154,11 @@ function App() {
               </button>
               <a
                 className="navbuy"
-                href={PROXY_PROVIDER_URL}
+                href={proxyOfferUrl("sidebar-cart", language)}
                 target="_blank"
                 rel="noreferrer"
-                title="Buy proxies at the AliasMode price"
-                aria-label="Buy proxies from NobleProxy at the AliasMode user price (opens externally)"
+                title={t("Buy proxies at the AliasMode price")}
+                aria-label={t("Buy proxies from NobleProxy at the AliasMode user price (opens externally)")}
               ><CartIcon /></a>
             </div>
             <button type="button" className={`navitem${view === "trash" ? " active" : ""}`} data-tip="Trash" title="Trash" onClick={() => setView("trash")}>
@@ -3448,7 +3454,7 @@ function App() {
       )}
 
       {!appMode?.legacyRemote && <>
-        <ProxiesPage key={`proxies:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
+        <ProxiesPage profilesWithoutProxy={profilesWithoutProxy} key={`proxies:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} folders={folders} onChanged={load} />
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "trash"} onChanged={load} folderTree={folders} />
@@ -3481,6 +3487,13 @@ function App() {
             {q && <button type="button" className="clear" aria-label={t("Clear search")} onClick={() => setQ("")}><Icon name="close" className="sm" /></button>}
           </div>
         </div>
+
+        {showImportOffer && profilesWithoutProxy > 0 && (
+          <div className="import-offer">
+            <ProxyProviderOffer placement="import-no-proxy" missing={profilesWithoutProxy} />
+            <button type="button" className="iconbtn" aria-label={t("Dismiss")} onClick={() => setShowImportOffer(false)}><Icon name="close" className="sm" /></button>
+          </div>
+        )}
 
         {filtered.length > 0 && (
           <div className="toolbar" role="status">

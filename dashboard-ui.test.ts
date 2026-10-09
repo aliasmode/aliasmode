@@ -201,6 +201,10 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   const editModal = app.slice(app.indexOf("{editId && ("), app.indexOf("{showBulk && ("));
 
   expect(proxyOffer).toContain('const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";');
+  // Every link names its placement, so NobleProxy can report which one sells.
+  expect(proxyOffer).toContain('url.searchParams.set("src", placement);');
+  expect(app).not.toContain("<ProxyProviderOffer />");
+  expect(app).not.toContain("<ProxyProviderOffer replacement />");
   expect(proxyOffer).toContain("replacement ?");
   expect(app).not.toContain("outreachproxy.com");
   expect(app).not.toContain("OutreachProxy");
@@ -210,8 +214,8 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(proxyOffer).toContain('target="_blank"');
   expect(proxyOffer).toContain('rel="noreferrer"');
-  expect(proxyOffer).toContain('aria-label="Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)"');
-  expect(proxyOffer).toContain('"Buy Replacement Proxy" : "Buy Static Residential Proxy"');
+  expect(proxyOffer).toContain('aria-label={t("Buy static residential proxies from NobleProxy at the AliasMode user price (opens externally)")}');
+  expect(proxyOffer).toContain('replacement ? t("Buy Replacement Proxy") : t("Buy Static Residential Proxy")');
   // The offer is an AliasMode-only price, not a sale banner.
   expect(proxyOffer).toContain("AliasMode price");
   expect(proxyOffer).toContain("Only AliasMode users pay 40% less");
@@ -230,12 +234,16 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(styles).toContain(".proxy-referral {");
   expect(styles).toContain(".proxy-referral:focus-visible");
-  // Both Proxies tools (check and replace) show the offer.
+  // Both Proxies tools (check and replace) show the offer, and the page names
+  // how many profiles have no proxy. That count is Local-mode only.
   const proxiesPage = readFileSync(join(import.meta.dir, "web", "proxies.tsx"), "utf8");
-  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(2);
+  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(3);
+  expect(proxiesPage).toContain('<ProxyProviderOffer placement="proxies-no-proxy" missing={profilesWithoutProxy} />');
+  expect(app).toContain("const profilesWithoutProxy = isCloudMode ? 0 : profiles.filter((p) => !p.proxy?.trim()).length;");
+  expect(app).toContain('<ProxyProviderOffer placement="import-no-proxy" missing={profilesWithoutProxy} />');
   // Sidebar cart beside Proxies opens the same offer; the icon rail hides it.
   expect(app).toContain('className="navbuy"');
-  expect(app).toContain("href={PROXY_PROVIDER_URL}");
+  expect(app).toContain('href={proxyOfferUrl("sidebar-cart", language)}');
   expect(styles).toContain(".sidebar.collapsed .navbuy { display: none; }");
 });
 

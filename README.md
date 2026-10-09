@@ -10,6 +10,7 @@ AliasMode is a free, open-source antidetect browser and local-first profile mana
 - **Which browser engines does it use?** Two, chosen per profile. AliasMode Firefox is our own open-source antidetect engine with C++ fingerprint spoofing (Windows x64, macOS Apple Silicon, Linux x64). Chromium profiles run in CloakBrowser, a third-party engine included at no extra cost.
 - **Is AliasMode a CloakBrowser wrapper?** No. AliasMode ships its own open-source engine, AliasMode Firefox, and supports CloakBrowser as a second engine for Chromium profiles. AliasMode adds fingerprint profiles, per-profile proxies, Scripts, Trash, bulk Proxy Tools, portable encrypted profile sync, the AliasMode Local API (AdsPower-compatible), Playwright over CDP, and MCP servers for AI agents.
 - **Does data stay local?** In Local mode, yes: no account, no AliasMode Cloud traffic, and profiles stay on the computer.
+- **Where do I get proxies?** Use any HTTP or SOCKS5 proxy. NobleProxy supports AliasMode and its users: AliasMode users pay 40% less for dedicated static residential proxies at [nobleproxy.com](https://nobleproxy.com/t/aliasmode?src=readme).
 - **What does it cost?** Nothing. Every feature is free, including both browser engines, which AliasMode downloads and verifies for you. No separate purchase, subscription, or account is required.
 
 ## Modes

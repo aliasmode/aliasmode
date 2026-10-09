@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
+import { I18nProvider } from "./i18n.tsx";
 import {
   ProxiesPage,
   failedProxyProfileIds,
@@ -139,7 +140,7 @@ test("cancelling progress cancels the reader and cannot report completion", asyn
 });
 
 test("the proxy page remains mounted but hidden when navigation changes", () => {
-  const html = renderToStaticMarkup(createElement(ProxiesPage, { active: false, groups: ["Sales", ""], onChanged: async () => {} }));
+  const html = renderToStaticMarkup(createElement(I18nProvider, null, createElement(ProxiesPage, { active: false, groups: ["Sales", ""], onChanged: async () => {} })));
   expect(html).toContain('hidden=""');
   expect(html).toContain('aria-pressed="true">Check proxies');
   expect(html).toContain('aria-pressed="false">Replace proxies');
