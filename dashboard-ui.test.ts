@@ -210,7 +210,10 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(proxyOffer).toContain('target="_blank"');
   expect(proxyOffer).toContain('rel="noreferrer"');
-  expect(proxyOffer).toContain('aria-label="View recommended proxies at NobleProxy (opens externally)"');
+  expect(proxyOffer).toContain('aria-label="Buy static residential proxies at NobleProxy, 40% off (opens externally)"');
+  expect(proxyOffer).toContain('"Buy Replacement Proxy" : "Buy Static Residential Proxy"');
+  expect(proxyOffer).toContain("40% OFF");
+  expect(proxyOffer).not.toContain("Need a proxy?");
   expect(app).toContain('if (k === "proxyType" || k === "host" || k === "port" || k === "user" || k === "pass")');
   expect(app).toContain('if (k === "proxy" || k === "proxyType") {\n      resetEditProxyCheck();');
   expect(app).toContain("generation === createProxyCheckGeneration.current");
@@ -223,7 +226,11 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
     expect(styles).toContain(`.proxy-check-result.${tone}`);
   }
   expect(styles).toContain(".proxy-referral {");
-  expect(styles).toContain(".proxy-referral a:focus-visible");
+  expect(styles).toContain(".proxy-referral:focus-visible");
+  // Sidebar cart beside Proxies opens the same offer; the icon rail hides it.
+  expect(app).toContain('className="navbuy"');
+  expect(app).toContain("href={PROXY_PROVIDER_URL}");
+  expect(styles).toContain(".sidebar.collapsed .navbuy { display: none; }");
 });
 
 test("dashboard selects browser for new profiles", () => {

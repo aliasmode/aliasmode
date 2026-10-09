@@ -542,6 +542,18 @@ a.navitem { box-sizing: border-box; text-decoration: none; cursor: pointer; }
   font-size: 11px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums;
 }
 .navitem.active .cnt { color: var(--accent-ink); background: var(--raised); }
+/* Buy-proxies cart beside the Proxies item. A sibling of the button, since a
+   link cannot nest inside one. */
+.navrow { position: relative; }
+.navbuy {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  display: grid; place-items: center; width: 26px; height: 26px;
+  color: var(--accent); border-radius: var(--r-sm);
+  transition: background .12s ease, color .12s ease;
+}
+.navbuy:hover { color: var(--on-fill); background: var(--accent-fill); }
+.navbuy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar.collapsed .navbuy { display: none; }
 
 .sidesection { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 2px; margin-top: 16px; padding: 0 2px; }
 .sidehead {
@@ -990,16 +1002,17 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .proxy-check-result.failed { color: var(--danger-ink); background: var(--danger-soft); border-color: var(--danger-line); }
 .proxy-check-result.unavailable { color: var(--muted); background: var(--surface-sunken); border-color: var(--line); }
 .proxy-referral {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
-  padding: 10px 11px; background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--r-md);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 8px;
+  padding: 9px 12px; color: var(--accent-ink); background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--r-md); font-size: 12.5px; font-weight: 650; text-decoration: none;
+  transition: background .12s ease, border-color .12s ease;
 }
-.proxy-referral strong { flex: 1 1 270px; min-width: 0; color: var(--ink); font-size: 12.5px; }
-.proxy-referral a {
-  flex: 0 0 auto; padding: 6px 10px; color: var(--on-fill); background: var(--accent-fill); border: 1px solid var(--accent-fill);
-  border-radius: var(--r-sm); font-size: 12px; font-weight: 650; text-decoration: none; white-space: nowrap;
+.proxy-referral:hover { background: var(--accent-soft-hover); border-color: var(--accent); }
+.proxy-referral:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.proxy-referral-off {
+  padding: 2px 7px; color: var(--on-fill); background: var(--accent-fill); border-radius: var(--r-pill);
+  font-size: 11px; font-weight: 700; white-space: nowrap;
 }
-.proxy-referral a:hover { background: var(--accent-fill-hover); border-color: var(--accent-fill-hover); }
-.proxy-referral a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Remote MCP settings card (Cloud mode). Fields/buttons reuse .fld and .btn;
    only the status pill and connect guide need their own rules. */

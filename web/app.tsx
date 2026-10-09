@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./proxies.css";
 import { ProxiesPage } from "./proxies.tsx";
-import { ProxyProviderOffer } from "./proxy-offer.tsx";
+import { CartIcon, PROXY_PROVIDER_URL, ProxyProviderOffer } from "./proxy-offer.tsx";
 import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
@@ -3142,9 +3142,19 @@ function App() {
             <Icon name="user" /><span className="navlabel">{t("Shared with me")}</span><span className="cnt">{sharedProfiles.length}</span>
           </button>}
           {!appMode?.legacyRemote && <>
-            <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip="Proxies" title="Proxies" onClick={() => setView("proxies")}>
-              <Icon name="activity" /><span className="navlabel">Proxies</span>
-            </button>
+            <div className="navrow">
+              <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip="Proxies" title="Proxies" onClick={() => setView("proxies")}>
+                <Icon name="activity" /><span className="navlabel">Proxies</span>
+              </button>
+              <a
+                className="navbuy"
+                href={PROXY_PROVIDER_URL}
+                target="_blank"
+                rel="noreferrer"
+                title="Buy proxies — 40% OFF"
+                aria-label="Buy proxies at NobleProxy, 40% off (opens externally)"
+              ><CartIcon /></a>
+            </div>
             <button type="button" className={`navitem${view === "trash" ? " active" : ""}`} data-tip="Trash" title="Trash" onClick={() => setView("trash")}>
               <Icon name="trash" /><span className="navlabel">Trash</span>
             </button>
