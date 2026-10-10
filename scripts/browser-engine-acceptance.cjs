@@ -279,20 +279,20 @@ async function writeStorage(page, token) {
 async function readStorage(page) {
   return page.evaluate(async () => ({cookie: document.cookie, localStorage: localStorage.getItem('synthetic'), indexedDB: await new Promise((resolve, reject) => { const r = indexedDB.open('synthetic-db', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onerror = () => reject(r.error); r.onsuccess = () => { const db = r.result, get = db.transaction('kv').objectStore('kv').get('synthetic'); get.onsuccess = () => { db.close(); resolve(get.result ?? null); }; get.onerror = () => reject(get.error); }; })}));
 }
-async function persistence(engine) {
+async function persistence(engine, extra = [], suffix = '') {
   let a, b;
-  const prefix = engine.id + '-persistent';
+  const prefix = engine.id + '-persistent' + suffix;
   try {
     const profileA = path.join(profiles, prefix + '-a'), profileB = path.join(profiles, prefix + '-b');
-    a = await launch(engine, prefix + '-a-first', seeded(engine, 42), profileA);
-    b = await launch(engine, prefix + '-b-first', seeded(engine, 43), profileB);
+    a = await launch(engine, prefix + '-a-first', [...seeded(engine, 42), ...extra], profileA);
+    b = await launch(engine, prefix + '-b-first', [...seeded(engine, 43), ...extra], profileB);
     await writeStorage(a.page, 'alpha'); const emptyB = await readStorage(b.page); await writeStorage(b.page, 'beta');
     const firstA = await readStorage(a.page), firstB = await readStorage(b.page);
     const isolated = emptyB.localStorage === null && emptyB.indexedDB === null && !emptyB.cookie.includes('synthetic=') && firstA.localStorage === 'alpha' && firstA.indexedDB === 'alpha' && firstA.cookie.includes('synthetic=alpha') && firstB.localStorage === 'beta' && firstB.indexedDB === 'beta' && firstB.cookie.includes('synthetic=beta');
     emit(prefix + '-isolation', engine, isolated ? 'pass' : 'fail', 'Concurrent profiles isolate cookies, localStorage and IndexedDB', {emptyB, firstA, firstB});
     await stop(a); await stop(b);
-    a = await launch(engine, prefix + '-a-reopen', seeded(engine, 42), profileA);
-    b = await launch(engine, prefix + '-b-reopen', seeded(engine, 43), profileB);
+    a = await launch(engine, prefix + '-a-reopen', [...seeded(engine, 42), ...extra], profileA);
+    b = await launch(engine, prefix + '-b-reopen', [...seeded(engine, 43), ...extra], profileB);
     const reopenedA = await readStorage(a.page), reopenedB = await readStorage(b.page);
     emit(prefix + '-reopen', engine, JSON.stringify(reopenedA) === JSON.stringify(firstA) && JSON.stringify(reopenedB) === JSON.stringify(firstB) ? 'pass' : 'fail', 'Both independent stores survive close/reopen', {firstA, firstB, reopenedA, reopenedB}, 'No existing profile migration or real account login is tested.');
     await a.page.evaluate(() => { window.syntheticReconnect = 'still-here'; });
@@ -305,9 +305,9 @@ async function persistence(engine) {
   } catch (error) { emit(prefix + '-execution', engine, 'blocked', 'Complete storage and reconnect checks', {error: errorText(error), launch: error.launch}); }
   finally { await stop(a); await stop(b); }
 }
-async function proxyCase(engine) {
+async function proxyCase(engine, extra = [], suffix = '') {
   let item;
-  const proxyRequests = [], directHits = [], label = engine.id + '-proxy';
+  const proxyRequests = [], directHits = [], label = engine.id + '-proxy' + suffix;
   const target = http.createServer((req, res) => { directHits.push({url: req.url, host: req.headers.host}); res.end('DIRECT-PATH'); });
   const targetPort = await listen(target);
   const authValue = 'Basic ' + Buffer.from('synthetic-user:synthetic-password').toString('base64');
@@ -319,7 +319,7 @@ async function proxyCase(engine) {
   });
   const proxyPort = await listen(proxy);
   try {
-    item = await launch(engine, label, [...seeded(engine, 42), `--proxy-server=http://127.0.0.1:${proxyPort}`, '--proxy-bypass-list=<-loopback>', '--host-resolver-rules=MAP proxy-fixture.test 127.0.0.1'], undefined, {username: 'synthetic-user', password: 'synthetic-password'});
+    item = await launch(engine, label, [...seeded(engine, 42), ...extra, `--proxy-server=http://127.0.0.1:${proxyPort}`, '--proxy-bypass-list=<-loopback>', '--host-resolver-rules=MAP proxy-fixture.test 127.0.0.1'], undefined, {username: 'synthetic-user', password: 'synthetic-password'});
     await item.page.goto(`http://proxy-fixture.test:${targetPort}/auth`, {waitUntil: 'domcontentloaded'});
     const body = await item.page.textContent('body');
     emit(label + '-auth', engine, body.includes('LOCAL-PROXY-PATH') && proxyRequests.some(x => !x.authenticated) && proxyRequests.some(x => x.authenticated) && !directHits.length ? 'pass' : 'fail', '407 challenge leads to authenticated proxy routing, not direct traffic', {body, proxyRequests: [...proxyRequests], directHits: [...directHits]}, 'Local HTTP proxy with synthetic credentials via CDP; not HTTPS, SOCKS or production relay qualification.');
@@ -343,12 +343,12 @@ function createExtension() {
   fs.writeFileSync(path.join(directory, 'page.html'), '<!doctype html><title>Local MV3 resource</title><script src="page.js"></script>');
   return {directory, id};
 }
-async function extensionCase(engine, extension, headed = false, host = false) {
+async function extensionCase(engine, extension, headed = false, host = false, extra = [], suffix = '') {
   let item;
-  const label = `${engine.id}-mv3-${host ? 'host' : 'seed424242'}-${headed ? 'headed' : 'headless'}`;
+  const label = `${engine.id}-mv3-${host ? 'host' : 'seed424242'}-${headed ? 'headed' : 'headless'}${suffix}`;
   try {
     const flags = host ? ['--fingerprint=host'] : seeded(engine, 424242);
-    item = await launch(engine, label, [...flags, `--disable-extensions-except=${extension.directory}`, `--load-extension=${extension.directory}`], undefined, undefined, headed);
+    item = await launch(engine, label, [...flags, ...extra, `--disable-extensions-except=${extension.directory}`, `--load-extension=${extension.directory}`], undefined, undefined, headed);
     await item.page.waitForFunction(() => document.documentElement.dataset.reply, null, {timeout: 15000}).catch(() => {});
     const content = await item.page.evaluate(() => ({id: document.documentElement.dataset.extensionId || null, reply: JSON.parse(document.documentElement.dataset.reply || 'null')}));
     const targets = (await item.session.send('Target.getTargets')).targetInfos.filter(t => t.type === 'service_worker').map(t => ({type: t.type, url: t.url}));
@@ -418,6 +418,12 @@ async function extensionCase(engine, extension, headed = false, host = false) {
     const observed = {identityEqual: JSON.stringify(first.window) === JSON.stringify(repeat.window), canvasFirst: first.rendering.canvas.hash, canvasRepeat: repeat.rendering.canvas.hash, audioFirst: first.rendering.audio.first?.hash, audioRepeat: repeat.rendering.audio.first?.hash};
     emit('apostate-cold-repeat', apostate, !first.rendering.canvas.available || !repeat.rendering.canvas.available || !first.rendering.audio.available || !repeat.rendering.audio.available ? 'blocked' : observed.identityEqual && observed.canvasFirst === observed.canvasRepeat && observed.audioFirst === observed.audioRepeat ? 'pass' : 'fail', 'Explicit seed identity and rendering repeat across fresh cold launches', observed);
   } else emit('apostate-cold-repeat', apostate, 'not-run', 'Compare cold captures', {reason: 'A required capture did not complete'});
+  const networkSandbox = ['--enable-features=NetworkServiceSandbox'];
+  await engineCase(apostate, 'apostate-network-sandbox-enabled', [...seeded(apostate, 42), ...networkSandbox]);
+  await persistence(apostate, networkSandbox, '-network-sandbox');
+  await proxyCase(apostate, networkSandbox, '-network-sandbox');
+  await extensionCase(apostate, extension, false, false, networkSandbox, '-network-sandbox');
+  await extensionCase(apostate, extension, true, false, networkSandbox, '-network-sandbox');
 })().catch(error => emit('harness-fatal', null, 'blocked', 'Complete the comparison', {error: errorText(error)})).finally(async () => {
   for (const item of [...active]) await stop(item);
   for (const server of servers) if (server.listening) { server.closeAllConnections?.(); await new Promise(resolve => server.close(resolve)); }

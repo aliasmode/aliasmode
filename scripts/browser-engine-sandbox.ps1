@@ -31,14 +31,14 @@ public static class BrowserTokenProbe {
             Marshal.FreeHGlobal(buffer);
             buffer = Marshal.AllocHGlobal(4);
             if (!GetTokenInformation(token, 29, buffer, 4, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            int appContainer = Marshal.ReadInt32(buffer), lessPrivileged = 0;
+            int appContainer = Marshal.ReadInt32(buffer), lessPrivileged = 0, lessPrivilegedError = 0;
             if (appContainer != 0) {
-                if (!GetTokenInformation(token, 46, buffer, 4, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
-                lessPrivileged = Marshal.ReadInt32(buffer);
+                if (GetTokenInformation(token, 46, buffer, 4, out size)) lessPrivileged = Marshal.ReadInt32(buffer);
+                else { lessPrivileged = -1; lessPrivilegedError = Marshal.GetLastWin32Error(); }
             }
             bool inJob;
             if (!IsProcessInJob(process, IntPtr.Zero, out inJob)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            return new int[] {integrity, appContainer, inJob ? 1 : 0, lessPrivileged};
+            return new int[] {integrity, appContainer, inJob ? 1 : 0, lessPrivileged, lessPrivilegedError};
         } finally {
             if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
             if (token != IntPtr.Zero) CloseHandle(token);
@@ -56,7 +56,7 @@ $results = @(
         $processId = $process.pid
         try {
             $facts = [BrowserTokenProbe]::Inspect($processId)
-            [ordered]@{ pid = $processId; role = $process.role; integrityRid = $facts[0]; appContainer = [bool]$facts[1]; inJob = [bool]$facts[2]; lessPrivilegedAppContainer = [bool]$facts[3] }
+            [ordered]@{ pid = $processId; role = $process.role; integrityRid = $facts[0]; appContainer = [bool]$facts[1]; inJob = [bool]$facts[2]; lessPrivilegedAppContainer = $(if ($facts[3] -lt 0) { $null } else { [bool]$facts[3] }); lessPrivilegedQueryError = $facts[4] }
         } catch {
             [ordered]@{ pid = $processId; role = $process.role; error = $_.Exception.Message }
         }
