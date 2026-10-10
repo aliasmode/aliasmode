@@ -725,8 +725,8 @@ function FingerprintSettings({
   return (
     <details className="fingerprint-settings">
       <summary>
-        <span>{"Fingerprint settings"}</span>
-        <span className="automatic-badge">{onTimezoneChange ? "Advanced" : "Automatic"}</span>
+        <span>{t("Fingerprint settings")}</span>
+        <span className="automatic-badge">{onTimezoneChange ? t("Advanced") : t("Automatic")}</span>
       </summary>
       <div className="fingerprint-grid">
         <label className="fld">
@@ -736,14 +736,14 @@ function FingerprintSettings({
         {engine === "chromium" && (
           <label className="fld">
             <span>Screen</span>
-            <input value={screen} disabled={disabled} placeholder={"Automatic · e.g. 1920x1080"} onChange={(event) => onScreenChange(event.target.value)} />
+            <input value={screen} disabled={disabled} placeholder={t("Automatic · e.g. 1920x1080")} onChange={(event) => onScreenChange(event.target.value)} />
           </label>
         )}
         <label className="fld">
-          <span>{"Operating system"}</span>
+          <span>{t("Operating system")}</span>
           {onPlatformOsChange ? (
             <select value={platformOs} disabled={disabled} onChange={(event) => onPlatformOsChange(event.target.value)}>
-              <option value="">{"Automatic — match this computer"}</option>
+              <option value="">{t("Automatic — match this computer")}</option>
               <option value="windows">Windows</option>
               <option value="macos">macOS</option>
               <option value="linux">Linux</option>
@@ -754,8 +754,8 @@ function FingerprintSettings({
         </label>
         {onTimezoneChange && (
           <label className="fld">
-            <span>{"Timezone"}</span>
-            <input value={timezone ?? ""} disabled={disabled} placeholder={"Automatic · e.g. Europe/Paris"} onChange={(event) => onTimezoneChange(event.target.value)} />
+            <span>{t("Timezone")}</span>
+            <input value={timezone ?? ""} disabled={disabled} placeholder={t("Automatic · e.g. Europe/Paris")} onChange={(event) => onTimezoneChange(event.target.value)} />
           </label>
         )}
         {AUTOMATIC_FINGERPRINT_FIELDS.filter(([label]) => label !== "Timezone" || !onTimezoneChange).map(([label, value]) => (
@@ -773,7 +773,7 @@ function FingerprintSettings({
             : engine === "firefox"
               ? "AliasMode Firefox uses its native profile. CDP, PDF, and Chrome extensions are unavailable."
               : "CloakBrowser keeps the locked values coordinated. Screen and operating system are the only fingerprint settings you can override."}</div>
-        {onUndo && <button type="button" className="btn ghost" disabled={disabled} onClick={onUndo}>{"Undo fingerprint edits"}</button>}
+        {onUndo && <button type="button" className="btn ghost" disabled={disabled} onClick={onUndo}>{t("Undo fingerprint edits")}</button>}
       </div>
     </details>
   );
@@ -1038,7 +1038,7 @@ function ProxyCheckFeedback({ hasProxy, state }: { hasProxy: boolean; state: Pro
   return (
     <div className="proxy-check-result unavailable" role="status">
       <Icon name="activity" className="sm" />
-      <span>{"Proxy check is unavailable. Try again later."}</span>
+      <span>{t("Proxy check is unavailable. Try again later.")}</span>
     </div>
   );
 }
@@ -1048,12 +1048,12 @@ function GrantControl({ label, direct, inherited, busy, onChange }: {
 }) {
   const { t } = useTranslation();
   const effective = direct === "edit" || inherited === "edit" ? "edit" : direct || inherited;
-  const permissionLabel = (value: string) => value === "edit" ? "Edit" : value === "view" ? "View" : "No access";
+  const permissionLabel = (value: string) => value === "edit" ? t("Edit") : value === "view" ? t("View") : t("No access");
   return <label className="grant-control">
     <span>{label}</span>
     <select className="select" aria-label={label} value={direct} disabled={busy} onChange={(event) => onChange(event.target.value)}>
-      <option value="">{inherited ? t("Inherited: {permission}", { permission: permissionLabel(inherited) }) : "No access"}</option>
-      <option value="view">{"View"}</option><option value="edit">{"Edit"}</option>
+      <option value="">{inherited ? t("Inherited: {permission}", { permission: permissionLabel(inherited) }) : t("No access")}</option>
+      <option value="view">{t("View")}</option><option value="edit">{t("Edit")}</option>
     </select>
     <small>{t("Effective access: {permission}", { permission: permissionLabel(effective) })}{inherited && direct ? ` · ${t("Inherited: {permission}", { permission: permissionLabel(inherited) })}` : ""}</small>
   </label>;
