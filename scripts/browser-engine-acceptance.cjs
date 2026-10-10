@@ -26,6 +26,7 @@ async function bounded(promise, milliseconds, label) {
 }
 function emit(id, engine, status, expected, observed, interpretation = '') {
   const row = {id, engine: engine ? engine.id : 'harness', releaseVersion: engine ? engine.releaseVersion : null,
+    runtimeVariant: engine ? engine.packagingRepair ? 'version-manifest-added' : 'as-released' : null,
     status, expected, observed, interpretation, timestamp: new Date().toISOString()};
   rows.push(row);
   fs.writeFileSync(path.join(out, id + '.json'), JSON.stringify(row, null, 2));
@@ -363,6 +364,28 @@ async function extensionCase(engine, extension, headed = false, host = false) {
   emit('windows-harness', null, 'pass', 'Run authored fixture controller natively on Windows', {platform: process.platform, architecture: process.arch, nodeVersion: process.version, origin, runId, flags: common}, 'All test origins are loopback. No real accounts or existing browser profiles are used.');
   const extension = createExtension();
   for (const engine of engines) {
+    if (engine.id === 'apostate') {
+      const directory = path.dirname(path.join(root, 'browsers', engine.id, engine.binaryRelativePath));
+      const manifest = path.join(directory, engine.browserVersion + '.manifest');
+      if (!fs.existsSync(manifest)) {
+        let original, activationFailure = false;
+        try {
+          original = await launch(engine, 'apostate-as-released');
+          emit('apostate-as-released-launch', engine, 'pass', 'The unmodified release launches', launchFacts(original));
+        } catch (error) {
+          activationFailure = JSON.parse(error.launch?.nativeDiagnostic || '{}').nativeErrorCode === 14001;
+          emit('apostate-as-released-launch', engine, activationFailure ? 'fail' : 'blocked', 'The unmodified release launches', {missingManifest: manifest, error: errorText(error), launch: error.launch});
+        } finally { await stop(original); }
+        if (activationFailure) {
+          const stock = engines.find(e => e.id === 'stock155');
+          const template = path.join(path.dirname(path.join(root, 'browsers', stock.id, stock.binaryRelativePath)), stock.browserVersion + '.manifest');
+          const xml = fs.readFileSync(template, 'utf8').replaceAll(stock.browserVersion, engine.browserVersion);
+          fs.writeFileSync(manifest, xml, {flag: 'wx'});
+          engine.packagingRepair = {manifest, manifestSha256: digest(manifest), template, templateSha256: digest(template), xml};
+          emit('apostate-manifest-repair', engine, 'pass', 'Add only the missing version assembly manifest', engine.packagingRepair, 'All following Apostate tests use this packaging repair, not the as-released archive. No native executable or DLL is replaced.');
+        }
+      }
+    }
     // Obtain launch and extension answers before the longer surface/reopen probes.
     await extensionCase(engine, extension);
     await extensionCase(engine, extension, true);
@@ -392,6 +415,7 @@ async function extensionCase(engine, extension, headed = false, host = false) {
     const table = ['## Native Windows browser comparison', '', '| Engine | Pass | Fail | Blocked | Unsupported | Not run |', '|---|---:|---:|---:|---:|---:|'];
     for (const [engine, values] of Object.entries(counts)) table.push(`| ${engine} | ${values.pass || 0} | ${values.fail || 0} | ${values.blocked || 0} | ${values.unsupported || 0} | ${values['not-run'] || 0} |`);
     table.push('', 'Counts describe individual probes, not detection scores. See JSON artifacts for exact configurations and limitations.');
+    if (engines.some(engine => engine.packagingRepair)) table.push('', 'Apostate runtime rows use a locally supplied version assembly manifest. Its as-released startup failure remains recorded separately.');
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, table.join('\n') + '\n');
   }
   process.exitCode = rows.some(row => row.status === 'fail' || row.status === 'blocked') ? 1 : 0;
