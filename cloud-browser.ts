@@ -1320,14 +1320,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const checkpoint = tabs === undefined ? undefined : this.pendingCapturesForOpen(open, queue)
       .find((capture) => !capture.readyToSubmit && capture.status !== "conflict");
     if (checkpoint) {
+      const session = { ...checkpoint.payload.session, tabs };
       queue.enqueue({
         accountId: open.accountId,
         profileId: open.profileId,
         registrationId: open.registrationId,
         expectedVersion: checkpoint.expectedVersion,
-        payload: { ...checkpoint.payload, session: { ...checkpoint.payload.session, tabs } },
+        payload: { ...checkpoint.payload, session },
         readyToSubmit: false,
       });
+      this.recordCloudSessionSignature(open.profileId, sessionBundleSignature(JSON.stringify(session)));
     }
     return queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId);
   }

@@ -2211,6 +2211,7 @@ test("Cloud uses immediate native-close tabs before or after Firefox exits", asy
         await state.coordinator.close("profile1");
       }
       expect(submitted?.session).toEqual({ ...session, tabs });
+      expect(options.launcher.matchesCloudSession("profile1", sessionBundleSignature(JSON.stringify(submitted!.session)))).toBe(true);
       expect(state.queue.getOpen("profile1", "account1")).toBeNull();
     } finally {
       state.queue.close();

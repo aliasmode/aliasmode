@@ -545,6 +545,16 @@ async def run(*, context, inputs, log, **_kwargs):
   if (process.platform === "darwin") {
     localStore.upsertProfile(profile(nativeCloseId, createFirefoxProfileConfig(1440, 900)));
     const nativeOrigin = `http://127.0.0.1:${fixturePort}`;
+    const nativeNavigator = join(root, "native-tab.mjs");
+    await writeFile(nativeNavigator, `
+import { writeFile } from "node:fs/promises";
+export default async ({ context, inputs }) => {
+  const page = context.pages().find(page => ["about:blank", "about:newtab"].includes(page.url()));
+  if (!page) throw new Error("native empty tab is unavailable");
+  await page.goto(inputs.url, { waitUntil: "domcontentloaded" });
+  await writeFile(inputs.resultPath, JSON.stringify({ url: page.url() }));
+};
+`);
     for (const close of ["window", "quit", "managed", "reduced", "blank"]) {
       console.log(`firefox-launcher-acceptance:native-close-reopen:${close}`);
       await localLauncher.start(nativeCloseId, [], { autoNavigate: false, restoreLastSession: false, headless: false });
@@ -556,10 +566,12 @@ async def run(*, context, inputs, log, **_kwargs):
       if (tabs.length) {
         await callFirefoxOwner(owner, "navigate", { urls: [tabs[0]] });
         for (const url of tabs.slice(1)) {
-          await nativeFirefoxKeys(nativeLaunch.pid, `keystroke "t" using command down
-            delay 0.2
-            keystroke ${JSON.stringify(url)}
-            key code 36`);
+          const count = (await status()).pageTargets.length;
+          await nativeFirefoxKeys(nativeLaunch.pid, 'keystroke "t" using command down');
+          const deadline = Date.now() + 30_000;
+          while ((await status()).pageTargets.length === count && Date.now() < deadline) await Bun.sleep(50);
+          assert.equal((await status()).pageTargets.length, count + 1, "native shortcut opens one tab");
+          await ownerScript(localLauncher, nativeCloseId, nativeNavigator, { url });
         }
         const deadline = Date.now() + 30_000;
         while (JSON.stringify((await status()).pageTargets.map(page => page.url)) !== JSON.stringify(tabs) && Date.now() < deadline) await Bun.sleep(50);
