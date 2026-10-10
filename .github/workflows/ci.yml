@@ -67,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/36421765188 | ConvertFrom-Json
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/38060990951 | ConvertFrom-Json
           if (
             $run.name -cne "Build and Release" -or
             $run.path -cne ".github/workflows/build.yml" -or
@@ -77,7 +77,7 @@ jobs:
             $run.conclusion -cne "success" -or
             $run.event -cne "push" -or
             $run.head_branch -cne "firefox-engine" -or
-            $run.head_sha -cne "013ebace6cc69c1979c7a86636139e91face6419"
+            $run.head_sha -cne "ab1519b7caef2c32c83c59f5028745ae71bb9478"
           ) {
             throw "AliasMode Firefox source build provenance is invalid"
           }
@@ -87,7 +87,7 @@ jobs:
           path: artifacts/firefox
           github-token: ${{ github.token }}
           repository: aliasmode/aliasmode-firefox
-          run-id: "36421765188"
+          run-id: "38060990951"
       - name: Verify owned AliasMode Firefox artifact
         id: verify
         shell: pwsh
@@ -217,7 +217,7 @@ jobs:
             "cloakbrowser-version=146.0.7680.177.5"
             "cloakbrowser-archive-sha256=b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe"
             "cloakbrowser-executable-sha256=03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80"
-            "aliasmode-firefox-source=aliasmode/aliasmode-firefox@013ebace6cc69c1979c7a86636139e91face6419"
+            "aliasmode-firefox-source=aliasmode/aliasmode-firefox@ab1519b7caef2c32c83c59f5028745ae71bb9478"
             "aliasmode-firefox-version=152.0.4-beta.30"
             "aliasmode-firefox-archive-sha256=$env:FIREFOX_ARCHIVE_SHA256"
             "aliasmode-firefox-executable-sha256=$env:FIREFOX_EXECUTABLE_SHA256"
