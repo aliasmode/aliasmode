@@ -5,6 +5,25 @@ import { ALIASMODE_VERSION } from "./version.ts";
 
 const root = import.meta.dir;
 
+test("standalone browser acceptance is opt-in and skips application builds", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
+  const browserJob = workflow.slice(
+    workflow.indexOf("\n  browser_acceptance:"),
+    workflow.indexOf("\n  ubuntu:"),
+  );
+  expect(workflow).toContain("        type: boolean\n        default: false");
+  expect(browserJob).toContain("if: github.event_name == 'workflow_dispatch' && inputs.browser_acceptance == true");
+  expect(browserJob).toContain("runs-on: windows-2022");
+  expect(browserJob).toContain("persist-credentials: false");
+  expect(browserJob).toContain("browser-engine-acceptance.ps1");
+  expect(browserJob).toContain("browser-engine-acceptance.cjs");
+  expect(browserJob).not.toContain("secrets.");
+  expect(browserJob).not.toContain("bun install");
+  expect(browserJob).not.toContain("build-windows-installer");
+  expect(workflow).toContain("    name: Ubuntu tests and checks\n    if: inputs.browser_acceptance != true");
+  expect(workflow).toContain("(github.event_name == 'workflow_dispatch' && inputs.browser_acceptance != true) || inputs.client_ci_reusable_call == true");
+});
+
 test("release version and updater trust stay aligned across the desktop bundle", () => {
   const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
     version: string;
@@ -390,7 +409,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(compatibilityWorkflow).not.toContain('event -cne "push"');
   expect(releaseWorkflow).not.toContain('event -cne "push"');
   expect(ciWorkflow).toContain(
-    "  windows_firefox:\n    name: Pinned AliasMode Firefox runtime\n    if: github.event_name == 'workflow_dispatch' || inputs.client_ci_reusable_call == true\n",
+    "  windows_firefox:\n    name: Pinned AliasMode Firefox runtime\n    if: (github.event_name == 'workflow_dispatch' || inputs.client_ci_reusable_call == true) && inputs.browser_acceptance != true\n",
   );
   expect(ciWorkflow).toContain('require_result "Windows pipeline job" "$result" skipped');
   expect(windowsCacheSaveJob).toContain("github.event_name == 'workflow_dispatch' &&");

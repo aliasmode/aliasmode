@@ -1,0 +1,32 @@
+[
+  {
+    "id": "apostate",
+    "engine": "Apostate",
+    "releaseVersion": "v0.5.1",
+    "browserVersion": "155.0.8059.31",
+    "url": "https://github.com/heretic-tech/apostate/releases/download/v0.5.1/apostate-155.0.8059.31-windows-x64.zip",
+    "archiveSha256": "8e55e44fb7f58619461e1d42a947446dcc08a2b46493c420c8e62ae27ab9c7e5",
+    "binaryRelativePath": "apostate-155.0.8059.31-windows-x64/chrome.exe",
+    "exeSha256": "5b4e065110a8a24bb35448d2716d26427a91618b0ee1f4b33723c4d25722de67"
+  },
+  {
+    "id": "cloak",
+    "engine": "CloakBrowser",
+    "releaseVersion": "146.0.7680.177.5",
+    "browserVersion": "146.0.7680.177",
+    "url": "https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip",
+    "archiveSha256": "b213795cb32c3169f766c74ce1d0275fc89d3df256de39c04da7fb4c23b7fdbe",
+    "binaryRelativePath": "chrome.exe",
+    "exeSha256": "03f53661a5c47e7b0a661bee2bce8a0d302b7a60834c328df417561fa0636d80"
+  },
+  {
+    "id": "stock155",
+    "engine": "Chrome for Testing",
+    "releaseVersion": "155.0.8059.39",
+    "browserVersion": "155.0.8059.39",
+    "url": "https://storage.googleapis.com/chrome-for-testing-public/155.0.8059.39/win64/chrome-win64.zip",
+    "archiveSha256": "59ab2a6e99bde9c0bc180414988394f9f5355a0d3764c704151ee8ecea235c7e",
+    "binaryRelativePath": "chrome-win64/chrome.exe",
+    "exeSha256": "b3750f3977e4c179e80b8fcb66d5919ca6c0a6525c2f5066f7e40e1becfcd083"
+  }
+]
