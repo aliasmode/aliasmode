@@ -330,5 +330,22 @@
   "➕ New platform…": "➕ 新建网站/平台…",
   "Destination folder": "目标文件夹",
   "Assign to group": "分配到分组",
-  "Readable TXT, CSV, JSON, or XLSX exports from AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut, and similar browsers": "可读的 TXT、CSV、JSON 或 XLSX 导出文件，来自 AdsPower、GoLogin、Multilogin、Dolphin Anty、HideMyAcc、Incogniton、Donut 及类似浏览器"
+  "Readable TXT, CSV, JSON, or XLSX exports from AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut, and similar browsers": "可读的 TXT、CSV、JSON 或 XLSX 导出文件，来自 AdsPower、GoLogin、Multilogin、Dolphin Anty、HideMyAcc、Incogniton、Donut 及类似浏览器",
+  "User agent": "用户代理",
+  "Browser version": "浏览器版本",
+  "Fingerprint seed": "指纹种子",
+  "Automatic · latest installed": "自动 · 已安装最新版",
+  "Automatic · unique and stable": "自动 · 唯一且稳定",
+  "Automatic · proxy-aware": "自动 · 代理感知",
+  "Stored · set from connection on request": "已存储 · 按需从连接获取",
+  "An AliasMode export also carries": "AliasMode 导出还包含",
+  "and": "和",
+  " and ": " 和 ",
+  ", which recreate the exact browser fingerprint. Its": "，它们能重建精确的浏览器指纹。其",
+  "columns are a": "列是",
+  "record": "记录",
+  "of the fingerprint that was measured, not settings — they are checked after the browser opens, never applied to it.": "实测指纹的，而非设置——它们在浏览器打开后校验，从不应用于浏览器。",
+  "(种子)": "（种子）",
+  "(时区)": "（时区）",
+  "(操作系统)": "（操作系统）"
 }
