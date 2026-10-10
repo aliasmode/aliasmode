@@ -4552,7 +4552,7 @@ function App() {
                           placeholder={editSerial != null ? String(editSerial) : "auto"}
                           onChange={(e) => setEF("customNo", e.target.value.replace(/\D/g, "").slice(0, MAX_CUSTOM_NO))}
                         />
-                        <small>Digits only · blank uses the serial</small>
+                        <small>{t("Digits only · blank uses the serial")}</small>
                       </label>
                     )}
                   </div>

@@ -439,8 +439,8 @@ test("the roster numbers every profile and prefers a custom NO. over the serial"
 
 test("the custom NO. editor is Local-only and digits-only", () => {
   expect(app).toContain("const MAX_CUSTOM_NO = 12;"); // matches MAX_CUSTOM_NO_LENGTH in parse.ts
-  expect(app).toContain("<span>Custom NO.</span>");
-  expect(app).toContain("<small>Digits only · blank uses the serial</small>");
+  expect(app).toContain("<span>{t(\"Custom NO.\")}</span>");
+  expect(app).toContain("<small>{t(\"Digits only · blank uses the serial\")}</small>");
   // The placeholder shows the serial that would be used instead, so an empty
   // field is never ambiguous about what the browser window will display.
   expect(app).toContain('placeholder={editSerial != null ? String(editSerial) : "auto"}');
@@ -658,7 +658,7 @@ test("New profile and Edit are instant dialogs; Scripts, Settings and Extensions
   // lands, and a stale response for an abandoned dialog is discarded.
   expect(app).toContain("editFetchId.current = id;");
   expect(app).toContain("if (editFetchId.current !== id) return;");
-  expect(app).toContain('<p className="hint" role="status">Loading profile…</p>');
+  expect(app).toContain('<p className="hint" role="status">{t("Loading profile…")}</p>');
   expect(app).toContain("disabled={editSaving || editLoading || timezoneBusy}");
 });
 
