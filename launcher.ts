@@ -1913,7 +1913,9 @@ export class Launcher {
       }
     }
     mkdirSync(userDataDir, { recursive: true });
-    const restoreLastSession = !pendingSession && opts.restoreLastSession !== false && [
+    const closedTabs = !pendingSession && opts.restoreLastSession !== false ? this.closedFirefoxTabs(profileId) : undefined;
+    const restoreLastSession = !pendingSession && opts.restoreLastSession !== false &&
+      !(this.hostPlatform === "darwin" && closedTabs !== undefined) && [
       "sessionstore.jsonlz4", "sessionstore-backups/recovery.jsonlz4", "sessionstore-backups/previous.jsonlz4",
     ].some((file) => existsSync(join(userDataDir, file)));
     writeFirefoxStartupPage(userDataDir, restoreLastSession);
@@ -1939,6 +1941,7 @@ export class Launcher {
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
         userDataDir, config: profile.firefox!.config, proxy, headless,
+        sessionGeneration: `${launch.debugPort}:${launch.startedAt}`,
         timeoutMs: this.cdpReadyTimeoutMs,
       }, {
         reservation,
@@ -1965,7 +1968,11 @@ export class Launcher {
         await sleep(50);
         startupStatus = await this.firefoxStatus(launch);
       }
-      const nativeSessionRestored = restoreLastSession && startupStatus.pageTargets.some((target) => canonicalUserPageUrl(target.url));
+      let nativeSessionRestored = restoreLastSession && startupStatus.pageTargets.some((target) => canonicalUserPageUrl(target.url));
+      if (!nativeSessionRestored && closedTabs !== undefined) {
+        await this.navigate(launch.ws, closedTabs, true);
+        nativeSessionRestored = closedTabs.length > 0;
+      }
       const captured = await recordCapture({
         profile, capture: () => this.captureFingerprintFn(launch.ws),
         save: (id, observed, verdict) => this.store.saveObservedFingerprint(id, observed, verdict),
@@ -1995,7 +2002,7 @@ export class Launcher {
         if (opts.autoNavigate ?? true) {
           const savedTabs = opts.restoreLastSession === false ? [] : bundleTabUrls(this.store.getSessionBundle(profileId) ?? "");
           const home = platformHomeUrl(profile.platform);
-          const urls = startupUrls.length ? startupUrls : nativeSessionRestored ? [] : savedTabs.length ? savedTabs : home ? [home] : [];
+          const urls = startupUrls.length ? startupUrls : nativeSessionRestored ? [] : closedTabs ?? (savedTabs.length ? savedTabs : home ? [home] : []);
           await this.navigate(launch.ws, urls).catch(() => {
             this.log(`${profileId}: startup navigation failed; open the site manually`);
           });
@@ -2908,6 +2915,19 @@ export class Launcher {
       || this.store.getLaunch(profileId) !== null;
   }
 
+  /** Native-close URLs; Cloud capture accepts only the exact launch generation. */
+  closedFirefoxTabs(profileId: string, launch?: { debugPort: number | null; startedAt: number | null }): string[] | undefined {
+    if (this.store.getProfile(profileId)?.engine !== "firefox") return undefined;
+    try {
+      const saved = JSON.parse(readFileSync(join(this.userDataDir(profileId), "aliasmode-session-tabs.json"), "utf8"));
+      if (typeof saved.generation !== "string" || !Array.isArray(saved.tabs) || saved.tabs.some((url: unknown) => typeof url !== "string")) return undefined;
+      if (launch && saved.generation !== `${launch.debugPort}:${launch.startedAt}`) return undefined;
+      return bundleTabUrls(JSON.stringify({ tabs: saved.tabs }));
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Best-effort Local export/managed-close snapshot. Never opens a browser. */
   async captureLocalSession(profileId: string): Promise<boolean> {
     const launch = this.store.getLaunch(profileId);
@@ -2918,10 +2938,12 @@ export class Launcher {
       && !this.store.getPendingSessionBundle(profileId);
     try {
       if (!unchanged() || !await this.certifiedActive(profileId) || !unchanged()) return false;
-      const bundle = await this.readSessionFn(launch.ws, {
-        captureSeed: sessionCaptureSeed(this.store.getSessionBundle(profileId) ?? ""),
+      const previous = this.store.getSessionBundle(profileId) ?? "";
+      let bundle = await this.readSessionFn(launch.ws, {
+        captureSeed: sessionCaptureSeed(previous),
       });
-      parseCapturedSessionBundle(bundle);
+      const captured = parseCapturedSessionBundle(bundle);
+      if (captured.tabs === undefined) bundle = JSON.stringify({ ...captured, tabs: this.closedFirefoxTabs(profileId, launch) ?? bundleTabUrls(previous) });
       if (!unchanged() || !await this.active(profileId) || !unchanged()) return false;
       this.store.saveSessionBundle(profileId, bundle);
       return true;

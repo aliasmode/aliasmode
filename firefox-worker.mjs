@@ -176,6 +176,7 @@ export function firefoxLaunchOptions(input) {
 async function launchOwner(input) {
   if (await sha256File(input.executablePath) !== input.executableSha256) throw typed("operation_failed");
   cleanCamouConfig(input.config);
+  process.env.ALIASMODE_FIREFOX_SESSION_GENERATION = input.sessionGeneration ?? input.owner.generation;
   let runtime;
   try { runtime = await import(pathToFileURL(join(ROOT, "node_modules", "playwright-core", "index.mjs")).href); } catch { throw typed("runtime_unavailable"); }
   if (!runtime.firefox) throw typed("runtime_unavailable");

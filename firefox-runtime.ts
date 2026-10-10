@@ -32,6 +32,7 @@ export interface StartFirefoxOwnerInput {
   executablePath: string;
   executableSha256: string;
   userDataDir: string;
+  sessionGeneration?: string;
   config: Record<string, JsonValue>;
   proxy?: { server: string; username?: string; password?: string; bypass?: string };
   headless?: boolean;

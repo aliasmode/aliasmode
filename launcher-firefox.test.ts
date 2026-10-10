@@ -272,6 +272,41 @@ test("Darwin and Linux Firefox ownership remains exact after an owner crash", as
   }
 });
 
+test("Local capture retains unavailable tabs without reverting fresh storage", async () => {
+  for (const tabs of [undefined, [], ["https://two.example/"]]) {
+    const f = fixture();
+    const savedTabs = ["https://one.example/", "https://two.example/", "https://one.example/"];
+    f.store.saveSessionBundle(f.profile.id, JSON.stringify({ cookies: [], origins: [], tabs: savedTabs }));
+    const fresh = {
+      cookies: [{ name: "session", value: "fresh", domain: "one.example", path: "/" }],
+      origins: [{ origin: "https://one.example", localStorage: [{ name: "state", value: "fresh" }] }],
+    };
+    const launcher = new Launcher({ ...f.options, readSession: async () => JSON.stringify({ ...fresh, tabs }) });
+    await launcher.start(f.profile.id);
+    if (tabs === undefined) f.closeNativeWindow();
+    expect(await launcher.captureLocalSession(f.profile.id)).toBe(true);
+    expect(JSON.parse(f.store.getSessionBundle(f.profile.id)!)).toEqual({ ...fresh, tabs: tabs ?? savedTabs });
+    expect(await launcher.stop(f.profile.id)).toBe(true);
+  }
+});
+
+test("Mac reopens the latest native-close tabs instead of an older session", async () => {
+  const f = fixture("darwin", "arm64");
+  const root = f.launcher.userDataDir(f.profile.id);
+  const tabs = ["https://new.example/", "https://second.example/", "https://new.example/"];
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "sessionstore.jsonlz4"), "older native session");
+  writeFileSync(join(root, "aliasmode-session-tabs.json"), JSON.stringify({ generation: "previous", tabs }));
+  f.store.saveSessionBundle(f.profile.id, JSON.stringify({ cookies: [], origins: [], tabs: ["https://old.example/"] }));
+  await f.launcher.start(f.profile.id);
+  expect(f.navigated).toEqual([tabs]);
+  const launch = f.store.getLaunch(f.profile.id)!;
+  expect(f.launcher.closedFirefoxTabs(f.profile.id, launch)).toBeUndefined();
+  writeFileSync(join(root, "aliasmode-session-tabs.json"), JSON.stringify({ generation: `${launch.debugPort}:${launch.startedAt}`, tabs }));
+  expect(f.launcher.closedFirefoxTabs(f.profile.id, launch)).toEqual(tabs);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
 test("Firefox enables native tab restore in the owned profile before spawn", async () => {
   const f = fixture();
   const root = f.launcher.userDataDir(f.profile.id);

@@ -132,7 +132,7 @@ type CloudBrowserLauncher = Pick<
   "start" | "stop" | "active" | "hasPageTargets" | "verifyRunningIdentity" | "reconcileOrphan" |
   "pageTargetFingerprint" | "browserStorageWatchPaths" | "failedStartGeneration" |
   "matchesCloudSession" | "recordCloudSession"
->;
+> & Partial<Pick<Launcher, "closedFirefoxTabs">>;
 
 export interface CloudBrowserOptions {
   cloud: CloudBrowserClient;
@@ -181,6 +181,7 @@ function isTerminalConflict(capture: PendingClose): boolean {
 interface CloudCheckpointState {
   registrationId: string;
   signature: string;
+  tabs: string[];
   origins: Set<string>;
   telegramClient?: "a" | "k";
 }
@@ -872,6 +873,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       this.checkpointSignatures.set(profileId, {
         registrationId,
         signature,
+        tabs: bundleTabUrls(sessionBundle),
         origins: new Set(captureSeed.origins),
         ...(captureSeed.telegramClient ? { telegramClient: captureSeed.telegramClient } : {}),
       });
@@ -1178,7 +1180,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     await this.stopHeartbeatAndWait(profileId);
     this.diagnosticEvents.record("browser_stopped");
 
-    if (!queue.finalizeOpenCheckpoint(profileId, accountId, open.registrationId)) {
+    if (!this.finalizeOpenCheckpoint(open, queue)) {
       this.diagnosticEvents.record("cleanup_retained");
       return this.closeResultForOpen(open, queue);
     }
@@ -1253,6 +1255,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     const state: CloudCheckpointState = {
       registrationId: open.registrationId,
       signature: bundle ? sessionBundleSignature(bundle) : "",
+      tabs: bundleTabUrls(bundle ?? ""),
       origins: new Set(captureSeed.origins),
       ...(captureSeed.telegramClient ? { telegramClient: captureSeed.telegramClient } : {}),
     };
@@ -1312,6 +1315,23 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     return this.finishStoppedOpen(current, queue);
   }
 
+  private finalizeOpenCheckpoint(open: PendingOpenSession, queue: PendingSyncQueue): boolean {
+    const tabs = this.options.launcher.closedFirefoxTabs?.(open.profileId, open);
+    const checkpoint = tabs === undefined ? undefined : this.pendingCapturesForOpen(open, queue)
+      .find((capture) => !capture.readyToSubmit && capture.status !== "conflict");
+    if (checkpoint) {
+      queue.enqueue({
+        accountId: open.accountId,
+        profileId: open.profileId,
+        registrationId: open.registrationId,
+        expectedVersion: checkpoint.expectedVersion,
+        payload: { ...checkpoint.payload, session: { ...checkpoint.payload.session, tabs } },
+        readyToSubmit: false,
+      });
+    }
+    return queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId);
+  }
+
   private async finishStoppedOpen(
     open: PendingOpenSession,
     queue: PendingSyncQueue,
@@ -1319,7 +1339,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   ): Promise<boolean> {
     const captures = this.pendingCapturesForOpen(open, queue);
     if (captures.length > 0) {
-      if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
+      if (!this.finalizeOpenCheckpoint(open, queue)) return false;
       this.clearCheckpointSignature(open);
       if (current() && this.options.accountId() === open.accountId) {
         await this.submitPending(queue, open.accountId, current);
@@ -1371,6 +1391,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       }
       try {
         const captured = parseCapturedSessionBundle(bundle);
+        if (captured.tabs === undefined) bundle = JSON.stringify({
+          ...captured,
+          tabs: this.options.launcher.closedFirefoxTabs?.(open.profileId, open) ?? state.tabs,
+        });
         for (const origin of captured.origins) state.origins.add(origin.origin);
         if (captured.telegramClient) state.telegramClient = captured.telegramClient;
       } catch (error) {
@@ -1435,6 +1459,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     });
     const state = this.checkpointState(open, queue);
     state.signature = signature;
+    state.tabs = bundleTabUrls(sessionBundle);
     this.checkpointSignatures.set(open.profileId, state);
     this.recordCloudSessionSignature(open.profileId, signature);
     this.diagnosticEvents.record("checkpoint_saved");
@@ -1966,7 +1991,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       startedAt: stopLaunch.startedAt,
     }).catch(() => false)) return false;
     await this.stopHeartbeatAndWait(open.profileId);
-    if (!queue.finalizeOpenCheckpoint(open.profileId, open.accountId, open.registrationId)) return false;
+    if (!this.finalizeOpenCheckpoint(open, queue)) return false;
     this.clearCheckpointSignature(open);
     if (
       submitAfterStop && current() &&

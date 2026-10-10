@@ -2137,6 +2137,88 @@ test("Cloud heartbeat refreshes its checkpoint during a Cloud outage", async () 
   state.store.close();
 });
 
+test("Cloud close preserves unavailable tabs but accepts intentional tab changes", async () => {
+  const originalTabs = ["https://one.example/", "https://two.example/", "https://one.example/"];
+  for (const capturedTabs of [undefined, ["https://two.example/"], []]) {
+    const state = setup({ session: { cookies: [], origins: [], tabs: originalTabs } });
+    const options = (state.coordinator as any).options;
+    try {
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      options.launcher.hasPageTargets = async () => capturedTabs !== undefined;
+      const fresh = {
+        cookies: [{ name: "session", value: "fresh", domain: "one.example", path: "/" }],
+        origins: [{ origin: "https://one.example", localStorage: [{ name: "state", value: "fresh" }] }],
+      };
+      options.readSession = async () => JSON.stringify({ ...fresh, ...(capturedTabs === undefined ? {} : { tabs: capturedTabs }) });
+      const expectedTabs = capturedTabs ?? originalTabs;
+      await state.coordinator.heartbeatOnce("profile1");
+      const checkpoint = state.queue.list("account1")[0]!;
+      expect(state.queue.get(checkpoint.id, "account1")?.payload.session).toEqual({ ...fresh, tabs: expectedTabs });
+      options.launcher.hasPageTargets = async () => false;
+      options.readSession = async () => JSON.stringify(fresh);
+      let closedSession: any;
+      const closeOpen = options.cloud.closeOpen;
+      options.cloud.closeOpen = async (registrationId: string, request: any) => {
+        closedSession = request.payload.session;
+        return closeOpen(registrationId, request);
+      };
+      expect(await state.coordinator.close("profile1")).toEqual({ closed: true, sync: "complete" });
+      expect(closedSession).toEqual({ ...fresh, tabs: expectedTabs });
+      const openProfile = options.cloud.openProfile;
+      options.cloud.openProfile = async () => {
+        const opened = await openProfile();
+        return { ...opened, payload: { ...opened.payload, session: closedSession } };
+      };
+      let restoredSession: any;
+      options.applySession = async (_endpoint: string, bundle: string) => { restoredSession = JSON.parse(bundle); };
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      expect(restoredSession.tabs).toEqual(expectedTabs);
+      await state.coordinator.close("profile1");
+    } finally {
+      state.queue.close();
+      state.store.close();
+    }
+  }
+});
+
+test("Cloud uses immediate native-close tabs before or after Firefox exits", async () => {
+  for (const exited of [false, true]) {
+    const session = { ...payload().session, origins: [], tabs: ["https://older.example/"] };
+    const state = setup({ session });
+    const options = (state.coordinator as any).options;
+    try {
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      const launch = state.store.getLaunch("profile1")!;
+      const tabs = ["https://new.example/", "https://two.example/", "https://new.example/"];
+      options.launcher.closedFirefoxTabs = (profileId: string, generation: any) => {
+        expect(profileId).toBe("profile1");
+        expect(generation).toMatchObject({ debugPort: launch.debugPort, startedAt: launch.startedAt });
+        return tabs;
+      };
+      options.launcher.hasPageTargets = async () => false;
+      options.readSession = async () => JSON.stringify({ cookies: session.cookies, origins: [] });
+      let submitted: PortableProfileV1 | undefined;
+      const closeOpen = options.cloud.closeOpen;
+      options.cloud.closeOpen = async (registrationId: string, request: { payload: PortableProfileV1 }) => {
+        submitted = request.payload;
+        return closeOpen(registrationId, request);
+      };
+      if (exited) {
+        state.setReconcileHook(() => state.store.clearLaunch("profile1"));
+        await state.coordinator.listRoster();
+      } else {
+        await state.coordinator.heartbeatOnce("profile1");
+        await state.coordinator.close("profile1");
+      }
+      expect(submitted?.session).toEqual({ ...session, tabs });
+      expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+    } finally {
+      state.queue.close();
+      state.store.close();
+    }
+  }
+});
+
 test("Cloud browser durably captures before confirmed stop and CAS close", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);

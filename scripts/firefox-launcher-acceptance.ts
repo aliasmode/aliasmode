@@ -69,6 +69,17 @@ end tell`;
   await run("osascript", ["-e", script]);
 }
 
+async function nativeFirefoxKeys(browserPid: number, commands: string): Promise<void> {
+  await run("osascript", ["-e", `tell application "System Events"
+    set browserProcesses to every application process whose unix id is ${browserPid}
+    if (count of browserProcesses) is not 1 then error "exact browser process is unavailable"
+    tell item 1 of browserProcesses
+      set frontmost to true
+      ${commands}
+    end tell
+  end tell`]);
+}
+
 async function waitForNativeFirefoxClose(profileId: string): Promise<void> {
   const launch = localStore.getLaunch(profileId);
   assert.ok(launch?.firefoxOwner, "native AXClose profile has a Firefox owner");
@@ -532,19 +543,63 @@ async def run(*, context, inputs, log, **_kwargs):
   }
 
   if (process.platform === "darwin") {
-    console.log("firefox-launcher-acceptance:native-axclose-before-stop");
     localStore.upsertProfile(profile(nativeCloseId, createFirefoxProfileConfig(1440, 900)));
-    await localLauncher.start(nativeCloseId, [], { autoNavigate: false, headless: false });
-    const nativeLaunch = localStore.getLaunch(nativeCloseId);
-    assert.ok(nativeLaunch?.firefoxOwner, "native AXClose profile has a Firefox owner");
-    const nativeStatus = await callFirefoxOwner<{ browserPid: number }>(nativeLaunch.firefoxOwner!, "status", {}, { timeoutMs: 800 });
-    assert.ok(Number.isSafeInteger(nativeStatus.browserPid) && nativeStatus.browserPid > 0, "native AXClose browser PID is valid");
-    // Cloud opens verify identity right after launch; headed macOS adds GPU helper processes.
-    await localLauncher.verifyRunningIdentity(nativeCloseId);
-    await closeNativeFirefoxWindow(nativeStatus.browserPid);
-    await waitForNativeFirefoxClose(nativeCloseId);
-    assert.equal(await localLauncher.stop(nativeCloseId), true, "Launcher confirms stop after native AXClose");
-    assert.equal(localStore.getLaunch(nativeCloseId), null, "native AXClose launch clears after confirmed stop");
+    const nativeOrigin = `http://127.0.0.1:${fixturePort}`;
+    for (const close of ["window", "quit", "managed", "reduced", "blank"]) {
+      console.log(`firefox-launcher-acceptance:native-close-reopen:${close}`);
+      await localLauncher.start(nativeCloseId, [], { autoNavigate: false, restoreLastSession: false, headless: false });
+      const nativeLaunch = localStore.getLaunch(nativeCloseId)!;
+      assert.ok(nativeLaunch.firefoxOwner, "native close profile has a Firefox owner");
+      const owner = nativeLaunch.firefoxOwner!;
+      const tabs = close === "blank" ? [] : [`${nativeOrigin}/first`, `${nativeOrigin}/second`, `${nativeOrigin}/first`];
+      const status = () => callFirefoxOwner<{ pageTargets: Array<{ url: string }> }>(owner, "status", {});
+      if (tabs.length) {
+        await callFirefoxOwner(owner, "navigate", { urls: [tabs[0]] });
+        for (const url of tabs.slice(1)) {
+          await nativeFirefoxKeys(nativeLaunch.pid, `keystroke "t" using command down
+            delay 0.2
+            keystroke ${JSON.stringify(url)}
+            key code 36`);
+        }
+        const deadline = Date.now() + 30_000;
+        while (JSON.stringify((await status()).pageTargets.map(page => page.url)) !== JSON.stringify(tabs) && Date.now() < deadline) await Bun.sleep(50);
+        assert.deepEqual((await status()).pageTargets.map(page => page.url), tabs, "native tabs finish navigation before close");
+        await callFirefoxOwner(owner, "page", { kind: "scripts", scripts: [
+          `() => { localStorage.setItem('native-close', '${close}'); document.cookie = 'native-close=${close}; Max-Age=86400; path=/'; }`,
+        ] });
+      }
+      if (close === "reduced") {
+        await nativeFirefoxKeys(nativeLaunch.pid, 'keystroke "2" using command down\ndelay 0.2\nkeystroke "w" using command down');
+        tabs.splice(1, 1);
+        const deadline = Date.now() + 30_000;
+        while ((await status()).pageTargets.length !== tabs.length && Date.now() < deadline) await Bun.sleep(50);
+        assert.deepEqual((await status()).pageTargets.map(page => page.url), tabs, "closing one tab keeps only the remaining tabs");
+      }
+      await localLauncher.verifyRunningIdentity(nativeCloseId);
+      if (close === "managed") {
+        assert.equal(await localLauncher.captureLocalSession(nativeCloseId), true);
+        assert.equal(await localLauncher.stop(nativeCloseId), true);
+      } else {
+        if (close === "quit") await nativeFirefoxKeys(nativeLaunch.pid, 'keystroke "q" using command down');
+        else await closeNativeFirefoxWindow(nativeLaunch.pid);
+        await waitForNativeFirefoxClose(nativeCloseId);
+        assert.deepEqual(localLauncher.closedFirefoxTabs(nativeCloseId, nativeLaunch), tabs, "native close saves current ordered tabs before managed cleanup");
+        assert.equal(await localLauncher.stop(nativeCloseId), true, "Launcher confirms native close cleanup");
+      }
+      assert.deepEqual(localLauncher.closedFirefoxTabs(nativeCloseId, nativeLaunch), tabs, "cleanup does not erase native-close tabs");
+      await localLauncher.start(nativeCloseId, [], { autoNavigate: false, headless: false });
+      const reopenedOwner = localStore.getLaunch(nativeCloseId)!.firefoxOwner!;
+      const reopenedStatus = await callFirefoxOwner<{ pageTargets: Array<{ url: string }> }>(reopenedOwner, "status", {});
+      assert.deepEqual(reopenedStatus.pageTargets.map(page => page.url).filter(url => /^https?:/.test(url)), tabs, "native close then reopen preserves exact URL order and duplicates");
+      if (tabs.length) {
+        const values = await callFirefoxOwner(reopenedOwner, "page", { kind: "scripts", scripts: [
+          "() => ({ storage: localStorage.getItem('native-close'), cookie: document.cookie })",
+        ] }) as Array<{ storage: string; cookie: string }>;
+        assert.equal(values[0]!.storage, close, "native reopen keeps fresh Local Storage");
+        assert.ok(values[0]!.cookie.includes(`native-close=${close}`), "native reopen keeps cookies");
+      }
+      assert.equal(await localLauncher.stop(nativeCloseId), true);
+    }
   }
 
   cloudStore.upsertProfile(handoff.profile);

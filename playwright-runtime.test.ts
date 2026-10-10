@@ -16,6 +16,18 @@ import { captureSession, restoreSession } from "./playwright-worker.mjs";
 
 const bunAsNodeTest = process.platform === "win32" ? test.skip : test;
 
+test("Firefox capture distinguishes a closed window from a live blank page", async () => {
+  for (const urls of [[], ["about:blank"], ["https://one.example/", "https://one.example/"]]) {
+    const context = {
+      pages: () => urls.map((url) => ({ url: () => url, evaluate: async () => ({ origin: new URL(url).origin, localStorage: [] }) })),
+      cookies: async () => [],
+    };
+    const captured = JSON.parse(await captureSession({ contexts: () => [context] }, {}, { nativeStorage: true }));
+    expect(captured.tabs).toEqual(urls.length ? urls.filter((url) => url !== "about:blank") : undefined);
+    expect(captured.cookies).toEqual([]);
+  }
+});
+
 test("uses packaged Node bootstrap and keeps requests off argv", () => {
   const runtime = "C:\\AliasMode\\playwright";
   const command = playwrightWorkerCommand(runtime);
@@ -295,7 +307,6 @@ test("native capture reads closed observed origins through storageState without 
   expect(result).toEqual({
     cookies: [],
     origins: [{ origin: "https://closed.example", localStorage: [{ name: "session", value: "fresh" }] }],
-    tabs: [],
   });
 });
 

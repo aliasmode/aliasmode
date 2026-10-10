@@ -661,7 +661,11 @@ function registerNativeOrigins(context, origins) {
 
 export async function captureSession(browser, payload, options = {}) {
   const context = contextOf(browser);
-  const tabs = context.pages().map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
+  const pages = context.pages();
+  // No window is not an intentional empty tab list (a live blank page is).
+  const tabs = options.nativeStorage && pages.length === 0
+    ? undefined
+    : pages.map((page) => canonicalUserPageUrl(page.url())).filter(Boolean);
   const seed = payload.captureSeed;
   if (seed !== undefined && (!seed || typeof seed !== "object" || Array.isArray(seed)
     || !Array.isArray(seed.origins)
@@ -695,8 +699,8 @@ export async function captureSession(browser, payload, options = {}) {
       let storage = await captureLiveOrigin(context, origin, !!options.nativeStorage);
       if (!storage) {
         if (options.nativeStorage) {
-          // Firefox reads a closed origin through a visible temporary window. Storage
-          // cannot change until that origin loads again, which clears its cache entry.
+          // Closed-origin storage cannot change until that origin loads again,
+          // which clears its cache entry.
           storage = options.storageCache?.get(origin);
           if (!storage) {
             storage = await sessionStep("origin_storage", () => nativeOriginStorage(context, origin));
