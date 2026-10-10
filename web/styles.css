@@ -518,7 +518,9 @@ button:disabled { cursor: default; }
 .newrow .importbtn { width: 100%; height: 36px; padding: 0; }
 
 /* Primary navigation. */
-.sidenav { display: flex; flex-direction: column; gap: 2px; padding: 0 2px; }
+.sidenav { display: flex; flex-direction: column; gap: 2px; padding: 0 2px; min-height: 0; overflow-y: auto; }
+/* Rail tooltips extend past the navigation box. */
+.sidebar.collapsed .sidenav { overflow: visible; }
 .navitem {
   display: flex; align-items: center; gap: 10px; width: 100%;
   padding: 8px 10px; border: 0; border-radius: var(--r-md);
@@ -556,6 +558,8 @@ a.navitem { box-sizing: border-box; text-decoration: none; cursor: pointer; }
 .sidebar.collapsed .navbuy { display: none; }
 
 .sidesection { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 2px; margin-top: 16px; padding: 0 2px; }
+/* Keep two folder rows usable; navigation gives up height first. */
+.sidesection:has(.folders) { min-height: 140px; }
 .sidehead {
   display: flex; align-items: center; gap: 6px; width: 100%;
   padding: 5px 10px; border: 0; background: none;
@@ -1485,6 +1489,15 @@ td.col-tags .chip + .chip { margin-left: 4px; }
    (with Action pinned right), and the column chooser is the only thing that
    decides what is on screen. Below 760px the app forces the sidebar into the
    icon rail (RAIL_MEDIA in app.tsx) rather than hiding navigation. */
+/* Short windows and display scaling need folder space more than decoration. */
+@media (max-height: 720px) {
+  .sidebar { padding-top: 10px; padding-bottom: 10px; }
+  .sidebar .brandrow, .sidebar .newrow { padding-bottom: 8px; }
+  .sidebar .navitem { padding-top: 6px; padding-bottom: 6px; }
+  .sidesection { margin-top: 8px; }
+  .sidebar .sidefoot { margin-top: 6px; padding-top: 6px; }
+  .sidecredit { display: none; }
+}
 @media (max-width: 920px) {
   :root { --sidebar-w: 200px; }
   .workspace { margin: 10px auto; width: calc(100% - 20px); }

@@ -689,6 +689,18 @@ test("the sidebar collapses to an icon rail and remembers it", () => {
   expect(app).toContain('data-tip="Settings"');
 });
 
+test("short sidebars keep folder space and let navigation scroll without clipping rail tooltips", () => {
+  const navigation = styles.match(/\n\.sidenav \{([^}]+)\}/)?.[1] ?? "";
+  expect(navigation).toContain("min-height: 0");
+  expect(navigation).toContain("overflow-y: auto");
+  expect(styles.includes(".sidebar.collapsed .sidenav { overflow: visible; }")).toBe(true);
+  expect(styles.includes(".sidesection:has(.folders) { min-height: 140px; }")).toBe(true);
+  const compact = styles.slice(styles.indexOf("@media (max-height: 720px)"), styles.indexOf("@media (max-width: 920px)"));
+  expect(compact).toContain(".sidecredit { display: none; }");
+  expect(compact).toContain(".sidebar .navitem { padding-top: 6px; padding-bottom: 6px; }");
+  expect(compact).not.toMatch(/\.sidefoot\s*\{[^}]*display:\s*none/);
+});
+
 test("roster columns declare their own width and never collapse", () => {
   // One registry drives the header cells and the table's min-width, so a column
   // cannot be squeezed below a readable size.
