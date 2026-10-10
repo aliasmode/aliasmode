@@ -2,7 +2,6 @@ name: Firefox compatibility
 
 on:
   push:
-    branches-ignore: [fix/firefox-native-close-runtime]
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
@@ -86,7 +85,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/36421765188 | ConvertFrom-Json
+          $run = gh api repos/aliasmode/aliasmode-firefox/actions/runs/38060990951 | ConvertFrom-Json
           if (
             $run.name -cne "Build and Release" -or
             $run.path -cne ".github/workflows/build.yml" -or
@@ -96,7 +95,7 @@ jobs:
             $run.conclusion -cne "success" -or
             $run.event -cne "push" -or
             $run.head_branch -cne "firefox-engine" -or
-            $run.head_sha -cne "013ebace6cc69c1979c7a86636139e91face6419"
+            $run.head_sha -cne "ab1519b7caef2c32c83c59f5028745ae71bb9478"
           ) {
             throw "AliasMode Firefox source build provenance is invalid"
           }
@@ -106,7 +105,7 @@ jobs:
           path: artifacts/firefox
           github-token: ${{ github.token }}
           repository: aliasmode/aliasmode-firefox
-          run-id: "36421765188"
+          run-id: "38060990951"
       - name: Extract verified owned browser
         shell: pwsh
         run: |
@@ -267,7 +266,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          run="$(gh api repos/aliasmode/aliasmode-firefox/actions/runs/36421766981)"
+          run="$(gh api repos/aliasmode/aliasmode-firefox/actions/runs/38060990891)"
           node -e '
             const run = JSON.parse(process.argv[1]);
             const expected = {
@@ -277,7 +276,7 @@ jobs:
               conclusion: "success",
               event: "push",
               head_branch: "firefox-runtime-macos-linux",
-              head_sha: "013ebace6cc69c1979c7a86636139e91face6419",
+              head_sha: "ab1519b7caef2c32c83c59f5028745ae71bb9478",
             };
             for (const [key, value] of Object.entries(expected)) {
               if (run[key] !== value) throw new Error(`invalid source build ${key}`);
@@ -292,7 +291,7 @@ jobs:
           path: artifacts/firefox
           github-token: ${{ github.token }}
           repository: aliasmode/aliasmode-firefox
-          run-id: "36421766981"
+          run-id: "38060990891"
       - name: Install verified owned browser
         shell: bash
         run: |
