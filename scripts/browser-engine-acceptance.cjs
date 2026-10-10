@@ -63,8 +63,13 @@ async function launch(engine, label, extra = [], profilePath, httpCredentials, h
   const stdoutPath = path.join(out, label + '.stdout.log'), stderrPath = path.join(out, label + '.stderr.log');
   const stdout = fs.openSync(stdoutPath, 'w'), stderr = fs.openSync(stderrPath, 'w');
   const started = Date.now();
-  const proc = cp.spawn(exe, flags, {cwd: root, stdio: ['ignore', stdout, stderr], windowsHide: !headed});
-  fs.closeSync(stdout); fs.closeSync(stderr);
+  let proc;
+  try { proc = cp.spawn(exe, flags, {cwd: root, stdio: ['ignore', stdout, stderr], windowsHide: !headed}); }
+  catch (error) {
+    const diagnostic = cp.spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'browser-engine-launch-diagnostic.ps1')], {input: JSON.stringify({executable: exe, root, flags}), encoding: 'utf8', timeout: 15000, windowsHide: true});
+    error.launch = {executable: exe, flags, nodeError: {code: error.code, errno: error.errno, syscall: error.syscall}, nativeDiagnostic: diagnostic.stdout, diagnosticError: diagnostic.error?.message || diagnostic.stderr};
+    throw error;
+  } finally { fs.closeSync(stdout); fs.closeSync(stderr); }
   const item = {engine, label, exe, profile, flags, proc, stdoutPath, stderrPath, started, stopped: false};
   active.add(item);
   proc.on('error', error => { item.spawnError = errorText(error); });
