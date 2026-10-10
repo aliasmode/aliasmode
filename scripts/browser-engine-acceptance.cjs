@@ -75,17 +75,19 @@ async function launch(engine, label, extra = [], profilePath, httpCredentials, h
   active.add(item);
   proc.on('error', error => { item.spawnError = errorText(error); });
   proc.on('exit', (code, signal) => { item.exit = {code, signal, timestamp: new Date().toISOString()}; });
-  while (Date.now() - started < 60000) {
-    if (item.spawnError || item.exit) break;
-    if (fs.existsSync(activePort)) {
-      const lines = fs.readFileSync(activePort, 'utf8').trim().split(/\r?\n/);
-      if (/^\d+$/.test(lines[0]) && lines[1]?.startsWith('/devtools/browser/')) {
-        item.endpoint = `ws://127.0.0.1:${lines[0]}${lines[1]}`; break;
-      }
-    }
-    await pause(200);
-  }
   try {
+    while (Date.now() - started < 60000) {
+      if (item.spawnError || item.exit) break;
+      if (fs.existsSync(activePort)) {
+        try {
+          const lines = fs.readFileSync(activePort, 'utf8').trim().split(/\r?\n/);
+          if (/^\d+$/.test(lines[0]) && lines[1]?.startsWith('/devtools/browser/')) {
+            item.endpoint = `ws://127.0.0.1:${lines[0]}${lines[1]}`; break;
+          }
+        } catch (error) { if (error.code !== 'EBUSY' && error.code !== 'ENOENT') throw error; }
+      }
+      await pause(200);
+    }
     if (!item.endpoint) throw new Error(item.spawnError || 'No DevTools endpoint before process exit or startup deadline');
     item.browser = await chromium.connectOverCDP(item.endpoint, {timeout: 30000});
     item.session = await item.browser.newBrowserCDPSession();
@@ -129,12 +131,14 @@ async function sandbox(item) {
     const info = await item.session.send('SystemInfo.getProcessInfo');
     const rendererPids = info.processInfo.filter(p => p.type === 'renderer').map(p => p.id);
     if (!rendererPids.length) throw new Error('No renderer PID was reported');
-    const result = cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'browser-engine-sandbox.ps1'), '-ProcessIds', rendererPids.join(',')], {encoding: 'utf8', timeout: 30000, windowsHide: true});
+    const result = cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'browser-engine-sandbox.ps1'), '-ProcessIds', rendererPids.join(','), '-BrowserProcessId', String(item.proc.pid)], {encoding: 'utf8', timeout: 30000, windowsHide: true});
     if (result.status !== 0) throw new Error(result.error?.message || result.stderr || 'Token inspection did not finish');
-    const tokens = JSON.parse(result.stdout.trim().replace(/^﻿/, ''));
+    const allTokens = JSON.parse(result.stdout.trim().replace(/^﻿/, ''));
+    const tokens = allTokens.filter(token => token.role === 'renderer');
+    const networkServices = allTokens.filter(token => token.role === 'network-service');
     const measured = tokens.length === rendererPids.length && tokens.every(t => !t.error && Number.isInteger(t.integrityRid));
     const protectedRenderers = measured && tokens.every(t => t.integrityRid <= 4096 && t.inJob);
-    emit(id, item.engine, !measured ? 'blocked' : protectedRenderers ? 'pass' : 'fail', 'Renderer tokens have low-or-untrusted integrity and belong to a Windows job', {tokens, rendererPids, flags: item.flags}, 'AppContainer is recorded, not required. Token checks do not certify every sandbox boundary or helper.');
+    emit(id, item.engine, !measured ? 'blocked' : protectedRenderers ? 'pass' : 'fail', 'Renderer tokens have low-or-untrusted integrity and belong to a Windows job', {tokens, rendererPids, networkServices, flags: item.flags}, 'Status covers renderer tokens only. Network-service AppContainer and LPAC measurements are recorded separately. Job membership may come from CI; token checks do not certify every sandbox boundary.');
   } catch (error) { emit(id, item.engine, 'blocked', 'Inspect native Windows renderer protection', {error: errorText(error)}); }
 }
 async function identityProbe() {
@@ -386,6 +390,18 @@ async function extensionCase(engine, extension, headed = false, host = false) {
         }
       }
     }
+    let beforeAcl;
+    try {
+      beforeAcl = await launch(engine, engine.id + '-before-acl');
+      await sandbox(beforeAcl);
+    } catch (error) { emit(engine.id + '-before-acl-execution', engine, 'blocked', 'Measure renderer and network tokens before changing payload permissions', {error: errorText(error), launch: error.launch}); }
+    finally { await stop(beforeAcl); }
+    const executable = path.join(root, 'browsers', engine.id, engine.binaryRelativePath);
+    const icacls = args => cp.spawnSync('icacls.exe', args, {encoding: 'utf8', timeout: 30000, windowsHide: true});
+    const before = icacls([executable]);
+    const access = icacls([path.dirname(executable), '/grant', '*S-1-15-2-1:(OI)(CI)(RX)', '*S-1-15-2-2:(OI)(CI)(RX)', '/T', '/Q']);
+    const after = icacls([executable]);
+    emit(engine.id + '-payload-access', engine, access.status === 0 && after.status === 0 ? 'pass' : 'blocked', 'Allow AppContainer and LPAC read/execute access to extracted browser files', {before: before.stdout, after: after.stdout, exitCode: access.status, output: access.stdout, error: access.error?.message || access.stderr}, 'Applied identically to all engines. Profiles and network rules are unchanged; no sandbox or GPU feature is disabled.');
     // Obtain launch and extension answers before the longer surface/reopen probes.
     await extensionCase(engine, extension);
     await extensionCase(engine, extension, true);

@@ -1,4 +1,7 @@
-param([Parameter(Mandatory = $true)][string]$ProcessIds)
+param(
+    [Parameter(Mandatory = $true)][string]$ProcessIds,
+    [Parameter(Mandatory = $true)][int]$BrowserProcessId
+)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -28,10 +31,14 @@ public static class BrowserTokenProbe {
             Marshal.FreeHGlobal(buffer);
             buffer = Marshal.AllocHGlobal(4);
             if (!GetTokenInformation(token, 29, buffer, 4, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            int appContainer = Marshal.ReadInt32(buffer);
+            int appContainer = Marshal.ReadInt32(buffer), lessPrivileged = 0;
+            if (appContainer != 0) {
+                if (!GetTokenInformation(token, 46, buffer, 4, out size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                lessPrivileged = Marshal.ReadInt32(buffer);
+            }
             bool inJob;
             if (!IsProcessInJob(process, IntPtr.Zero, out inJob)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            return new int[] {integrity, appContainer, inJob ? 1 : 0};
+            return new int[] {integrity, appContainer, inJob ? 1 : 0, lessPrivileged};
         } finally {
             if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
             if (token != IntPtr.Zero) CloseHandle(token);
@@ -40,14 +47,18 @@ public static class BrowserTokenProbe {
     }
 }
 '@
+$processes = @($ProcessIds -split ',' | ForEach-Object { [ordered]@{ pid = [int]$_; role = 'renderer' } })
+$processes += @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $BrowserProcessId" |
+    Where-Object { $_.CommandLine -like '*--utility-sub-type=network.mojom.NetworkService*' } |
+    ForEach-Object { [ordered]@{ pid = [int]$_.ProcessId; role = 'network-service' } })
 $results = @(
-    foreach ($value in ($ProcessIds -split ',')) {
-        $processId = [int]$value
+    foreach ($process in $processes) {
+        $processId = $process.pid
         try {
             $facts = [BrowserTokenProbe]::Inspect($processId)
-            [ordered]@{ pid = $processId; integrityRid = $facts[0]; appContainer = [bool]$facts[1]; inJob = [bool]$facts[2] }
+            [ordered]@{ pid = $processId; role = $process.role; integrityRid = $facts[0]; appContainer = [bool]$facts[1]; inJob = [bool]$facts[2]; lessPrivilegedAppContainer = [bool]$facts[3] }
         } catch {
-            [ordered]@{ pid = $processId; error = $_.Exception.Message }
+            [ordered]@{ pid = $processId; role = $process.role; error = $_.Exception.Message }
         }
     }
 )
