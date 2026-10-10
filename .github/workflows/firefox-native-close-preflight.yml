@@ -1,0 +1,52 @@
+name: Firefox native close development preflight
+on:
+  push:
+    branches: [fix/firefox-native-close-runtime]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check 'playwright==1.58.0'
+      - run: bun install --frozen-lockfile
+      - name: Prepare development overlay, not a release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/firefox-r3.zip"
+          curl -fLsS 'https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-152.0.4-beta.30-r3/aliasmode-152.0.4-beta.30-mac.arm64.zip' -o "$archive"
+          printf '%s  %s\n' 99718013a49f0aa5bd77dd3f27fbf884a671a708320f7b8a53334e0bb672971a "$archive" | shasum -a 256 --check
+          ditto -x -k "$archive" "$RUNNER_TEMP/firefox-overlay"
+          source="$RUNNER_TEMP/TargetRegistry.js"
+          curl -fLsS 'https://raw.githubusercontent.com/aliasmode/aliasmode-firefox/ab1519b7caef2c32c83c59f5028745ae71bb9478/additions/juggler/TargetRegistry.js' -o "$source"
+          printf '%s  %s\n' 3b1d4156921054dc63169eed1a6304cbd4d39244b8014836d31f68330838e61a "$source" | shasum -a 256 --check
+          browser="$RUNNER_TEMP/firefox-overlay/AliasMode.app/Contents/MacOS/aliasmode"
+          python -I - "$RUNNER_TEMP/firefox-overlay/AliasMode.app/Contents/Resources/omni.ja" "$source" <<'PY'
+          import pathlib, sys, zipfile
+          archive, source = map(pathlib.Path, sys.argv[1:])
+          destination = archive.with_suffix('.patched')
+          with zipfile.ZipFile(archive) as original, zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED) as patched:
+              for entry in original.infolist():
+                  if not entry.filename.startswith('startupCache/'):
+                      data = source.read_bytes() if entry.filename == 'chrome/juggler/content/TargetRegistry.js' else original.read(entry.filename)
+                      patched.writestr(entry, data)
+          destination.replace(archive)
+          PY
+          printf 'FIREFOX_PREFLIGHT_BINARY=%s\n' "$browser" >> "$GITHUB_ENV"
+          printf 'FIREFOX_PREFLIGHT_SHA256=%s\n' "$(shasum -a 256 "$browser" | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
+      - name: Verify native close and reopen
+        run: bun scripts/firefox-launcher-acceptance.ts "$FIREFOX_PREFLIGHT_BINARY" "$RUNNER_TEMP/native-close-proof" "$FIREFOX_PREFLIGHT_SHA256"
+      - name: Verify windowless capture and focus
+        run: node scripts/firefox-compatibility-smoke.mjs "$FIREFOX_PREFLIGHT_BINARY" "$RUNNER_TEMP/windowless-proof" --headed --native-ui

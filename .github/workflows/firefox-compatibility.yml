@@ -2,6 +2,7 @@ name: Firefox compatibility
 
 on:
   push:
+    branches-ignore: [fix/firefox-native-close-runtime]
     paths:
       - .github/workflows/firefox-compatibility.yml
       - scripts/firefox-compatibility-smoke.mjs
