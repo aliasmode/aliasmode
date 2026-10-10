@@ -158,6 +158,32 @@ test("Firefox uses its authenticated owner when an external close leaves the hos
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
 });
 
+test.each(["stop", "reconcile", "reopen"])("Linux Firefox recovers native exit through %s without Chromium group proof", async (operation) => {
+  const f = fixture("linux", "x64");
+  await f.launcher.start(f.profile.id);
+  const launch = f.store.getLaunch(f.profile.id)!;
+  await f.options.firefoxRuntime!.close(launch.firefoxOwner!);
+  if (operation === "stop") expect(await f.launcher.stop(f.profile.id)).toBe(true);
+  if (operation === "reconcile") expect(await f.launcher.reconcileOrphan(f.profile.id, launch)).toBe("dead");
+  await f.launcher.start(f.profile.id);
+  expect(f.launches()).toBe(2);
+  expect(f.killed).toEqual([]);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
+test("Linux Firefox retains native-exit ownership while its process scan is incomplete", async () => {
+  const f = fixture("linux", "x64");
+  await f.launcher.start(f.profile.id);
+  const launch = f.store.getLaunch(f.profile.id)!;
+  await f.options.firefoxRuntime!.close(launch.firefoxOwner!);
+  f.setSnapshotIncomplete(true);
+  expect(await f.launcher.stop(f.profile.id)).toBe(false);
+  expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
+  expect(f.killed).toEqual([]);
+  f.setSnapshotIncomplete(false);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
 test("Firefox retains ownership when its host scan stays inconclusive after authenticated close", async () => {
   const f = fixture("darwin", "arm64");
   await f.launcher.start(f.profile.id);
@@ -288,6 +314,22 @@ test("Local capture retains unavailable tabs without reverting fresh storage", a
     expect(JSON.parse(f.store.getSessionBundle(f.profile.id)!)).toEqual({ ...fresh, tabs: tabs ?? savedTabs });
     expect(await launcher.stop(f.profile.id)).toBe(true);
   }
+});
+
+test("Mac reopens a closed window on its existing Firefox owner", async () => {
+  const f = fixture("darwin", "arm64");
+  const initial = await f.launcher.start(f.profile.id);
+  const launch = f.store.getLaunch(f.profile.id)!;
+  const tabs = ["https://new.example/", "https://new.example/"];
+  writeFileSync(join(f.launcher.userDataDir(f.profile.id), "aliasmode-session-tabs.json"), JSON.stringify({
+    generation: `${launch.debugPort}:${launch.startedAt}`, tabs,
+  }));
+  f.closeNativeWindow();
+  expect(await f.launcher.start(f.profile.id)).toEqual({ ...initial, nativeSessionRestored: true });
+  expect(f.navigated).toEqual([tabs]);
+  expect(f.launches()).toBe(1);
+  expect(f.killed).toEqual([]);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
 });
 
 test("Mac reopens the latest native-close tabs instead of an older session", async () => {

@@ -2184,7 +2184,7 @@ test("Cloud close preserves unavailable tabs but accepts intentional tab changes
 test("Cloud uses immediate native-close tabs before or after Firefox exits", async () => {
   for (const exited of [false, true]) {
     const session = { ...payload().session, origins: [], tabs: ["https://older.example/"] };
-    const state = setup({ session });
+    const state = setup({ session, nativeSessionAvailable: true });
     const options = (state.coordinator as any).options;
     try {
       expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
@@ -2213,6 +2213,15 @@ test("Cloud uses immediate native-close tabs before or after Firefox exits", asy
       expect(submitted?.session).toEqual({ ...session, tabs });
       expect(options.launcher.matchesCloudSession("profile1", sessionBundleSignature(JSON.stringify(submitted!.session)))).toBe(true);
       expect(state.queue.getOpen("profile1", "account1")).toBeNull();
+      state.setReconcileHook(() => {});
+      options.cloud.openProfile = async () => ({
+        ok: true, registrationId: "registration2", baseVersion: 5, payload: submitted!, activeOpens: [],
+      });
+      const restores = state.restoreEndpoints.length;
+      expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+      expect(state.restoreEndpoints).toHaveLength(restores);
+      expect(state.startOptionsSeen.at(-1).resetStorage).toBe(false);
+      await state.coordinator.close("profile1");
     } finally {
       state.queue.close();
       state.store.close();

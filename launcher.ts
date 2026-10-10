@@ -1370,6 +1370,12 @@ export class Launcher {
               return await this.rejectUnsafeExistingLaunch(profileId, "live-browser relay restoration", error);
             }
           }
+          let nativeSessionRestored = false;
+          if (profile.engine === "firefox" && !await this.hasPageTargets(profileId)) {
+            const tabs = opts.restoreLastSession === false ? [] : this.closedFirefoxTabs(profileId, existing) ?? [];
+            await this.navigate(currentWs, startupUrls.length ? startupUrls : tabs, true);
+            nativeSessionRestored = !startupUrls.length && tabs.length > 0;
+          }
           this.log(
             trackedProc
               ? `profile ${profileId} already running on port ${existing.debugPort}`
@@ -1379,7 +1385,7 @@ export class Launcher {
           return {
             ws: currentWs,
             port: existing.debugPort,
-            nativeSessionRestored: false,
+            nativeSessionRestored,
           };
         }
       }
@@ -2629,6 +2635,7 @@ export class Launcher {
   }
 
   private async confirmPersistedLaunchStopped(profileId: string, launch: LaunchInfo): Promise<boolean> {
+    if (launch.engine === "firefox") return this.confirmLaunchStopped(profileId, launch);
     if (this.hostPlatform !== "linux" || !this.readProcessSnapshotFn) return true;
     const proof = this.persistedGroupProof(launch);
     return !!proof && await this.confirmLaunchStopped(profileId, launch, proof);
@@ -2811,7 +2818,7 @@ export class Launcher {
             teardownConfirmed = await this.confirmLaunchStopped(profileId, launch, undefined, true);
           }
         } else if (forceState.process === "dead") {
-          if (requiresLinuxProof && !linuxProof) {
+          if (requiresLinuxProof && !linuxProof && launch.engine !== "firefox") {
             this.log(`stop ${profileId}: pre-patch Linux tree cannot be anchored after its root disappeared; retaining ownership`);
           } else {
             teardownConfirmed = await this.confirmLaunchStopped(profileId, launch, linuxProof ?? undefined);

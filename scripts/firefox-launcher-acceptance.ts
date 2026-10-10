@@ -577,7 +577,7 @@ export default async ({ context, inputs }) => {
         while (JSON.stringify((await status()).pageTargets.map(page => page.url)) !== JSON.stringify(tabs) && Date.now() < deadline) await Bun.sleep(50);
         assert.deepEqual((await status()).pageTargets.map(page => page.url), tabs, "native tabs finish navigation before close");
         await callFirefoxOwner(owner, "page", { kind: "scripts", scripts: [
-          `() => { localStorage.setItem('native-close', '${close}'); document.cookie = 'native-close=${close}; Max-Age=86400; path=/'; }`,
+          `(() => { localStorage.setItem('native-close', '${close}'); document.cookie = 'native-close=${close}; Max-Age=86400; path=/'; })()`,
         ] });
       }
       if (close === "reduced") {
@@ -596,7 +596,7 @@ export default async ({ context, inputs }) => {
         else await closeNativeFirefoxWindow(nativeLaunch.pid);
         await waitForNativeFirefoxClose(nativeCloseId);
         assert.deepEqual(localLauncher.closedFirefoxTabs(nativeCloseId, nativeLaunch), tabs, "native close saves current ordered tabs before managed cleanup");
-        assert.equal(await localLauncher.stop(nativeCloseId), true, "Launcher confirms native close cleanup");
+        if (close !== "window") assert.equal(await localLauncher.stop(nativeCloseId), true, "Launcher confirms native close cleanup");
       }
       assert.deepEqual(localLauncher.closedFirefoxTabs(nativeCloseId, nativeLaunch), tabs, "cleanup does not erase native-close tabs");
       await localLauncher.start(nativeCloseId, [], { autoNavigate: false, headless: false });
@@ -605,7 +605,7 @@ export default async ({ context, inputs }) => {
       assert.deepEqual(reopenedStatus.pageTargets.map(page => page.url).filter(url => /^https?:/.test(url)), tabs, "native close then reopen preserves exact URL order and duplicates");
       if (tabs.length) {
         const values = await callFirefoxOwner(reopenedOwner, "page", { kind: "scripts", scripts: [
-          "() => ({ storage: localStorage.getItem('native-close'), cookie: document.cookie })",
+          "({ storage: localStorage.getItem('native-close'), cookie: document.cookie })",
         ] }) as Array<{ storage: string; cookie: string }>;
         assert.equal(values[0]!.storage, close, "native reopen keeps fresh Local Storage");
         assert.ok(values[0]!.cookie.includes(`native-close=${close}`), "native reopen keeps cookies");
