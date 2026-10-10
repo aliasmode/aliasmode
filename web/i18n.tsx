@@ -19,10 +19,29 @@ function isKnownLanguage(value: unknown): value is string {
   return typeof value === "string" && Object.hasOwn(catalogs, value);
 }
 
+/** Pick the first bundled locale that matches the system's preferred languages:
+ *  exact tag first ("zh-CN"), then the primary language ("zh", "zh-Hans-CN" → "zh-CN"). */
+export function detectLanguage(preferred: readonly string[], known: readonly string[]): string | null {
+  for (const tag of preferred) {
+    const exact = known.find((lang) => lang.toLowerCase() === tag.toLowerCase());
+    if (exact) return exact;
+  }
+  for (const tag of preferred) {
+    const primary = tag.split("-")[0]!.toLowerCase();
+    const match = known.find((lang) => lang.split("-")[0]!.toLowerCase() === primary);
+    if (match) return match;
+  }
+  return null;
+}
+
 export function readLanguage(): string {
   try {
     const saved = localStorage.getItem(LANGUAGE_KEY);
     if (isKnownLanguage(saved)) return saved;
+  } catch {}
+  try {
+    const detected = detectLanguage(navigator.languages ?? [navigator.language], Object.keys(catalogs));
+    if (detected) return detected;
   } catch {}
   return FALLBACK_LANGUAGE;
 }
@@ -62,7 +81,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const [language, setLanguageState] = useState<string>(readLanguage);
   // The desktop shell serves the UI from a random loopback port each launch,
   // and localStorage is origin-scoped, so a saved language never survives a
-  // restart in localStorage alone. Hydrate from the server-persisted value.
+  // restart in localStorage alone. Hydrate from the server-persisted value;
+  // null means the user never chose, so the system-language default stands.
   const hydratedRef = useRef(false);
   useEffect(() => {
     if (hydratedRef.current) return;

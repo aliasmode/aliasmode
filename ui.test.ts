@@ -4674,10 +4674,10 @@ test("shell-language round-trips through the server and rejects invalid tags", a
   const paths = { root } as any;
   const call = (req: Request) => handleUiRequest(req, {} as any, s, null, { paths });
 
-  // Default is English when nothing is stored.
+  // Nothing stored yet: null, so the UI follows the system language.
   let res = await call(new Request("http://x/ui/api/shell-language"));
   expect(res!.status).toBe(200);
-  expect(await res!.json()).toEqual({ language: "en-US" });
+  expect(await res!.json()).toEqual({ language: null });
 
   // Store Chinese, read it back.
   res = await call(new Request("http://x/ui/api/shell-language", {

@@ -120,11 +120,11 @@ export async function fetchAppMode(): Promise<AppModeConfig> {
 /** Shell UI language (BCP47 tag), persisted server-side: localStorage is
  *  origin-scoped and the desktop shell serves the UI from a random loopback
  *  port each launch. */
-export async function fetchShellLanguage(): Promise<string> {
+export async function fetchShellLanguage(): Promise<string | null> {
   const path = "/ui/api/shell-language";
   const response = await fetch(path);
   const body = await apiJson(response, path);
-  return typeof body.language === "string" && body.language.length > 0 ? body.language : "en-US";
+  return typeof body.language === "string" && body.language.length > 0 ? body.language : null;
 }
 
 export async function saveShellLanguage(language: string): Promise<void> {

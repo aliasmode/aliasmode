@@ -350,16 +350,17 @@ function shellLanguagePath(paths?: StatePaths): string | null {
   return join(paths.root, "shell.json");
 }
 
-export function readShellLanguage(paths?: StatePaths): string {
+/** The saved shell language, or null when the user never chose one (the UI then follows the system language). */
+export function readShellLanguage(paths?: StatePaths): string | null {
   try {
     const file = shellLanguagePath(paths);
-    if (!file) return "en-US";
+    if (!file) return null;
     const raw = JSON.parse(readFileSync(file, "utf8")) as { language?: unknown };
     if (typeof raw.language === "string" && SHELL_LANGUAGE_PATTERN.test(raw.language)) return raw.language;
   } catch {
-    // Missing or corrupt file: fall back to English.
+    // Missing or corrupt file: nothing chosen yet.
   }
-  return "en-US";
+  return null;
 }
 
 export function writeShellLanguage(paths: StatePaths | undefined, language: string): void {

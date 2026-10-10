@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { availableLanguages, languageNativeName, translate } from "./i18n.tsx";
+import { availableLanguages, detectLanguage, languageNativeName, translate } from "./i18n.tsx";
 import enUS from "./locales/en-US.json";
 import zhCN from "./locales/zh-CN.json";
 
@@ -52,4 +52,14 @@ test("availableLanguages lists bundled locales with native names", () => {
   expect(languageNativeName("en-US")).toBe("English");
   expect(languageNativeName("zh-CN")).toBe("简体中文");
   expect(languageNativeName("xx-YY")).toBe("xx-YY");
+});
+
+test("detectLanguage matches the system language exactly, then by primary tag", () => {
+  const known = ["en-US", "zh-CN", "ru-RU"];
+  expect(detectLanguage(["zh-CN", "en"], known)).toBe("zh-CN");
+  expect(detectLanguage(["zh-Hans-CN", "en-GB"], known)).toBe("zh-CN");
+  expect(detectLanguage(["ru"], known)).toBe("ru-RU");
+  expect(detectLanguage(["en-GB", "zh"], known)).toBe("en-US");
+  expect(detectLanguage(["fr-FR", "de"], known)).toBeNull();
+  expect(detectLanguage([], known)).toBeNull();
 });
