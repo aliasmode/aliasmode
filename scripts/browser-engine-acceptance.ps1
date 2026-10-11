@@ -1,4 +1,4 @@
-param([Parameter(Mandatory = $true)][string]$Root)
+param([Parameter(Mandatory = $true)][string]$Root, [switch]$AllowInternet)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:RUNNER_OS -ne 'Windows') { throw 'This comparison requires a disposable Windows runner' }
@@ -36,7 +36,8 @@ Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled True
 $outsideLoopback = @('0.0.0.0-126.255.255.255', '128.0.0.0-255.255.255.255', '::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
 $rules = @()
 $index = 0
-foreach ($binary in Get-ChildItem (Join-Path $Root 'browsers') -Recurse -File -Filter '*.exe') {
+# Detector runs must reach the public detector pages, so they skip these rules.
+foreach ($binary in $(if ($AllowInternet) { @() } else { Get-ChildItem (Join-Path $Root 'browsers') -Recurse -File -Filter '*.exe' })) {
     $name = "BrowserAcceptance-$env:GITHUB_RUN_ID-$index"
     New-NetFirewallRule -Name $name -DisplayName $name -Direction Outbound -Action Block -Enabled True -Profile Any -Program $binary.FullName -RemoteAddress $outsideLoopback | Out-Null
     $rule = Get-NetFirewallRule -Name $name
@@ -57,7 +58,8 @@ New-Item -ItemType Directory -Path $evidence | Out-Null
     verifiedArtifacts = $verified
     firewallProfiles = $profiles
     browserOutboundRules = $rules
-    limitation = 'Program-specific egress rules, not an offline VM or physical-GPU qualification.'
+    internetAllowed = [bool]$AllowInternet
+    limitation = $(if ($AllowInternet) { 'Public internet from a datacenter IP with no physical GPU.' } else { 'Program-specific egress rules, not an offline VM or physical-GPU qualification.' })
 } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $evidence 'setup.json') -Encoding utf8
 "BROWSER_ACCEPTANCE_ROOT=$Root" | Add-Content $env:GITHUB_ENV
 Write-Host 'Windows browser payloads are hash-checked and ready for local tests.'

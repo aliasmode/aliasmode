@@ -21,6 +21,10 @@ on:
         description: Run only the standalone Windows browser comparison, without app builds.
         type: boolean
         default: false
+      browser_detectors:
+        description: With browser_acceptance, visit public bot-detector pages instead of the local checks.
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -44,7 +48,7 @@ jobs:
     name: Native Windows browser comparison
     if: github.event_name == 'workflow_dispatch' && inputs.browser_acceptance == true
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 50
     permissions:
       contents: read
     steps:
@@ -56,11 +60,21 @@ jobs:
           node-version: 22.23.2
       - name: Download and verify pinned browser payloads
         shell: pwsh
+        env:
+          ALLOW_INTERNET: ${{ inputs.browser_detectors }}
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP "browser-acceptance-${env:GITHUB_RUN_ID}-${env:GITHUB_RUN_ATTEMPT}"
-          & .\scripts\browser-engine-acceptance.ps1 -Root $root
+          & .\scripts\browser-engine-acceptance.ps1 -Root $root -AllowInternet:($env:ALLOW_INTERNET -eq 'true')
+      - name: Visit public bot-detector pages
+        if: inputs.browser_detectors == true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & node .\scripts\browser-engine-detectors.cjs $env:BROWSER_ACCEPTANCE_ROOT "${env:GITHUB_RUN_ID}-${env:GITHUB_RUN_ATTEMPT}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run local native Windows browser checks
+        if: inputs.browser_detectors != true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
