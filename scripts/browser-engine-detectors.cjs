@@ -29,9 +29,10 @@ const SITES = [
   {id: 'creepjs', url: 'https://abrahamjuliot.github.io/creepjs/', wait: 40000, verdict: /headless|stealth|lies|bot|trust|crowd|blocked/i},
   {id: 'sannysoft', url: 'https://bot.sannysoft.com/', wait: 25000, verdict: /webdriver|chrome|permissions|plugins|languages|webgl|broken|failed|missing/i},
   {id: 'browserscan', url: 'https://www.browserscan.net/bot-detection', wait: 35000, verdict: /normal|robot|bot|abnormal|webdriver|cdp|headless|automat|result/i},
-  {id: 'botd', url: 'https://fingerprintjs.github.io/BotD/main/', wait: 25000, verdict: /bot|kind|detect/i},
+  {id: 'fingerprint-bot', url: 'https://fingerprint.com/products/bot-detection/', wait: 30000, verdict: /bot|automat|detected|good|bad|not a/i},
   {id: 'deviceandbrowserinfo', url: 'https://deviceandbrowserinfo.com/are_you_a_bot', wait: 30000, verdict: /bot|human|cdp|automat|headless|inconsisten/i},
-  {id: 'pixelscan', url: 'https://pixelscan.net/', wait: 45000, verdict: /consisten|automat|bot|mask|spoof|proxy|detected|fingerprint|timezone|language/i},
+  {id: 'pixelscan-fingerprint', url: 'https://pixelscan.net/fingerprint-check', wait: 45000, verdict: /consisten|automat|bot|mask|spoof|proxy|detected|timezone|language|location|hardware|webgl|canvas|font/i},
+  {id: 'pixelscan-bot', url: 'https://pixelscan.net/bot-check', wait: 35000, verdict: /bot|automat|detected|human|webdriver|cdp|headless|passed|failed/i},
 ];
 const EXTRACT = `(() => {
   const text = (document.body && document.body.innerText || '').slice(0, 40000);
