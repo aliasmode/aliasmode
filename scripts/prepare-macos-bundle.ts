@@ -1,7 +1,7 @@
 /** Stages the macOS arm64 bundle inputs: sidecar, agent helper, AliasMode Firefox and the agent runtime. */
 import { createHash } from "node:crypto";
-import { cpSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, cpSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { sha256File } from "../browser-install.ts";
 import { FIREFOX_RUNTIME_VERSION, firefoxBuildForHost, installFirefox } from "../firefox-install.ts";
 import { installSourceNode } from "../source-runtime.ts";
@@ -34,6 +34,40 @@ const PYTHON_WHEELS = [
     sha256: "f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548",
   },
 ];
+
+// Thin and universal Mach-O files, as the first four bytes on disk.
+const MACH_O_MAGIC = new Set(["cffaedfe", "cefaedfe", "cafebabe", "cafebabf"]);
+
+function isMachO(path: string): boolean {
+  const header = Buffer.alloc(4);
+  const file = openSync(path, "r");
+  try {
+    return readSync(file, header, 0, 4, 0) === 4 && MACH_O_MAGIC.has(header.toString("hex"));
+  } finally {
+    closeSync(file);
+  }
+}
+
+/**
+ * Signs the programs that Tauri does not sign, because they are bundle resources: each Mach-O file,
+ * then each nested bundle, innermost first. Apple notarization needs the hardened runtime and a
+ * timestamp on all of them. Without APPLE_SIGNING_IDENTITY the signature is ad-hoc.
+ */
+export async function signResourcePrograms(tauri: string, roots: string[], execute = run): Promise<void> {
+  const identity = process.env.APPLE_SIGNING_IDENTITY || "-";
+  const entries = roots.flatMap((root) => readdirSync(root, { recursive: true, withFileTypes: true }))
+    .map((entry) => ({ entry, path: join(entry.parentPath, entry.name) }));
+  const innermostFirst = (paths: string[]) => paths.sort((a, b) => b.split(sep).length - a.split(sep).length);
+  const programs = entries.filter(({ entry, path }) => entry.isFile() && isMachO(path)).map(({ path }) => path);
+  const bundles = entries.filter(({ entry }) => entry.isDirectory() && /\.(app|framework)$/.test(entry.name)).map(({ path }) => path);
+  for (const path of [...innermostFirst(programs), ...innermostFirst(bundles)]) {
+    await execute([
+      "codesign", "--force", "--sign", identity, "--options", "runtime",
+      "--entitlements", join(tauri, "macos", "entitlements.plist"),
+      ...(identity === "-" ? [] : ["--timestamp"]), path,
+    ]);
+  }
+}
 
 async function run(command: string[]): Promise<void> {
   const child = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" });
@@ -86,14 +120,15 @@ export async function prepareMacosBundle(cwd = process.cwd()): Promise<void> {
   const build = firefoxBuildForHost();
   const firefox = await installFirefox({ cwd: staging, writeEnv: false });
   renameSync(resolve(firefox.path, ...build.executablePath.split("/").map(() => "..")), firefoxRoot);
-  // The published engine bundle has no resource seal, so macOS reports its signature as broken.
-  // Seal it after the pinned hashes passed; the packaged hash below is the sealed executable.
-  await run(["codesign", "--force", "--deep", "--sign", "-", join(firefoxRoot, "AliasMode.app")]);
-  const firefoxSha256 = await sha256File(join(firefoxRoot, build.executablePath));
 
   cpSync(await installSourceNode(staging), join(playwrightRoot, "node", "node"));
   await installPython(staging, playwrightRoot);
   stageAgentRuntime(cwd, playwrightRoot);
+
+  // The published engine bundle has no resource seal, so macOS reports its signature as broken.
+  // Sign after the pinned hashes passed; the packaged hash below is the signed executable.
+  await signResourcePrograms(tauri, [firefoxRoot, playwrightRoot]);
+  const firefoxSha256 = await sha256File(join(firefoxRoot, build.executablePath));
 
   const metadata = {
     firefox: {
