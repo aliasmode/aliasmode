@@ -127,7 +127,8 @@ jobs:
           echo "hardened runtime on $programs programs"
           test "$programs" -ge 20
           # An ad-hoc signature has no notarization, so Gatekeeper is expected to reject it.
-          spctl --assess --type execute -vv "$app" || true
+          # No verbose output: for a signed build it would put the certificate name in this public log.
+          spctl --assess --type execute "$app" || true
       - name: Notarize the disk image and verify that macOS accepts the app
         if: env.APPLE_SIGNING_IDENTITY != ''
         shell: bash
