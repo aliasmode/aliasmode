@@ -23,6 +23,8 @@ jobs:
     uses: ./.github/workflows/macos-desktop.yml
     with:
       ref: ${{ inputs.tag }}
+      sign: true
+    secrets: inherit
 
   publish:
     name: Publish macOS assets
