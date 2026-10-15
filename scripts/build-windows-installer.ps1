@@ -22,7 +22,18 @@ $bundleDirectory = Join-Path $repoRoot "src-tauri\target\release\bundle\nsis"
 $sourcePath = Join-Path $bundleDirectory $sourceName
 if (Test-Path -LiteralPath $sourcePath) { Remove-Item -LiteralPath $sourcePath -Force }
 
-$tauriArguments = @("tauri", "build", "--bundles", "nsis", "--no-sign")
+$tauriArguments = @("tauri", "build", "--bundles", "nsis")
+if ($env:ALIASMODE_WINDOWS_SIGNING -ceq "on") {
+  # Tauri signs the app, the sidecars, the uninstaller and the installer with Azure Artifact Signing.
+  $signConfig = Join-Path ([IO.Path]::GetTempPath()) "aliasmode-authenticode.conf.json"
+  @{ bundle = @{ windows = @{ signCommand = @{
+    cmd = "pwsh"
+    args = @("-NoProfile", "-NonInteractive", "-File", (Join-Path $PSScriptRoot "windows-authenticode-sign.ps1"), "%1")
+  } } } } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $signConfig -Encoding utf8
+  $tauriArguments += @("--config", $signConfig)
+} else {
+  $tauriArguments += "--no-sign"
+}
 if ($flavorName -eq "slim") {
   $tauriArguments += @("--config", "src-tauri/tauri.updater.conf.json")
 }

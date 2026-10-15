@@ -143,6 +143,7 @@ jobs:
       firefox_executable_sha256: ${{ steps.provenance.outputs.firefox_executable_sha256 }}
       cache_hit: ${{ steps.cache_status.outputs.cache_hit }}
       product_key: ${{ steps.provenance.outputs.product_key }}
+      signing: ${{ steps.provenance.outputs.signing }}
       source: ${{ steps.provenance.outputs.source }}
       version: ${{ steps.provenance.outputs.version }}
     steps:
@@ -160,6 +161,8 @@ jobs:
         env:
           FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_firefox.outputs.archive_sha256 }}
           FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_firefox.outputs.executable_sha256 }}
+          # Authenticode signing runs only for a dispatched run on main, after the owner turns it on.
+          WINDOWS_SIGNING: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.WINDOWS_SIGNING == 'on' && 'on' || 'off' }}
         run: |
           $ErrorActionPreference = "Stop"
           $baselineUrl = "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip"
@@ -209,6 +212,7 @@ jobs:
             "rust-toolchain=$activeToolchain"
             "runner=$env:RUNNER_OS/$env:RUNNER_ARCH/$env:ImageOS/$env:ImageVersion"
             "build-recipe=windows-nsis-zlib-v1"
+            "authenticode=$env:WINDOWS_SIGNING"
           ) -join "`n"
           $externalIdentity = @(
             "node-win-x64=22.23.2:1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
@@ -239,6 +243,7 @@ jobs:
           "firefox_archive_sha256=$env:FIREFOX_ARCHIVE_SHA256" | Add-Content $env:GITHUB_OUTPUT
           "firefox_executable_sha256=$env:FIREFOX_EXECUTABLE_SHA256" | Add-Content $env:GITHUB_OUTPUT
           "product_key=$productKey" | Add-Content $env:GITHUB_OUTPUT
+          "signing=$env:WINDOWS_SIGNING" | Add-Content $env:GITHUB_OUTPUT
           "source=$env:GITHUB_SHA" | Add-Content $env:GITHUB_OUTPUT
           "version=$version" | Add-Content $env:GITHUB_OUTPUT
       - name: Restore exact Windows candidate cache
@@ -629,6 +634,12 @@ jobs:
     needs: windows_cache
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
+    # Signing uses the protected release environment (main only) and GitHub's OIDC token.
+    environment: ${{ needs.windows_cache.outputs.signing == 'on' && 'windows-release' || '' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -652,6 +663,20 @@ jobs:
           name: aliasmode-firefox-windows-x64
           path: artifacts/firefox
       - run: bun install --frozen-lockfile
+      - name: Sign in to Azure for Artifact Signing
+        if: needs.windows_cache.outputs.signing == 'on'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Prepare Artifact Signing
+        if: needs.windows_cache.outputs.signing == 'on'
+        shell: pwsh
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+        run: '& .\scripts\windows-artifact-signing-setup.ps1'
       - name: Prepare bundle with verified official baseline Bun
         shell: pwsh
         env:
@@ -678,9 +703,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
       - name: Build full offline installer with zlib
         shell: pwsh
+        env:
+          ALIASMODE_WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\build-windows-installer.ps1 -Flavor full -OutputDirectory ".\artifacts\windows-full"
+          & .\scripts\windows-authenticode-check.ps1 -Signing $env:ALIASMODE_WINDOWS_SIGNING `
+            -Path ".\artifacts\windows-full\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
       - name: Create and verify full-package manifest
         shell: pwsh
         env:
@@ -722,6 +752,12 @@ jobs:
     needs: [windows_cache, windows_prepare]
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
+    # Signing uses the protected release environment (main only) and GitHub's OIDC token.
+    environment: ${{ needs.windows_cache.outputs.signing == 'on' && 'windows-release' || '' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -736,6 +772,20 @@ jobs:
           workspaces: src-tauri -> target
           cache-on-failure: true
       - run: bun install --frozen-lockfile
+      - name: Sign in to Azure for Artifact Signing
+        if: needs.windows_cache.outputs.signing == 'on'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Prepare Artifact Signing
+        if: needs.windows_cache.outputs.signing == 'on'
+        shell: pwsh
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
+        run: '& .\scripts\windows-artifact-signing-setup.ps1'
       - uses: actions/download-artifact@v4
         with:
           name: aliasmode-windows-prepared
@@ -759,9 +809,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
       - name: Build slim updater installer with zlib (--config src-tauri/tauri.updater.conf.json)
         shell: pwsh
+        env:
+          ALIASMODE_WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory ".\artifacts\windows-slim"
+          & .\scripts\windows-authenticode-check.ps1 -Signing $env:ALIASMODE_WINDOWS_SIGNING `
+            -Path ".\artifacts\windows-slim\AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
       - name: Create and verify slim-package manifest
         shell: pwsh
         env:
