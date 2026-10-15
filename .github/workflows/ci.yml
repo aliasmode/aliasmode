@@ -634,12 +634,8 @@ jobs:
     needs: windows_cache
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
-    # Signing uses the protected release environment (main only) and GitHub's OIDC token.
+    # The Certum signing login lives in the protected release environment (main only).
     environment: ${{ needs.windows_cache.outputs.signing == 'on' && 'windows-release' || '' }}
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -663,20 +659,6 @@ jobs:
           name: aliasmode-firefox-windows-x64
           path: artifacts/firefox
       - run: bun install --frozen-lockfile
-      - name: Sign in to Azure for Artifact Signing
-        if: needs.windows_cache.outputs.signing == 'on'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Prepare Artifact Signing
-        if: needs.windows_cache.outputs.signing == 'on'
-        shell: pwsh
-        env:
-          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
-          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
-        run: '& .\scripts\windows-artifact-signing-setup.ps1'
       - name: Prepare bundle with verified official baseline Bun
         shell: pwsh
         env:
@@ -703,14 +685,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "baseline bundle preparation failed" }
       - name: Build full offline installer with zlib
         shell: pwsh
-        env:
-          ALIASMODE_WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
-          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\build-windows-installer.ps1 -Flavor full -OutputDirectory ".\artifacts\windows-full"
-          & .\scripts\windows-authenticode-check.ps1 -Signing $env:ALIASMODE_WINDOWS_SIGNING `
-            -Path ".\artifacts\windows-full\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+      - name: Sign and check the full installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = ".\artifacts\windows-full\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          if ($env:WINDOWS_SIGNING -ceq "on") { & .\scripts\windows-authenticode-sign.ps1 $installer }
+          & .\scripts\windows-authenticode-check.ps1 -Path $installer -Signing $env:WINDOWS_SIGNING
       - name: Create and verify full-package manifest
         shell: pwsh
         env:
@@ -752,12 +741,8 @@ jobs:
     needs: [windows_cache, windows_prepare]
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
-    # Signing uses the protected release environment (main only) and GitHub's OIDC token.
+    # The Certum signing login lives in the protected release environment (main only).
     environment: ${{ needs.windows_cache.outputs.signing == 'on' && 'windows-release' || '' }}
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -772,20 +757,6 @@ jobs:
           workspaces: src-tauri -> target
           cache-on-failure: true
       - run: bun install --frozen-lockfile
-      - name: Sign in to Azure for Artifact Signing
-        if: needs.windows_cache.outputs.signing == 'on'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Prepare Artifact Signing
-        if: needs.windows_cache.outputs.signing == 'on'
-        shell: pwsh
-        env:
-          ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.ARTIFACT_SIGNING_ENDPOINT }}
-          ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.ARTIFACT_SIGNING_ACCOUNT }}
-        run: '& .\scripts\windows-artifact-signing-setup.ps1'
       - uses: actions/download-artifact@v4
         with:
           name: aliasmode-windows-prepared
@@ -809,14 +780,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "prepared-input extraction failed" }
       - name: Build slim updater installer with zlib (--config src-tauri/tauri.updater.conf.json)
         shell: pwsh
-        env:
-          ALIASMODE_WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
-          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory ".\artifacts\windows-slim"
-          & .\scripts\windows-authenticode-check.ps1 -Signing $env:ALIASMODE_WINDOWS_SIGNING `
-            -Path ".\artifacts\windows-slim\AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+      - name: Sign and check the slim installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = ".\artifacts\windows-slim\AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          if ($env:WINDOWS_SIGNING -ceq "on") { & .\scripts\windows-authenticode-sign.ps1 $installer }
+          & .\scripts\windows-authenticode-check.ps1 -Path $installer -Signing $env:WINDOWS_SIGNING
       - name: Create and verify slim-package manifest
         shell: pwsh
         env:

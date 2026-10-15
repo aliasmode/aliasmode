@@ -1,18 +1,28 @@
-# Signs one file with Azure Artifact Signing. Tauri runs it for each program it bundles.
-# windows-artifact-signing-setup.ps1 sets ACS_DLIB and ACS_METADATA; the Azure CLI login provides the access.
+# Signs one Windows program with the company's Certum cloud certificate (SimplySign), through the
+# pinned ssign tool. CERTUM_EMAIL and CERTUM_OTP come from the protected release environment.
 param([Parameter(Mandatory = $true, Position = 0)][string]$Path)
 
 $ErrorActionPreference = "Stop"
-foreach ($name in @("ACS_DLIB", "ACS_METADATA")) {
-  $value = [Environment]::GetEnvironmentVariable($name)
-  if ([string]::IsNullOrWhiteSpace($value) -or -not (Test-Path -LiteralPath $value -PathType Leaf)) {
-    throw "$name does not point to a file"
-  }
+$version = "0.1.7"
+$expectedSha256 = "4ee5389a74ddbeb67e18fe8c8b963734ca13de7b24beffbe430c3f427ecc5e40"
+foreach ($name in @("CERTUM_EMAIL", "CERTUM_OTP")) {
+  if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name is missing" }
 }
-$signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-  Sort-Object { [version]$_.Directory.Parent.Name } |
-  Select-Object -Last 1
-if ($null -eq $signtool) { throw "signtool.exe was not found" }
-# No verbose output: it would print the certificate subject (the company name) in a public log.
-& $signtool.FullName sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $env:ACS_DLIB /dmdf $env:ACS_METADATA $Path
-if ($LASTEXITCODE -ne 0) { throw "signtool exited with code $LASTEXITCODE for $Path" }
+$zip = Join-Path $env:RUNNER_TEMP "ssign-$version.zip"
+$root = Join-Path $env:RUNNER_TEMP "ssign-$version"
+Invoke-WebRequest "https://github.com/Le-Syl21/ssign/releases/download/v$version/ssign-windows-x86_64.zip" -OutFile $zip
+if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSha256) {
+  throw "ssign download SHA-256 mismatch"
+}
+Expand-Archive -LiteralPath $zip -DestinationPath $root -Force
+$ssign = Join-Path $root "ssign.exe"
+if (-not (Test-Path -LiteralPath $ssign -PathType Leaf)) { throw "the ssign archive has no ssign.exe" }
+
+# The full and slim builds can sign in the same 30-second window with the same one-time code.
+# If Certum refuses the reused code, the next window gives a new one.
+for ($attempt = 1; $attempt -le 2; $attempt++) {
+  & $ssign $Path
+  if ($LASTEXITCODE -eq 0) { return }
+  if ($attempt -eq 1) { Start-Sleep -Seconds 35 }
+}
+throw "ssign could not sign $Path"
