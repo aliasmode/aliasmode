@@ -143,6 +143,7 @@ jobs:
       firefox_executable_sha256: ${{ steps.provenance.outputs.firefox_executable_sha256 }}
       cache_hit: ${{ steps.cache_status.outputs.cache_hit }}
       product_key: ${{ steps.provenance.outputs.product_key }}
+      signing: ${{ steps.provenance.outputs.signing }}
       source: ${{ steps.provenance.outputs.source }}
       version: ${{ steps.provenance.outputs.version }}
     steps:
@@ -160,6 +161,8 @@ jobs:
         env:
           FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_firefox.outputs.archive_sha256 }}
           FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_firefox.outputs.executable_sha256 }}
+          # Authenticode signing runs only for a dispatched run on main, after the owner turns it on.
+          WINDOWS_SIGNING: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && vars.WINDOWS_SIGNING == 'on' && 'on' || 'off' }}
         run: |
           $ErrorActionPreference = "Stop"
           $baselineUrl = "https://github.com/oven-sh/bun/releases/download/bun-v1.2.21/bun-windows-x64-baseline.zip"
@@ -209,6 +212,7 @@ jobs:
             "rust-toolchain=$activeToolchain"
             "runner=$env:RUNNER_OS/$env:RUNNER_ARCH/$env:ImageOS/$env:ImageVersion"
             "build-recipe=windows-nsis-zlib-v1"
+            "authenticode=$env:WINDOWS_SIGNING"
           ) -join "`n"
           $externalIdentity = @(
             "node-win-x64=22.23.2:1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
@@ -239,6 +243,7 @@ jobs:
           "firefox_archive_sha256=$env:FIREFOX_ARCHIVE_SHA256" | Add-Content $env:GITHUB_OUTPUT
           "firefox_executable_sha256=$env:FIREFOX_EXECUTABLE_SHA256" | Add-Content $env:GITHUB_OUTPUT
           "product_key=$productKey" | Add-Content $env:GITHUB_OUTPUT
+          "signing=$env:WINDOWS_SIGNING" | Add-Content $env:GITHUB_OUTPUT
           "source=$env:GITHUB_SHA" | Add-Content $env:GITHUB_OUTPUT
           "version=$version" | Add-Content $env:GITHUB_OUTPUT
       - name: Restore exact Windows candidate cache
@@ -629,6 +634,8 @@ jobs:
     needs: windows_cache
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
+    # The Certum signing login lives in the protected release environment (main only).
+    environment: ${{ needs.windows_cache.outputs.signing == 'on' && 'windows-release' || '' }}
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -681,6 +688,18 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\build-windows-installer.ps1 -Flavor full -OutputDirectory ".\artifacts\windows-full"
+      - name: Sign and check the full installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = ".\artifacts\windows-full\AliasMode_$($env:WINDOWS_VERSION)_x64-offline-setup.exe"
+          if ($env:WINDOWS_SIGNING -ceq "on") { & .\scripts\windows-authenticode-sign.ps1 $installer }
+          & .\scripts\windows-authenticode-check.ps1 -Path $installer -Signing $env:WINDOWS_SIGNING
       - name: Create and verify full-package manifest
         shell: pwsh
         env:
@@ -722,6 +741,8 @@ jobs:
     needs: [windows_cache, windows_prepare]
     if: needs.windows_cache.outputs.cache_hit == 'false'
     runs-on: windows-latest
+    # The Certum signing login lives in the protected release environment (main only).
+    environment: ${{ needs.windows_cache.outputs.signing == 'on' && 'windows-release' || '' }}
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
@@ -762,6 +783,18 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & .\scripts\build-windows-installer.ps1 -Flavor slim -OutputDirectory ".\artifacts\windows-slim"
+      - name: Sign and check the slim installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING: ${{ needs.windows_cache.outputs.signing }}
+          WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
+          CERTUM_EMAIL: ${{ secrets.CERTUM_EMAIL }}
+          CERTUM_OTP: ${{ secrets.CERTUM_OTP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = ".\artifacts\windows-slim\AliasMode_$($env:WINDOWS_VERSION)_x64-setup.exe"
+          if ($env:WINDOWS_SIGNING -ceq "on") { & .\scripts\windows-authenticode-sign.ps1 $installer }
+          & .\scripts\windows-authenticode-check.ps1 -Path $installer -Signing $env:WINDOWS_SIGNING
       - name: Create and verify slim-package manifest
         shell: pwsh
         env:
