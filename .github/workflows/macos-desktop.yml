@@ -59,6 +59,16 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --verify --deep --strict --verbose=2 "$app/Contents/Resources/firefox/AliasMode.app"
           codesign --display --verbose=2 "$app" 2>&1 | grep -E "Signature|flags|Identifier"
+          # Apple notarization needs the hardened runtime on each program in the bundle.
+          programs=0
+          while IFS= read -r -d '' file; do
+            [[ "$(file -b "$file")" == *Mach-O* ]] || continue
+            programs=$((programs + 1))
+            flags="$(codesign --display --verbose=4 "$file" 2>&1 | sed -n 's/.*flags=\([^ ]*\).*/\1/p')" || true
+            [[ "$flags" == *runtime* ]] || { echo "no hardened runtime ($flags): $file"; exit 1; }
+          done < <(find "$app" -type f -print0)
+          echo "hardened runtime on $programs programs"
+          test "$programs" -ge 20
           # An ad-hoc signature has no notarization, so Gatekeeper is expected to reject it.
           spctl --assess --type execute -vv "$app" || true
       - name: Package the release files
