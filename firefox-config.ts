@@ -9,7 +9,7 @@ import webglDataPath from "./node_modules/camoufox-js/dist/data-files/webgl_data
 import { Database } from "bun:sqlite";
 import type { ChromiumRuntime, FirefoxProfileConfig, JsonValue, Profile, ProfileEngine } from "./types.ts";
 import fonts from "camoufox-js/dist/mappings/fonts.config.js";
-import { platformFromUA, seedFraction } from "./fingerprint.ts";
+import { deterministicSeed, launchWindowSize, platformFromUA, seedFraction } from "./fingerprint.ts";
 import { localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
 
 const generatorAssetInputs = [
@@ -75,11 +75,30 @@ export function createFirefoxProfileConfig(
   platformOs: PersonaOs = "windows",
   seed?: number,
 ): FirefoxProfileConfig {
-  const fingerprint = generateFingerprint([screenWidth, screenHeight], {
-    browsers: ["firefox"],
-    operatingSystems: [platformOs],
-  });
+  // The chosen size is the screen. The window opens at the app's usual fraction of it.
+  const windowSize = launchWindowSize(screenWidth, screenHeight);
+  const options = { browsers: ["firefox" as const], operatingSystems: [platformOs] };
+  let fingerprint;
+  try {
+    fingerprint = generateFingerprint(windowSize, {
+      ...options,
+      screen: { minWidth: screenWidth, maxWidth: screenWidth, minHeight: screenHeight, maxHeight: screenHeight },
+    });
+  } catch {
+    // No Firefox sample has this screen size. The size is set below instead.
+    fingerprint = generateFingerprint(windowSize, options);
+  }
   const config = fromBrowserforge(fingerprint, FIREFOX_UA_MAJOR_VERSION);
+  // The generator can also drop a screen it cannot match: keep its taskbar on the chosen size.
+  for (const [axis, size] of [["width", screenWidth], ["height", screenHeight]] as const) {
+    const avail = axis === "width" ? "screen.availWidth" : "screen.availHeight";
+    const generated = config[`screen.${axis}`];
+    if (typeof generated === "number" && typeof config[avail] === "number") {
+      config[avail] = Math.max(1, size - Math.max(0, generated - config[avail]));
+    }
+    config[`screen.${axis}`] = size;
+  }
+  fitFirefoxWindow(config);
   if (typeof config.timezone !== "string" || !config.timezone.trim()) {
     config.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   }
@@ -89,6 +108,50 @@ export function createFirefoxProfileConfig(
     runtimeVersion: FIREFOX_RUNTIME_VERSION,
     config,
   });
+}
+
+/**
+ * Keep inner <= outer <= available <= screen and the window inside the screen, as upstream
+ * Camoufox does (clamp_window_dimensions/clamp_window_position). The engine sizes the real
+ * window from these values, so a window larger than its own screen is an impossible geometry.
+ */
+export function fitFirefoxWindow(config: Record<string, JsonValue>): void {
+  const value = (key: string) => typeof config[key] === "number" ? config[key] as number : undefined;
+  for (const [axis, position] of [["Width", "window.screenX"], ["Height", "window.screenY"]] as const) {
+    const screen = value(`screen.${axis.toLowerCase()}`);
+    const avail = value(`screen.avail${axis}`);
+    if (screen && avail && avail > screen) config[`screen.avail${axis}`] = screen;
+    const cap = value(`screen.avail${axis}`) ?? screen;
+    const outer = value(`window.outer${axis}`);
+    const inner = value(`window.inner${axis}`);
+    if (outer && cap && outer > cap) {
+      config[`window.outer${axis}`] = cap;
+      if (inner) config[`window.inner${axis}`] = Math.max(1, cap - Math.max(0, outer - inner));
+    }
+    const fittedOuter = value(`window.outer${axis}`);
+    const fittedInner = value(`window.inner${axis}`);
+    if (fittedInner && fittedOuter && fittedInner > fittedOuter) config[`window.inner${axis}`] = fittedOuter;
+    const at = value(position);
+    if (at !== undefined && screen && fittedOuter) config[position] = Math.max(0, Math.min(at, screen - fittedOuter));
+  }
+}
+
+/** Engine 152 reads these as uint. Upstream 156 removed canvas:seed and fonts:spacing_seed. */
+const ENGINE_152_SEED_KEYS = ["canvas:seed", "audio:seed", "fonts:spacing_seed"] as const;
+
+/**
+ * The config one launch sends to the engine. Seeds and the window fit are derived here and
+ * never stored, so saved Local and Cloud profiles keep their exact shape.
+ */
+export function firefoxLaunchConfig(profile: Profile): Record<string, JsonValue> {
+  const firefox = profile.firefox!;
+  const config = { ...firefox.config };
+  // Without seeds every profile on one computer draws the same canvas, audio and text widths.
+  if (firefox.runtimeVersion.startsWith("152.")) {
+    for (const key of ENGINE_152_SEED_KEYS) config[key] ??= deterministicSeed(`${profile.fingerprintSeed}:${key}`);
+  }
+  fitFirefoxWindow(config);
+  return config;
 }
 
 function configuredFirefoxLocale(config: Record<string, JsonValue>): string | undefined {

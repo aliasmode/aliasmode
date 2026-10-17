@@ -3,6 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { firefoxLaunchConfig } from "./firefox-config.ts";
 import { Launcher, BrowserLaunchError, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
 import { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
@@ -96,7 +97,10 @@ test("Firefox launches one saved persona and retains ownership across manager re
   const opened = await f.launcher.start(f.profile.id);
   expect(opened.ws.startsWith("firefox://")).toBe(true);
   expect(opened.ws).not.toContain("a".repeat(64));
-  expect(f.config()).toEqual(f.profile.firefox!.config);
+  // The launch adds the per-profile seeds; the saved identity stays as it was.
+  expect(f.config()).toEqual(firefoxLaunchConfig(f.profile));
+  expect(f.config()).toHaveProperty("canvas:seed");
+  expect(f.store.getProfile(f.profile.id)!.firefox!.config).not.toHaveProperty("canvas:seed");
   expect(f.store.getLaunch(f.profile.id)?.engine).toBe("firefox");
   const restarted = new Launcher(f.options);
   expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false });
@@ -136,7 +140,7 @@ test.each([false, true])("legacy Firefox keeps its old digest until confirmed cl
   const completed = f.store.getProfile(legacy.id)!;
   expect(completed.locale).toBe("en-US");
   expect(completed.firefox!.config.fonts).toBeArray();
-  expect(f.config()).toEqual(completed.firefox!.config);
+  expect(f.config()).toEqual(firefoxLaunchConfig(completed));
   expect(f.store.getLaunch(legacy.id)!.personaDigest).not.toBe(oldDigest);
   expect(f.launches()).toBe(2);
   expect(await restarted.stop(legacy.id)).toBe(true);
@@ -252,7 +256,7 @@ test("Firefox supports Darwin arm64 and Linux x64 personas without changing save
     const f = fixture(platform, arch);
     const savedConfig = structuredClone(f.profile.firefox!);
     const opened = await f.launcher.start(f.profile.id);
-    expect(f.config()).toEqual(savedConfig.config);
+    expect(f.config()).toEqual(firefoxLaunchConfig(f.profile));
     expect(f.store.getLaunch(f.profile.id)?.firefoxOwner).toMatchObject({ pid: 201, browserPid: 202 });
     const restarted = new Launcher(f.options);
     expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false });

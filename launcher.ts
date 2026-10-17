@@ -31,7 +31,10 @@ import type { ProfileStore } from "./store.ts";
 import type { AutofillBridge } from "./autofill-bridge.ts";
 import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-extension.ts";
 import { allocatePort } from "./ports.ts";
-import { deriveFingerprintFlags, isMobileUserAgent, platformFromUA, proxyServerFlag } from "./fingerprint.ts";
+import {
+  DEFAULT_WINDOW_HEIGHT_SCALE, DEFAULT_WINDOW_WIDTH_SCALE, deriveFingerprintFlags, isMobileUserAgent, launchWindowSize,
+  platformFromUA, proxyServerFlag,
+} from "./fingerprint.ts";
 export { isMobileUserAgent } from "./fingerprint.ts";
 import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "./search-provider.ts";
@@ -43,7 +46,7 @@ import { resolvePlaywrightRuntime, runPlaywrightWorker } from "./playwright-runt
 import { callFirefoxOwner, closeFirefoxOwner, firefoxEndpoint, forgetFirefoxOwner, reserveFirefoxOwner, startFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
 import { isDeepStrictEqual } from "node:util";
-import { completeProfileFingerprint, FIREFOX_RUNTIME_VERSION } from "./firefox-config.ts";
+import { completeProfileFingerprint, FIREFOX_RUNTIME_VERSION, firefoxLaunchConfig } from "./firefox-config.ts";
 import {
   ALIASMODE_CHROMIUM_EXECUTABLE_SHA256,
   CLOAKBROWSER_MACOS_EXECUTABLE_SHA256,
@@ -754,8 +757,8 @@ export class Launcher {
     this.portProbeFn = opts.portProbe;
     this.baseArgs = opts.baseArgs ?? [];
     // Clamp to a sane range so a stray config can't produce a 0-size or oversized window.
-    this.windowWidthScale = Math.min(1.0, Math.max(0.2, opts.windowWidthScale ?? 0.65));
-    this.windowHeightScale = Math.min(1.0, Math.max(0.2, opts.windowHeightScale ?? 0.9));
+    this.windowWidthScale = Math.min(1.0, Math.max(0.2, opts.windowWidthScale ?? DEFAULT_WINDOW_WIDTH_SCALE));
+    this.windowHeightScale = Math.min(1.0, Math.max(0.2, opts.windowHeightScale ?? DEFAULT_WINDOW_HEIGHT_SCALE));
     // Wrapped in an arrow so the helper's diagnostics reach THIS launcher's log
     // (this.log is assigned below; the call happens long after construction).
     this.spawnFn = opts.spawn
@@ -1028,8 +1031,7 @@ export class Launcher {
     // above, so it doesn't change the fingerprint (it just looks like a normal
     // non-maximized window, which real users have). The WIDTH floor (800) stops a profile
     // that drew a small seed resolution (e.g. 1366 -> 683px) from opening as an unusable sliver.
-    const winW = Math.max(800, Math.round(profile.screenWidth * this.windowWidthScale));
-    const winH = Math.max(480, Math.round(profile.screenHeight * this.windowHeightScale));
+    const [winW, winH] = launchWindowSize(profile.screenWidth, profile.screenHeight, this.windowWidthScale, this.windowHeightScale);
     const args = [
       `--remote-debugging-port=${port}`,
       `--remote-debugging-address=127.0.0.1`,
@@ -2031,7 +2033,7 @@ export class Launcher {
         : profile.proxy ? { server: `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port}` } : undefined;
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
-        userDataDir, config: profile.firefox!.config, proxy, headless,
+        userDataDir, config: firefoxLaunchConfig(profile), proxy, headless,
         sessionGeneration: `${launch.debugPort}:${launch.startedAt}`,
         timeoutMs: this.cdpReadyTimeoutMs,
       }, {

@@ -57,6 +57,23 @@ export function normalizeProfileHardware(value: unknown, engine: ProfileEngine, 
   return { cores };
 }
 
+/** Default launch window as fractions of the profile's screen: a tall two-thirds-width window. */
+export const DEFAULT_WINDOW_WIDTH_SCALE = 0.65;
+export const DEFAULT_WINDOW_HEIGHT_SCALE = 0.9;
+
+/**
+ * The OS window size for a screen. The floors stop a small screen (e.g. 1024 -> 666px)
+ * from opening as an unusable sliver.
+ */
+export function launchWindowSize(
+  screenWidth: number,
+  screenHeight: number,
+  widthScale = DEFAULT_WINDOW_WIDTH_SCALE,
+  heightScale = DEFAULT_WINDOW_HEIGHT_SCALE,
+): [number, number] {
+  return [Math.max(800, Math.round(screenWidth * widthScale)), Math.max(480, Math.round(screenHeight * heightScale))];
+}
+
 /** Parse AdsPower "1680*1050" (or "1680x1050") → width/height; default 1920x1080. */
 export function parseResolution(res: string): { width: number; height: number } {
   const m = (res ?? "").trim().match(/^(\d{3,5})\s*[*x×]\s*(\d{3,5})$/i);

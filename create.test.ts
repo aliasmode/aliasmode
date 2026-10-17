@@ -55,17 +55,12 @@ test("buildNewProfile generates and fixes a selected Windows identity for Firefo
   expect(p.firefox!.runtimeVersion).toBe("152.0.4-beta.30");
   expect(p.firefox!.config["navigator.platform"]).toBe("Win32");
   expect(p.firefox!.config["navigator.userAgent"]).toContain("Firefox/152.0");
-  expect(p.firefox!.config["window.outerWidth"]).toBe(1440);
-  expect(p.firefox!.config["window.outerHeight"]).toBe(900);
-  const configScreenWidth = p.firefox!.config["screen.width"];
-  const configScreenHeight = p.firefox!.config["screen.height"];
+  const config = p.firefox!.config as Record<string, number>;
+  expect([config["screen.width"], config["screen.height"]]).toEqual([1440, 900]);
+  expect([p.screenWidth, p.screenHeight]).toEqual([1440, 900]);
+  expect(config["window.outerWidth"]).toBeLessThanOrEqual(Math.min(936, config["screen.availWidth"]!));
+  expect(config["window.outerHeight"]).toBeLessThanOrEqual(Math.min(810, config["screen.availHeight"]!));
   const configTimezone = p.firefox!.config.timezone;
-  expect(configScreenWidth).toBeNumber();
-  expect(configScreenHeight).toBeNumber();
-  expect([p.screenWidth, p.screenHeight]).toEqual([
-    configScreenWidth as number,
-    configScreenHeight as number,
-  ]);
   expect(p.timezone).toBe(configTimezone as string);
   expect(p.timezone).toBeString();
   expect(p.timezone).not.toBe("");
