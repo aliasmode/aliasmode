@@ -44,8 +44,8 @@ test("an existing Firefox window never exceeds its available screen", () => {
     "window.outerWidth": 1920, "window.outerHeight": 1080,
   }));
   expect(tall).toMatchObject({
-    "screen.width": 1920, "screen.height": 1080, "screen.availHeight": 1032,
-    "window.outerWidth": 1920, "window.outerHeight": 1032, "window.screenX": 0, "window.screenY": 0,
+    "screen.width": 1920, "screen.height": 1080, "screen.availHeight": 1032, "screen.availLeft": 1920,
+    "window.outerWidth": 1920, "window.outerHeight": 1032, "window.screenX": 1920, "window.screenY": 0,
   });
   // A wide screen keeps its stored size; only the window's position comes back inside it.
   const wide = firefoxLaunchConfig(profile(2, {
@@ -57,6 +57,21 @@ test("an existing Firefox window never exceeds its available screen", () => {
     "screen.width": 5120, "screen.height": 1440,
     "window.outerWidth": 1920, "window.outerHeight": 1080, "window.screenX": 3200, "window.screenY": 180,
   });
+});
+
+test("a Firefox window on a second monitor stays on that monitor's available area", () => {
+  const monitor = {
+    "screen.width": 1920, "screen.height": 1080, "screen.availWidth": 1920, "screen.availHeight": 1040,
+    "screen.availLeft": 2176, "screen.availTop": 40, "window.outerWidth": 1248, "window.outerHeight": 972,
+  };
+  const at = (screenX: number, screenY: number) => {
+    const config: Record<string, JsonValue> = { ...monitor, "window.screenX": screenX, "window.screenY": screenY };
+    fitFirefoxWindow(config);
+    return [config["window.screenX"], config["window.screenY"]];
+  };
+  expect(at(2297, 60)).toEqual([2297, 60]);
+  expect(at(3000, 200)).toEqual([2848, 108]);
+  expect(at(100, 0)).toEqual([2176, 40]);
 });
 
 test("fitting a Firefox window keeps the browser frame between outer and inner sizes", () => {
@@ -78,10 +93,22 @@ test.each([
   expect([config["screen.width"], config["screen.height"]]).toEqual([width, height]);
   expect(config["screen.availWidth"]).toBeLessThanOrEqual(width);
   expect(config["screen.availHeight"]).toBeLessThanOrEqual(height);
+  expect(config["screen.availWidth"]! < width || config["screen.availHeight"]! < height).toBe(true);
   expect(config["window.outerWidth"]).toBeLessThanOrEqual(config["screen.availWidth"]!);
   expect(config["window.outerHeight"]).toBeLessThanOrEqual(config["screen.availHeight"]!);
-  expect(config["window.screenX"]).toBeGreaterThanOrEqual(0);
-  expect(config["window.screenY"]).toBeGreaterThanOrEqual(0);
-  expect(config["window.screenX"]! + config["window.outerWidth"]!).toBeLessThanOrEqual(width);
-  expect(config["window.screenY"]! + config["window.outerHeight"]!).toBeLessThanOrEqual(height);
+  const left = config["screen.availLeft"] ?? 0;
+  const top = config["screen.availTop"] ?? 0;
+  expect(config["window.screenX"]).toBeGreaterThanOrEqual(left);
+  expect(config["window.screenY"]).toBeGreaterThanOrEqual(top);
+  expect(config["window.screenX"]! + config["window.outerWidth"]!).toBeLessThanOrEqual(left + config["screen.availWidth"]!);
+  expect(config["window.screenY"]! + config["window.outerHeight"]!).toBeLessThanOrEqual(top + config["screen.availHeight"]!);
+});
+
+test("a new Firefox profile always keeps a taskbar, also where the generator drew none", () => {
+  // Every drawn Windows 2560x1440 sample reported avail == screen before upstream's taskbar fix.
+  for (let seed = 1; seed <= 6; seed++) {
+    const config = createFirefoxProfileConfig(2560, 1440, "windows", seed).config as Record<string, number>;
+    expect(config["screen.availWidth"]! < 2560 || config["screen.availHeight"]! < 1440).toBe(true);
+    expect(config["window.outerHeight"]).toBeLessThanOrEqual(config["screen.availHeight"]!);
+  }
 });

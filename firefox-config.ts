@@ -98,6 +98,11 @@ export function createFirefoxProfileConfig(
     }
     config[`screen.${axis}`] = size;
   }
+  // Every desktop keeps a taskbar, dock or panel visible, so a screen without one is a headless
+  // tell (CreepJS "noTaskbar"). Give it upstream's size (fix_screen_no_taskbar).
+  if (config["screen.availWidth"] === screenWidth && config["screen.availHeight"] === screenHeight) {
+    config["screen.availHeight"] = screenHeight - (platformOs === "windows" ? 40 : platformOs === "macos" ? 25 : 27);
+  }
   fitFirefoxWindow(config);
   if (typeof config.timezone !== "string" || !config.timezone.trim()) {
     config.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -111,9 +116,9 @@ export function createFirefoxProfileConfig(
 }
 
 /**
- * Keep inner <= outer <= available <= screen and the window inside the screen, as upstream
- * Camoufox does (clamp_window_dimensions/clamp_window_position). The engine sizes the real
- * window from these values, so a window larger than its own screen is an impossible geometry.
+ * Keep inner <= outer <= available <= screen and the window inside the available area, as
+ * upstream Camoufox does (clamp_window_dimensions/clamp_window_position). The engine sizes the
+ * real window from these values, so a window larger than its own screen is an impossible geometry.
  */
 export function fitFirefoxWindow(config: Record<string, JsonValue>): void {
   const value = (key: string) => typeof config[key] === "number" ? config[key] as number : undefined;
@@ -131,8 +136,13 @@ export function fitFirefoxWindow(config: Record<string, JsonValue>): void {
     const fittedOuter = value(`window.outer${axis}`);
     const fittedInner = value(`window.inner${axis}`);
     if (fittedInner && fittedOuter && fittedInner > fittedOuter) config[`window.inner${axis}`] = fittedOuter;
+    // The position is page-visible only. It stays inside the available area of the window's own
+    // screen, which a multi-monitor layout places at availLeft/availTop.
     const at = value(position);
-    if (at !== undefined && screen && fittedOuter) config[position] = Math.max(0, Math.min(at, screen - fittedOuter));
+    const origin = value(axis === "Width" ? "screen.availLeft" : "screen.availTop") ?? 0;
+    if (at !== undefined && cap && fittedOuter) {
+      config[position] = Math.max(origin, Math.min(at, origin + cap - fittedOuter));
+    }
   }
 }
 
