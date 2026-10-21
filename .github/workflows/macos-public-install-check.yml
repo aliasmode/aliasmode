@@ -1,0 +1,59 @@
+name: macOS public install check
+
+# TEMPORARY (branch check/macos-intel-release): installs the published release on both Mac
+# types the way a user does, and opens the published .dmg. Never merged.
+on:
+  push:
+    branches: [check/macos-intel-release]
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, dmg: x64 }
+          - { runner: macos-15, dmg: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Install with the public command, open the app and quit
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -m
+          # The same command the download page gives, without --version: the installer finds the release itself.
+          curl -fsSL https://raw.githubusercontent.com/aliasmode/aliasmode/main/scripts/install-macos.sh | bash
+          app=/Applications/AliasMode.app
+          file "$app/Contents/MacOS/aliasmode"
+          "$app/Contents/MacOS/aliasmode-mcp" version
+          data="$HOME/Library/Application Support/com.aliasmode.desktop"
+          mkdir -p "$data"
+          printf '{"version":1,"mode":"local","localAnalytics":false}\n' > "$data/config.json"
+          open -n "$app"
+          for attempt in $(seq 1 120); do [[ -f "$data/agent-runtime.json" ]] && break; sleep 1; done
+          jq '{appVersion, desktopPid}' "$data/agent-runtime.json"
+          port="$(jq -er .port "$data/agent-runtime.json")"
+          curl -fsS "http://127.0.0.1:$port/ui/api/health" | jq -e '.ok == true'
+          desktop="$(jq -er .desktopPid "$data/agent-runtime.json")"
+          osascript -e "tell application \"System Events\" to tell (first application process whose unix id is $desktop) to set frontmost to true" \
+            -e 'tell application "System Events" to keystroke "q" using command down'
+          for attempt in $(seq 1 60); do kill -0 "$desktop" 2>/dev/null || break; sleep 1; done
+          ! kill -0 "$desktop" 2>/dev/null
+      - name: Open the published disk image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(/Applications/AliasMode.app/Contents/MacOS/aliasmode-mcp version | jq -er .version)"
+          name="AliasMode_${version}_${{ matrix.dmg }}.dmg"
+          curl -fsSL -o "$RUNNER_TEMP/$name" "https://github.com/aliasmode/aliasmode/releases/download/v$version/$name"
+          curl -fsSL "https://github.com/aliasmode/aliasmode/releases/download/v$version/SHA256SUMS-macos.txt" | grep " $name\$" > "$RUNNER_TEMP/sum.txt"
+          (cd "$RUNNER_TEMP" && shasum -a 256 -c sum.txt)
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/mnt" "$RUNNER_TEMP/$name"
+          ls -la "$RUNNER_TEMP/mnt"
+          codesign --verify --deep --strict "$RUNNER_TEMP/mnt/AliasMode.app"
+          file "$RUNNER_TEMP/mnt/AliasMode.app/Contents/MacOS/aliasmode"
+          hdiutil detach "$RUNNER_TEMP/mnt" || hdiutil detach -force "$RUNNER_TEMP/mnt"
