@@ -69,9 +69,8 @@ export function parseDesktopUpdateResult(value: unknown): DesktopUpdateResult | 
 }
 
 // The recovery hints name what each system offers: the Start menu and offline installer, or Applications and the install command.
+// Each hint is a full sentence per platform so translations never mix languages.
 const MAC = typeof navigator !== "undefined" && /Macintosh/.test(navigator.userAgent);
-const REOPEN = MAC ? "open it from the Applications folder" : "launch it from Windows Start";
-const REINSTALL = MAC ? "run the install command again" : "run the full offline installer without uninstalling";
 
 export function describeDesktopUpdateResult(result: DesktopUpdateResult, t: (key: string, values?: Record<string, string>) => string): DesktopUpdateResultSummary {
   if (result.state === "succeeded") {
@@ -85,7 +84,9 @@ export function describeDesktopUpdateResult(result: DesktopUpdateResult, t: (key
     return {
       tone: "warning",
       title: t("AliasMode {version} is installed.", { version: result.version }),
-      detail: t("The automatic restart was not confirmed. Close AliasMode, then {reopen}.", { reopen: REOPEN }),
+      detail: MAC
+        ? t("The automatic restart was not confirmed. Close AliasMode, then open it from the Applications folder.")
+        : t("The automatic restart was not confirmed. Close AliasMode, then launch it from Windows Start."),
     };
   }
 
@@ -94,8 +95,12 @@ export function describeDesktopUpdateResult(result: DesktopUpdateResult, t: (key
     : result.reason === "installerLaunch"
       ? t("AliasMode {expectedVersion} could not start. AliasMode {fromVersion} remains installed.", { expectedVersion: result.expectedVersion, fromVersion: result.fromVersion })
       : result.reason === "startupMismatch"
-        ? t("AliasMode could not verify {expectedVersion} at the expected install location. Close AliasMode, then {reopen}.", { expectedVersion: result.expectedVersion, reopen: REOPEN })
-        : t("AliasMode could not confirm {expectedVersion}. If the installed version did not change, {reinstall}.", { expectedVersion: result.expectedVersion, reinstall: REINSTALL });
+        ? MAC
+          ? t("AliasMode could not verify {expectedVersion} at the expected install location. Close AliasMode, then open it from the Applications folder.", { expectedVersion: result.expectedVersion })
+          : t("AliasMode could not verify {expectedVersion} at the expected install location. Close AliasMode, then launch it from Windows Start.", { expectedVersion: result.expectedVersion })
+        : MAC
+          ? t("AliasMode could not confirm {expectedVersion}. If the installed version did not change, run the install command again.", { expectedVersion: result.expectedVersion })
+          : t("AliasMode could not confirm {expectedVersion}. If the installed version did not change, run the full offline installer without uninstalling.", { expectedVersion: result.expectedVersion });
   return {
     tone: "error",
     title: t("The last update did not finish."),
