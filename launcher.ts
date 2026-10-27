@@ -29,6 +29,7 @@ import {
   statSync,
   statfsSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dlopen, ptr } from "bun:ffi";
 import type { CookieRecord, LaunchInfo, Profile, ProxySpec } from "./types.ts";
@@ -884,6 +885,8 @@ export class Launcher {
    */
   private verifiedExternal = new Map<string, VerifiedExternalLaunch>();
   private relays = new Map<string, ProxyRelay>(); // auth-injecting proxy relay per running authed-proxy profile
+  /** Post-stop cache deletes still running, so a relaunch never races its own cache dirs. */
+  private cacheClears = new Map<string, Promise<void>>();
   /** Proxied browser websocket generations verified by this manager process. */
   /** Full profile + launch generations certified by this manager process. */
   private certifiedLaunches = new Map<string, string>();
@@ -1911,6 +1914,7 @@ export class Launcher {
     // and the rotated session never saves. Resetting only the corrupt prefs lets Chromium
     // regenerate defaults; the login session is untouched (cookies live in
     // Default/Network/Cookies, the cookie-encryption key in the root Local State).
+    await this.cacheClears.get(profileId);
     await this.repairCorruptPrefs(profileId);
 
     // …and clear the OTHER leftovers an unclean exit leaves behind, which repairCorruptPrefs
@@ -3239,7 +3243,9 @@ export class Launcher {
           this.log(`stop ${profileId}: waiting for in-flight start to settle`);
           await starting.catch(() => {});
         }
-        return await this.doStop(profileId, expected);
+        const stopped = await this.doStop(profileId, expected);
+        await this.cacheClears.get(profileId);
+        return stopped;
       })
       .finally(() => {
         if (this.stopsInFlight.get(profileId) === promise) {
@@ -3824,15 +3830,22 @@ export class Launcher {
 
   private clearPostStopCache(profileId: string): void {
     const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_CACHE_DIRS : POST_STOP_CACHE_DIRS;
-    const { cleared } = this.clearCacheDirs(profileId, dirs, "post-stop cache cleanup");
-    if (cleared) this.log(`${profileId}: rebuildable disk caches cleared after confirmed stop`);
+    const startedAt = Date.now();
+    const clearing: Promise<void> = this.clearCacheDirs(profileId, dirs, "post-stop cache cleanup")
+      .then(({ cleared }) => {
+        if (cleared) this.log(`${profileId}: rebuildable disk caches cleared after confirmed stop (${Date.now() - startedAt}ms)`);
+      })
+      .finally(() => {
+        if (this.cacheClears.get(profileId) === clearing) this.cacheClears.delete(profileId);
+      });
+    this.cacheClears.set(profileId, clearing);
   }
 
-  private clearCacheDirs(
+  private async clearCacheDirs(
     profileId: string,
     cacheDirs: readonly string[],
     op: string,
-  ): { cleared: boolean } {
+  ): Promise<{ cleared: boolean }> {
     // The id arrives from an unauthenticated local HTTP body. Only clear caches
     // for a KNOWN profile, and only inside the data root — a "../" id must never
     // let a request rm cache directories elsewhere on disk.
@@ -3847,7 +3860,9 @@ export class Launcher {
       const dir = join(base, rel);
       try {
         if (existsSync(dir)) {
-          rmSync(dir, { recursive: true, force: true });
+          // Async: this thread also runs every browser's proxy relay, and a
+          // synchronous delete of a large cache stalls all of their traffic.
+          await rm(dir, { recursive: true, force: true });
           cleared = true;
         }
       } catch {
@@ -4168,7 +4183,10 @@ export class Launcher {
         this.log(`reconcileOrphans retained ${launch.profileId}: exact Linux tree disappearance was not proven`);
         continue;
       }
-      if (this.forgetLaunch(launch.profileId, currentLaunch)) cleared++;
+      if (this.forgetLaunch(launch.profileId, currentLaunch)) {
+        cleared++;
+        await this.cacheClears.get(launch.profileId);
+      }
     }
     if (cleared > 0) this.log(`reconcileOrphans cleared ${cleared} dead launch record(s)`);
     return { cleared };
