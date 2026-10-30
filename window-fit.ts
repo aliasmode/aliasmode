@@ -120,7 +120,8 @@ function near(a: WindowBounds, b: ScreenArea): boolean {
  * again, so there is no resize loop.
  */
 export function watchWindowFit(ws: string, area: ScreenArea, opts: WindowFitOptions = {}): { stop(): void } {
-  const intervalMs = opts.intervalMs ?? 250;
+  // Each tick is a CDP round trip on AliasMode's main thread, once per browser.
+  const intervalMs = opts.intervalMs ?? 2_000;
   const Socket = opts.WebSocket ?? WebSocket;
   const socket = new Socket(ws);
   const pending = new Map<number, (result: any) => void>();
