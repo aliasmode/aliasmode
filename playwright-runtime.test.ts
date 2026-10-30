@@ -124,6 +124,71 @@ test("worker request uses stdin and keeps endpoint and secrets off argv", async 
   expect(JSON.parse(input).payload).toEqual(payload);
 });
 
+/** A worker that stays alive until `finish` answers with `result`. */
+function gatedWorker(result: unknown) {
+  let finish!: () => void;
+  let resolveExit!: (code: number) => void;
+  const exited = new Promise<number>((resolve) => { resolveExit = resolve; });
+  const stdout = new ReadableStream<Uint8Array>({
+    start(controller) {
+      finish = () => {
+        controller.enqueue(new TextEncoder().encode(success(result)));
+        controller.close();
+        resolveExit(0);
+      };
+    },
+  });
+  return { worker: { stdin: { write() {}, end() {} }, stdout, stderr: textStream(""), exited, kill() {} }, finish: () => finish() };
+}
+
+test("at most eight workers run at once and later callers start in order", async () => {
+  const started: number[] = [];
+  const gates: Array<() => void> = [];
+  const runs = Array.from({ length: 10 }, (_, index) => runPlaywrightWorker<number>("page", { endpoint: "ws://browser" }, {
+    spawn() {
+      started.push(index);
+      const gated = gatedWorker(index);
+      gates.push(gated.finish);
+      return gated.worker;
+    },
+  }));
+  await Bun.sleep(5);
+  expect(started).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  gates[0]!();
+  await Bun.sleep(5);
+  expect(started).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+  for (let i = 1; i < 10; i++) {
+    for (let wait = 0; wait < 100 && !gates[i]; wait++) await Bun.sleep(1);
+    gates[i]!();
+  }
+  expect(await Promise.all(runs)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+});
+
+test("a background capture is refused as busy while six workers run, without spawning", async () => {
+  const gates: Array<() => void> = [];
+  const busyWork = Array.from({ length: 6 }, () => runPlaywrightWorker("page", { endpoint: "ws://browser" }, {
+    spawn() {
+      const gated = gatedWorker(null);
+      gates.push(gated.finish);
+      return gated.worker;
+    },
+  }));
+  await Bun.sleep(5);
+  let spawned = false;
+  const background = await runPlaywrightWorker("session-capture", { endpoint: "ws://browser" }, {
+    background: true,
+    spawn() { spawned = true; return fakeWorker(success("bundle")); },
+  }).then(() => null, (error) => error);
+  expect(background).toMatchObject({ code: "busy" });
+  expect(spawned).toBe(false);
+  for (const finish of gates) finish();
+  await Promise.all(busyWork);
+  expect(await runPlaywrightWorker<string>("session-capture", { endpoint: "ws://browser" }, {
+    background: true,
+    spawn: () => fakeWorker(success("bundle")),
+  })).toBe("bundle");
+});
+
 test("worker timeout kills only the worker and waits for its exit", async () => {
   let killed = false;
   let resolveExit!: (code: number) => void;
