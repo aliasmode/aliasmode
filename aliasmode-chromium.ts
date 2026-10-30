@@ -255,6 +255,8 @@ export interface AliasmodeChromiumDeps {
   extract?: (archive: string, directory: string) => Promise<void>;
   hashFile?: (path: string) => Promise<string>;
   sleep?: (ms: number) => Promise<void>;
+  /** Prepare the downloaded runtime's Windows sandbox file access. */
+  run?: (command: string[]) => Promise<void>;
 }
 
 async function run(command: string[]): Promise<void> {
@@ -386,11 +388,32 @@ function partialName(spec: PinnedRuntime): string {
   return `.${spec.dir}.${spec.archiveSha256.slice(0, 16)}.part`;
 }
 
+// A launch checks the runtime twice. Grant access once per directory instance in this
+// process, but prepare it again after a reinstall replaces the directory at the same path.
+const windowsAccessPrepared = new Map<string, string>();
+
+async function prepareWindowsAccess(target: string, deps: AliasmodeChromiumDeps, platform: NodeJS.Platform): Promise<void> {
+  if (platform !== "win32") return;
+  const directory = realpathSync(target);
+  const stat = statSync(directory);
+  const identity = [stat.dev, stat.ino, stat.birthtimeMs].join(":");
+  if (windowsAccessPrepared.get(directory) === identity) return;
+  try {
+    // The main process can read AppData while an AppContainer GPU process cannot.
+    // Grant only read/execute on the verified runtime, including its DLLs and resources.
+    await (deps.run ?? run)(["icacls.exe", directory, "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"]);
+  } catch (error) {
+    throw new Error(`Could not prepare Windows sandbox read/execute access for ${directory}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  windowsAccessPrepared.set(directory, identity);
+}
+
 async function install(spec: PinnedRuntime, root: string, deps: AliasmodeChromiumDeps, platform: NodeJS.Platform): Promise<string> {
   const hashFile = deps.hashFile ?? sha256File;
   const target = join(root, spec.dir);
   const executable = join(target, spec.executable);
   if (existsSync(executable) && await hashFile(executable) === spec.executableSha256) {
+    await prepareWindowsAccess(target, deps, platform);
     return executable;
   }
 
@@ -423,6 +446,7 @@ async function install(spec: PinnedRuntime, root: string, deps: AliasmodeChromiu
     }
     rmSync(target, { recursive: true, force: true });
     await renameWhenUnlocked(runtime, target);
+    await prepareWindowsAccess(target, deps, platform);
     return executable;
   } finally {
     rmSync(temp, { recursive: true, force: true });
