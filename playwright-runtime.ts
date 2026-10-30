@@ -44,7 +44,7 @@ export class PlaywrightWorkerError extends Error {
   override readonly name = "PlaywrightWorkerError";
 
   constructor(
-    readonly code: "invalid_request" | "invalid_response" | "operation_failed" | "timeout" | "runtime_unavailable",
+    readonly code: "invalid_request" | "invalid_response" | "operation_failed" | "timeout" | "runtime_unavailable" | "busy",
     message: string,
     readonly details?: PlaywrightWorkerErrorDetails,
   ) {
@@ -80,6 +80,33 @@ export interface PlaywrightWorkerOptions {
   timeoutMs?: number;
   runtimeRoot?: string;
   spawn?: (argv: string[]) => WorkerProcess;
+  /** A background capture fails with code "busy" instead of waiting for a free worker. */
+  background?: boolean;
+}
+
+// Every operation is a fresh Node process. With 60 browsers, 35-50 of them at once stalled the
+// AliasMode main thread (and so every browser's proxy relay) for minutes on Windows, while 2-18
+// ran without stalls. Callers queue for a worker; background captures never queue and leave two
+// workers free so browser starts and closes are not held up behind them.
+const MAX_LIVE_WORKERS = 8;
+const MAX_BACKGROUND_WORKERS = 6;
+let liveWorkers = 0;
+const workerWaiters: Array<() => void> = [];
+
+async function acquireWorker(background: boolean): Promise<void> {
+  const free = workerWaiters.length === 0 && liveWorkers < (background ? MAX_BACKGROUND_WORKERS : MAX_LIVE_WORKERS);
+  if (free) {
+    liveWorkers++;
+    return;
+  }
+  if (background) throw new PlaywrightWorkerError("busy", "Playwright workers are busy");
+  await new Promise<void>((resolve) => workerWaiters.push(resolve));
+}
+
+function releaseWorker(): void {
+  const next = workerWaiters.shift();
+  if (next) next();
+  else liveWorkers--;
 }
 
 export interface PlaywrightRuntimeResolutionOptions {
@@ -212,6 +239,19 @@ export async function runPlaywrightWorker<T>(
       throw error;
     }
   }
+  await acquireWorker(options.background === true);
+  try {
+    return await runAcquiredWorker<T>(operation, request, options);
+  } finally {
+    releaseWorker();
+  }
+}
+
+async function runAcquiredWorker<T>(
+  operation: PlaywrightWorkerOperation,
+  request: string,
+  options: PlaywrightWorkerOptions,
+): Promise<T> {
   const spawn = options.spawn ?? ((argv: string[]) => Bun.spawn(argv, {
     stdin: "pipe",
     stdout: "pipe",

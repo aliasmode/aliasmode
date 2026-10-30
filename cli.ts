@@ -443,7 +443,7 @@ function makeCloudBrowser(
     queue: () => pendingSync.queue(),
     accountId: () => connection.accountId(),
     deviceId: () => connection.deviceId(),
-    readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
+    readSession: (endpoint, captureSeed, options) => readSessionInSubprocess(endpoint, { ...options, captureSeed }),
     applySession: (endpoint, bundle, urls) =>
       applySessionToEndpoint(endpoint, bundle, urls, { log: (m) => console.log(`[aliasmode] ${m}`) }),
     log: (m) => console.log(`[aliasmode] ${m}`),

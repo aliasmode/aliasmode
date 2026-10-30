@@ -2023,6 +2023,37 @@ test("Cloud production timers arm the heartbeat, the window check and the storag
   state.store.close();
 });
 
+test("a background checkpoint refused as busy retries the change and logs no capture failure", async () => {
+  const storageDirty: Array<() => void> = [];
+  const state = setup({
+    storageCheckpoints: true,
+    checkpointDebounceMs: 5,
+    checkpointMinIntervalMs: 20,
+    watchPaths: ["local-storage"],
+    watchPath: (_path: string, onDirty: () => void) => {
+      storageDirty.push(onDirty);
+      return { close() {} };
+    },
+  });
+  const calls: unknown[] = [];
+  (state.coordinator as any).options.readSession = async (_endpoint: string, _seed: unknown, options?: unknown) => {
+    calls.push(options);
+    if (calls.length === 1) throw new PlaywrightWorkerError("busy", "Playwright workers are busy");
+    return JSON.stringify({ cookies: [], origins: [], tabs: ["https://x.com/home"] });
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  storageDirty[0]!();
+  for (let attempt = 0; attempt < 200 && calls.length < 2; attempt++) await Bun.sleep(5);
+
+  // The second capture came from the re-armed monitor, not from a new storage event.
+  expect(calls).toEqual([{ background: true }, { background: true }]);
+  expect(state.logs.some((line) => line.includes("Cloud session capture failed"))).toBe(false);
+  const diagnostics = (state.coordinator as any).diagnosticEvents.snapshot() as Array<{ type: string }>;
+  expect(diagnostics.some((event) => event.type === "checkpoint_capture_failed")).toBe(false);
+  await state.coordinator.close("profile1");
+});
+
 test("Cloud storage writes checkpoint the open tabs once per debounce and at most once per interval", async () => {
   const storageDirty: Array<() => void> = [];
   let watcherCloses = 0;
