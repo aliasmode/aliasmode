@@ -148,7 +148,7 @@ export interface CloudBrowserOptions {
   queue: () => PendingSyncQueue | undefined;
   accountId: () => string | undefined;
   deviceId: () => string | undefined;
-  readSession: (endpoint: string, captureSeed: SessionCaptureSeed) => Promise<string>;
+  readSession: (endpoint: string, captureSeed: SessionCaptureSeed, options?: { background?: boolean }) => Promise<string>;
   /** Restore the bundle and open startup pages over ONE CDP attach, then detach. */
   applySession: (endpoint: string, bundle: string, urls: readonly string[]) => Promise<void>;
   heartbeatMs?: number;
@@ -302,6 +302,10 @@ function newestParkedSessions(summaries: PendingCloseSummary[]): Map<string, Pen
     }
   }
   return parked;
+}
+
+function isWorkerBusy(error: unknown): boolean {
+  return error instanceof PlaywrightWorkerError && error.code === "busy";
 }
 
 function errorCode(error: unknown): string {
@@ -1477,6 +1481,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     endpoint: string,
     openTabsOnly = false,
     retry = false,
+    background = false,
   ): Promise<string> {
     const state = this.checkpointState(open, queue);
     const checkpoint = this.pendingCapturesForOpen(open, queue)
@@ -1496,8 +1501,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const read = async () => {
         const startedAt = performance.now();
         try {
-          return await this.options.readSession(endpoint, captureSeed);
+          return await this.options.readSession(endpoint, captureSeed, background ? { background } : undefined);
         } catch (error) {
+          // A skipped background capture is not a failure; the caller tries again later.
+          if (isWorkerBusy(error)) throw error;
           this.diagnosticEvents.record("checkpoint_capture_failed");
           this.log(`${open.profileId}: Cloud session capture failed (${errorCode(error)}, ${safeErrorType(error)}, stage=${captureFailureStage(error)}, elapsedMs=${Math.round(performance.now() - startedAt)})`);
           throw error;
@@ -1660,9 +1667,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
   }
 
-  private async refreshCheckpoint(open: PendingOpenSession, queue: PendingSyncQueue, openTabsOnly = false): Promise<void> {
+  /** Returns true when the capture was skipped because every Playwright worker was busy. */
+  private async refreshCheckpoint(open: PendingOpenSession, queue: PendingSyncQueue, openTabsOnly = false): Promise<boolean> {
     const launch = this.options.store.getLaunch(open.profileId);
-    if (!launch || !this.isExactRunningLaunch(open, launch)) return;
+    if (!launch || !this.isExactRunningLaunch(open, launch)) return false;
     try {
       await this.options.launcher.verifyRunningIdentity(open.profileId);
       const verified = this.options.store.getLaunch(open.profileId);
@@ -1673,8 +1681,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         current.registrationId !== open.registrationId ||
         current.cleanupMode ||
         !this.isExactRunningLaunch(current, verified)
-      ) return;
-      const sessionBundle = await this.captureSession(current, queue, verified.ws, openTabsOnly);
+      ) return false;
+      const sessionBundle = await this.captureSession(current, queue, verified.ws, openTabsOnly, false, true);
       await this.options.launcher.verifyRunningIdentity(open.profileId);
       const captured = this.options.store.getLaunch(open.profileId);
       const latest = queue.getOpen(open.profileId, open.accountId);
@@ -1684,12 +1692,14 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         latest.registrationId !== open.registrationId ||
         latest.cleanupMode ||
         !this.isExactRunningLaunch(latest, captured)
-      ) return;
+      ) return false;
       this.checkpointOpen(latest, queue, sessionBundle);
       await this.uploadCheckpoint(latest, queue);
-    } catch {
+    } catch (error) {
       // Keep the last durable checkpoint when a background capture is inconclusive.
+      return isWorkerBusy(error);
     }
+    return false;
   }
 
   private async cleanupRestoringOpen(
@@ -2440,7 +2450,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       const launch = this.options.store.getLaunch(profileId);
       if (!open || open.registrationId !== monitor.registrationId || open.cleanupMode || !launch
         || launch.debugPort !== monitor.debugPort || launch.startedAt !== monitor.startedAt) return;
-      await this.refreshCheckpoint(open, queue, true);
+      // Every worker was busy: keep the change pending so the re-arm below retries it.
+      if (await this.refreshCheckpoint(open, queue, true)) monitor.dirty = true;
     }).catch(() => {}).finally(() => {
       if (this.dirtyMonitors.get(profileId) !== monitor) return;
       monitor.lastCaptureAt = Date.now();
