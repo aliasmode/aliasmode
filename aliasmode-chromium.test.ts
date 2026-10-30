@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -34,6 +34,7 @@ import { ProfileStore } from "./store.ts";
 /** Fake archive whose files carry their pinned hashes by content. */
 function fakeRelease(options: { archiveHash?: string; executableHash?: string } = {}) {
   const downloads: string[] = [];
+  const commands: string[][] = [];
   const deps: AliasmodeChromiumDeps = {
     download: async (url, output) => {
       downloads.push(url);
@@ -46,8 +47,9 @@ function fakeRelease(options: { archiveHash?: string; executableHash?: string } 
       writeFileSync(join(root, "chrome.dll"), "dll");
     },
     hashFile: async (path) => readFileSync(path, "utf8"),
+    run: async (command) => { commands.push(command); },
   };
-  return { deps, downloads };
+  return { deps, downloads, commands };
 }
 
 test("installs AliasMode's own 155 build once, beside any earlier runtime", async () => {
@@ -72,6 +74,88 @@ test("installs AliasMode's own 155 build once, beside any earlier runtime", asyn
   expect(readdirSync(root).sort()).toEqual([...earlier, "chromium-155.0.8059.85-aliasmode.4"]);
 
   expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
+  expect(release.downloads).toHaveLength(1);
+  expect(release.commands).toEqual([
+    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"],
+  ]);
+});
+
+test("repairs a previously installed Windows runtime without downloading or changing its files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-chromium-"));
+  const executable = aliasmodeChromiumExecutable(root, "win32");
+  mkdirSync(dirname(executable), { recursive: true });
+  writeFileSync(executable, WINDOWS_155.executableSha256);
+  writeFileSync(join(dirname(executable), "chrome.dll"), "existing dll");
+  const release = fakeRelease();
+
+  expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
+  expect(release.downloads).toEqual([]);
+  expect(release.commands).toEqual([
+    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"],
+  ]);
+  expect(readFileSync(join(dirname(executable), "chrome.dll"), "utf8")).toBe("existing dll");
+  await ensureAliasmodeChromium(root, release.deps, "win32");
+  expect(release.commands).toHaveLength(1);
+});
+
+test("a Windows permission failure rejects the runtime and is retried without downloading it again", async () => {
+  for (const alreadyInstalled of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), "aliasmode-chromium-"));
+    const executable = aliasmodeChromiumExecutable(root, "win32");
+    if (alreadyInstalled) {
+      mkdirSync(dirname(executable), { recursive: true });
+      writeFileSync(executable, WINDOWS_155.executableSha256);
+    }
+    const release = fakeRelease();
+    let attempts = 0;
+    release.deps.run = async () => {
+      if (++attempts === 1) throw new Error("icacls.exe exited with code 5");
+    };
+    await expect(ensureAliasmodeChromium(root, release.deps, "win32")).rejects.toThrow("Windows sandbox read/execute access");
+    expect(readFileSync(executable, "utf8")).toBe(WINDOWS_155.executableSha256);
+    expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
+    expect(attempts).toBe(2);
+    expect(release.downloads).toHaveLength(alreadyInstalled ? 0 : 1);
+  }
+});
+
+test("concurrent Windows runtime requests wait for one permission preparation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-chromium-"));
+  const release = fakeRelease();
+  let started!: () => void;
+  let finish!: () => void;
+  const preparing = new Promise<void>((resolve) => { started = resolve; });
+  const ready = new Promise<void>((resolve) => { finish = resolve; });
+  const run = release.deps.run!;
+  release.deps.run = async (command) => {
+    await run(command);
+    started();
+    await ready;
+  };
+  let returned = false;
+  const first = ensureAliasmodeChromium(root, release.deps, "win32").then((path) => { returned = true; return path; });
+  const second = ensureAliasmodeChromium(root, release.deps, "win32");
+  await preparing;
+  expect(returned).toBe(false);
+  expect(release.commands).toHaveLength(1);
+  finish();
+  const executable = aliasmodeChromiumExecutable(root, "win32");
+  expect(await Promise.all([first, second])).toEqual([executable, executable]);
+  expect(release.downloads).toHaveLength(1);
+  expect(release.commands).toHaveLength(1);
+});
+
+test("replacing a Windows runtime directory prepares its permissions again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-chromium-"));
+  const release = fakeRelease();
+  const executable = await ensureAliasmodeChromium(root, release.deps, "win32");
+  const directory = dirname(executable);
+  renameSync(directory, `${directory}-previous`);
+  mkdirSync(directory);
+  writeFileSync(executable, WINDOWS_155.executableSha256);
+
+  expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
+  expect(release.commands).toHaveLength(2);
   expect(release.downloads).toHaveLength(1);
 });
 
@@ -113,6 +197,7 @@ test("Linux x64 installs AliasMode's own 155 build from its zstd tar archive", a
       writeFileSync(join(runtime, "chrome"), linux.executableSha256);
     },
     hashFile: async (path) => readFileSync(path, "utf8"),
+    run: async () => { throw new Error("Linux must not run Windows permission commands"); },
   };
   expect(supportsChromium155Host("linux", "x64")).toBe(true);
   expect(supportsChromium155Host("linux", "arm64")).toBe(false);
@@ -141,7 +226,9 @@ test("Windows and Linux pin AliasMode's own 155.0.8059.85 build while macOS keep
 test("rejects an archive or executable that does not match its pin", async () => {
   for (const options of [{ archiveHash: "0".repeat(64) }, { executableHash: "1".repeat(64) }]) {
     const root = mkdtempSync(join(tmpdir(), "aliasmode-chromium-"));
-    await expect(ensureAliasmodeChromium(root, fakeRelease(options).deps, "win32")).rejects.toThrow("Chromium 155");
+    const release = fakeRelease(options);
+    await expect(ensureAliasmodeChromium(root, release.deps, "win32")).rejects.toThrow("Chromium 155");
+    expect(release.commands).toEqual([]);
     expect(existsSync(aliasmodeChromiumExecutable(root, "win32"))).toBe(false);
     expect(readdirSync(root)).toEqual([]);
   }
@@ -252,6 +339,7 @@ test("installs the pinned CloakBrowser build for each Mac processor from its tar
         writeFileSync(join(bundle, "Chromium"), executableSha256);
       },
       hashFile: async (path) => readFileSync(path, "utf8"),
+      run: async () => { throw new Error("macOS must not run Windows permission commands"); },
     };
     const executable = await ensureCloakBrowser(root, "darwin", arch, deps);
     expect(executable).toBe(join(root, "cloakbrowser-145.0.7632.109.2", "Chromium.app", "Contents", "MacOS", "Chromium"));
@@ -290,6 +378,7 @@ const WINDOWS_CLOAKBROWSER_EXECUTABLE = "03f53661a5c47e7b0a661bee2bce8a0d302b7a6
 test("installs the CloakBrowser build that the Windows app bundled before, from its zip archive root", async () => {
   const root = mkdtempSync(join(tmpdir(), "aliasmode-cloakbrowser-"));
   const downloads: string[] = [];
+  const commands: string[][] = [];
   const deps: AliasmodeChromiumDeps = {
     download: async (url, output) => {
       downloads.push(url);
@@ -300,6 +389,7 @@ test("installs the CloakBrowser build that the Windows app bundled before, from 
       writeFileSync(join(directory, "chrome.dll"), "dll");
     },
     hashFile: async (path) => readFileSync(path, "utf8"),
+    run: async (command) => { commands.push(command); },
   };
   // The same executable keeps the launch identity of every existing Windows profile.
   expect(cloakBrowserExecutableSha256("win32", "x64")).toBe(WINDOWS_CLOAKBROWSER_EXECUTABLE);
@@ -311,6 +401,11 @@ test("installs the CloakBrowser build that the Windows app bundled before, from 
   ]);
   expect(readdirSync(join(root, "cloakbrowser-146.0.7680.177.5")).sort()).toEqual(["chrome.dll", "chrome.exe"]);
   expect(readdirSync(root)).toEqual(["cloakbrowser-146.0.7680.177.5"]);
+  expect(commands).toEqual([
+    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"],
+  ]);
+  await ensureCloakBrowser(root, "win32", "x64", deps);
+  expect(commands).toHaveLength(1);
   await expect(ensureCloakBrowser(root, "win32", "arm64", deps)).rejects.toThrow("CloakBrowser does not run");
 });
 
@@ -335,6 +430,7 @@ function brokenDownload(breaks: number, step: number) {
     extract: async (_archive, directory) => writeFileSync(join(directory, "chrome.exe"), WINDOWS_CLOAKBROWSER_EXECUTABLE),
     hashFile: async (path) => readFileSync(path, "utf8"),
     sleep: async (ms) => { sleeps.push(ms); },
+    run: async () => {},
   };
   return { deps, outputs, offsets, sleeps };
 }
