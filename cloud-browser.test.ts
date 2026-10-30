@@ -2015,7 +2015,7 @@ test("Cloud production timers arm the heartbeat, the window check and the storag
   const coordinator = new CloudBrowserCoordinator(options);
 
   expect((await coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  expect(intervals).toEqual([60_000, 1_000]);
+  expect(intervals).toEqual([60_000, 5_000]);
   expect(watched).toEqual(["local-storage"]);
 
   await coordinator.close("profile1");
@@ -2226,6 +2226,33 @@ test("capture-generated storage events do not create an unchanged-checkpoint loo
   state.store.close();
 });
 
+test("Cloud heartbeat skips the full capture while storage watchers are live, except every tenth beat", async () => {
+  const state = setup();
+  let captures = 0;
+  const options = (state.coordinator as any).options;
+  (state.coordinator as any).storageCheckpoints = true;
+  options.launcher.browserStorageWatchPaths = () => ["cookies"];
+  options.watchPath = () => ({ close() {} });
+  options.setIntervalFn = () => ({ unref() {} });
+  options.clearIntervalFn = () => {};
+  options.readSession = async () => {
+    captures++;
+    return JSON.stringify({ ...payload().session, origins: [] });
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  (state.coordinator as any).startDirtyMonitor("profile1");
+  const before = captures;
+  for (let beat = 1; beat <= 9; beat++) await state.coordinator.heartbeatOnce("profile1");
+  expect(captures).toBe(before);
+  await state.coordinator.heartbeatOnce("profile1");
+  expect(captures).toBe(before + 1);
+
+  await state.coordinator.close("profile1");
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud heartbeat retires its capture watcher generation before reading storage", async () => {
   const state = setup();
   const storageDirty: Array<() => void> = [];
@@ -2250,6 +2277,8 @@ test("Cloud heartbeat retires its capture watcher generation before reading stor
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
   (state.coordinator as any).startDirtyMonitor("profile1");
   await Bun.sleep(0);
+  // With live watchers only every tenth heartbeat runs a full capture; make this one it.
+  (state.coordinator as any).dirtyMonitors.get("profile1").heartbeats = 9;
 
   await state.coordinator.heartbeatOnce("profile1");
   await Bun.sleep(20);

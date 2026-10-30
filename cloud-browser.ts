@@ -180,9 +180,12 @@ const DEFAULT_CLOUD_CHECKPOINT_SOON_MS = 30_000;
 /** Failed checkpoint uploads in a row before the dashboard says the profile is not saved to Cloud yet. */
 const CLOUD_UPLOAD_FAILURES_SHOWN = 2;
 /** How often a running Cloud browser is checked for a closed last window. */
-const WINDOW_CHECK_MS = 1_000;
+// Local /json/list probe for a user-closed window; three empty reads (~15 s) end the open.
+const WINDOW_CHECK_MS = 5_000;
 /** Checks in a row without a page before the last window counts as closed. */
 const WINDOW_CLOSED_CHECKS = 3;
+// Storage watchers capture every change, so the heartbeat runs a full capture only every Nth beat.
+const HEARTBEAT_FULL_CAPTURE_EVERY = 10;
 const CLOUD_PROFILE_OPEN_ERROR =
   "This Cloud profile is open in another session. Close it there, or try again shortly if that browser already closed.";
 const TERMINAL_CONFLICT_WARNING =
@@ -230,6 +233,7 @@ interface CloudDirtyMonitor {
   dirty: boolean;
   captureInFlight: boolean;
   lastCaptureAt: number;
+  heartbeats: number;
 }
 
 /** Live checkpoint uploads of one open registration. */
@@ -1892,6 +1896,14 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         return;
       }
     }
+    // A full capture spawns a Playwright helper. With live storage watchers, every 60 s per
+    // browser was redundant load; still upload what the watchers captured.
+    const monitor = this.dirtyMonitors.get(profileId);
+    if (monitor?.registrationId === registrationId && monitor.watchers.length > 0
+      && ++monitor.heartbeats % HEARTBEAT_FULL_CAPTURE_EVERY !== 0) {
+      await this.uploadCheckpoint(open, context.queue);
+      return;
+    }
     await this.refreshCheckpoint(open, context.queue);
   }
 
@@ -2376,6 +2388,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       dirty: false,
       captureInFlight: false,
       lastCaptureAt: 0,
+      heartbeats: 0,
     };
     this.dirtyMonitors.set(profileId, monitor);
     this.startStorageWatchers(profileId, monitor);
