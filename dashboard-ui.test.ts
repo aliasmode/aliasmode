@@ -968,7 +968,7 @@ test("file update results retain partial counts and per-profile failures before 
 
 test("the existing Extensions page installs from a Web Store URL and keeps archive upload", () => {
   expect(app).toContain("Install from Chrome Web Store");
-  expect(app).toContain('aria-label="Chrome Web Store URL or extension ID"');
+  expect(app).toContain('aria-label={t("Chrome Web Store URL or extension ID")}');
   expect(app).toContain("installWebStoreExtension(source)");
   expect(app).toContain("The in-browser Store button does not work in CloakBrowser");
   expect(app).toContain("Edit &gt; Extensions");
