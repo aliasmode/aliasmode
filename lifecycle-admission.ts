@@ -7,8 +7,14 @@ const PRIORITY: Record<LifecycleTransitionKind, number> = {
   start: 1,
 };
 
-const DEFAULT_LIMIT = 4;
-const DEFAULT_QUEUE_WAIT_MS = 120_000;
+// Host-wide slots for browser lifecycle work. Every admitted operation holds its
+// slot for the whole launch or teardown, and a start may legitimately take as long
+// as the launcher's CDP ceiling (180s). Four slots left too little headroom for
+// automation that opens many profiles: a request merely queued behind a couple of
+// slow launches exhausted the 120s wait and was reported as a browser that could
+// not start, even though nothing had failed.
+const DEFAULT_LIMIT = 8;
+const DEFAULT_QUEUE_WAIT_MS = 200_000;
 
 export interface LifecycleAdmissionStats {
   limit: number;
