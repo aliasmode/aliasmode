@@ -941,6 +941,7 @@ export async function retryPendingSync(
   current: () => boolean = () => true,
   deviceId?: string,
   keepAliveMs = 30_000,
+  profileId?: string,
 ): Promise<PendingSyncRetryResult> {
   const result: PendingSyncRetryResult = { accepted: 0, conflicts: 0, failed: 0 };
   /** Count a resave and report whether the pass should stop for transport loss. */
@@ -952,6 +953,7 @@ export async function retryPendingSync(
   };
   for (const summary of queue.list(accountId)) {
     if (!current()) break;
+    if (profileId !== undefined && summary.profileId !== profileId) continue;
     const resavable = isResavableConflict(summary);
     if ((summary.status === "conflict" && !resavable) || !summary.readyToSubmit) continue;
     let pending: PendingClose | null;

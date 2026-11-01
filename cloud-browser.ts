@@ -693,7 +693,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     };
 
     try {
-      await this.submitPending(queue, accountId);
+      await this.submitPending(queue, accountId, undefined, profileId);
       const pendingForProfile = queue.list(accountId)
         .filter((pending) => pending.profileId === profileId);
       if (pendingForProfile.some((pending) => pending.status !== "conflict")) {
@@ -1256,7 +1256,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     }
     this.clearCheckpointSignature(open);
     if (this.options.accountId() === accountId) {
-      await this.submitPending(queue, accountId);
+      await this.submitPending(queue, accountId, undefined, profileId);
     }
     const result = this.closeResultForOpen(open, queue);
     this.diagnosticEvents.record(result.sync === "complete" ? "session_synced" : "cleanup_retained");
@@ -1438,7 +1438,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (!this.finalizeOpenCheckpoint(open, queue)) return false;
       this.clearCheckpointSignature(open);
       if (current() && this.options.accountId() === open.accountId) {
-        await this.submitPending(queue, open.accountId, current);
+        await this.submitPending(queue, open.accountId, current, open.profileId);
       }
       const retainedCaptures = this.pendingCapturesForOpen(open, queue);
       if (retainedCaptures.length > 0) {
@@ -2234,18 +2234,23 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       submitAfterStop && current() &&
       this.options.accountId() === open.accountId
     ) {
-      await this.submitPending(queue, open.accountId, current);
+      await this.submitPending(queue, open.accountId, current, open.profileId);
       if (current()) this.closeResultForOpen(open, queue);
     }
     return true;
   }
 
+  /** Pass profileId from lifecycle paths: they hold a host-wide admission slot, so they must
+   * not upload every other profile's backlog. The background retry covers the rest. */
   private submitPending(
     queue: PendingSyncQueue,
     accountId: string,
     current?: () => boolean,
+    profileId?: string,
   ): ReturnType<typeof retryPendingSync> {
-    return retryPendingSync(queue, this.options.cloud, accountId, current, this.options.deviceId(), this.heartbeatMs / 2);
+    return retryPendingSync(
+      queue, this.options.cloud, accountId, current, this.options.deviceId(), this.heartbeatMs / 2, profileId,
+    );
   }
 
   async retryPending(): Promise<void> {

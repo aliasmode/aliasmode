@@ -1624,6 +1624,28 @@ test("Cloud roster returns while a closed browser's session upload is still pend
   state.store.close();
 });
 
+test("Cloud open and close upload only their own profile's pending session", async () => {
+  const state = setup();
+  state.queue.enqueue({
+    accountId: "account1", profileId: "profile2", registrationId: "other-registration",
+    expectedVersion: 4, payload: { ...payload(), profile: { ...payload().profile, id: "profile2" } },
+  });
+  const uploaded: string[] = [];
+  (state.coordinator as any).options.cloud.closeOpen = async (registrationId: string) => {
+    uploaded.push(registrationId);
+    return { ok: true, status: "accepted", version: 5 };
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect((await state.coordinator.close("profile1")).closed).toBe(true);
+
+  expect(uploaded).not.toContain("other-registration");
+  expect(uploaded.length).toBeGreaterThan(0);
+  expect(state.queue.list("account1")).toMatchObject([{ profileId: "profile2", readyToSubmit: true }]);
+  state.queue.close();
+  state.store.close();
+});
+
 test("Cloud roster is not held by a slow close of an open browser", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
