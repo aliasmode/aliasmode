@@ -400,10 +400,13 @@ async function prepareWindowsAccess(target: string, deps: AliasmodeChromiumDeps,
   if (windowsAccessPrepared.get(directory) === identity) return;
   try {
     // The main process can read AppData while an AppContainer GPU process cannot.
-    // Grant only read/execute on the verified runtime, including its DLLs and resources.
-    await (deps.run ?? run)(["icacls.exe", directory, "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"]);
+    // Grant only read/execute on the verified runtime, including its DLLs and resources,
+    // to the sandbox groups Chrome's installer grants: all and restricted app packages.
+    await (deps.run ?? run)(["icacls.exe", directory, "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"]);
   } catch (error) {
-    throw new Error(`Could not prepare Windows sandbox read/execute access for ${directory}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    // Most computers launch without the grant, so a failure must not block the browser. The next launch retries.
+    console.warn(`[aliasmode] could not prepare Windows sandbox read/execute access for ${directory}: ${error instanceof Error ? error.message : String(error)}`);
+    return;
   }
   windowsAccessPrepared.set(directory, identity);
 }

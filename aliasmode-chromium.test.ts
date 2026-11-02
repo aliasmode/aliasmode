@@ -76,7 +76,7 @@ test("installs AliasMode's own 155 build once, beside any earlier runtime", asyn
   expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
   expect(release.downloads).toHaveLength(1);
   expect(release.commands).toEqual([
-    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"],
+    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
   ]);
 });
 
@@ -91,14 +91,14 @@ test("repairs a previously installed Windows runtime without downloading or chan
   expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
   expect(release.downloads).toEqual([]);
   expect(release.commands).toEqual([
-    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"],
+    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
   ]);
   expect(readFileSync(join(dirname(executable), "chrome.dll"), "utf8")).toBe("existing dll");
   await ensureAliasmodeChromium(root, release.deps, "win32");
   expect(release.commands).toHaveLength(1);
 });
 
-test("a Windows permission failure rejects the runtime and is retried without downloading it again", async () => {
+test("a Windows permission failure still returns the runtime and is retried without downloading it again", async () => {
   for (const alreadyInstalled of [false, true]) {
     const root = mkdtempSync(join(tmpdir(), "aliasmode-chromium-"));
     const executable = aliasmodeChromiumExecutable(root, "win32");
@@ -111,7 +111,7 @@ test("a Windows permission failure rejects the runtime and is retried without do
     release.deps.run = async () => {
       if (++attempts === 1) throw new Error("icacls.exe exited with code 5");
     };
-    await expect(ensureAliasmodeChromium(root, release.deps, "win32")).rejects.toThrow("Windows sandbox read/execute access");
+    expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
     expect(readFileSync(executable, "utf8")).toBe(WINDOWS_155.executableSha256);
     expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
     expect(attempts).toBe(2);
@@ -402,7 +402,7 @@ test("installs the CloakBrowser build that the Windows app bundled before, from 
   expect(readdirSync(join(root, "cloakbrowser-146.0.7680.177.5")).sort()).toEqual(["chrome.dll", "chrome.exe"]);
   expect(readdirSync(root)).toEqual(["cloakbrowser-146.0.7680.177.5"]);
   expect(commands).toEqual([
-    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "/T", "/Q"],
+    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
   ]);
   await ensureCloakBrowser(root, "win32", "x64", deps);
   expect(commands).toHaveLength(1);
