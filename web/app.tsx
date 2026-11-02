@@ -4156,7 +4156,7 @@ function App() {
           <p className="formnote">{t("The in-browser Store button does not work in CloakBrowser. Paste the Store link above, or upload a ZIP/CRX archive. Chrome extensions apply only to CloakBrowser profiles.")}</p>
           <ol className="steps">
             <li>{t("Install the extension here. New installs stay unassigned.")}</li>
-            <li>{t("Use")} <b>{t("Edit &gt; Extensions")}</b> {isCloudMode ? t("to assign it to a profile.") : t("to assign it to a profile, or assign many at once from the roster toolbar.")}</li>
+            <li>{t("Use")} <b>{t("Edit > Extensions")}</b> {isCloudMode ? t("to assign it to a profile.") : t("to assign it to a profile, or assign many at once from the roster toolbar.")}</li>
             <li>{t("Reopen the profile. AliasMode loads the extension when the browser starts.")}</li>
           </ol>
           <section className="settings-card">

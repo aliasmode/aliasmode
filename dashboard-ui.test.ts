@@ -971,7 +971,7 @@ test("the existing Extensions page installs from a Web Store URL and keeps archi
   expect(app).toContain('aria-label={t("Chrome Web Store URL or extension ID")}');
   expect(app).toContain("installWebStoreExtension(source)");
   expect(app).toContain("The in-browser Store button does not work in CloakBrowser");
-  expect(app).toContain("Edit &gt; Extensions");
+  expect(app).toContain('t("Edit > Extensions")');
   expect(app).toContain("Upload ZIP/CRX");
   expect(app).toContain('accept=".zip,.crx,application/zip,application/x-chrome-extension"');
   expect(app).not.toContain("Chrome Web Store installs are not supported in AliasMode");
