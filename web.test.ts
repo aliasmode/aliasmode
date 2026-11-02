@@ -450,6 +450,55 @@ test("Cloud automation API stays closed when the Cloud lifecycle is unavailable"
   }
 });
 
+test("Cloud user/update changes the proxy of open and closed profiles", async () => {
+  const store = new ProfileStore(":memory:");
+  // Port 9 on loopback refuses at once, so the exit timezone lookups fail fast.
+  const oldProxy = { type: "http", host: "127.0.0.1", port: "8", user: "", pass: "" };
+  const open = buildNewProfile({ name: "open", proxy: oldProxy }, () => false);
+  const closed = buildNewProfile({ name: "closed", proxy: oldProxy }, (id) => id === open.id);
+  store.upsertProfile(open);
+  const committed: any[] = [];
+  const updates: any[] = [];
+  const payload = encodePortableProfile(closed);
+  const server = serveAutomationApi({
+    port: 0, launcher: {} as any, store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudConnection: { client: {
+      getProfile: async () => ({ ok: true, profile: { id: closed.id, version: 3, activeOpens: [] }, payload }),
+      updateProfile: async (id: string, request: any) => {
+        updates.push({ id, ...request });
+        return { ok: true };
+      },
+    } } as any,
+    cloudBrowser: {
+      canEditLive: (id: string) => id === open.id,
+      commitLiveEdit: async (profile: any) => {
+        committed.push(profile);
+        return true;
+      },
+    } as any,
+    log: () => {},
+  });
+  const update = (body: unknown) => fetch(`http://127.0.0.1:${server.port}/api/v1/user/update`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((response) => response.json());
+  const config = { proxy_type: "socks5", proxy_host: "127.0.0.1", proxy_port: "9", proxy_user: "u:1", proxy_password: "p@ss:word" };
+  const proxy = { type: "socks5", host: "127.0.0.1", port: "9", user: "u:1", pass: "p@ss:word" };
+  try {
+    expect(await update({ user_id: open.id, user_proxy_config: config })).toMatchObject({ code: 0 });
+    expect(committed).toMatchObject([{ id: open.id, name: "open", proxy }]);
+
+    expect(await update({ user_id: closed.id, user_proxy_config: config })).toMatchObject({ code: 0 });
+    expect(decodePortableProfile(updates[0].payload).profile).toMatchObject({ name: "closed", proxy });
+
+    expect(await update({ user_id: closed.id, user_proxy_config: { proxy_soft: "no_proxy" } })).toMatchObject({ code: 0 });
+    expect(decodePortableProfile(updates[1].payload).profile.proxy).toBeNull();
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});
+
 test("Cloud user/update renames and saves credentials on open and closed profiles", async () => {
   const store = new ProfileStore(":memory:");
   const open = buildNewProfile({ name: "open-old", username: "old", password: "old-pw" }, () => false);

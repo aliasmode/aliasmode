@@ -768,8 +768,8 @@
         "tags": [
           "user"
         ],
-        "summary": "Rename a profile and update its saved credentials",
-        "description": "`name` is required and replaces the profile name. Credential fields are applied only when present as strings. Fails with `invalid JSON body`, `missing user_id`, `name must be a non-empty string`, `no such profile: <id>`, or `failed to persist profile update: <reason>`.",
+        "summary": "Rename a profile, update its saved credentials, or change its proxy",
+        "description": "Each field is optional, but the request must change at least one. `name`, when sent, must be non-empty. Credential fields are applied only when present as strings. `user_proxy_config` replaces the proxy, or removes it with `proxy_soft: \"no_proxy\"`. A new proxy gets its exit IP's timezone unless the profile has a typed timezone; an open browser uses the new proxy from its next launch. Fails with `invalid JSON body`, `missing user_id`, `name must be a non-empty string`, `nothing to update: send name, account fields or user_proxy_config`, an invalid proxy message, `no such profile: <id>`, or `failed to persist profile update: <reason>`.",
         "x-aliasmode-version-introduced": "0.1.0-beta.42",
         "requestBody": {
           "required": true,
@@ -1658,8 +1658,7 @@
       "UserUpdateRequest": {
         "type": "object",
         "required": [
-          "user_id",
-          "name"
+          "user_id"
         ],
         "properties": {
           "user_id": {
@@ -1669,7 +1668,7 @@
           "name": {
             "type": "string",
             "minLength": 1,
-            "description": "New profile name. Required and non-empty."
+            "description": "New profile name. Optional; non-empty when sent."
           },
           "username": {
             "type": "string"
@@ -1694,6 +1693,24 @@
           "twofa": {
             "type": "string",
             "description": "Alias of `fakey`."
+          },
+          "user_proxy_config": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProxyConfig"
+              }
+            ],
+            "description": "New proxy. `proxy_host` and `proxy_port` are required unless `proxy_soft` is `no_proxy`, which removes the proxy.",
+            "properties": {
+              "proxy_soft": {
+                "type": "string",
+                "enum": [
+                  "other",
+                  "no_proxy"
+                ],
+                "description": "`no_proxy` removes the profile's proxy."
+              }
+            }
           }
         }
       }

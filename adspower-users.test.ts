@@ -283,6 +283,84 @@ test("user/update sends only supplied fields to a Cloud roster", async () => {
   expect(store.getProfile("k1d0cd11")!.name).toBe("acct");
 });
 
+test("user/update changes only the proxy and gives it the new exit timezone", async () => {
+  const { store, launcher } = setup();
+  const body = await (await handleUserApi(post("/api/v1/user/update", {
+    user_id: "k1d0cd11",
+    user_proxy_config: { proxy_type: "socks5", proxy_host: "5.6.7.8", proxy_port: 1080, proxy_user: "nu", proxy_password: "np" },
+  }), launcher, store, null, geoip))!.json();
+
+  expect(body.code).toBe(0);
+  expect(store.getProfile("k1d0cd11")).toMatchObject({
+    name: "acct",
+    proxy: { type: "socks5", host: "5.6.7.8", port: "1080", user: "nu", pass: "np" },
+    timezone: "America/New_York",
+  });
+});
+
+test("user/update removes the proxy with proxy_soft no_proxy", async () => {
+  const { store, launcher } = setup();
+  const body = await (await handleUserApi(post("/api/v1/user/update", {
+    user_id: "k1d0cd11",
+    user_proxy_config: { proxy_soft: "no_proxy" },
+  }), launcher, store, null, geoip))!.json();
+
+  expect(body.code).toBe(0);
+  expect(store.getProfile("k1d0cd11")!.proxy).toBeNull();
+});
+
+test("user/update keeps a typed timezone when the proxy changes", async () => {
+  const { store, launcher } = setup();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, timezone: "Europe/Paris", timezoneManual: true });
+  let lookups = 0;
+  const counting = async () => { lookups++; return geoip(); };
+  const body = await (await handleUserApi(post("/api/v1/user/update", {
+    user_id: "k1d0cd11",
+    user_proxy_config: { proxy_host: "5.6.7.8", proxy_port: "8080" },
+  }), launcher, store, null, counting))!.json();
+
+  expect(body.code).toBe(0);
+  expect(lookups).toBe(0);
+  expect(store.getProfile("k1d0cd11")).toMatchObject({ proxy: { host: "5.6.7.8", port: "8080" }, timezone: "Europe/Paris" });
+});
+
+test("user/update rejects a bad proxy and an empty update without changing the profile", async () => {
+  const { store, launcher } = setup();
+  const user_id = "k1d0cd11";
+  for (const [payload, msg] of [
+    [{ user_id, user_proxy_config: { proxy_host: "" } }, "user_proxy_config needs proxy_host and proxy_port"],
+    [{ user_id, user_proxy_config: { proxy_host: "5.6.7.8" } }, "invalid proxy port"],
+    [{ user_id, user_proxy_config: { proxy_type: "ftp", proxy_host: "5.6.7.8", proxy_port: "21" } }, "unsupported proxy type"],
+    [{ user_id }, "nothing to update"],
+  ] as const) {
+    const body = await (await handleUserApi(post("/api/v1/user/update", payload), launcher, store, null, geoip))!.json();
+    expect(body.code).toBe(-1);
+    expect(body.msg).toContain(msg);
+  }
+  expect(store.getProfile(user_id)).toMatchObject({ name: "acct", proxy: { host: "1.2.3.4", port: "8080" } });
+});
+
+test("user/update sends a proxy-only edit to a Cloud roster", async () => {
+  const { store, launcher } = setup();
+  const updates: unknown[] = [];
+  const roster = {
+    listProfiles: async () => [],
+    updateProfile: async (id: string, edits: unknown) => { updates.push({ id, edits }); },
+  };
+  const body = await (await handleUserApi(
+    post("/api/v1/user/update", { user_id: "k1d0cd11", user_proxy_config: { proxy_host: "5.6.7.8", proxy_port: "8080" } }),
+    launcher,
+    store,
+    null,
+    undefined,
+    roster,
+  ))!.json();
+
+  expect(body.code).toBe(0);
+  expect(updates).toEqual([{ id: "k1d0cd11", edits: { proxy: { type: "http", host: "5.6.7.8", port: "8080", user: "", pass: "" } } }]);
+});
+
 test("user/update on an unknown id fails AdsPower-style", async () => {
   const { store, launcher } = setup();
   const body = await (await handleUserApi(post("/api/v1/user/update", { user_id: "nope", name: "x" }), launcher, store))!.json();
@@ -292,7 +370,7 @@ test("user/update on an unknown id fails AdsPower-style", async () => {
 
 test("user/update rejects invalid names without changing the profile", async () => {
   const { store, launcher } = setup();
-  for (const name of [undefined, null, 7, "", " \t "]) {
+  for (const name of [null, 7, "", " \t "]) {
     const body = await (await handleUserApi(post("/api/v1/user/update", { user_id: "k1d0cd11", name }), launcher, store))!.json();
     expect(body.code).toBe(-1);
     expect(body.msg).toBe("name must be a non-empty string");
@@ -490,6 +568,20 @@ test("remote mode: name-only update keeps the lock-safe rename path", async () =
   expect(calls.renamed).toEqual([["rp1", "renamed"]]);
   expect(calls.saved).toEqual([]);
   expect(roster[0]!.name).toBe("renamed");
+});
+
+test("remote mode: proxy updates are refused", async () => {
+  const { store, launcher } = setup();
+  const { remote, calls } = fakeRemote();
+  const body = await (await handleUserApi(
+    post("/api/v1/user/update", { user_id: "rp1", user_proxy_config: { proxy_host: "5.6.7.8", proxy_port: "8080" } }),
+    launcher,
+    store,
+    remote,
+  ))!.json();
+
+  expect(body).toMatchObject({ code: -1, msg: "proxy updates are unavailable in legacy Remote mode" });
+  expect(calls.saved).toEqual([]);
 });
 
 test("remote mode: update reports missing profiles and rejects invalid names locally", async () => {

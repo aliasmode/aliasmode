@@ -32,7 +32,8 @@ import { ScriptLibrary, ScriptSupervisor, prefetchPythonFor } from "./scripts.ts
 import { PythonRuntime } from "./python-runtime.ts";
 import { resolvePlaywrightRuntime } from "./playwright-runtime.ts";
 
-import { handleUserApi, type ProfileRoster } from "./adspower-users.ts";
+import { exitTimezoneForEdit, handleUserApi, profileWithEdits, type ProfileRoster } from "./adspower-users.ts";
+import { proxyUrl } from "./proxy.ts";
 import { CloudProfileEditor } from "./cloud-profile-editor.ts";
 import { defaultProfileEngine } from "./create.ts";
 import {
@@ -198,7 +199,8 @@ async function handleAutomationRequest(
           if (cloudBrowser.canEditLive?.(id) === true) {
             const live = store.getProfile(id);
             if (!live) throw new Error(`no such profile: ${id}`);
-            if (!(await cloudBrowser.commitLiveEdit?.({ ...live, ...edits }))) {
+            const timezone = await exitTimezoneForEdit(live, edits);
+            if (!(await cloudBrowser.commitLiveEdit?.(profileWithEdits(live, edits, timezone)))) {
               throw new Error("the browser just closed; retry the update");
             }
             return;
@@ -206,7 +208,9 @@ async function handleAutomationRequest(
           if (!opts.cloudConnection) throw new Error("Cloud connection is unavailable");
           const editor = new CloudProfileEditor(opts.cloudConnection.client, store);
           const { expectedVersion } = await editor.get(id);
-          await editor.save(id, expectedVersion, edits);
+          // The Cloud editor takes the Edit dialog's proxy text and looks up the new proxy's timezone.
+          const { proxy, ...set } = edits;
+          await editor.save(id, expectedVersion, "proxy" in edits ? { ...set, proxy: proxy ? proxyUrl(proxy) : "" } : set);
         },
       };
       const users = await handleUserApi(req, launcher, store, null, undefined, roster);
