@@ -180,8 +180,8 @@ const DEFAULT_CLOUD_CHECKPOINT_SOON_MS = 30_000;
 /** Failed checkpoint uploads in a row before the dashboard says the profile is not saved to Cloud yet. */
 const CLOUD_UPLOAD_FAILURES_SHOWN = 2;
 /** How often a running Cloud browser is checked for a closed last window. */
-// Local /json/list probe for a user-closed window; three empty reads (~15 s) end the open.
-const WINDOW_CHECK_MS = 5_000;
+// Local /json/list probe for a user-closed window; three empty reads (~6 s) end the open.
+const WINDOW_CHECK_MS = 2_000;
 /** Checks in a row without a page before the last window counts as closed. */
 const WINDOW_CLOSED_CHECKS = 3;
 // Storage watchers capture every change, so the heartbeat runs a full capture only every Nth beat.

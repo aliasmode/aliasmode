@@ -2016,7 +2016,7 @@ test("Cloud production timers arm the heartbeat, the window check and the storag
   const coordinator = new CloudBrowserCoordinator(options);
 
   expect((await coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  expect(intervals).toEqual([60_000, 5_000]);
+  expect(intervals).toEqual([60_000, 2_000]);
   expect(watched).toEqual(["local-storage"]);
 
   await coordinator.close("profile1");
