@@ -17,15 +17,16 @@
  *   user/list   -> data.list[].{user_id, name, created_time, last_open_time, serial_number}
  *   user/create -> data.id
  *   user/delete -> code === 0
- *   user/update -> code === 0
+ *   user/update -> code === 0 (name, credentials and user_proxy_config are each optional)
  */
 
 import type { Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
-import type { Profile } from "./types.ts";
+import type { Profile, ProxySpec } from "./types.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
-import { attachTimezones } from "./geoip.ts";
+import { attachTimezones, lookupExitLocation } from "./geoip.ts";
+import { normalizeProxySpec, proxyIdentityKey } from "./proxy.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { isValidProfileName } from "./profile-validation.ts";
 
@@ -53,8 +54,8 @@ export interface ProfileRoster {
   updateProfile?(id: string, edits: ProfileEdits): Promise<void>;
 }
 
-/** Fields `user/update` may change: the browser name and saved account credentials. */
-export type ProfileEdits = Partial<Pick<Profile, "name" | "username" | "password" | "email" | "emailPassword" | "twofa">>;
+/** Fields `user/update` may change: the browser name, saved account credentials and the proxy. */
+export type ProfileEdits = Partial<Pick<Profile, "name" | "username" | "password" | "email" | "emailPassword" | "twofa" | "proxy">>;
 
 function normalizeGroup(g: unknown): string {
   const s = String(g ?? "").trim();
@@ -107,8 +108,23 @@ function hasCredentialUpdate(body: any): boolean {
     .some((field) => typeof body?.[field] === "string");
 }
 
+/** AdsPower `user_proxy_config` on update. `proxy_soft: "no_proxy"` removes the proxy. */
+function proxyFromUpdateConfig(px: any): ProxySpec | null {
+  if (px.proxy_soft === "no_proxy") return null;
+  const proxy = normalizeProxySpec({
+    type: String(px.proxy_type || "http"),
+    host: String(px.proxy_host ?? ""),
+    port: String(px.proxy_port ?? ""),
+    user: String(px.proxy_user ?? ""),
+    pass: String(px.proxy_password ?? ""),
+  });
+  if (!proxy) throw new Error('user_proxy_config needs proxy_host and proxy_port, or proxy_soft "no_proxy" to remove the proxy');
+  return proxy;
+}
+
 function editsFromUpdateBody(body: any): ProfileEdits {
-  const edits: ProfileEdits = { name: body.name };
+  const edits: ProfileEdits = {};
+  if (typeof body?.name === "string") edits.name = body.name;
   if (typeof body?.username === "string") edits.username = body.username;
   if (typeof body?.password === "string") edits.password = body.password;
   if (typeof body?.email === "string") edits.email = body.email;
@@ -116,11 +132,24 @@ function editsFromUpdateBody(body: any): ProfileEdits {
   else if (typeof body?.emailPassword === "string") edits.emailPassword = body.emailPassword;
   if (typeof body?.fakey === "string") edits.twofa = body.fakey;
   else if (typeof body?.twofa === "string") edits.twofa = body.twofa;
+  if (body?.user_proxy_config && typeof body.user_proxy_config === "object") edits.proxy = proxyFromUpdateConfig(body.user_proxy_config);
   return edits;
 }
 
-function profileFromUpdateBody(profile: Profile, body: any): Profile {
-  return { ...profile, ...editsFromUpdateBody(body) };
+/** A new proxy's exit timezone, as the Edit dialog looks it up. Null when the proxy stays or the user typed a timezone. */
+export async function exitTimezoneForEdit(profile: Profile, edits: ProfileEdits, geoipFetch?: GeoipFetch): Promise<string | null> {
+  if (!edits.proxy || profile.timezoneManual || proxyIdentityKey(edits.proxy) === proxyIdentityKey(profile.proxy)) return null;
+  return (await lookupExitLocation(edits.proxy, geoipFetch))?.timezone ?? null;
+}
+
+export function profileWithEdits(profile: Profile, edits: ProfileEdits, timezone: string | null = null): Profile {
+  const next = { ...profile, ...edits };
+  if ("proxy" in edits) delete next.proxyError;
+  if (timezone) {
+    next.timezone = timezone;
+    syncFirefoxTimezone(next);
+  }
+  return next;
 }
 
 /**
@@ -289,7 +318,7 @@ export async function handleUserApi(
     return ok({ deleted, locked });
   }
 
-  // --- update: browser name + saved account credentials ---
+  // --- update: browser name, saved account credentials and proxy ---
   if (pathname === "/api/v1/user/update" && req.method === "POST") {
     let body: any;
     try {
@@ -299,22 +328,30 @@ export async function handleUserApi(
     }
     const id = typeof body?.user_id === "string" ? body.user_id : "";
     if (!id) return fail("missing user_id");
-    if (!isValidProfileName(body?.name)) return fail("name must be a non-empty string");
+    if (body.name !== undefined && !isValidProfileName(body.name)) return fail("name must be a non-empty string");
+    let edits: ProfileEdits;
+    try {
+      edits = editsFromUpdateBody(body);
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e));
+    }
+    if (!Object.keys(edits).length) return fail("nothing to update: send name, account fields or user_proxy_config");
     if (roster?.updateProfile) {
       try {
-        await roster.updateProfile(id, editsFromUpdateBody(body));
+        await roster.updateProfile(id, edits);
         return ok({});
       } catch (e) {
         return fail(e instanceof Error ? e.message : String(e));
       }
     }
     if (remote) {
+      if ("proxy" in edits) return fail("proxy updates are unavailable in legacy Remote mode");
       try {
         if (!hasCredentialUpdate(body)) {
           await remote.renameProfile(id, body.name);
         } else {
           const profile = await remote.getProfile(id);
-          await remote.saveProfile(profileFromUpdateBody(profile, body));
+          await remote.saveProfile(profileWithEdits(profile, edits));
         }
         return ok({});
       } catch (e) {
@@ -324,7 +361,12 @@ export async function handleUserApi(
     try {
       const profile = store.getProfile(id);
       if (!profile) return fail(`no such profile: ${id}`);
-      store.upsertProfile(profileFromUpdateBody(profile, body));
+      // An open browser keeps the timezone it launched with; its next launch looks the new proxy up.
+      const timezone = store.getLaunch(id) ? null : await exitTimezoneForEdit(profile, edits, geoipFetch);
+      // Apply to the current copy, so changes saved during the lookup are kept.
+      const current = store.getProfile(id);
+      if (!current) return fail(`no such profile: ${id}`);
+      store.upsertProfile(profileWithEdits(current, edits, store.getLaunch(id) ? null : timezone));
       return ok({});
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
