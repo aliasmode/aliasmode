@@ -497,6 +497,12 @@ export const openProfile = (id: string, force = false) =>
   post(`/ui/api/profiles/${encodeURIComponent(id)}/open${force ? "?force=1" : ""}`);
 export const closeProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/close`);
 export const raiseProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/raise`);
+/** Opens the AliasMode fingerprint test (`page`: en, ru or zh-cn) in a new tab of a running profile. */
+export async function checkFingerprint(id: string, page: string): Promise<any> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/check-fingerprint`;
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ page }) });
+  return apiJson(response, path);
+}
 export const restoreParkedSession = (id: string) =>
   post(`/ui/api/profiles/${encodeURIComponent(id)}/restore-session`);
 export const importInbox = () => post("/ui/api/import");

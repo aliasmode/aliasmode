@@ -1242,7 +1242,7 @@ export async function handleUiRequest(
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
     (req.method === "POST" &&
-      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session)$/.test(pathname));
+      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session|check-fingerprint)$/.test(pathname));
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
@@ -2088,6 +2088,32 @@ export async function handleUiRequest(
       return Response.json({ ok: true });
     } catch {
       return Response.json({ ok: false, error: "cookie could not be added" }, { status: 500 });
+    }
+  }
+
+  // Open the AliasMode fingerprint test in a new tab of a running profile. Only these pages can be opened.
+  const fingerprintCheck = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/check-fingerprint$/);
+  if (fingerprintCheck && req.method === "POST") {
+    const id = decodeURIComponent(fingerprintCheck[1]!);
+    const body = await req.json().catch(() => ({})) as { page?: unknown };
+    const pages: Record<string, string> = {
+      en: "https://aliasmode.com/check/",
+      ru: "https://aliasmode.com/ru/fingerprint-test/",
+      "zh-cn": "https://aliasmode.com/zh-cn/fingerprint-test/",
+    };
+    const url = pages[typeof body.page === "string" ? body.page : "en"] ?? pages.en!;
+    if (!await launcher.certifiedActive(id).catch(() => false)) {
+      return Response.json({ ok: false, error: "profile browser is not open" }, { status: 409 });
+    }
+    const launch = store.getLaunch(id);
+    if (!launch?.ws) {
+      return Response.json({ ok: false, error: "profile browser is not open" }, { status: 409 });
+    }
+    try {
+      await launcher.navigate(launch.ws, [url], false);
+      return Response.json({ ok: true });
+    } catch (e) {
+      return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }
   }
 

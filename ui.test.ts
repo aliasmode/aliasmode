@@ -4976,3 +4976,32 @@ test("shell-language round-trips through the server and rejects invalid tags", a
   s.close();
   rmSync(root, { recursive: true, force: true });
 });
+
+test("fingerprint check route opens only the AliasMode test page in a running profile", async () => {
+  const s = store();
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://live-browser", startedAt: 123 });
+  const opened: Array<{ ws: string; urls: string[]; replace: boolean }> = [];
+  let active = true;
+  const launcher = {
+    certifiedActive: async () => active,
+    navigate: async (ws: string, urls: string[], replace: boolean) => { opened.push({ ws, urls, replace }); },
+  } as any;
+  const request = (page: unknown) => handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/check-fingerprint", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ page }),
+  }), launcher, s, null, {} as any);
+
+  expect((await request("ru"))!.status).toBe(200);
+  expect((await request("https://evil.invalid/"))!.status).toBe(200);
+  expect(opened).toEqual([
+    { ws: "ws://live-browser", urls: ["https://aliasmode.com/ru/fingerprint-test/"], replace: false },
+    { ws: "ws://live-browser", urls: ["https://aliasmode.com/check/"], replace: false },
+  ]);
+
+  active = false;
+  const closed = await request("en");
+  expect(closed!.status).toBe(409);
+  expect(opened).toHaveLength(2);
+  s.close();
+});

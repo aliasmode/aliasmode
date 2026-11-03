@@ -68,6 +68,7 @@ import {
   openProfile,
   closeProfile,
   raiseProfile,
+  checkFingerprint,
   restoreParkedSession,
   fetchExtensions,
   installWebStoreExtension,
@@ -351,6 +352,7 @@ const ICONS = {
   move: <><path d="M4 20h13a3 3 0 003-3v-6a2 2 0 00-2-2h-7.5a2 2 0 01-1.6-.8L7.6 5.8A2 2 0 006 5H4a2 2 0 00-2 2v11a2 2 0 002 2z" /><path d="M9 14h6M13 11.5l2.5 2.5L13 16.5" /></>,
   raise: <><rect x="8" y="3" width="13" height="13" rx="2" /><path d="M16 16v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-9a2 2 0 012-2h3" /></>,
   key: <><circle cx="8" cy="12" r="4" /><path d="M12 12h9M18 12v3M15.5 12v2.5" /></>,
+  fingerprint: <><path d="M7 11a5 5 0 0110 0v2a9 9 0 01-1.5 5" /><path d="M10 11a2 2 0 014 0v2a12 12 0 01-2.5 7" /><path d="M4.5 15a14 14 0 00.5-4 7 7 0 0114 0" /></>,
   cookie: <><circle cx="12" cy="12" r="9" /><circle cx="8.5" cy="10" r="1" /><circle cx="13.5" cy="15" r="1" /><circle cx="16" cy="9" r="1" /></>,
   more: <><circle cx="6" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="18" cy="12" r="1.4" /></>,
   alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7.5v5M12 16.2v.3" /></>,
@@ -2456,6 +2458,7 @@ function App() {
   const actionWarning = (r: any): string => r.captureFailed
     ? t("Browser closed, but its latest session could not be read. Cloud keeps the last saved copy, and this device saves the newer session to Cloud the next time you open the profile here.")
     : r.warning;
+  const fingerprintPage = language.startsWith("ru") ? "ru" : language.startsWith("zh") ? "zh-cn" : "en";
   const act = async (id: string, fn: (id: string) => Promise<any>) => {
     setActionErr(null);
     setBusy((b) => ({ ...b, [id]: true }));
@@ -4011,6 +4014,13 @@ function App() {
                                 onClick={() => act(p.id, raiseProfile)}
                               ><Icon name="raise" className="sm" /></button>
                             </>}
+                            <button
+                              className="iconbtn tip"
+                              data-tip={t("Check fingerprint")}
+                              aria-label={t("Open the fingerprint test in {profile}", { profile: p.name })}
+                              disabled={busy[p.id]}
+                              onClick={() => act(p.id, (id) => checkFingerprint(id, fingerprintPage))}
+                            ><Icon name="fingerprint" className="sm" /></button>
                             <button className="btn sm solid-danger" aria-label={`Close ${p.name}`} disabled={busy[p.id]} onClick={() => act(p.id, closeProfile)}>
                               <Icon name="power" className="sm" />{t("Close")}
                             </button>
