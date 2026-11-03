@@ -262,6 +262,7 @@ const PREFLIGHT_GUIDANCE = {
   firefox_fonts_download: "The fonts for this profile's operating system could not be downloaded. Check your internet connection, then open the profile again.",
   cloakbrowser_download: "CloakBrowser could not be downloaded. Check your internet connection, then open the profile again.",
   chromium155_host: "Chromium 155 beta requires Windows x64, Apple Silicon macOS, or Linux x64.",
+  chromium155_macos_on_windows: "Chromium 155 cannot open a macOS profile on Windows. Open it on a Mac, or set its operating system to Windows.",
   chromium_sandbox: "This Linux computer blocks the Chrome sandbox. Run the AliasMode install command again. It asks for your password once to allow Chrome.",
   chromium155_download: "Chromium 155 beta could not be downloaded. Check your internet connection, then open the profile again.",
   stored_identity: "The saved browser launch does not match this profile's current identity. Close the existing browser, then reopen the profile.",
@@ -1312,6 +1313,11 @@ export class Launcher {
     if (!this.enforceHostCompatibility) return;
     if (profile.chromiumRuntime && !supportsChromium155Host(this.hostPlatform, this.hostArch)) {
       throw new BrowserLaunchError("preflight", "chromium155_host");
+    }
+    // The engine gives its child processes a macOS identity on a command line longer than Windows
+    // allows (32,767 characters), and the browser stops at once ("GPU process isn't usable").
+    if (profile.chromiumRuntime && this.hostPlatform === "win32" && (profile.platformOs || platformFromUA(profile.ua)) === "macos") {
+      throw new BrowserLaunchError("preflight", "chromium155_macos_on_windows");
     }
     if (isMobileUserAgent(profile.ua)) {
       throw new BrowserLaunchError("preflight", "persona_mobile");

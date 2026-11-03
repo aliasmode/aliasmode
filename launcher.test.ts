@@ -5752,6 +5752,24 @@ test("a Linux computer that blocks the Chrome sandbox gets a public preflight er
   store.close();
 });
 
+test("Chromium 155 refuses a macOS profile on Windows with a clear reason instead of crashing", async () => {
+  const store = new ProfileStore(":memory:");
+  const profile = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), platformOs: "macos" as const };
+  store.upsertProfile(profile);
+  const launcher = new ProductionLauncher({
+    store,
+    dataRoot: testDataRoot(store),
+    hostPlatform: "win32",
+    hostArch: "x64",
+    ensureAliasmodeChromium: async () => "/unused",
+    spawn: () => { throw new Error("must not spawn"); },
+  });
+  const error = await launcher.start(profile.id).catch((failure) => failure);
+  expect(error).toEqual(new BrowserLaunchError("preflight", "chromium155_macos_on_windows"));
+  expect(error.guidance).toContain("macOS profile on Windows");
+  store.close();
+});
+
 test("Chromium 155 beta is refused on unsupported hosts before any download", async () => {
   const store = new ProfileStore(":memory:");
   const profile = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
