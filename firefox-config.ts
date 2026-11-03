@@ -461,6 +461,14 @@ function firefoxStartupLocale(profile: Profile): string {
  * a site can see. WebGPU in service workers follows WebGPU, as in stock Firefox. A profile of
  * another OS than this computer's gets that OS's stock fonts and colours (personaOsPrefs).
  */
+/**
+ * Site caches (HTTP and compiled-script caches) stay across closes up to this total per profile
+ * (the user's choice, 2026-11-03), so a reopen does not download every site again through the
+ * proxy. Chromium's HTTP cache is capped at 20 MB by --disk-cache-size, Firefox's whole cache at
+ * this total by its cache prefs; the launcher trims what is over it after a stop.
+ */
+export const SITE_CACHE_CAP_BYTES = 35 * 1024 * 1024;
+
 export function firefoxStartupPrefs(profile: Profile, hostPlatform?: NodeJS.Platform, hostArch?: string): Record<string, JsonValue> {
   const os = firefoxPersonaOs(profile);
   const appleSilicon = hostPlatform === "darwin" && hostArch === "arm64";
@@ -477,6 +485,9 @@ export function firefoxStartupPrefs(profile: Profile, hostPlatform?: NodeJS.Plat
     "browser.startup.couldRestoreSession.count": -1,
     "gfx.font_rendering.fallback.async": false,
     "browser.newtabpage.enabled": true,
+    // A fixed cache size (in KB) instead of one sized from free disk; pages cannot read it.
+    "browser.cache.disk.smart_size.enabled": false,
+    "browser.cache.disk.capacity": SITE_CACHE_CAP_BYTES / 1024,
     ...(host && host !== os ? personaOsPrefs(os) : {}),
   };
 }

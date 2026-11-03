@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { closeSync, fstatSync, mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, rmSync, statSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, realpathSync, rmSync, statSync, truncateSync } from "node:fs";
 import { join, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -1464,7 +1464,7 @@ test("reconcileOrphans clears dead rows WITHOUT killing by the stored PID", asyn
   const launcherA = newLauncher(store, f, []);
   const a = await launcherA.start("k1d0cd11");
   const base = launcherA.userDataDir("k1d0cd11");
-  const cacheDir = join(base, "Default", "Cache");
+  const cacheDir = join(base, "Default", "GPUCache");
   const cookies = join(base, "Default", "Network", "Cookies");
   mkdirSync(cacheDir, { recursive: true });
   writeFileSync(join(cacheDir, "data_0"), "junk");
@@ -1478,6 +1478,7 @@ test("reconcileOrphans clears dead rows WITHOUT killing by the stored PID", asyn
   expect(cleared).toBe(1);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   expect(f.killed.length).toBe(0); // no blind SIGKILL of a possibly-recycled PID
+  await (launcherB as any).cacheClears.get("k1d0cd11");
   expect(existsSync(cacheDir)).toBe(false);
   expect(existsSync(cookies)).toBe(true);
   rmSync(base, { recursive: true, force: true });
@@ -3262,6 +3263,8 @@ test("concurrent stop calls share one destructive teardown", async () => {
   expect(await Promise.all([first, second])).toEqual([true, true]);
   expect(killCalls).toBe(1);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
+  // Deletion waits for the post-stop cache delete, which runs on after stop() returns.
+  await (launcher as any).cacheClears.get("k1d0cd11");
   expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(false);
   store.close();
 });
@@ -4174,13 +4177,41 @@ test("clearCache removes cache dirs, preserves the session, and skips a live bro
 
   await launcher.stop("k1d0cd11");
   // The post-stop cache delete runs on after stop() returns.
-  for (let i = 0; i < 200 && (existsSync(cacheDir) || existsSync(scriptCache) || existsSync(cacheStorage)); i++) await Bun.sleep(10);
-  expect(existsSync(cacheDir)).toBe(false);
+  await (launcher as any).cacheClears.get("k1d0cd11");
+  // Site caches under the cap stay for the next open; Service Worker data goes.
+  expect(existsSync(cacheDir)).toBe(true);
   expect(existsSync(scriptCache)).toBe(false);
   expect(existsSync(cacheStorage)).toBe(false);
   expect(existsSync(cookies)).toBe(true);
   expect(existsSync(localStorage)).toBe(true);
   rmSync(dataRoot, { recursive: true, force: true });
+  store.close();
+});
+
+test("after a stop, site caches stay up to 35 MB, the compiled-script cache going first", async () => {
+  const store = seeded();
+  const f = fleet();
+  const launcher = newLauncher(store, f, []);
+  const base = join(testDataRoot(store), "k1d0cd11");
+  const sized = (rel: string, megabytes: number) => {
+    const dir = join(base, ...rel.split("/"));
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "data");
+    writeFileSync(file, "");
+    truncateSync(file, megabytes * 1024 * 1024);
+  };
+  const cycle = async (code: number, http: number) => {
+    await launcher.start("k1d0cd11");
+    sized("Default/Code Cache", code);
+    sized("Default/Cache", http);
+    await launcher.stop("k1d0cd11");
+    await (launcher as any).cacheClears.get("k1d0cd11");
+    return [existsSync(join(base, "Default", "Code Cache")), existsSync(join(base, "Default", "Cache"))];
+  };
+
+  expect(await cycle(10, 20)).toEqual([true, true]);
+  expect(await cycle(20, 20)).toEqual([false, true]);
+  expect(await cycle(0, 40)).toEqual([true, false]);
   store.close();
 });
 
@@ -5060,6 +5091,7 @@ test("a stopped Chromium 155 profile shares its components beside the browser; C
     // The next start waits for the cleanup after the stop.
     await launcher.start(profile.id);
     await launcher.stop(profile.id);
+    await (launcher as any).cacheClears.get(profile.id);
     const result = {
       shared: existsSync(join(executable, "..", "WidevineCdm", "manifest.json")),
       own: existsSync(own),

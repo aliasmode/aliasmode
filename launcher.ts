@@ -29,7 +29,7 @@ import {
   statSync,
   statfsSync,
 } from "node:fs";
-import { rm } from "node:fs/promises";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dlopen, ptr } from "bun:ffi";
 import type { CookieRecord, LaunchInfo, Profile, ProxySpec } from "./types.ts";
@@ -57,8 +57,7 @@ import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
   completeProfileFingerprint, FIREFOX_RUNTIME_VERSION, firefoxLaunchConfig, firefoxPersonaOs, firefoxStartupPrefs, intelMacGraphicsVendor,
-  type MacGraphicsVendor, syncFirefoxTimezone,
-} from "./firefox-config.ts";
+  type MacGraphicsVendor, syncFirefoxTimezone, SITE_CACHE_CAP_BYTES } from "./firefox-config.ts";
 import { ensureFirefoxFontPack, firefoxFontPackFor, firefoxFontPackPrefs, pruneFirefoxFontPacks, type FirefoxFontPack } from "./firefox-fonts.ts";
 import { renameWhenUnlocked, windowsSystemTool } from "./browser-install.ts";
 import {
@@ -773,8 +772,6 @@ export function readSnapshotChildBounded(
  * Local Storage and IndexedDB carry the login and are untouched.
  */
 const POST_STOP_CACHE_DIRS = [
-  "Default/Cache",
-  "Default/Code Cache",
   "Default/GPUCache",
   "Default/Service Worker",
   "Default/DawnCache",
@@ -793,10 +790,30 @@ const POST_STOP_CACHE_DIRS = [
  * Local Storage, Network, Preferences) — deleting those would log the account
  * out and defeat the persistent-session design the whole migration relies on.
  */
-const CACHE_DIRS = POST_STOP_CACHE_DIRS;
+// Site caches stay across closes up to SITE_CACHE_CAP_BYTES per profile; over it, they go after
+// the stop, the compiled-script cache first.
+
+/** Bytes of the files under a directory; 0 when it is missing. */
+async function directoryBytes(dir: string): Promise<number> {
+  let entries;
+  try {
+    entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    try { total += (await lstat(join(entry.parentPath, entry.name))).size; } catch {}
+  }
+  return total;
+}
+const SITE_CACHE_DIRS = ["Default/Code Cache", "Default/Cache"];
+const CACHE_DIRS = [...SITE_CACHE_DIRS, ...POST_STOP_CACHE_DIRS];
 const FIREFOX_CACHE_DIRS = ["cache2", "startupCache", "shader-cache"];
+const FIREFOX_SITE_CACHE_DIRS = ["cache2"];
 /** Firefox rebuilds its own startupCache (browser code, never site data) at every start without it. */
-const FIREFOX_POST_STOP_CACHE_DIRS = ["cache2", "shader-cache"];
+const FIREFOX_POST_STOP_CACHE_DIRS = ["shader-cache"];
 
 /**
  * Volatile per-profile stores that commonly get left half-written by an UNCLEAN kill (all leveldb-
@@ -3946,14 +3963,21 @@ export class Launcher {
   }
 
   private clearPostStopCache(profileId: string, binaryPath?: string): void {
-    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_POST_STOP_CACHE_DIRS : POST_STOP_CACHE_DIRS;
+    const firefox = this.store.getProfile(profileId)?.engine === "firefox";
+    const dirs = firefox ? FIREFOX_POST_STOP_CACHE_DIRS : POST_STOP_CACHE_DIRS;
     const componentsDir = binaryPath ? chromiumComponentsDir(binaryPath, this.hostPlatform) : null;
     const startedAt = Date.now();
     const clearing: Promise<void> = this.clearCacheDirs(profileId, dirs, "post-stop cache cleanup")
+      .then(async (result) => {
+        const trimmed = await this.trimSiteCaches(profileId, firefox ? FIREFOX_SITE_CACHE_DIRS : SITE_CACHE_DIRS);
+        return { cleared: result.cleared || trimmed };
+      })
       .then(async ({ cleared }) => {
         if (cleared) this.log(`${profileId}: rebuildable disk caches cleared after confirmed stop (${Date.now() - startedAt}ms)`);
         if (componentsDir) await this.shareComponents(profileId, componentsDir);
       })
+      // Nothing awaits this after stop() returns, and an unhandled rejection ends the sidecar.
+      .catch((error) => this.log(`${profileId}: post-stop cache cleanup failed (${error instanceof Error ? error.name : "error"})`))
       .finally(() => {
         if (this.cacheClears.get(profileId) === clearing) this.cacheClears.delete(profileId);
       });
@@ -4001,6 +4025,23 @@ export class Launcher {
       }
     }
     return { cleared };
+  }
+
+  /** Delete site cache directories, in order, until the rest fit SITE_CACHE_CAP_BYTES. */
+  private async trimSiteCaches(profileId: string, dirs: readonly string[]): Promise<boolean> {
+    if (!this.store.getProfile(profileId) || this.store.getLaunch(profileId)) return false;
+    const base = this.containedUserDataDir(profileId, "site cache trim");
+    if (!base) return false;
+    const sizes = await Promise.all(dirs.map((rel) => directoryBytes(join(base, rel))));
+    let total = sizes.reduce((sum, size) => sum + size, 0);
+    const over: string[] = [];
+    for (const [index, rel] of dirs.entries()) {
+      if (total <= SITE_CACHE_CAP_BYTES) break;
+      if (sizes[index]! === 0) continue;
+      over.push(rel);
+      total -= sizes[index]!;
+    }
+    return over.length > 0 && (await this.clearCacheDirs(profileId, over, "site cache trim")).cleared;
   }
 
   /**

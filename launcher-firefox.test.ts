@@ -685,10 +685,11 @@ test("Firefox cache cleanup preserves native storage and lock files", async () =
   expect(await f.launcher.clearCache(f.profile.id)).toEqual({ cleared: false });
   expect(existsSync(join(root, "cache2/state"))).toBe(true);
   expect(await f.launcher.stop(f.profile.id)).toBe(true);
-  // The post-stop cache delete runs on after stop() returns. Firefox's own startupCache stays.
-  for (let i = 0; i < 200 && (existsSync(join(root, "cache2")) || existsSync(join(root, "shader-cache"))); i++) await Bun.sleep(10);
-  for (const dir of ["cache2", "shader-cache"]) expect(existsSync(join(root, dir))).toBe(false);
-  for (const file of ["startupCache/state", "storage/default/state", "cookies.sqlite", "prefs.js", "parent.lock", "sessionstore.jsonlz4"]) {
+  // The post-stop cache delete runs on after stop() returns. Firefox's own startupCache stays, and
+  // so does its site cache (cache2) under the 35 MB cap.
+  await (f.launcher as any).cacheClears.get(f.profile.id);
+  expect(existsSync(join(root, "shader-cache"))).toBe(false);
+  for (const file of ["cache2/state", "startupCache/state", "storage/default/state", "cookies.sqlite", "prefs.js", "parent.lock", "sessionstore.jsonlz4"]) {
     expect(existsSync(join(root, file))).toBe(true);
   }
 });

@@ -108,6 +108,9 @@ test("a Firefox launch shows the window label in the native title and starts in 
     "intl.locale.requested": "de-DE", "dom.webgpu.enabled": true, "dom.webgpu.service-workers.enabled": true, "gfx.blacklist.webgpu": 4, "browser.startup.couldRestoreSession.count": -1,
     "gfx.font_rendering.fallback.async": false,
     "browser.newtabpage.enabled": true,
+    // Site caches stay across closes, up to 35 MB.
+    "browser.cache.disk.smart_size.enabled": false,
+    "browser.cache.disk.capacity": 35 * 1024,
   });
   expect(firefoxStartupPrefs(profile(5))["intl.locale.requested"]).toBe("en-US");
 });

@@ -1534,10 +1534,11 @@ bunAsNodeTest("worker replaces stale pages and attempts every restored tab after
     expect(error).toMatchObject({ details: { operation: "navigation", outcome: "failed" } });
 
     const events = (await Bun.file(join(root, "events.log")).text()).trim().split("\n");
-    expect(events.filter((event) => event.startsWith("goto:"))).toEqual([
+    // The tabs load at the same time, so their log lines can land in any order.
+    expect(events.filter((event) => event.startsWith("goto:")).sort()).toEqual([
+      "goto:https://fails.example/",
       "goto:https://fails.example/",
       "goto:https://ok.example/",
-      "goto:https://fails.example/",
     ]);
     expect(events).toContain("close:stale");
     expect(events).toContain("close:extra-blank");
