@@ -495,6 +495,23 @@ export class ProfileStore {
     return this.db.query<any, []>(`SELECT * FROM profiles WHERE trashed_at = 0 ORDER BY id`).all().map(rowToProfile);
   }
 
+  /** What a Cloud roster row shows from the local copy, read in one query without parsing whole profiles. */
+  listRosterFields(): Map<string, Pick<Profile, "engine" | "chromiumRuntime" | "proxy" | "proxyError">> {
+    const rows = this.db.query<any, []>(
+      `SELECT id, engine, chromium_runtime, proxy_json, proxy_error FROM profiles WHERE trashed_at = 0`,
+    ).all();
+    return new Map(rows.map((row) => {
+      const engine = storedProfileEngine(row.engine);
+      const stored = readStoredProxy(row.proxy_json, row.proxy_error);
+      return [row.id, {
+        engine,
+        ...(engine === "chromium" && row.chromium_runtime === "aliasmode" ? { chromiumRuntime: "aliasmode" as const } : {}),
+        proxy: stored.proxy,
+        ...(stored.error ? { proxyError: stored.error } : {}),
+      }];
+    }));
+  }
+
   count(): number {
     return this.db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM profiles WHERE trashed_at = 0`).get()!.n;
   }

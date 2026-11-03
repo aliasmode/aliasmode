@@ -98,8 +98,13 @@ export interface CloudClientOptions {
   requestTimeoutMs?: number;
 }
 
-async function readResponseText(response: Response, progress: () => void): Promise<string> {
-  if (!response.body) return response.text();
+/**
+ * Reading a body chunk by chunk leaks native memory in Bun 1.2 (oven-sh/bun#18488; about the
+ * response size each time), so only the roster, which needs a silence limit on slow links, reads
+ * its body that way. Every other response is read whole.
+ */
+async function readResponseText(response: Response, progress?: () => void): Promise<string> {
+  if (!response.body || !progress) return response.text();
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let text = "";
@@ -113,6 +118,8 @@ async function readResponseText(response: Response, progress: () => void): Promi
 
 interface CallResponseOptions<T> {
   anonymous?: boolean;
+  /** Restart the silence limit at each body chunk (a large roster on a slow link). */
+  progressive?: boolean;
   notModified?: () => T;
   received?: (response: Response, body: T) => void;
 }
@@ -197,7 +204,7 @@ export class CloudClient {
         }
         let text: string;
         try {
-          text = await readResponseText(response, restartTimeout);
+          text = await readResponseText(response, responseOptions.progressive ? restartTimeout : undefined);
         } catch (error) {
           throw new CloudRequestError(
             `AliasMode Cloud response ${path} could not be read`,
@@ -419,6 +426,7 @@ export class CloudClient {
     const headers = new Headers();
     if (this.profileRoster) headers.set("if-none-match", this.profileRoster.etag);
     const request = this.call<ListProfilesResponse>("/profiles", { headers }, {
+      progressive: true,
       notModified: () => {
         if (!this.profileRoster) throw new Error("AliasMode Cloud profile roster cache is empty");
         return this.profileRoster.response;

@@ -375,6 +375,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   /** Per profile: the heartbeat and window-check intervals. */
   private readonly timers = new Map<string, unknown[]>();
   private readonly heartbeatRetries = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Pending close id -> its profile and registration, with the row state it was read at. */
+  private readonly pendingRegistrations = new Map<string, { key: string; profileId: string; registrationId: string }>();
   private readonly windowChecks = new Set<string>();
   private readonly heartbeatInFlight = new Map<string, CloudLeaseInFlight>();
   private readonly maintenanceInFlight = new Map<string, CloudMaintenanceInFlight>();
@@ -473,26 +475,44 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     // A registration that finishes during the fetch can still be in the Cloud reply.
     const rememberLocal = () => {
       for (const open of queue.listOpens(accountId)) rememberRegistration(open.profileId, open.registrationId);
+      const listed = new Set<string>();
       for (const summary of queue.list(accountId)) {
-        try {
-          const pending = queue.get(summary.id, accountId);
-          if (pending) rememberRegistration(pending.profileId, pending.registrationId);
-        } catch {
-          // An unreadable registration cannot prove local ownership or hide a Cloud lock.
+        listed.add(summary.id);
+        // Reading a pending close decrypts it; a roster poll reuses what an earlier poll read.
+        const key = `${summary.updatedAt}:${summary.expectedVersion}`;
+        let known = this.pendingRegistrations.get(summary.id);
+        if (known?.key !== key) {
+          known = undefined;
+          this.pendingRegistrations.delete(summary.id);
+          try {
+            const pending = queue.get(summary.id, accountId);
+            if (pending) {
+              known = { key, profileId: pending.profileId, registrationId: pending.registrationId };
+              this.pendingRegistrations.set(summary.id, known);
+            }
+          } catch {
+            // An unreadable registration cannot prove local ownership or hide a Cloud lock.
+          }
         }
+        if (known) rememberRegistration(known.profileId, known.registrationId);
       }
+      for (const id of this.pendingRegistrations.keys()) if (!listed.has(id)) this.pendingRegistrations.delete(id);
     };
     rememberLocal();
     const response = await this.options.cloud.listProfiles();
-    this.backfillProxyCache(response.profiles);
+    // One query each instead of two per profile: a 10,000-profile roster polled every second
+    // otherwise holds the main thread, which also carries every browser's proxy traffic.
+    const cachedProfiles = this.options.store.listRosterFields();
+    this.backfillProxyCache(response.profiles, cachedProfiles);
     rememberLocal();
     const parkedSessions = newestParkedSessions(queue.list(accountId));
+    const launches = new Map(this.options.store.listLaunches().map((launch) => [launch.profileId, launch]));
     return {
       profiles: response.profiles
         .filter((profile) => profile.trashedAt === null)
         .map((profile) => {
-          const launch = this.options.store.getLaunch(profile.id);
-          const cached = this.options.store.getProfile(profile.id);
+          const launch = launches.get(profile.id);
+          const cached = cachedProfiles.get(profile.id);
           const parked = parkedSessions.get(profile.id);
           const upload = launch ? this.uploads.get(profile.id) : undefined;
           // A parked session means Cloud took another device's copy; its own notice covers that.
@@ -542,7 +562,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
    * next polls without blocking this one. A version change on a profile cached
    * this run (a remote edit) triggers a refetch the same way.
    */
-  private backfillProxyCache(profiles: readonly CloudProfileSummary[]): void {
+  private backfillProxyCache(profiles: readonly CloudProfileSummary[], cached: ReadonlyMap<string, unknown>): void {
     if (this.proxyBackfillTask || this.shuttingDown) return;
     const now = Date.now();
     const candidates = profiles
@@ -552,7 +572,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         if (cachedVersion === profile.version) return false;
         // Cached by an earlier run at an unknown version: keep what we have
         // rather than re-downloading the whole roster on every start.
-        if (cachedVersion === undefined && this.options.store.getProfile(profile.id)) return false;
+        if (cachedVersion === undefined && cached.has(profile.id)) return false;
         const attempted = this.proxyCacheAttempts.get(profile.id);
         return attempted === undefined || now - attempted > PROXY_BACKFILL_RETRY_MS;
       })

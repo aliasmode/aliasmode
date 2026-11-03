@@ -1613,6 +1613,25 @@ test("Cloud roster reconciles a manually closed browser from its latest checkpoi
   state.store.close();
 });
 
+test("Cloud roster polls decrypt a pending close once and still show it as this device's", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.queue.list("account1")).toHaveLength(1);
+  const get = state.queue.get.bind(state.queue);
+  let decrypts = 0;
+  (state.queue as any).get = (...args: Parameters<typeof get>) => { decrypts++; return get(...args); };
+
+  for (let poll = 0; poll < 3; poll++) {
+    const roster = await rosterReconciled(state.coordinator);
+    expect(roster.profiles[0]).toMatchObject({ id: "profile1", running: true, lockedBy: null });
+  }
+  expect(decrypts).toBe(1);
+
+  await state.coordinator.close("profile1");
+  state.queue.close();
+  state.store.close();
+});
+
 const notBlocked = <T>(work: Promise<T>) =>
   Promise.race([work, Bun.sleep(1_000).then(() => "blocked" as const)]);
 
