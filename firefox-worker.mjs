@@ -168,6 +168,11 @@ function send(response, status, body) {
   response.end(body);
 }
 
+// The engine copies every response body and every WebSocket frame for Playwright, which made
+// WebSocket-heavy sites (Telegram Web) several times slower. The app reads neither; a script or MCP
+// client may, so the owner turns this on while one is attached (Browser.setNetworkDetail).
+const NETWORK_DETAIL_OFF = { "juggler.networkDetail": false };
+
 export function firefoxLaunchOptions(input) {
   // A stored graphics identity must show on every computer, also where the browser would turn WebGL off.
   const graphics = input.config?.["webGl:vendor"] ? { "webgl.force-enabled": true } : {};
@@ -187,11 +192,12 @@ export function firefoxLaunchOptions(input) {
         "media.peerconnection.ice.proxy_only": true,
         "media.peerconnection.ice.default_address_only": true,
         "media.peerconnection.ice.no_host": true,
+        ...NETWORK_DETAIL_OFF,
         ...graphics,
       },
     } : {
       // No proxy: keep WebRTC on the default route so a system VPN's IP is used, not the real NIC.
-      firefoxUserPrefs: { "media.peerconnection.ice.default_address_only": true, ...graphics },
+      firefoxUserPrefs: { "media.peerconnection.ice.default_address_only": true, ...NETWORK_DETAIL_OFF, ...graphics },
     }),
     ...(input.headless === undefined ? {} : { headless: input.headless }),
     ...(input.args ? { args: input.args } : {}),
@@ -257,19 +263,28 @@ async function run() {
     try { url = page.url(); } catch {}
     return { id, url };
   });
+  let playwrightServer;
+  let playwrightEndpoint;
+  // An engine before the lean network build does not know the method; it keeps full detail.
+  const updateNetworkDetail = () => context?._connection?.toImpl?.(context)?._browser?.session
+    ?.send("Browser.setNetworkDetail", { enabled: !!(official || playwrightServer) })
+    .catch(() => {});
   const closeOfficial = async () => {
     const current = official;
     official = undefined;
     await current?.client.close().catch(() => {});
     await current?.server.close().catch(() => {});
+    if (current) await updateNetworkDetail();
   };
-  let playwrightServer;
-  let playwrightEndpoint;
   const closePlaywrightServer = async () => {
     const current = playwrightServer;
     playwrightServer = undefined;
     playwrightEndpoint = undefined;
-    await current?.close();
+    try {
+      await current?.close();
+    } finally {
+      if (current) await updateNetworkDetail();
+    }
   };
   const initializePlaywrightServer = async () => {
     if (playwrightEndpoint) return playwrightEndpoint;
@@ -288,6 +303,7 @@ async function run() {
     try {
       playwrightEndpoint = await bridge.listen(0, "127.0.0.1");
       playwrightServer = bridge;
+      await updateNetworkDetail();
       return playwrightEndpoint;
     } catch (error) {
       await bridge.close().catch(() => {});
@@ -323,6 +339,7 @@ async function run() {
   const initializeOfficial = async () => {
     if (official) return official;
     official = await connectOfficial("aliasmode-firefox-owner", async () => nonClosingContext(context));
+    await updateNetworkDetail();
     return official;
   };
   const operation = async (name, payload) => {

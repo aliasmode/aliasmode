@@ -39,6 +39,8 @@ test("Firefox owner passes native proxy preferences", () => {
       "media.peerconnection.ice.proxy_only": true,
       "media.peerconnection.ice.default_address_only": true,
       "media.peerconnection.ice.no_host": true,
+      // Response bodies and WebSocket frames for Playwright stay off until a script or MCP client attaches.
+      "juggler.networkDetail": false,
     },
   });
   expect(firefoxLaunchOptions({ executablePath: "firefox.exe", proxy })).not.toHaveProperty("firefoxUserPrefs.browser.startup.page");
@@ -52,6 +54,7 @@ test("Firefox owner passes native proxy preferences", () => {
   expect(firefoxLaunchOptions({ executablePath: "firefox.exe", config: {} }).firefoxUserPrefs).not.toHaveProperty("webgl.force-enabled");
   expect(firefoxLaunchOptions({ executablePath: "firefox.exe" }).firefoxUserPrefs).toEqual({
     "media.peerconnection.ice.default_address_only": true,
+    "juggler.networkDetail": false,
   });
 });
 
