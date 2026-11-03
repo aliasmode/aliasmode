@@ -184,6 +184,9 @@ const CLOUD_UPLOAD_FAILURES_SHOWN = 2;
 const WINDOW_CHECK_MS = 2_000;
 /** Checks in a row without a page before the last window counts as closed. */
 const WINDOW_CLOSED_CHECKS = 3;
+const RETRYABLE_RENEWAL_STATUSES = new Set([401, 408, 429]);
+/** A failed heartbeat is tried again this soon, so one lost beat does not lapse the 120 s Cloud lease. */
+const HEARTBEAT_RETRY_MS = 15_000;
 // Storage watchers capture every change, so the heartbeat runs a full capture only every Nth beat.
 const HEARTBEAT_FULL_CAPTURE_EVERY = 10;
 const CLOUD_PROFILE_OPEN_ERROR =
@@ -371,6 +374,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private readonly closing = new Map<string, Promise<CloudBrowserCloseResult>>();
   /** Per profile: the heartbeat and window-check intervals. */
   private readonly timers = new Map<string, unknown[]>();
+  private readonly heartbeatRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly windowChecks = new Set<string>();
   private readonly heartbeatInFlight = new Map<string, CloudLeaseInFlight>();
   private readonly maintenanceInFlight = new Map<string, CloudMaintenanceInFlight>();
@@ -1730,12 +1734,23 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   async heartbeatOnce(profileId: string): Promise<void> {
     const lease = await this.renewLeaseOnce(profileId);
     if (!lease) return;
+    if (lease.outcome === "transient") this.retryHeartbeatSoon(profileId);
     if (lease.outcome === "terminal") {
       this.stopHeartbeatForRegistration(profileId, lease.accountId, lease.registrationId);
       await this.handleTerminalHeartbeat(profileId, lease);
       return;
     }
     await this.maintainOpenOnce(profileId, lease);
+  }
+
+  private retryHeartbeatSoon(profileId: string): void {
+    if (!this.timers.has(profileId) || this.heartbeatRetries.has(profileId)) return;
+    const timer = setTimeout(() => {
+      this.heartbeatRetries.delete(profileId);
+      if (this.timers.has(profileId)) void this.heartbeatOnce(profileId).catch(() => {});
+    }, HEARTBEAT_RETRY_MS);
+    (timer as { unref?: () => void }).unref?.();
+    this.heartbeatRetries.set(profileId, timer);
   }
 
   private async renewLeaseOnce(profileId: string): Promise<CloudLeaseResult | null> {
@@ -2195,7 +2210,10 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     try {
       fresh = await this.options.cloud.openProfile(open.profileId, { deviceId });
     } catch (error) {
-      return error instanceof CloudApiError && error.status < 500 ? "failed" : "retry";
+      // An expired token (refreshed within the hour), a timeout or throttling is no answer about the lease.
+      return error instanceof CloudApiError && error.status < 500 && !RETRYABLE_RENEWAL_STATUSES.has(error.status)
+        ? "failed"
+        : "retry";
     }
     if (
       fresh.baseVersion === open.expectedVersion &&
@@ -2559,8 +2577,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (this.heartbeatMs === 0 || this.timers.has(profileId)) return;
     const set = this.options.setIntervalFn ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
     const timers = [
-      set(() => { void this.heartbeatOnce(profileId); }, this.heartbeatMs),
-      set(() => { void this.checkWindowsOnce(profileId); }, WINDOW_CHECK_MS),
+      // An unhandled rejection ends the sidecar, and with it every browser on Windows.
+      set(() => { void this.heartbeatOnce(profileId).catch(() => {}); }, this.heartbeatMs),
+      set(() => { void this.checkWindowsOnce(profileId).catch(() => {}); }, WINDOW_CHECK_MS),
     ];
     for (const timer of timers) {
       if (timer && typeof timer === "object" && "unref" in timer) {
@@ -2584,6 +2603,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   private stopHeartbeat(profileId: string): Promise<CloudLeaseResult> | null {
     this.stopDirtyMonitor(profileId);
     this.missingPageObservations.delete(profileId);
+    clearTimeout(this.heartbeatRetries.get(profileId));
+    this.heartbeatRetries.delete(profileId);
     const timers = this.timers.get(profileId);
     if (timers !== undefined) {
       const clear = this.options.clearIntervalFn ?? ((handle: unknown) => clearInterval(handle as ReturnType<typeof setInterval>));

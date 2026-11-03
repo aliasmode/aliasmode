@@ -391,8 +391,12 @@ async function run() {
       }
       try {
         const requestValue = await readRequest(request);
-        const runOperation = queue.then(() => operation(requestValue.operation, requestValue.payload));
-        queue = runOperation.catch(() => {});
+        // status only reads memory. Behind a capture (up to minutes) it timed out, and a running
+        // browser read as gone. Every other operation runs one at a time.
+        const runOperation = requestValue.operation === "status"
+          ? operation(requestValue.operation, requestValue.payload)
+          : queue.then(() => operation(requestValue.operation, requestValue.payload));
+        if (requestValue.operation !== "status") queue = runOperation.catch(() => {});
         const result = await runOperation;
         if (requestValue.operation === "close") {
           await stopContext();

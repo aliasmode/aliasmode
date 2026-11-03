@@ -121,7 +121,7 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.labeled()).toBe(0);
   expect(f.store.getLaunch(f.profile.id)?.engine).toBe("firefox");
   const restarted = new Launcher(f.options);
-  expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false });
+  expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false, reattached: true });
   expect(await restarted.certifiedActive(f.profile.id)).toBe(true);
   expect(f.launches()).toBe(1);
   expect(await restarted.stop(f.profile.id)).toBe(true);
@@ -164,7 +164,7 @@ test("a proxied Firefox launch saves the proxy exit's timezone in its config, an
     expect((f.config() as Record<string, unknown>).timezone).toBe(timezone);
     // The launch identity was recorded with the saved timezone, so a restarted app reattaches.
     const restarted = new Launcher(options);
-    expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false });
+    expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false, reattached: true });
     expect(await restarted.certifiedActive(f.profile.id)).toBe(true);
     expect(f.launches()).toBe(1);
     expect(await restarted.stop(f.profile.id)).toBe(true);
@@ -321,7 +321,7 @@ test("Firefox supports Darwin arm64, Darwin x64 and Linux x64 personas without c
     expect(f.config()).toEqual(firefoxLaunchConfig(f.profile, LABEL, join(f.options.chromiumRuntimeRoot!, "firefox-fonts", "windows", "fonts")));
     expect(f.store.getLaunch(f.profile.id)?.firefoxOwner).toMatchObject({ pid: 201, browserPid: 202 });
     const restarted = new Launcher(f.options);
-    expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false });
+    expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false, reattached: true });
     expect(await restarted.certifiedActive(f.profile.id)).toBe(true);
     expect(f.launches()).toBe(1);
     expect(await restarted.stop(f.profile.id)).toBe(true);
@@ -432,7 +432,7 @@ test("Mac reopens a closed window on its existing Firefox owner", async () => {
     generation: `${launch.debugPort}:${launch.startedAt}`, tabs,
   }));
   f.closeNativeWindow();
-  expect(await f.launcher.start(f.profile.id)).toEqual({ ...initial, nativeSessionRestored: true });
+  expect(await f.launcher.start(f.profile.id)).toEqual({ ...initial, nativeSessionRestored: true, reattached: true });
   expect(f.navigated).toEqual([tabs]);
   expect(f.launches()).toBe(1);
   expect(f.killed).toEqual([]);

@@ -453,7 +453,9 @@ export class AgentControlSession {
         return {
           ws: result.ws,
           port: result.port,
-          alreadyOpen: false,
+          // A browser that was running before this call (a busy one can fail the check above) is the
+          // user's; this connection must not close it when it ends.
+          alreadyOpen: !!result.reattached,
           headless: launch?.headless ?? options.headless ?? false,
         };
       },

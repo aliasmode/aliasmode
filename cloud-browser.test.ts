@@ -1489,6 +1489,28 @@ test("Cloud retries a lapsed lease while the network is not back after a wake", 
 });
 
 test.each([
+  ["an expired access token", 401, "authentication_required"],
+  ["throttling", 429, "rate_limited"],
+] as const)("Cloud keeps a browser whose lease lapsed when the renewal meets %s", async (_case, status, code) => {
+  const state = setup({ heartbeatMs: 60_000, setIntervalFn: () => ({}), clearIntervalFn: () => {} });
+  const cloud = (state.coordinator as any).options.cloud;
+  try {
+    expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+    cloud.heartbeat = async () => { throw new CloudApiError("The open registration expired.", "version_conflict", 409); };
+    cloud.openProfile = async () => { throw new CloudApiError("try again", code, status); };
+
+    await state.coordinator.heartbeatOnce("profile1");
+    expect(state.events).not.toContain("stop");
+    expect(state.store.getLaunch("profile1")).not.toBeNull();
+    expect(state.queue.getOpen("profile1", "account1")).toMatchObject({ registrationId: "registration1", phase: "running" });
+  } finally {
+    await state.coordinator.releaseAll(true);
+    state.queue.close();
+    state.store.close();
+  }
+});
+
+test.each([
   ["another device holds the profile", async () => { throw new CloudApiError("open elsewhere", "profile_open", 409); }, 0],
   ["someone else saved the profile", async () => freshOpen("registration2", 5), 1],
 ] as const)("Cloud closes a browser whose lease lapsed when %s", async (_case, reopen, abandons) => {

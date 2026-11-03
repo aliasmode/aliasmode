@@ -645,7 +645,7 @@ test("after a restart, a bootstrapped browser reattaches without rerunning searc
 
   const changedWs = `ws://127.0.0.1:${b.port}/devtools/browser/restarted`;
   f.setWs(b.port, changedWs);
-  expect(await launcherB.start("k1d0cd11")).toEqual({ ws: changedWs, port: b.port, nativeSessionRestored: false });
+  expect(await launcherB.start("k1d0cd11")).toEqual({ ws: changedWs, port: b.port, nativeSessionRestored: false, reattached: true });
   expect(prepared).toHaveLength(1);
   store.close();
 });
@@ -1310,7 +1310,7 @@ test("after a restart, a surviving SOCKS5 browser rebinds its relay before reuse
   store.close();
 });
 
-test("certifiedActive verifies a survivor once and stops it when the stored timezone changes", async () => {
+test("certifiedActive keeps a proven browser after a live edit and stops an unproven survivor with a changed timezone", async () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   store.upsertProfile({
@@ -1338,12 +1338,28 @@ test("certifiedActive verifies a survivor once and stops it when the stored time
 
   const edited = store.getProfile("k1d0cd11")!;
   store.upsertProfile({ ...edited, timezone: "Europe/London" });
-  expect(await launcher.certifiedActive("k1d0cd11")).toBe(false);
+  // This process proved the running browser, so it keeps its launch-time identity until it closes.
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
+
+  // After an app restart nothing proved it, and a survivor that differs from its profile stops.
+  const restarted = new Launcher({
+    store,
+    binaryPath: "/fake/cloak",
+    spawn: () => { throw new Error("must not spawn"); },
+    fetch: f.fetchFn,
+    isPidAlive: f.isPidAlive,
+    findOwnedBrowserPids: f.findOwnedBrowserPids,
+    browserClose: async () => false,
+    killPid: async (pid) => f.killPid(pid),
+  });
+  expect(await restarted.certifiedActive("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });
 
-test("certifiedActive retains a survivor after one transient CDP miss", async () => {
+test("certifiedActive rides out a transient CDP miss and retains a survivor that stays silent", async () => {
   const store = seeded();
   makeDirect(store);
   const f = fleet();
@@ -1352,6 +1368,7 @@ test("certifiedActive retains a survivor after one transient CDP miss", async ()
 
   let versionProbes = 0;
   let failThirdProbe = true;
+  let silent = false;
   let browserCloses = 0;
   const killed: number[] = [];
   const launcher = new Launcher({
@@ -1359,7 +1376,7 @@ test("certifiedActive retains a survivor after one transient CDP miss", async ()
     binaryPath: "/fake/cloak",
     spawn: () => { throw new Error("must not spawn"); },
     fetch: async (url) => {
-      if (url.includes("/json/version") && ++versionProbes === 3 && failThirdProbe) {
+      if (url.includes("/json/version") && (silent || (++versionProbes === 3 && failThirdProbe))) {
         return { ok: false, json: async () => ({}) };
       }
       return f.fetchFn(url);
@@ -1370,11 +1387,18 @@ test("certifiedActive retains a survivor after one transient CDP miss", async ()
     killPid: async (pid) => { killed.push(pid); f.killPid(pid); },
   });
 
+  // One missed probe of a running browser is retried, not read as a dead browser.
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  expect(versionProbes).toBeGreaterThan(3);
+
+  // A browser that stops answering reads as not active, but is never closed for it.
+  silent = true;
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).not.toBeNull();
   expect(browserCloses).toBe(0);
   expect(killed).toEqual([]);
 
+  silent = false;
   failThirdProbe = false;
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
   expect(store.getLaunch("k1d0cd11")).not.toBeNull();
@@ -2620,7 +2644,7 @@ test("per-launch headless mode skips address-bar search provider setup", async (
   const launch = await launcher.start("k1d0cd11", [], { headless: true });
   expect(attempts).toBe(0);
   expect(store.getLaunch("k1d0cd11")?.searchBootstrapRevision).toBeUndefined();
-  expect(await launcher.start("k1d0cd11", [], { headless: true })).toEqual(launch);
+  expect(await launcher.start("k1d0cd11", [], { headless: true })).toEqual({ ...launch, reattached: true });
   await expect(launcher.verifyRunningIdentity("k1d0cd11")).resolves.toBeUndefined();
 
   rmSync(dataRoot, { recursive: true, force: true });
@@ -5376,7 +5400,7 @@ test("every proxied Chromium launch takes the proxy exit's timezone, and no answ
     const stored = store.getProfile(chromium155.id)!.timezone;
     // The launch identity was recorded with the saved timezone, so a restarted app reattaches.
     const restarted = newLauncher(store, f, spawnedArgs, undefined, undefined, options);
-    expect(await restarted.start(chromium155.id)).toEqual({ ...opened, nativeSessionRestored: false });
+    expect(await restarted.start(chromium155.id)).toEqual({ ...opened, nativeSessionRestored: false, reattached: true });
     expect(spawnedArgs).toHaveLength(1);
     await restarted.stop(chromium155.id);
     store.close();

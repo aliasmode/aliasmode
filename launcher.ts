@@ -628,6 +628,8 @@ export interface LaunchStartResult {
   nativeSessionRestored?: boolean;
   /** True when this fresh Chromium launch opened its own last on-disk session, cookies included. */
   nativeSessionLoaded?: boolean;
+  /** True when the browser was already running and this call only attached to it. */
+  reattached?: boolean;
 }
 
 export type LaunchGeneration = Pick<LaunchInfo, "debugPort" | "startedAt">;
@@ -641,6 +643,9 @@ const WINDOWS_TASKLIST_TIMEOUT_MS = 10_000;
 const DARWIN_PROCESS_SCAN_TIMEOUT_MS = 10_000;
 const FAILED_PROCESS_SCAN_BACKOFF_MS = 60_000;
 const EXTERNAL_OWNERSHIP_PROOF_TTL_MS = 5 * 60_000;
+/** Extra liveness probes of a browser whose process is still running; see probeLiveLaunchCdp. */
+const ACTIVE_PROBE_RETRIES = 3;
+const ACTIVE_PROBE_RETRY_MS = 250;
 
 type ProcessLiveness = "alive" | "dead" | "recovering" | "unknown";
 
@@ -900,6 +905,8 @@ export class Launcher {
   /** Proxied browser websocket generations verified by this manager process. */
   /** Full profile + launch generations certified by this manager process. */
   private certifiedLaunches = new Map<string, string>();
+  /** Launch generation (port:startedAt) whose identity this process proved; see certifiedActive. */
+  private provenGenerations = new Map<string, { generation: string; staleLogged: boolean }>();
   private certificationsInFlight = new Map<string, Promise<boolean>>();
   /** Ports currently handed out, so the allocator never reuses a live one. */
   private liveReserved = new Set<number>();
@@ -1531,6 +1538,11 @@ export class Launcher {
   private markIdentityCertified(profileId: string): void {
     const key = this.identityCertificationKey(profileId);
     if (key) this.certifiedLaunches.set(profileId, key);
+    const launch = this.store.getLaunch(profileId);
+    const generation = launch ? `${launch.debugPort}:${launch.startedAt}` : "";
+    if (generation && this.provenGenerations.get(profileId)?.generation !== generation) {
+      this.provenGenerations.set(profileId, { generation, staleLogged: false });
+    }
   }
 
   private isIdentityCertified(profileId: string): boolean {
@@ -1538,8 +1550,9 @@ export class Launcher {
     return !!key && this.certifiedLaunches.get(profileId) === key;
   }
 
-  private clearIdentityCertification(profileId: string): void {
+  private clearIdentityCertification(profileId: string, keepProvenGeneration = false): void {
     this.certifiedLaunches.delete(profileId);
+    if (!keepProvenGeneration) this.provenGenerations.delete(profileId);
   }
 
   private requireUnchangedProfile(profileId: string, snapshot: string, stage: string): Profile {
@@ -1857,6 +1870,7 @@ export class Launcher {
             ws: currentWs,
             port: existing.debugPort,
             nativeSessionRestored,
+            reattached: true,
           };
         }
       }
@@ -3522,7 +3536,7 @@ export class Launcher {
     const launch = this.store.getLaunch(profileId);
     if (!launch) return false;
     const trackedProc = this.procs.get(profileId);
-    const currentWs = await this.probeLaunchCdp(launch);
+    const currentWs = await this.probeLiveLaunchCdp(launch, trackedProc);
     if (!currentWs) return false;
     const afterProbe = this.store.getLaunch(profileId);
     if (!afterProbe
@@ -3672,7 +3686,7 @@ export class Launcher {
     const starting = this.startsInFlight.get(profileId);
     if (starting) await starting.catch(() => {});
     if (!(await this.active(profileId).catch(() => false))) {
-      this.clearIdentityCertification(profileId);
+      this.clearIdentityCertification(profileId, true);
       return false;
     }
     if (this.isIdentityCertified(profileId)) return true;
@@ -3686,11 +3700,21 @@ export class Launcher {
         await this.verifyRunningIdentity(profileId);
         return this.isIdentityCertified(profileId) && await this.active(profileId).catch(() => false);
       } catch (error) {
-        this.clearIdentityCertification(profileId);
+        this.clearIdentityCertification(profileId, true);
         const current = this.store.getLaunch(profileId);
         if (!current || `${current.debugPort}:${current.startedAt}` !== targetGeneration) return false;
         const detail = error instanceof Error ? error.message : String(error);
         const mismatch = this.survivorPolicyMismatch(profileId, targetGeneration);
+        const proven = this.provenGenerations.get(profileId);
+        if (mismatch && proven?.generation === targetGeneration && await this.active(profileId).catch(() => false)) {
+          // The profile was edited while a browser that this process proved runs. That browser keeps
+          // its launch-time identity until it closes; the edit applies at the next open.
+          if (!proven.staleLogged) {
+            proven.staleLogged = true;
+            this.log(`${profileId}: profile changed while open (${mismatch}); the browser keeps running and the change applies at the next open`);
+          }
+          return true;
+        }
         if (mismatch) {
           const stopped = await this.stop(profileId).catch(() => false);
           this.log(
@@ -3796,6 +3820,23 @@ export class Launcher {
       liveness: await this.inspectLaunchLiveness(launch.profileId, launch, trackedProc, !trackedProc),
       exactVerified: !trackedProc,
     };
+  }
+
+  /**
+   * A browser busy with a heavy page or a capture can miss one 800 ms probe. Callers of active()
+   * stop or replace a browser that reads as gone, so a still-running process gets a few more probes
+   * (about 3 s in all) before it counts as gone. A dead process answers at once.
+   */
+  private async probeLiveLaunchCdp(launch: LaunchInfo, trackedProc?: SpawnedProcess): Promise<string | null> {
+    for (let attempt = 0; ; attempt++) {
+      const ws = await this.probeLaunchCdp(launch);
+      if (ws || attempt >= ACTIVE_PROBE_RETRIES) return ws;
+      const pid = trackedProc?.pid ?? launch.pid;
+      let alive = false;
+      try { alive = pid > 0 && this.isPidAliveFn(pid); } catch {}
+      if (!alive) return null;
+      await Bun.sleep(ACTIVE_PROBE_RETRY_MS);
+    }
   }
 
   private async probeLaunchCdp(launch: LaunchInfo): Promise<string | null> {

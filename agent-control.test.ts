@@ -176,6 +176,26 @@ test("disconnect detaches from an existing browser without closing it", async ()
   expect(h.events).toEqual([]);
 });
 
+test("disconnect leaves a running browser alone when its status check missed and start reattached", async () => {
+  const h = harness();
+  const deps = {
+    ...h.deps,
+    launcher: {
+      ...h.deps.launcher,
+      start: async () => {
+        h.events.push("reattach");
+        return { ws: "ws://127.0.0.1:9333/devtools/browser/test", port: 9333, reattached: true };
+      },
+    },
+  };
+  const session = new AgentControlSession(deps as any);
+  const response = await session.enqueue(wire("browser.open", { profileId: "profile1" }));
+
+  expect(response.result).toMatchObject({ alreadyOpen: true, ownedByConnection: false });
+  await session.disconnect();
+  expect(h.events).toEqual(["reattach"]);
+});
+
 test("Firefox browser status and open keep the owner transport private", async () => {
   const h = harness({ active: true, firefox: true });
   const session = new AgentControlSession({
