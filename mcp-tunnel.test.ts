@@ -183,3 +183,41 @@ test("disconnect pauses the tunnel until authentication refresh", async () => {
   await waitFor(() => sockets.length === 2);
   await runtime.stop();
 });
+
+test("an authentication refresh keeps a live tunnel and its MCP sessions", async () => {
+  const sockets: FakeSocket[] = [];
+  const children: FakeChild[] = [];
+  const runtime = new McpTunnelRuntime({
+    baseUrl: "https://cloud.example.test",
+    accessToken: () => "access-token",
+    deviceId: () => "device-id",
+    deviceCredential: () => "device-credential",
+    reconnectDelayMs: 1,
+    connect: () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket as any;
+    },
+    spawnChild: () => {
+      const child = new FakeChild();
+      children.push(child);
+      return child as any;
+    },
+  });
+  runtime.start();
+  await waitFor(() => sockets.length === 1);
+  sockets[0]!.open();
+  sockets[0]!.emit("message", Buffer.from(JSON.stringify({ protocol: MCP_TUNNEL_PROTOCOL, type: "open", sessionId: "s1" })));
+  await waitFor(() => children.length === 1);
+  let childClosed = false;
+  children[0]!.stdin.once("finish", () => { childClosed = true; });
+
+  runtime.refresh();
+  await Bun.sleep(20);
+
+  expect(sockets).toHaveLength(1);
+  expect(sockets[0]!.readyState).toBe(WebSocket.OPEN);
+  expect(childClosed).toBe(false);
+  children[0]!.finish();
+  await runtime.stop();
+});

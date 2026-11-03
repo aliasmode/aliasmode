@@ -91,6 +91,9 @@ export class McpTunnelRuntime implements McpTunnelLifecycle {
   }
 
   refresh(): void {
+    // A token refresh of the same account keeps a live tunnel: the Cloud checks the token only when
+    // the tunnel connects, and a reset ends every remote MCP session and closes the browsers it opened.
+    if (!this.paused && this.socket && this.socket.readyState <= WebSocket.OPEN) return;
     this.paused = false;
     this.resetSocket();
     this.wake();
