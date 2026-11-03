@@ -143,7 +143,7 @@ type CloudBrowserLauncher = Pick<
 
 export interface CloudBrowserOptions {
   cloud: CloudBrowserClient;
-  launcher: CloudBrowserLauncher & Partial<Pick<Launcher, "prefetchBrowserRuntimes">>;
+  launcher: CloudBrowserLauncher & Partial<Pick<Launcher, "prefetchBrowserRuntimes" | "prefetchProxyExit">>;
   store: ProfileStore;
   queue: () => PendingSyncQueue | undefined;
   accountId: () => string | undefined;
@@ -725,6 +725,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
       stage = "cloud_registration";
       logStage("cloud_registration");
+      // The launch below reuses this lookup; a proxy that Cloud changed gets its own.
+      const cachedProxy = this.options.store.getProfile(profileId)?.proxy;
+      if (cachedProxy) this.options.launcher.prefetchProxyExit?.(cachedProxy);
       const opened = await this.options.cloud.openProfile(profileId, { deviceId });
       registrationId = opened.registrationId;
       this.diagnosticEvents.record("cloud_registered");

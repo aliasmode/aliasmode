@@ -925,14 +925,24 @@ async function navigatePages(context, urls, replacePages = false, tabsInOneWindo
       opener = tabs[index] ?? opener;
     }
   }
+  const pages = [];
   for (let index = 0; index < targets.length; index++) {
     try {
-      const page = index === 0 && blank ? blank : tabs[index] ?? await context.newPage();
-      await page.goto(targets[index], { waitUntil: "domcontentloaded", timeout: 30_000 });
+      pages[index] = index === 0 && blank ? blank : tabs[index] ?? await context.newPage();
     } catch (error) {
       firstError ??= error;
     }
   }
+  // The tabs exist in their order; they load at the same time, so an open waits for its slowest
+  // page through the proxy, not for the sum of all pages.
+  const loads = pages.map(async (page, index) => {
+    try {
+      await page.goto(targets[index], { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } catch (error) {
+      return error;
+    }
+  });
+  for (const error of await Promise.all(loads)) if (error) firstError ??= error;
   if (tabs.some(Boolean)) await blank.bringToFront?.().catch(() => {});
   if (firstError) throw firstError;
 }

@@ -3485,6 +3485,11 @@ export class Launcher {
     ];
   }
 
+  /** Start a proxy exit lookup early (Cloud does while its open request runs); start() reuses it. */
+  prefetchProxyExit(proxy: ProxySpec): void {
+    void this.lookupExitLocationFn?.(proxy).catch(() => null);
+  }
+
   /** Block destructive profile deletion while any owned lifecycle can still use its data directory. */
   profileDeletionBlocked(profileId: string): boolean {
     return this.startsInFlight.has(profileId)
