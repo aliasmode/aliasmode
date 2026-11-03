@@ -737,5 +737,7 @@
   "Uploading…": "上传中…",
   "Upload ZIP/CRX": "上传 ZIP/CRX",
   "Detailed logs": "详细日志",
-  "Applying replaces assignments on {count} current profile(s). New and moved profiles inherit it.": "应用后将替换当前分组中 {count} 个环境的分配。新增和移入的环境将继承它。"
+  "Applying replaces assignments on {count} current profile(s). New and moved profiles inherit it.": "应用后将替换当前分组中 {count} 个环境的分配。新增和移入的环境将继承它。",
+  "Check fingerprint": "检测指纹",
+  "Open the fingerprint test in {profile}": "在 {profile} 中打开指纹检测"
 }
