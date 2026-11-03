@@ -1768,8 +1768,22 @@ export class Launcher {
       try {
         this.assertStoredLaunchPersona(profile, existing, approvedBinarySha256);
       } catch {
-        return await this.rejectUnsafeExistingLaunch(profileId, "launch-time persona verification", new BrowserLaunchError("preflight", "stored_identity"));
+        // A browser that this process proved before its profile was edited (see certifiedActive)
+        // reopens with the edit. Any other mismatch is not trusted.
+        if (this.provenGenerations.get(profileId)?.generation !== `${existing.debugPort}:${existing.startedAt}`) {
+          return await this.rejectUnsafeExistingLaunch(profileId, "launch-time persona verification", new BrowserLaunchError("preflight", "stored_identity"));
+        }
+        this.log(`profile ${profileId} changed while open; restarting it with the change`);
+        if (!await this.doStop(profileId, existing)) {
+          throw this.rememberFailedStartGeneration(
+            new Error(`profile ${profileId} could not be safely restarted with its changed settings`),
+            existing,
+          );
+        }
+        existing = null;
       }
+    }
+    if (existing) {
       const trackedProc = this.procs.get(profileId);
       const liveness = await this.inspectLaunchLiveness(profileId, existing, trackedProc, true)
         .catch((error) => { throw this.rememberFailedStartGeneration(error, existing!); });
@@ -3490,11 +3504,12 @@ export class Launcher {
     void this.lookupExitLocationFn?.(proxy).catch(() => null);
   }
 
-  /** Block destructive profile deletion while any owned lifecycle can still use its data directory. */
+  /** Block destructive profile deletion while any owned lifecycle (or post-stop cache delete) can still use its data directory. */
   profileDeletionBlocked(profileId: string): boolean {
     return this.startsInFlight.has(profileId)
       || this.stopsInFlight.has(profileId)
       || this.procs.has(profileId)
+      || this.cacheClears.has(profileId)
       || this.store.getLaunch(profileId) !== null;
   }
 
@@ -4177,8 +4192,7 @@ export class Launcher {
   removeUserDataDir(profileId: string): boolean {
     const dir = this.containedUserDataDir(profileId, "removeUserDataDir");
     if (!dir) return false;
-    // A post-stop cache delete can still be running inside it; retries cover Windows' EBUSY/ENOTEMPTY.
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+    rmSync(dir, { recursive: true, force: true });
     return true;
   }
 

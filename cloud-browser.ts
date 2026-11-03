@@ -1755,14 +1755,20 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   async heartbeatOnce(profileId: string): Promise<void> {
+    await this.beatOnce(profileId, false);
+  }
+
+  /** A retry only renews the lease; the next regular beat does the rest. */
+  private async beatOnce(profileId: string, retry: boolean): Promise<void> {
     const lease = await this.renewLeaseOnce(profileId);
     if (!lease) return;
-    if (lease.outcome === "transient") this.retryHeartbeatSoon(profileId);
+    if (lease.outcome === "transient" && !retry) this.retryHeartbeatSoon(profileId);
     if (lease.outcome === "terminal") {
       this.stopHeartbeatForRegistration(profileId, lease.accountId, lease.registrationId);
       await this.handleTerminalHeartbeat(profileId, lease);
       return;
     }
+    if (retry) return;
     await this.maintainOpenOnce(profileId, lease);
   }
 
@@ -1770,7 +1776,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (!this.timers.has(profileId) || this.heartbeatRetries.has(profileId)) return;
     const timer = setTimeout(() => {
       this.heartbeatRetries.delete(profileId);
-      if (this.timers.has(profileId)) void this.heartbeatOnce(profileId).catch(() => {});
+      if (this.timers.has(profileId)) void this.beatOnce(profileId, true).catch(() => {});
     }, HEARTBEAT_RETRY_MS);
     (timer as { unref?: () => void }).unref?.();
     this.heartbeatRetries.set(profileId, timer);

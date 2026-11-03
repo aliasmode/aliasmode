@@ -62,6 +62,8 @@ export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
 export type CloudCredentialProvider = () => string | undefined | Promise<string | undefined>;
 
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 30_000;
+/** A profile with its saved session can be megabytes; it is read whole (see readResponseText). */
+const SESSION_BODY_TIMEOUT_MS = 120_000;
 
 export type CloudRequestFailure =
   | { kind: "transport"; retryable: true }
@@ -120,6 +122,8 @@ interface CallResponseOptions<T> {
   anonymous?: boolean;
   /** Restart the silence limit at each body chunk (a large roster on a slow link). */
   progressive?: boolean;
+  /** Time for a body read whole once its headers arrived (a large saved session on a slow link). */
+  bodyTimeoutMs?: number;
   notModified?: () => T;
   received?: (response: Response, body: T) => void;
 }
@@ -165,16 +169,16 @@ export class CloudClient {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let rejectTimeout!: (error: CloudRequestError) => void;
     const timeout = new Promise<never>((_, reject) => { rejectTimeout = reject; });
-    const restartTimeout = () => {
+    const restartTimeout = (ms = this.requestTimeoutMs) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         const error = new CloudRequestError(
-          `AliasMode Cloud request ${path} timed out after ${this.requestTimeoutMs}ms`,
+          `AliasMode Cloud request ${path} timed out after ${ms}ms`,
           { kind: "timeout", retryable: true },
         );
         controller.abort(error);
         rejectTimeout(error);
-      }, this.requestTimeoutMs);
+      }, ms);
       if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     };
     restartTimeout();
@@ -195,7 +199,7 @@ export class CloudClient {
             { cause: error },
           );
         }
-        restartTimeout();
+        restartTimeout(Math.max(this.requestTimeoutMs, responseOptions.bodyTimeoutMs ?? 0));
         if (response.status === 304) {
           if (!responseOptions.notModified) {
             throw new Error(`AliasMode Cloud ${path} returned an unexpected not-modified response`);
@@ -204,7 +208,7 @@ export class CloudClient {
         }
         let text: string;
         try {
-          text = await readResponseText(response, responseOptions.progressive ? restartTimeout : undefined);
+          text = await readResponseText(response, responseOptions.progressive ? () => restartTimeout() : undefined);
         } catch (error) {
           throw new CloudRequestError(
             `AliasMode Cloud response ${path} could not be read`,
@@ -453,7 +457,7 @@ export class CloudClient {
   }
 
   getProfile(profileId: string): Promise<GetProfileResponse> {
-    return this.call(`/profiles/${encodeURIComponent(profileId)}`);
+    return this.call(`/profiles/${encodeURIComponent(profileId)}`, {}, { bodyTimeoutMs: SESSION_BODY_TIMEOUT_MS });
   }
 
   updateProfile(profileId: string, request: UpdateProfileRequest): Promise<UpdateProfileResponse> {
@@ -517,7 +521,7 @@ export class CloudClient {
     return this.call(`/profiles/${encodeURIComponent(profileId)}/open`, {
       method: "POST",
       body: JSON.stringify(request),
-    });
+    }, { bodyTimeoutMs: SESSION_BODY_TIMEOUT_MS });
   }
 
   heartbeat(registrationId: string): Promise<OpenHeartbeatResponse> {

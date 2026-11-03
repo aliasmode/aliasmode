@@ -454,8 +454,8 @@ export class AgentControlSession {
           ws: result.ws,
           port: result.port,
           // A browser that was running before this call (a busy one can fail the check above) is the
-          // user's; this connection must not close it when it ends.
-          alreadyOpen: !!result.reattached,
+          // user's, unless this connection opened it; this connection must not close the user's.
+          alreadyOpen: !!result.reattached && !this.openedByConnection.has(profileId),
           headless: launch?.headless ?? options.headless ?? false,
         };
       },

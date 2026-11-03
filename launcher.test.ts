@@ -1359,6 +1359,26 @@ test("certifiedActive keeps a proven browser after a live edit and stops an unpr
   store.close();
 });
 
+test("Open restarts a running browser that was edited while open, with the change", async () => {
+  const store = seeded();
+  const f = fleet();
+  const spawned: string[][] = [];
+  const launcher = newLauncher(store, f, spawned);
+  await launcher.start("k1d0cd11");
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+
+  store.upsertProfile({ ...store.getProfile("k1d0cd11")!, timezone: "Europe/London" });
+  // Until the next open it keeps running with its launch-time settings.
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+
+  const second = await launcher.start("k1d0cd11");
+  expect(spawned).toHaveLength(2);
+  expect(second.reattached).toBeUndefined();
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  await launcher.stop("k1d0cd11");
+  store.close();
+});
+
 test("certifiedActive rides out a transient CDP miss and retains a survivor that stays silent", async () => {
   const store = seeded();
   makeDirect(store);
