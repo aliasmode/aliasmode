@@ -1,7 +1,7 @@
 import { accessSync, constants, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
-import { browserEnvText, sha256File } from "./browser-install.ts";
+import { browserEnvText, sha256File, windowsSystemTool } from "./browser-install.ts";
 
 export interface FirefoxRuntimeBuild {
   platform: NodeJS.Platform;
@@ -86,9 +86,9 @@ async function downloadFirefoxArchive(
 
 async function extractFirefoxArchive(archive: string, destination: string, platform: NodeJS.Platform): Promise<void> {
   const command = platform === "darwin" ? ["ditto", "-x", "-k", archive, destination]
-    : platform === "win32" ? ["tar.exe", "-xf", archive, "-C", destination]
+    : platform === "win32" ? [windowsSystemTool("tar.exe"), "-xf", archive, "-C", destination]
       : ["unzip", "-q", archive, "-d", destination];
-  if (!Bun.which(command[0]!)) throw new Error(`Firefox setup requires ${command[0]} on PATH`);
+  if (!(platform === "win32" ? existsSync(command[0]!) : Bun.which(command[0]!))) throw new Error(`Firefox setup requires ${command[0]}`);
   const child = Bun.spawn(command, { stdout: "ignore", stderr: "inherit" });
   if (await child.exited !== 0) throw new Error("AliasMode Firefox archive extraction failed");
 }

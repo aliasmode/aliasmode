@@ -60,7 +60,7 @@ import {
   type MacGraphicsVendor, syncFirefoxTimezone,
 } from "./firefox-config.ts";
 import { ensureFirefoxFontPack, firefoxFontPackFor, firefoxFontPackPrefs, pruneFirefoxFontPacks, type FirefoxFontPack } from "./firefox-fonts.ts";
-import { renameWhenUnlocked } from "./browser-install.ts";
+import { renameWhenUnlocked, windowsSystemTool } from "./browser-install.ts";
 import {
   ALIASMODE_CHROMIUM_EXECUTABLE_SHA256,
   ALIASMODE_CHROMIUM_HOST_SCALE,
@@ -4691,7 +4691,7 @@ async function readWindowsProcessImageNames(): Promise<Set<string> | null> {
   if (!IS_WINDOWS) return null;
   try {
     const child = Bun.spawn(
-      ["tasklist.exe", "/FO", "CSV", "/NH"],
+      [windowsSystemTool("tasklist.exe"), "/FO", "CSV", "/NH"],
       { stdout: "pipe", stderr: "ignore" },
     );
     const result = await readSnapshotChildBounded(

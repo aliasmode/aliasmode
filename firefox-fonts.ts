@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { open } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { renameWhenUnlocked } from "./browser-install.ts";
-import { sha256File } from "./browser-install.ts";
+import { sha256File, windowsSystemTool } from "./browser-install.ts";
 import { trackRuntimeDownload } from "./runtime-download.ts";
 
 export type FontPackOs = "windows" | "macos" | "linux";
@@ -164,7 +164,7 @@ async function download(url: string, partial: string, size: number, deps: Firefo
 
 async function extractZip(archive: string, directory: string): Promise<void> {
   const command = process.platform === "darwin" ? ["ditto", "-x", "-k", archive, directory]
-    : process.platform === "win32" ? ["tar.exe", "-xf", archive, "-C", directory]
+    : process.platform === "win32" ? [windowsSystemTool("tar.exe"), "-xf", archive, "-C", directory]
       : ["unzip", "-q", archive, "-d", directory];
   const child = Bun.spawn(command, { stdout: "ignore", stderr: "ignore" });
   if (await child.exited !== 0) throw new Error(`${command[0]} exited with code ${child.exitCode}`);
