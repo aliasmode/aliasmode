@@ -9,7 +9,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
+
+/** A program in Windows' System32 folder by full path, so it starts even when PATH has no System32. */
+export function windowsSystemTool(name: string): string {
+  return win32.join(process.env.SystemRoot || "C:\\Windows", "System32", name);
+}
 
 export const CLOAKBROWSER_WRAPPER_VERSION = "0.4.11";
 export const CLOAKBROWSER_VERSION = "146.0.7680.177.5";
@@ -73,7 +78,7 @@ async function preparePinnedWindowsArchive(cacheDir: string): Promise<void> {
     for (const url of WINDOWS_ARCHIVE_URLS) {
       try {
         const download = Bun.spawn([
-          "curl.exe",
+          windowsSystemTool("curl.exe"),
           "--fail",
           "--location",
           "--retry",
@@ -101,7 +106,7 @@ async function preparePinnedWindowsArchive(cacheDir: string): Promise<void> {
   rmSync(extractRoot, { recursive: true, force: true });
   mkdirSync(extractRoot, { recursive: true });
   try {
-    const extraction = Bun.spawn(["tar.exe", "-xf", archivePath, "-C", extractRoot], {
+    const extraction = Bun.spawn([windowsSystemTool("tar.exe"), "-xf", archivePath, "-C", extractRoot], {
       stdout: "ignore",
       stderr: "inherit",
     });

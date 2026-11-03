@@ -11,6 +11,7 @@ import {
   CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256,
   CLOAKBROWSER_WRAPPER_VERSION,
   installCloakBrowser,
+  windowsSystemTool,
 } from "./browser-install.ts";
 
 const dirs: string[] = [];
@@ -95,4 +96,17 @@ test("installCloakBrowser can return a verified binary without writing environme
   })).resolves.toEqual({ path: binary, sha256 });
 
   expect(existsSync(join(dir, ".env"))).toBe(false);
+});
+
+test("Windows system tools start by full path, also when PATH has no System32", () => {
+  const saved = process.env.SystemRoot;
+  try {
+    process.env.SystemRoot = "D:\\Win";
+    expect(windowsSystemTool("curl.exe")).toBe("D:\\Win\\System32\\curl.exe");
+    delete process.env.SystemRoot;
+    expect(windowsSystemTool("tar.exe")).toBe("C:\\Windows\\System32\\tar.exe");
+  } finally {
+    if (saved === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = saved;
+  }
 });

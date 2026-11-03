@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { windowsSystemTool } from "./browser-install.ts";
 import {
   aliasmodeChromiumArchive,
   aliasmodeChromiumExecutable,
@@ -76,7 +77,7 @@ test("installs AliasMode's own 155 build once, beside any earlier runtime", asyn
   expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
   expect(release.downloads).toHaveLength(1);
   expect(release.commands).toEqual([
-    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
+    [windowsSystemTool("icacls.exe"), realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
   ]);
 });
 
@@ -91,7 +92,7 @@ test("repairs a previously installed Windows runtime without downloading or chan
   expect(await ensureAliasmodeChromium(root, release.deps, "win32")).toBe(executable);
   expect(release.downloads).toEqual([]);
   expect(release.commands).toEqual([
-    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
+    [windowsSystemTool("icacls.exe"), realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
   ]);
   expect(readFileSync(join(dirname(executable), "chrome.dll"), "utf8")).toBe("existing dll");
   await ensureAliasmodeChromium(root, release.deps, "win32");
@@ -402,7 +403,7 @@ test("installs the CloakBrowser build that the Windows app bundled before, from 
   expect(readdirSync(join(root, "cloakbrowser-146.0.7680.177.5")).sort()).toEqual(["chrome.dll", "chrome.exe"]);
   expect(readdirSync(root)).toEqual(["cloakbrowser-146.0.7680.177.5"]);
   expect(commands).toEqual([
-    ["icacls.exe", realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
+    [windowsSystemTool("icacls.exe"), realpathSync(dirname(executable)), "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"],
   ]);
   await ensureCloakBrowser(root, "win32", "x64", deps);
   expect(commands).toHaveLength(1);

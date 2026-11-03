@@ -9,7 +9,7 @@ import { cp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import {
   CLOAKBROWSER_MACOS_VERSION, CLOAKBROWSER_VERSION, CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256,
-  CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256, renameWhenUnlocked, sha256File,
+  CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256, renameWhenUnlocked, sha256File, windowsSystemTool,
 } from "./browser-install.ts";
 import { trackRuntimeDownload } from "./runtime-download.ts";
 
@@ -271,7 +271,7 @@ async function run(command: string[]): Promise<void> {
  */
 async function curlDownload(url: string, output: string, platform: NodeJS.Platform): Promise<void> {
   const child = Bun.spawn([
-    platform === "win32" ? "curl.exe" : "curl", "--fail", "--location", "--silent", "--show-error",
+    platform === "win32" ? windowsSystemTool("curl.exe") : "curl", "--fail", "--location", "--silent", "--show-error",
     "--continue-at", "-", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60",
     "--output", output, url,
   ], { stdout: "ignore", stderr: "ignore" });
@@ -380,7 +380,7 @@ export function aliasmodeChromiumArchive(platform: NodeJS.Platform): { url: stri
 function extractCommand(url: string, file: string, directory: string, platform: NodeJS.Platform): string[] {
   if (url.endsWith(".tar.gz")) return ["tar", "-xzf", file, "-C", directory];
   if (url.endsWith(".tar.zst")) return ["tar", "--zstd", "-xf", file, "-C", directory];
-  return platform === "darwin" ? ["ditto", "-x", "-k", file, directory] : ["tar.exe", "-xf", file, "-C", directory];
+  return platform === "darwin" ? ["ditto", "-x", "-k", file, directory] : [windowsSystemTool("tar.exe"), "-xf", file, "-C", directory];
 }
 
 /** The download in progress keeps this name across attempts and app runs, so it can continue. */
@@ -402,7 +402,7 @@ async function prepareWindowsAccess(target: string, deps: AliasmodeChromiumDeps,
     // The main process can read AppData while an AppContainer GPU process cannot.
     // Grant only read/execute on the verified runtime, including its DLLs and resources,
     // to the sandbox groups Chrome's installer grants: all and restricted app packages.
-    await (deps.run ?? run)(["icacls.exe", directory, "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"]);
+    await (deps.run ?? run)([windowsSystemTool("icacls.exe"), directory, "/grant", "*S-1-15-2-1:(OI)(CI)(RX)", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"]);
   } catch (error) {
     // Most computers launch without the grant, so a failure must not block the browser. The next launch retries.
     console.warn(`[aliasmode] could not prepare Windows sandbox read/execute access for ${directory}: ${error instanceof Error ? error.message : String(error)}`);
