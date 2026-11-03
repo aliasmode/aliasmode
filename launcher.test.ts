@@ -795,39 +795,47 @@ for (const hostPlatform of ["darwin", "linux"] as const) {
   });
 }
 
-test("Local waits for delayed native tabs before opening platform home", async () => {
-  const store = seeded();
-  const profile = store.getProfile("k1d0cd11")!;
-  store.upsertProfile({ ...profile, platform: "x.com" });
-  const f = fleet();
-  const navigated: string[][] = [];
-  const userDataDir = join(testDataRoot(store), "k1d0cd11");
-  mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
-  writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
-  let targetReads = 0;
-  const launcher = newLauncher(store, f, [], undefined, async () => ({
-    status: "already-default",
-    engine: "DuckDuckGo",
-  }), {
-    hostPlatform: "win32",
-    fetch: async (url) => url.endsWith("/json/list")
-      ? {
-          ok: true,
-          json: async () => ++targetReads >= 22
-            ? [{ type: "page", url: "https://restored.example/delayed" }]
-            : [{ type: "page", url: "about:blank" }],
-        }
-      : f.fetchFn(url),
-    navigate: async (_ws, urls) => { navigated.push(urls); },
+for (const caller of ["Local", "Cloud"] as const) {
+  test(`${caller} open of a native session ${caller === "Cloud" ? "waits for a delayed restored tab" : "reads the tabs once"} and opens no platform home`, async () => {
+    const store = seeded();
+    const profile = store.getProfile("k1d0cd11")!;
+    store.upsertProfile({ ...profile, platform: "x.com" });
+    const f = fleet();
+    const navigated: string[][] = [];
+    const userDataDir = join(testDataRoot(store), "k1d0cd11");
+    mkdirSync(join(userDataDir, "Default", "Sessions"), { recursive: true });
+    writeFileSync(join(userDataDir, "Default", "Sessions", "Tabs_1"), "native session bytes");
+    let targetReads = 0;
+    const launcher = newLauncher(store, f, [], undefined, async () => ({
+      status: "already-default",
+      engine: "DuckDuckGo",
+    }), {
+      hostPlatform: "win32",
+      fetch: async (url) => url.endsWith("/json/list")
+        ? {
+            ok: true,
+            json: async () => ++targetReads >= 22
+              ? [{ type: "page", url: "https://restored.example/delayed" }]
+              : [{ type: "page", url: "about:blank" }],
+          }
+        : f.fetchFn(url),
+      navigate: async (_ws, urls) => { navigated.push(urls); },
+    });
+
+    // Only Cloud, which navigates by itself, uses the late restored tab.
+    const launched = await launcher.start("k1d0cd11", [], caller === "Cloud" ? { autoNavigate: false } : {});
+
+    if (caller === "Cloud") {
+      expect(targetReads).toBeGreaterThanOrEqual(22);
+      expect(launched.nativeSessionRestored).toBe(true);
+    } else {
+      expect(targetReads).toBe(1);
+    }
+    expect(navigated).toEqual([]);
+    await launcher.stop("k1d0cd11");
+    store.close();
   });
-
-  await launcher.start("k1d0cd11");
-
-  expect(targetReads).toBeGreaterThanOrEqual(22);
-  expect(navigated).toEqual([]);
-  await launcher.stop("k1d0cd11");
-  store.close();
-});
+}
 
 test("fresh native session restore reports only a restored user page", async () => {
   const store = seeded();
@@ -4121,6 +4129,8 @@ test("clearCache removes cache dirs, preserves the session, and skips a live bro
   expect(existsSync(cacheStorage)).toBe(true);
 
   await launcher.stop("k1d0cd11");
+  // The post-stop cache delete runs on after stop() returns.
+  for (let i = 0; i < 200 && (existsSync(cacheDir) || existsSync(scriptCache) || existsSync(cacheStorage)); i++) await Bun.sleep(10);
   expect(existsSync(cacheDir)).toBe(false);
   expect(existsSync(scriptCache)).toBe(false);
   expect(existsSync(cacheStorage)).toBe(false);

@@ -790,6 +790,8 @@ const POST_STOP_CACHE_DIRS = [
  */
 const CACHE_DIRS = POST_STOP_CACHE_DIRS;
 const FIREFOX_CACHE_DIRS = ["cache2", "startupCache", "shader-cache"];
+/** Firefox rebuilds its own startupCache (browser code, never site data) at every start without it. */
+const FIREFOX_POST_STOP_CACHE_DIRS = ["cache2", "shader-cache"];
 
 /**
  * Volatile per-profile stores that commonly get left half-written by an UNCLEAN kill (all leveldb-
@@ -2123,8 +2125,14 @@ export class Launcher {
         profileSnapshot = JSON.stringify(profile);
       }
 
+      // Only a caller that navigates by itself (Cloud) and the Windows session launch use a late
+      // restored page; a Local open reads the targets once instead of waiting up to 3 s for one.
       const startupTargets = restoreLastSession || SESSION_LAUNCH
-        ? await this.startupPageTargets(port, profileId, restoreLastSession && startupUrls.length === 0)
+        ? await this.startupPageTargets(
+          port,
+          profileId,
+          restoreLastSession && startupUrls.length === 0 && (opts.autoNavigate === false || SESSION_LAUNCH),
+        )
         : { userUrls: [], profileCardPresent: false, firstRunPresent: false };
       const nativeSessionRestored = restoreLastSession && !!startupTargets?.userUrls.length;
 
@@ -2405,6 +2413,7 @@ export class Launcher {
     let binary: { path: string; sha256: string };
     try { binary = await this.verifyConfiguredBinary(true, "firefox"); }
     catch { throw new BrowserLaunchError("binary_verification"); }
+    await this.cacheClears.get(profileId);
     // A profile of another OS never opens without that OS's fonts: it would show this
     // computer's font list. The first open waits for the download when no prefetch did it.
     const fontPack = this.firefoxFontPack(profile);
@@ -3291,9 +3300,8 @@ export class Launcher {
           this.log(`stop ${profileId}: waiting for in-flight start to settle`);
           await starting.catch(() => {});
         }
-        const stopped = await this.doStop(profileId, expected);
-        await this.cacheClears.get(profileId);
-        return stopped;
+        // The post-stop cache delete runs on; start() waits for it and deletion is blocked until it ends.
+        return await this.doStop(profileId, expected);
       })
       .finally(() => {
         if (this.stopsInFlight.get(profileId) === promise) {
@@ -3877,7 +3885,7 @@ export class Launcher {
   }
 
   private clearPostStopCache(profileId: string, binaryPath?: string): void {
-    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_CACHE_DIRS : POST_STOP_CACHE_DIRS;
+    const dirs = this.store.getProfile(profileId)?.engine === "firefox" ? FIREFOX_POST_STOP_CACHE_DIRS : POST_STOP_CACHE_DIRS;
     const componentsDir = binaryPath ? chromiumComponentsDir(binaryPath, this.hostPlatform) : null;
     const startedAt = Date.now();
     const clearing: Promise<void> = this.clearCacheDirs(profileId, dirs, "post-stop cache cleanup")
@@ -4123,7 +4131,8 @@ export class Launcher {
   removeUserDataDir(profileId: string): boolean {
     const dir = this.containedUserDataDir(profileId, "removeUserDataDir");
     if (!dir) return false;
-    rmSync(dir, { recursive: true, force: true });
+    // A post-stop cache delete can still be running inside it; retries cover Windows' EBUSY/ENOTEMPTY.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
     return true;
   }
 
