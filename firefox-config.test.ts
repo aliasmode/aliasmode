@@ -509,8 +509,8 @@ test("on an Intel Mac a macOS profile shows an Intel or AMD Mac card of that Mac
   for (let seed = 1; seed <= 50; seed++) {
     for (const cores of [8, 14]) {
       const stored = profile(seed, { "navigator.platform": "MacIntel", ...apple, "navigator.hardwareConcurrency": cores });
-      const intel = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "intel" })["navigator.hardwareConcurrency"];
-      const amd = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "amd" })["navigator.hardwareConcurrency"];
+      const intel = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "intel" }, undefined, 64)["navigator.hardwareConcurrency"];
+      const amd = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "amd" }, undefined, 64)["navigator.hardwareConcurrency"];
       expect([4, 8]).toContain(intel as number);
       expect([8, 12, 16]).toContain(amd as number);
       if (cores === 8) expect([intel, amd]).toEqual([8, 8]);
