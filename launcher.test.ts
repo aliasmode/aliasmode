@@ -2047,6 +2047,22 @@ test("buildArgs accepts the fixed Automation runtime flag bundle", () => {
   store.close();
 });
 
+test("buildArgs keeps Chromium 155 Google logins off the TPM binding and merges a forwarded --disable-features", () => {
+  const store = seeded();
+  const f = fleet();
+  const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn });
+  const cloak = store.getProfile("k1d0cd11")!;
+  const chromium155 = { ...cloak, chromiumRuntime: "aliasmode" as const };
+  const features = (args: string[]) => args.filter((arg) => arg.startsWith("--disable-features="));
+
+  expect(features(launcher.buildArgs(chromium155, 9333, "/data", [])))
+    .toEqual(["--disable-features=DeviceBoundSessions,EnableBoundSessionCredentials"]);
+  expect(features(launcher.buildArgs(chromium155, 9333, "/data", ["--disable-features=BackForwardCache"])))
+    .toEqual(["--disable-features=DeviceBoundSessions,EnableBoundSessionCredentials,BackForwardCache"]);
+  expect(features(launcher.buildArgs(cloak, 9333, "/data", []))).toEqual([]);
+  store.close();
+});
+
 test("buildArgs forwards any client-named launcher-pid ownership marker verbatim", () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;

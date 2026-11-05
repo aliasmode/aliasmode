@@ -1437,7 +1437,17 @@ export class Launcher {
     // two namespaces: Automation must be able to reap its abandoned browser after
     // it crashes even when this long-running manager remains alive. Keep base
     // args before caller-supplied ephemeral args as the general override order.
-    args.push(...this.baseArgs, ...forwardedArgs);
+    // Chromium 155 binds a Google login to the computer's TPM chip (Device Bound Session Credentials).
+    // Its cookies then cannot renew on another device or after the Cloud copy replaces them, and Google
+    // signs the account out. CloakBrowser 146 ships with this binding off. Chromium reads only the last
+    // --disable-features, so a forwarded one joins this list.
+    const disableFeatures = "--disable-features=";
+    if (profile.chromiumRuntime) {
+      const features = ["DeviceBoundSessions", "EnableBoundSessionCredentials"];
+      for (const arg of forwardedArgs) if (arg.startsWith(disableFeatures)) features.push(arg.slice(disableFeatures.length));
+      args.push(`${disableFeatures}${features.join(",")}`);
+    }
+    args.push(...this.baseArgs, ...forwardedArgs.filter((arg) => !profile.chromiumRuntime || !arg.startsWith(disableFeatures)));
     return args;
   }
 
