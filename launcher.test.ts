@@ -5170,6 +5170,33 @@ test("a Chromium 155 profile keeps the display scale of its first open on every 
   store.close();
 });
 
+test("a Chromium 155 profile keeps the processor count of its first open", async () => {
+  const store = new ProfileStore(":memory:");
+  const profile = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
+  store.upsertProfile(profile);
+  const open = async (hardwareConcurrency: number) => {
+    const spawnedArgs: string[][] = [];
+    const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
+      hostPlatform: "win32",
+      hostArch: "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
+      captureFingerprint: async () => ({ hardwareConcurrency }),
+      watchWindowFit: () => ({ stop: () => {} }),
+    });
+    await launcher.start(profile.id);
+    await launcher.stop(profile.id);
+    return spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-hardware-concurrency="));
+  };
+  // The first open shows the engine's own count and keeps it.
+  expect(await open(2)).toEqual([]);
+  expect(store.getProfile(profile.id)!.hardware).toEqual({ cores: 2 });
+  // Another computer, where the engine would draw another count, shows the kept one.
+  expect(await open(3)).toEqual(["--fingerprint-hardware-concurrency=2"]);
+  expect(store.getProfile(profile.id)!.hardware).toEqual({ cores: 2 });
+  store.close();
+});
+
 test("Chromium 155 on a scaled Windows display reports the screen in CSS pixels, as Chrome does there", async () => {
   const launch = async (
     hostPlatform: NodeJS.Platform,

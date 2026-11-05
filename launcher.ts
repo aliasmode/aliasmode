@@ -2165,6 +2165,15 @@ export class Launcher {
         profile = this.store.getProfile(profileId)!;
         profileSnapshot = JSON.stringify(profile);
       }
+      // Chromium 155 draws its processor count from the counts this computer has that fit the
+      // graphics card it drew. The count of the first open is kept, so a profile that moves to a
+      // bigger computer shows the same count (a smaller one caps it), still matched to its card.
+      const drawnCores = (sample as FingerprintSample | null)?.hardwareConcurrency;
+      if (profile.chromiumRuntime && !profile.hardware && Number.isInteger(drawnCores) && drawnCores! >= 1 && drawnCores! <= 256) {
+        this.store.setHardware(profileId, { cores: drawnCores! });
+        profile = this.store.getProfile(profileId)!;
+        profileSnapshot = JSON.stringify(profile);
+      }
 
       const startupTargets = restoreLastSession || SESSION_LAUNCH
         ? await this.startupPageTargets(port, profileId, restoreLastSession && startupUrls.length === 0)
