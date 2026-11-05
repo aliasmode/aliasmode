@@ -173,6 +173,12 @@ function newLauncher(
     },
     browserClose: async () => false, // force-kill path; graceful close is unit-tested in server.test.ts
     cdpReadyTimeoutMs: 1000,
+    // A Windows profile of Chromium 155 on Linux needs the Windows font pack; tests never download it.
+    ensureFirefoxFontPack: async () => {
+      const fontsDir = join(testDataRoot(store), "font-pack", "fonts");
+      mkdirSync(fontsDir, { recursive: true });
+      return fontsDir;
+    },
     ...overrides,
   });
 }
@@ -5301,6 +5307,66 @@ test("a Cloud launch of Chromium 155 on Windows or Linux keeps the browser after
   for (const [host, engine] of [["darwin", "aliasmode"], ["win32", "cloakbrowser"]] as const) {
     expect(await launch(host, engine, true)).toBe(false);
   }
+});
+
+test("a Windows profile of Chromium 155 on Linux gets the Windows font pack through fontconfig; others keep the system fonts", async () => {
+  const launch = async (
+    hostPlatform: NodeJS.Platform,
+    engine: "aliasmode" | "cloakbrowser",
+    platformOs: string,
+    ensureFirefoxFontPack?: (root: string, pack: { os: string }) => Promise<string>,
+  ) => {
+    const store = new ProfileStore(":memory:");
+    const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs }, () => false);
+    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
+    const f = fleet();
+    const envs: Array<Record<string, string> | undefined> = [];
+    const packs: string[] = [];
+    const fontsDir = join(testDataRoot(store), "font-pack", "fonts");
+    const launcher = newLauncher(store, f, [], undefined, undefined, {
+      hostPlatform,
+      hostArch: hostPlatform === "darwin" ? "arm64" : "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome",
+      ensureDownloadedCloakBrowser: async () => "/fake/cloak",
+      chromiumSandboxBlocked: () => false,
+      captureFingerprint: async () => null,
+      ensureFirefoxFontPack: ensureFirefoxFontPack ?? (async (_root, pack) => {
+        packs.push(pack.os);
+        mkdirSync(fontsDir, { recursive: true });
+        return fontsDir;
+      }),
+      spawn: (bin, args, env) => {
+        envs.push(env);
+        return f.spawn(bin, args);
+      },
+    });
+    try {
+      await launcher.start(chromium155.id);
+      await launcher.stop(chromium155.id);
+    } finally {
+      store.close();
+    }
+    const conf = envs[0]?.FONTCONFIG_FILE;
+    return { packs, conf, content: conf ? readFileSync(conf, "utf8") : undefined, fontsDir, env: envs[0] };
+  };
+  const linux = await launch("linux", "aliasmode", "windows");
+  expect(linux.packs).toEqual(["windows"]);
+  expect(linux.conf).toBe(join(linux.fontsDir, "..", "chromium-fonts.conf"));
+  // The pack is added to the system's fonts, which stay.
+  expect(linux.content).toContain(`<dir>${linux.fontsDir}</dir>`);
+  expect(linux.content).toContain(`<include ignore_missing="yes">${process.env.FONTCONFIG_FILE || "/etc/fonts/fonts.conf"}</include>`);
+  expect(linux.env).toMatchObject({ GOOGLE_API_KEY: "no" });
+  // The host's own OS, another host, and CloakBrowser get no pack.
+  for (const [host, engine, os] of [["linux", "aliasmode", "linux"], ["win32", "aliasmode", "windows"], ["linux", "cloakbrowser", "windows"]] as const) {
+    const other = await launch(host, engine, os);
+    expect(other.packs).toEqual([]);
+    expect(other.conf).toBeUndefined();
+  }
+  // Without the fonts the profile does not open with this computer's fonts.
+  await expect(launch("linux", "aliasmode", "windows", async () => { throw new Error("offline"); }))
+    .rejects.toEqual(new BrowserLaunchError("preflight", "firefox_fonts_download"));
 });
 
 test("Chromium 155 on Windows and Linux shows the proxy exit IP to WebRTC; macOS and CloakBrowser do not", async () => {

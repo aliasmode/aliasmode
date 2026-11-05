@@ -59,7 +59,10 @@ import {
   completeProfileFingerprint, FIREFOX_RUNTIME_VERSION, firefoxLaunchConfig, firefoxPersonaOs, firefoxStartupPrefs, intelMacGraphicsVendor,
   type MacGraphicsVendor, syncFirefoxTimezone,
 } from "./firefox-config.ts";
-import { ensureFirefoxFontPack, firefoxFontPackFor, firefoxFontPackPrefs, pruneFirefoxFontPacks, type FirefoxFontPack } from "./firefox-fonts.ts";
+import {
+  chromiumFontconfigFile, ensureFirefoxFontPack, FIREFOX_FONT_PACKS, firefoxFontPackFor, firefoxFontPackPrefs, pruneFirefoxFontPacks,
+  type FirefoxFontPack,
+} from "./firefox-fonts.ts";
 import { renameWhenUnlocked, windowsSystemTool } from "./browser-install.ts";
 import {
   ALIASMODE_CHROMIUM_EXECUTABLE_SHA256,
@@ -1037,11 +1040,29 @@ export class Launcher {
     }
   }
 
-  /** The font pack this Firefox profile needs on this computer, if any. */
-  private firefoxFontPack(profile: Profile): FirefoxFontPack | undefined {
-    return profile.engine === "firefox" && profile.firefox
-      ? firefoxFontPackFor(firefoxPersonaOs(profile), this.hostPlatform)
-      : undefined;
+  /**
+   * The font pack this profile needs on this computer, if any. AliasMode Chromium on Linux reads
+   * fonts through fontconfig, so a Windows profile there gets the Windows pack Firefox uses.
+   */
+  private fontPack(profile: Profile): FirefoxFontPack | undefined {
+    if (profile.engine === "firefox") {
+      return profile.firefox ? firefoxFontPackFor(firefoxPersonaOs(profile), this.hostPlatform) : undefined;
+    }
+    const persona = profile.platformOs || platformFromUA(profile.ua);
+    return this.hostPlatform === "linux" && supportsChromium155Host(this.hostPlatform, this.hostArch) && profile.chromiumRuntime
+      && persona === "windows" ? FIREFOX_FONT_PACKS.windows : undefined;
+  }
+
+  /** Install the profile's font pack, waiting for the download when no prefetch did it. */
+  private async installFontPack(pack: FirefoxFontPack): Promise<string> {
+    try {
+      const fontsDir = await this.ensureFirefoxFontPackFn(this.chromiumRuntimeRoot, pack);
+      this.fontPackPrefetchFailed.delete(pack.sha256);
+      return fontsDir;
+    } catch (error) {
+      this.log(`${pack.os} font pack install failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new BrowserLaunchError("preflight", "firefox_fonts_download");
+    }
   }
 
   /**
@@ -1053,7 +1074,7 @@ export class Launcher {
       this.fontPacksPruned = true;
       pruneFirefoxFontPacks(this.chromiumRuntimeRoot);
     }
-    const packs = new Set(profiles.flatMap((profile) => this.firefoxFontPack(profile) ?? []));
+    const packs = new Set(profiles.flatMap((profile) => this.fontPack(profile) ?? []));
     for (const pack of packs) {
       if (this.fontPackPrefetchFailed.has(pack.sha256)) continue;
       this.ensureFirefoxFontPackFn(this.chromiumRuntimeRoot, pack).catch((error) => {
@@ -1928,6 +1949,11 @@ export class Launcher {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession, exit);
     }
     const webRtcIp = this.chromiumWebRtcIp(profile) ? this.webRtcExitIp(profile, exit) : undefined;
+    // Without the fonts of its OS, the browser shows this computer's fonts in place of them.
+    const fontPack = this.fontPack(profile);
+    const fontconfigFile = fontPack
+      ? chromiumFontconfigFile(await this.installFontPack(fontPack), process.env.FONTCONFIG_FILE || undefined)
+      : undefined;
 
     // A fresh generation is never spawned until the configured executable has
     // been canonicalized and matched byte-for-byte against the deployment pin.
@@ -2090,7 +2116,11 @@ export class Launcher {
       this.autofill?.install(provisionalLaunch);
       spawnAttempted = true;
       try {
-        proc = this.spawnFn(spawnVerifiedBinary.path, args, profile.chromiumRuntime ? { ...ALIASMODE_CHROMIUM_ENV } : undefined);
+        proc = this.spawnFn(
+          spawnVerifiedBinary.path,
+          args,
+          profile.chromiumRuntime ? { ...ALIASMODE_CHROMIUM_ENV, ...(fontconfigFile ? { FONTCONFIG_FILE: fontconfigFile } : {}) } : undefined,
+        );
       } catch {
         throw new BrowserLaunchError("process_spawn");
       }
@@ -2417,17 +2447,8 @@ export class Launcher {
     catch { throw new BrowserLaunchError("binary_verification"); }
     // A profile of another OS never opens without that OS's fonts: it would show this
     // computer's font list. The first open waits for the download when no prefetch did it.
-    const fontPack = this.firefoxFontPack(profile);
-    let fontsDir: string | undefined;
-    if (fontPack) {
-      try {
-        fontsDir = await this.ensureFirefoxFontPackFn(this.chromiumRuntimeRoot, fontPack);
-        this.fontPackPrefetchFailed.delete(fontPack.sha256);
-      } catch (error) {
-        this.log(`Firefox ${fontPack.os} font pack install failed: ${error instanceof Error ? error.message : String(error)}`);
-        throw new BrowserLaunchError("preflight", "firefox_fonts_download");
-      }
-    }
+    const fontPack = this.fontPack(profile);
+    const fontsDir = fontPack ? await this.installFontPack(fontPack) : undefined;
     const userDataDir = this.userDataDir(profileId);
     const runtime = resolvePlaywrightRuntime();
     const ownerBinaryPath = this.unsafeDisableIdentityGates
