@@ -59,7 +59,7 @@ test("a typed count reaches every engine, and Chromium 155 shows at most this co
   expect(deriveFingerprintFlags(beta, 8)).toContain("--fingerprint-hardware-concurrency=8");
   expect(deriveFingerprintFlags({ ...beta, hardware: { cores: 4 } }, 8)).toContain("--fingerprint-hardware-concurrency=4");
   const firefox = { ...buildNewProfile({ engine: "firefox", platformOs: "windows" }, () => false), hardware: { cores: 7 } };
-  expect(firefoxLaunchConfig(firefox)["navigator.hardwareConcurrency"]).toBe(7);
+  expect(firefoxLaunchConfig(firefox, undefined, undefined, undefined, undefined, undefined, 8)["navigator.hardwareConcurrency"]).toBe(7);
 
   // Cleared, CloakBrowser draws from the seed again and the other engines choose.
   expect(editedProfileHardware(cloak, undefined)).toEqual(generateProfileHardware(cloak.fingerprintSeed));
