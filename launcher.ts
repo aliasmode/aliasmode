@@ -1934,9 +1934,12 @@ export class Launcher {
     // whose lookup failed, a rotating proxy that moved) becomes the exit's before any engine reads
     // the profile, so pages see the timezone of the IP they come from. Without an answer the saved
     // timezone stays, and so does one the user typed. The exit IP is WebRTC's public address below.
-    const exit = profile.proxy && this.lookupExitLocationFn
-      ? await this.lookupExitLocationFn(profile.proxy).catch(() => null)
-      : null;
+    const proxy = profile.proxy;
+    const lookupExit = () => proxy && this.lookupExitLocationFn ? this.lookupExitLocationFn(proxy).catch(() => null) : Promise.resolve(null);
+    let exit = await lookupExit();
+    // Without the exit IP, WebRTC behind the proxy finds no address at all, which a real browser
+    // never shows. A slow lookup gets more time and a failed one a second try, both through the proxy.
+    if (!exit?.ip && proxy && (profile.engine === "firefox" || this.chromiumWebRtcIp(profile))) exit = await lookupExit();
     if (exit?.timezone && exit.timezone !== profile.timezone && !profile.timezoneManual) {
       const updated = { ...this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup"), timezone: exit.timezone };
       syncFirefoxTimezone(updated);

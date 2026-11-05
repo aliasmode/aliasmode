@@ -5407,18 +5407,22 @@ test("Chromium 155 on Windows and Linux shows the proxy exit IP to WebRTC; macOS
     .toEqual({ asked: [proxy], webrtc: [policy, "--fingerprint-webrtc-ip=203.0.113.7"] });
   expect((await launch("win32", "aliasmode", async () => "2001:db8::7")).webrtc)
     .toEqual([policy, "--fingerprint-webrtc-ip=2001:db8::7"]);
-  // No answer, or a failed lookup, keeps the arguments as they were.
-  expect(await launch("win32", "aliasmode", async () => null)).toEqual({ asked: [proxy], webrtc: [policy] });
+  // No answer, or a failed lookup, is asked once more; still none keeps the arguments as they were.
+  expect(await launch("win32", "aliasmode", async () => null)).toEqual({ asked: [proxy, proxy], webrtc: [policy] });
   expect(await launch("win32", "aliasmode", () => Promise.reject(new Error("offline"))))
-    .toEqual({ asked: [proxy], webrtc: [policy] });
+    .toEqual({ asked: [proxy, proxy], webrtc: [policy] });
+  const answers = [null, "203.0.113.9"];
+  expect(await launch("linux", "aliasmode", async () => answers.shift() ?? null))
+    .toEqual({ asked: [proxy, proxy], webrtc: [policy, "--fingerprint-webrtc-ip=203.0.113.9"] });
   // Without a proxy WebRTC keeps the computer's own route and nothing is looked up.
   expect(await launch("win32", "aliasmode", async () => "203.0.113.7", null))
     .toEqual({ asked: [], webrtc: ["--force-webrtc-ip-handling-policy=default_public_interface_only"] });
   expect((await launch("linux", "aliasmode", async () => "203.0.113.7")).webrtc).toEqual([policy, "--fingerprint-webrtc-ip=203.0.113.7"]);
   // Upstream's Mac build and CloakBrowser lack the engine change. Their exit is asked
-  // for its timezone only.
+  // for its timezone only, once.
   for (const [host, engine] of [["darwin", "aliasmode"], ["win32", "cloakbrowser"]] as const) {
     expect(await launch(host, engine, async () => "203.0.113.7")).toEqual({ asked: [proxy], webrtc: [policy] });
+    expect(await launch(host, engine, async () => null)).toEqual({ asked: [proxy], webrtc: [policy] });
   }
 });
 
