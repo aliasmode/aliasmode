@@ -132,7 +132,9 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     id,
     engine,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
-    ...(engine === "chromium" && !chromiumRuntime ? { hardware: generateProfileHardware(deterministicSeed(id)) } : {}),
+    // Stored, so the profile shows the same count on every computer. Without it Chromium 155 draws
+    // its count from those this computer has, and a profile that moves to another changes it.
+    ...(engine === "chromium" ? { hardware: generateProfileHardware(deterministicSeed(id)) } : {}),
     ...(firefox ? { firefox } : {}),
     accId: "",
     name: (input.name || "").trim() || id, // AdsPower auto-names blank profiles after the id

@@ -22,13 +22,21 @@ test("a new CloakBrowser profile stores its processor cores and reports them on 
   expect(counts.size).toBeGreaterThan(3);
 });
 
-test("profiles made before stored hardware, Chromium 155 profiles and Firefox profiles get no cores flag", () => {
+test("profiles made before stored hardware and Firefox profiles get no cores flag", () => {
   const { hardware: _hardware, ...legacy } = cloakProfile();
   expect(deriveFingerprintFlags(legacy).some((flag) => flag.startsWith("--fingerprint-hardware-concurrency"))).toBe(false);
-  const beta = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
-  expect(beta.hardware).toBeUndefined();
-  expect(deriveFingerprintFlags(beta).some((flag) => flag.startsWith("--fingerprint-hardware-concurrency"))).toBe(false);
+  const { hardware: _betaHardware, ...legacyBeta } = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
+  expect(deriveFingerprintFlags(legacyBeta).some((flag) => flag.startsWith("--fingerprint-hardware-concurrency"))).toBe(false);
   expect(buildNewProfile({ engine: "firefox" }, () => false).hardware).toBeUndefined();
+});
+
+test("a new Chromium 155 profile stores cores from its seed, so two computers show the same count", () => {
+  const beta = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
+  expect(beta.hardware).toEqual(generateProfileHardware(beta.fingerprintSeed));
+  const cores = beta.hardware!.cores;
+  // Any computer with at least that many threads shows the stored count; a smaller one shows its own.
+  for (const host of [cores, 32, 64]) expect(deriveFingerprintFlags(beta, host)).toContain(`--fingerprint-hardware-concurrency=${cores}`);
+  expect(deriveFingerprintFlags(beta, 4)).toContain("--fingerprint-hardware-concurrency=4");
 });
 
 test("stored hardware survives edits, and a typed count replaces it on every engine", () => {
@@ -59,11 +67,11 @@ test("a typed count reaches every engine, and Chromium 155 shows at most this co
   expect(deriveFingerprintFlags(beta, 8)).toContain("--fingerprint-hardware-concurrency=8");
   expect(deriveFingerprintFlags({ ...beta, hardware: { cores: 4 } }, 8)).toContain("--fingerprint-hardware-concurrency=4");
   const firefox = { ...buildNewProfile({ engine: "firefox", platformOs: "windows" }, () => false), hardware: { cores: 7 } };
-  expect(firefoxLaunchConfig(firefox)["navigator.hardwareConcurrency"]).toBe(7);
+  expect(firefoxLaunchConfig(firefox, undefined, undefined, undefined, undefined, undefined, 8)["navigator.hardwareConcurrency"]).toBe(7);
 
-  // Cleared, CloakBrowser draws from the seed again and the other engines choose.
+  // Cleared, Chromium draws from the seed again and Firefox chooses.
   expect(editedProfileHardware(cloak, undefined)).toEqual(generateProfileHardware(cloak.fingerprintSeed));
-  expect(editedProfileHardware(beta, undefined)).toBeUndefined();
+  expect(editedProfileHardware(beta, undefined)).toEqual(generateProfileHardware(beta.fingerprintSeed));
   expect(editedProfileHardware(firefox, undefined)).toBeUndefined();
 });
 

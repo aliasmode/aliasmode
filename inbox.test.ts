@@ -557,11 +557,11 @@ test.each([
     return [profile.engine ?? "chromium", profile.chromiumRuntime, profile.hardware?.cores];
   };
   expect(browser(cloak.id)).toEqual(["chromium", undefined, cloak.hardware!.cores]);
-  expect(browser(beta.id)).toEqual(["chromium", "aliasmode", undefined]);
+  expect(browser(beta.id)).toEqual(["chromium", "aliasmode", beta.hardware!.cores]);
   expect(browser(firefox.id)).toEqual(["firefox", undefined, undefined]);
   expect(browser("k1older1")).toEqual(["chromium", undefined, cloak.hardware!.cores]);
   expect(browser("k1sheet1")).toEqual(["chromium", undefined, cloak.hardware!.cores]);
-  expect(browser("k1sheet2")).toEqual(["chromium", "aliasmode", undefined]);
+  expect(browser("k1sheet2")).toEqual(["chromium", "aliasmode", beta.hardware!.cores]);
   // A saved profile keeps its browser.
   expect(browser("k1saved1")).toEqual(["chromium", undefined, store.getProfile("k1saved1")!.hardware?.cores]);
   // An AdsPower record gets this computer's default and keeps its account, screen and session.

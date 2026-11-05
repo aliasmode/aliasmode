@@ -40,7 +40,7 @@ export function seedFraction(seed: number): number {
 // Logical processor counts of current desktop and laptop computers; repeats set the odds.
 const CORE_COUNTS = [8, 8, 8, 12, 12, 12, 16, 16, 20, 24] as const;
 
-/** Choose the hardware that a new CloakBrowser profile reports on every computer. */
+/** Choose the hardware that a new Chromium profile (CloakBrowser or Chromium 155) reports on every computer. */
 export function generateProfileHardware(seed: number): ProfileHardware {
   // The extra constant keeps this draw apart from other values drawn from the same seed.
   return { cores: CORE_COUNTS[Math.floor(seedFraction(seed ^ 0x9e3779b9) * CORE_COUNTS.length)]! };
@@ -57,10 +57,10 @@ export function normalizeProfileHardware(value: unknown): ProfileHardware | unde
   return { cores };
 }
 
-/** The hardware after the user types a processor count, or clears it: CloakBrowser then draws its count from the seed again. */
+/** The hardware after the user types a processor count, or clears it: Chromium then draws its count from the seed again. */
 export function editedProfileHardware(profile: Profile, cores: number | undefined): ProfileHardware | undefined {
   if (cores !== undefined) return { cores };
-  return (profile.engine ?? "chromium") === "chromium" && !profile.chromiumRuntime ? generateProfileHardware(profile.fingerprintSeed) : undefined;
+  return (profile.engine ?? "chromium") === "chromium" ? generateProfileHardware(profile.fingerprintSeed) : undefined;
 }
 
 /** Default launch window as fractions of the profile's screen: a tall two-thirds-width window. */
