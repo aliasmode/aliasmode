@@ -32,7 +32,8 @@ import {
 import { lstat, readdir, rm } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { dlopen, ptr } from "bun:ffi";
-import type { CookieRecord, LaunchInfo, Profile, ProxySpec } from "./types.ts";
+import type { CookieRecord, LaunchInfo, LaunchPersona, Profile, ProxySpec } from "./types.ts";
+import { cookiesForEngine } from "./parse.ts";
 import type { ProfileStore } from "./store.ts";
 import { lookupProxyExitLocation, type ExitLocation } from "./geoip.ts";
 import type { AutofillBridge } from "./autofill-bridge.ts";
@@ -343,6 +344,47 @@ export type SearchProviderEnsurer = (
 /** Add missing imported cookies without replacing values already in the browser. */
 export type CookieEnsurer = (ws: string, cookies: CookieRecord[]) => Promise<{ injected: boolean }>;
 
+/** Set cookies, replacing any with the same name, domain and path. */
+export type CookieSetter = (ws: string, cookies: CookieRecord[]) => Promise<void>;
+
+/**
+ * Profile fields a browser takes at launch. Edits to them while it runs are saved and apply at
+ * the next start; the running browser and its identity checks keep the launched values.
+ */
+export const LAUNCH_PERSONA_KEYS = [
+  "engine", "chromiumRuntime", "firefox", "hardware", "ua", "platformOs", "platform", "proxy", "proxyError",
+  "timezone", "locale", "screenWidth", "screenHeight", "displayScale", "fingerprintSeed", "extensions",
+] as const satisfies readonly (keyof LaunchPersona)[];
+
+export function launchPersona(profile: Profile): LaunchPersona {
+  const persona: Record<string, unknown> = {};
+  for (const key of LAUNCH_PERSONA_KEYS) {
+    if (profile[key] !== undefined) persona[key] = structuredClone(profile[key]);
+  }
+  return persona as LaunchPersona;
+}
+
+/** The profile as its running browser was launched: stored values with the launch-time identity. */
+export function launchedProfile(profile: Profile, launch: Pick<LaunchInfo, "persona"> | null | undefined): Profile {
+  if (!launch?.persona) return profile;
+  const launched: Record<string, unknown> = { ...profile };
+  for (const key of LAUNCH_PERSONA_KEYS) {
+    if (launch.persona[key] === undefined) delete launched[key];
+    else launched[key] = structuredClone(launch.persona[key]);
+  }
+  return launched as unknown as Profile;
+}
+
+/**
+ * Saved edits the running browser does not have yet. The account platform only picks the first
+ * page at launch, so it never needs a restart.
+ */
+export function launchIdentityChanged(profile: Profile, launch: Pick<LaunchInfo, "persona"> | null | undefined): boolean {
+  if (!launch?.persona) return false;
+  const value = (v: unknown) => JSON.stringify(v === undefined || v === "" || (Array.isArray(v) && !v.length) ? null : v);
+  return LAUNCH_PERSONA_KEYS.some((key) => key !== "platform" && value(profile[key]) !== value(launch.persona![key]));
+}
+
 function cookieIsCurrent(c: CookieRecord): boolean {
   const nowSec = Date.now() / 1000;
   const expires = Number(c.expires);
@@ -510,6 +552,8 @@ export interface LauncherOptions {
   spawn?: SpawnFn;
   fetch?: FetchFn;
   ensureCookies?: CookieEnsurer;
+  /** Sets the cookies added while the profile was closed. Defaults to Playwright's addCookies. */
+  setCookies?: CookieSetter;
   /**
    * Adds the session cookies of Firefox's own last session. Cloud mode turns ensureCookies off;
    * this stays on, because this device's session is kept only when its cookies came back.
@@ -881,6 +925,7 @@ export class Launcher {
   private fetchFn: FetchFn;
   private ensureCookiesFn: CookieEnsurer;
   private addNativeSessionCookiesFn: CookieEnsurer;
+  private setCookiesFn: CookieSetter;
   private ensureSearchProviderFn?: SearchProviderEnsurer;
   private captureFingerprintFn: (ws: string) => Promise<FingerprintSample | null>;
   private lookupExitLocationFn?: (proxy: ProxySpec) => Promise<ExitLocation | null>;
@@ -1001,6 +1046,7 @@ export class Launcher {
     this.fetchFn = opts.fetch ?? ((url) => fetch(url, { signal: AbortSignal.timeout(800) }) as any);
     this.ensureCookiesFn = opts.ensureCookies ?? defaultEnsureCookies;
     this.addNativeSessionCookiesFn = opts.addNativeSessionCookies ?? defaultEnsureCookies;
+    this.setCookiesFn = opts.setCookies ?? defaultSetCookies;
     this.ensureSearchProviderFn = opts.ensureSearchProvider;
     this.captureFingerprintFn = opts.captureFingerprint ?? ((ws) => captureFingerprint(ws));
     this.lookupExitLocationFn = opts.lookupExitLocation ?? (this.unsafeDisableIdentityGates ? undefined : (proxy) => lookupProxyExitLocation(proxy));
@@ -1295,7 +1341,9 @@ export class Launcher {
   }
 
   /** A survivor is reusable only with its exact launch-time kernel and persona. */
-  private assertStoredLaunchPersona(profile: Profile, launch: LaunchInfo, approvedSha256: string): void {
+  private assertStoredLaunchPersona(stored: Profile, launch: LaunchInfo, approvedSha256: string): void {
+    // Edits saved while the browser runs apply at its next start; it keeps its launch identity.
+    const profile = launchedProfile(stored, launch);
     if ((profile.engine ?? "chromium") !== (launch.engine ?? "chromium")) {
       throw new Error("live browser engine differs from the stored profile");
     }
@@ -1512,9 +1560,10 @@ export class Launcher {
   }
 
   private identityCertificationKey(profileId: string): string | null {
-    const profile = this.store.getProfile(profileId);
     const launch = this.store.getLaunch(profileId);
-    if (!profile || !launch) return null;
+    const stored = this.store.getProfile(profileId);
+    if (!stored || !launch) return null;
+    const profile = launchedProfile(stored, launch);
     return JSON.stringify([
       profile.engine,
       profile.firefox,
@@ -1587,7 +1636,7 @@ export class Launcher {
     const launch = this.store.getLaunch(profileId);
     if (!profile?.chromiumRuntime || !launch || launch.headless || launch.engine === "firefox") return;
     const ws = await this.probeLaunchCdp(launch);
-    if (ws && !this.windowFits.has(profileId)) this.startWindowFit(profile, ws, null);
+    if (ws && !this.windowFits.has(profileId)) this.startWindowFit(launchedProfile(profile, launch), ws, null);
   }
 
   private markIdentityCertified(profileId: string): void {
@@ -1608,6 +1657,20 @@ export class Launcher {
   private clearIdentityCertification(profileId: string, keepProvenGeneration = false): void {
     this.certifiedLaunches.delete(profileId);
     if (!keepProvenGeneration) this.provenGenerations.delete(profileId);
+  }
+
+  /** Set the cookies added while the profile was closed, then forget them. A failure keeps them for the next start. */
+  private async applyPendingCookies(profileId: string, ws: string): Promise<void> {
+    const pending = this.store.getPendingCookies(profileId);
+    if (!pending.length) return;
+    const current = pending.filter(cookieIsCurrent);
+    try {
+      if (current.length) await this.setCookiesFn(ws, cookiesForEngine(current, this.store.getProfile(profileId)?.engine === "firefox" ? "firefox" : "chromium"));
+      this.store.clearPendingCookies(profileId, pending);
+      this.log(`${profileId}: set ${current.length} cookie(s) added while it was closed`);
+    } catch (err) {
+      this.log(`${profileId}: cookies added while it was closed could not be set; kept for the next start (${err instanceof Error ? err.message : err})`);
+    }
   }
 
   private requireUnchangedProfile(profileId: string, snapshot: string, stage: string): Profile {
@@ -1795,10 +1858,12 @@ export class Launcher {
     let profileSnapshot = JSON.stringify(profile);
     let approvedBinarySha256: string;
     try {
-      if (profile.proxy?.type === "https" && profile.proxy.user) {
+      // A running browser is checked with the identity it was launched with; saved edits wait for its next start.
+      const checked = launchedProfile(profile, this.store.getLaunch(profileId));
+      if (checked.proxy?.type === "https" && checked.proxy.user) {
         throw new BrowserLaunchError("preflight", "proxy_https_auth");
       }
-      this.assertHostCompatibility(profile);
+      this.assertHostCompatibility(checked);
       if (profile.engine === "firefox" && chromeArgs.length) throw new BrowserLaunchError("preflight", "firefox_arguments");
       approvedBinarySha256 = this.approvedBinarySha256(binaryKind(profile));
     } catch (error) {
@@ -1983,6 +2048,11 @@ export class Launcher {
       }
       profile = current!;
       profileSnapshot = JSON.stringify(profile);
+      // The checks above saw the identity of the browser that ran; this launch uses the saved one.
+      if (profile.proxy?.type === "https" && profile.proxy.user) {
+        throw new BrowserLaunchError("preflight", "proxy_https_auth");
+      }
+      this.assertHostCompatibility(profile);
     }
     // The proxy exit is looked up once per launch. A missing or stale saved timezone (an import
     // whose lookup failed, a rotating proxy that moved) becomes the exit's before any engine reads
@@ -2026,6 +2096,7 @@ export class Launcher {
     const userDataDir = this.userDataDir(profileId);
     const existingUserDataDir = existsSync(userDataDir);
     let personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
+    const persona = launchPersona(profile);
     mkdirSync(userDataDir, { recursive: true });
 
     // A directory that did not exist before this launch cannot have a foreign
@@ -2166,6 +2237,7 @@ export class Launcher {
         userDataDir,
         binarySha256: spawnVerifiedBinary.sha256,
         personaDigest,
+        persona,
         headless,
         searchBootstrapRevision,
       };
@@ -2313,6 +2385,8 @@ export class Launcher {
         }
         this.requireUnchangedProfile(profileId, profileSnapshot, "session restore");
       }
+      // Before the platform page opens, so it loads with them. Set over the restored session.
+      await this.applyPendingCookies(profileId, ws);
       if (!pendingSession && profile.cookies.length > 0) {
         const cookies = profile.cookies.filter(cookieIsCurrent);
         if (!cookies.length) {
@@ -2403,6 +2477,7 @@ export class Launcher {
         userDataDir,
         binarySha256: verifiedBinary.sha256,
         personaDigest,
+        persona,
         headless,
         searchBootstrapRevision,
         processGroupId: proc.processGroupId,
@@ -2437,6 +2512,7 @@ export class Launcher {
           userDataDir,
           binarySha256: verifiedBinary.sha256,
           personaDigest,
+          persona,
           headless,
           searchBootstrapRevision,
           processGroupId: proc?.processGroupId,
@@ -2537,6 +2613,7 @@ export class Launcher {
       startedAt: Date.now(), firefoxOwner: owner, ownerBinaryPath,
       binaryPath: binary.path, binarySha256: binary.sha256, userDataDir, headless,
       personaDigest: this.launchPersonaDigest(profile, binary.sha256, headless),
+      persona: launchPersona(profile),
       sessionBaseVersion: opts.sessionBaseVersion,
     };
     if (existsSync(userDataDir)) {
@@ -2648,6 +2725,7 @@ export class Launcher {
           this.log(`${profileId}: session cookies from the last Firefox session could not be restored`);
         });
       }
+      if (!pendingSession) await this.applyPendingCookies(profileId, launch.ws);
       if (!nativeSessionRestored && closedTabs !== undefined) {
         await this.navigate(launch.ws, closedTabs, true);
         nativeSessionRestored = closedTabs.length > 0;
@@ -2662,6 +2740,7 @@ export class Launcher {
           if (!(error instanceof SessionRestoreError) || error.operation !== "navigation") throw error;
           this.log(`${profileId}: session restored, but startup navigation failed; open the site manually`);
         }
+        await this.applyPendingCookies(profileId, launch.ws);
       } else {
         const cookies = profile.cookies.filter(cookieIsCurrent);
         if (cookies.length) await this.ensureCookiesFn(launch.ws, cookies);
@@ -3337,7 +3416,9 @@ export class Launcher {
    * process must not restore its account network before hub claim/certification.
    */
   /** True when this call reattached the relay. */
-  private async ensureSurvivorRelay(profile: Profile, launch: LaunchInfo): Promise<boolean> {
+  private async ensureSurvivorRelay(stored: Profile, launch: LaunchInfo): Promise<boolean> {
+    // The browser points at the relay for the proxy it was launched with.
+    const profile = launchedProfile(stored, launch);
     if (!needsProxyRelay(profile)) return false;
     if (this.relays.has(profile.id)) return false;
     if (!launch.relayPort) {
@@ -3708,7 +3789,7 @@ export class Launcher {
     let profile = this.store.getProfile(profileId);
     if (!profile) throw new Error(`cannot verify survivor ${profileId}: profile is missing`);
     const snapshot = JSON.stringify(profile);
-    this.assertHostCompatibility(profile);
+    this.assertHostCompatibility(launchedProfile(profile, this.store.getLaunch(profileId)));
     const approvedBinarySha256 = this.approvedBinarySha256(binaryKind(profile));
     if (!(await this.active(profileId))) throw new Error(`cannot verify survivor ${profileId}: browser identity/CDP is unavailable`);
 
@@ -3725,7 +3806,7 @@ export class Launcher {
     this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
     const generation = `${launch.debugPort}:${launch.startedAt}`;
     profile = this.requireUnchangedProfile(profileId, snapshot, "survivor CDP verification");
-    if (!profile.proxy) {
+    if (!launchedProfile(profile, launch).proxy) {
       this.markIdentityCertified(profileId);
       void this.watchSurvivorWindow(profileId);
       return;
@@ -3752,9 +3833,9 @@ export class Launcher {
     try {
       const profile = this.store.getProfile(profileId);
       if (!profile) throw new Error(`cannot verify survivor ${profileId}: profile is missing`);
-      this.assertHostCompatibility(profile);
-      const approvedBinarySha256 = this.approvedBinarySha256(binaryKind(profile));
       const launch = this.store.getLaunch(profileId);
+      this.assertHostCompatibility(launchedProfile(profile, launch));
+      const approvedBinarySha256 = this.approvedBinarySha256(binaryKind(profile));
       if (!launch || `${launch.debugPort}:${launch.startedAt}` !== generation) return null;
       this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
       if (
@@ -5542,6 +5623,10 @@ const defaultLabelWindow: WindowLabeler = async (ws, label) => {
  * default context, then disconnect. connectOverCDP's close() detaches the
  * client without terminating the browser, leaving the persistent dir seeded.
  */
+export const defaultSetCookies: CookieSetter = async (ws, cookies) => {
+  await runPlaywrightWorker("cookie-add", { endpoint: ws, cookies, connectTimeoutMs: 30_000 });
+};
+
 const defaultEnsureCookies: CookieEnsurer = async (ws, cookies) => {
   return runPlaywrightWorker<{ injected: boolean }>("ensure-cookies", {
     endpoint: ws,

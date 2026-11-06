@@ -17,6 +17,9 @@ import {
   serializeAdsTxt,
   serializeXlsxRows,
   serializeCsv,
+  parseCookieText,
+  mergeCookies,
+  cookiesForEngine,
 } from "./parse.ts";
 import { deterministicSeed } from "./fingerprint.ts";
 
@@ -469,4 +472,31 @@ test("an old export with none of the new keys imports exactly as before", () => 
   expect(out.profile.extensions).toEqual([]);
   expect(out.profile.tags).toEqual([]);
   expect(out.validationErrors).toEqual([]);
+});
+
+test("pasted cookies accept JSON exports and Netscape cookies.txt", () => {
+  expect(parseCookieText('{"cookies":[{"name":"a","value":"1","domain":".x.com","expirationDate":4000000000,"sameSite":"no_restriction"}]}')).toEqual([
+    { name: "a", value: "1", domain: ".x.com", path: "/", httpOnly: false, secure: true, sameSite: "None", expires: 4_000_000_000 },
+  ]);
+  expect(parseCookieText('{"name":"b","value":"2","domain":"x.com","path":"/"}')).toHaveLength(1);
+  expect(parseCookieText([
+    "# Netscape HTTP Cookie File",
+    "",
+    "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t4000000000\tauth_token\ttok",
+    "x.com\tFALSE\t/home\tFALSE\t0\tlang\ten",
+  ].join("\r\n"))).toEqual([
+    { name: "auth_token", value: "tok", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 4_000_000_000 },
+    { name: "lang", value: "en", domain: "x.com", path: "/home", httpOnly: false, secure: false },
+  ]);
+  for (const bad of ["", "[]", "{bad", "x.com TRUE / FALSE", '[{"name":"bad name","value":"v","domain":"x.com"}]']) {
+    expect(() => parseCookieText(bad)).toThrow();
+  }
+});
+
+test("cookie merges replace the same name, domain, path and partition", () => {
+  const a = { name: "a", value: "1", domain: ".X.com", path: "/" };
+  expect(mergeCookies([a, { ...a, name: "b" }], [{ ...a, domain: ".x.com", value: "2" }, { ...a, partitionKey: "https://x.com" }])).toEqual([
+    { ...a, name: "b" }, { ...a, domain: ".x.com", value: "2" }, { ...a, partitionKey: "https://x.com" },
+  ]);
+  expect(cookiesForEngine([{ ...a, partitionKey: "p", _crHasCrossSiteAncestor: false }], "firefox")).toEqual([a]);
 });

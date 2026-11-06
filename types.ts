@@ -219,6 +219,11 @@ export interface FingerprintVerdict {
   differences: FingerprintDifference[];
 }
 
+/** Profile fields a running browser took at launch (see LAUNCH_PERSONA_KEYS in launcher.ts). */
+export type LaunchPersona = Partial<Pick<Profile,
+  | "engine" | "chromiumRuntime" | "firefox" | "hardware" | "ua" | "platformOs" | "platform" | "proxy" | "proxyError"
+  | "timezone" | "locale" | "screenWidth" | "screenHeight" | "displayScale" | "fingerprintSeed" | "extensions">>;
+
 /** Internal launch ownership. Only Chromium's control address is public CDP. */
 export interface LaunchInfo {
   profileId: string;
@@ -244,6 +249,11 @@ export interface LaunchInfo {
   binarySha256?: string;
   /** Hash of every launch-time fingerprint input, kernel, extension and mode. */
   personaDigest?: string;
+  /**
+   * The identity fields this browser was launched with. Edits saved while it runs change the
+   * stored profile, not this; they apply at the next start. Missing on launches made before it existed.
+   */
+  persona?: LaunchPersona;
   /** Explicit mode for this launch generation. Missing only on legacy rows. */
   headless?: boolean;
   /** Search bootstrap attempted before this browser generation was spawned. */

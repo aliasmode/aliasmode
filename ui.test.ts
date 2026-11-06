@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, existsSync, rmSync, mkdtempSync, readFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileStore } from "./store.ts";
-import { BrowserLaunchError, Launcher } from "./launcher.ts";
+import { BrowserLaunchError, Launcher, launchPersona } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { deriveFingerprintFlags, editedProfileHardware } from "./fingerprint.ts";
 import { listUiProfiles, handleUiRequest, LOW_DISK_SPACE_BYTES } from "./ui.ts";
@@ -363,12 +363,12 @@ test("cookie route adds one persistent cookie to an active Cloud browser without
     {
       appConfig,
       cloudBrowser: {} as any,
-      addCookie: async (ws: string, cookie: any) => { calls.push({ ws, cookie }); },
+      setCookies: async (ws: string, cookies: any[]) => { for (const cookie of cookies) calls.push({ ws, cookie }); },
     } as any,
   );
 
   expect(response!.status).toBe(200);
-  expect(await response!.json()).toEqual({ ok: true });
+  expect(await response!.json()).toEqual({ ok: true, applied: "now", count: 1 });
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject({
     ws: "ws://live-browser",
@@ -387,12 +387,12 @@ test("cookie route adds one persistent cookie to an active Cloud browser without
   s.close();
 });
 
-test("cookie route rejects untrusted, malformed, and closed-browser requests", async () => {
+test("cookie route rejects untrusted and malformed requests, and keeps cookies for a closed profile", async () => {
   const s = store();
   let certifications = 0;
   let writes = 0;
   const launcher = { certifiedActive: async () => { certifications++; return false; } } as any;
-  const options = { addCookie: async () => { writes++; } } as any;
+  const options = { setCookies: async () => { writes++; } } as any;
 
   const untrusted = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
     method: "POST",
@@ -415,6 +415,8 @@ test("cookie route rejects untrusted, malformed, and closed-browser requests", a
     { name: "name", value: "bad;value", domain: "example.com", path: "/" },
     { name: "name", value: "value", domain: "", path: "/" },
     { name: "name", value: "value", domain: "example.com", path: "account" },
+    { text: "not cookies" },
+    { text: "[]" },
   ]) {
     const malformed = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
       method: "POST",
@@ -423,16 +425,100 @@ test("cookie route rejects untrusted, malformed, and closed-browser requests", a
     }), launcher, s, null, options);
     expect(malformed!.status).toBe(400);
   }
+  expect(s.getPendingCookies("k1d0cd11")).toEqual([]);
 
   const closed = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "session", value: "value", domain: "example.com", path: "/" }),
   }), launcher, s, null, options);
-  expect(closed!.status).toBe(409);
-  expect(await closed!.json()).toEqual({ ok: false, error: "profile browser is not open" });
+  expect(closed!.status).toBe(200);
+  expect(await closed!.json()).toEqual({ ok: true, applied: "next-start", count: 1 });
+  expect(s.getPendingCookies("k1d0cd11")).toMatchObject([{ name: "session", value: "value", domain: "example.com", path: "/" }]);
+  expect(listUiProfiles(s).find((profile) => profile.id === "k1d0cd11")!.pendingCookieCount).toBe(1);
+
+  // A recorded browser that is not certified yet (still starting) gets nothing.
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://live-browser", startedAt: 123 });
+  const starting = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "other", value: "value", domain: "example.com", path: "/" }),
+  }), launcher, s, null, options);
+  expect(starting!.status).toBe(409);
+  expect(await starting!.json()).toEqual({ ok: false, error: "profile browser is not open" });
   expect(certifications).toBe(1);
   expect(writes).toBe(0);
+  expect(s.getPendingCookies("k1d0cd11")).toHaveLength(1);
+  s.close();
+});
+
+test("bulk cookie route sets open browsers now and keeps cookies for closed profiles", async () => {
+  const s = store();
+  const first = s.getProfile("k1d0cd11")!;
+  s.upsertProfile({ ...first, id: "k1closed", name: "closed" });
+  s.upsertProfile(firefoxProfile(s, "k1firefox"));
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://chromium", startedAt: 1 });
+  s.recordLaunch({ profileId: "k1firefox", engine: "firefox", pid: 2, debugPort: 9413, ws: "firefox://live", startedAt: 1 });
+  const calls: Array<{ ws: string; cookies: any[] }> = [];
+  const post = (body: unknown) => handleUiRequest(new Request("http://x/ui/api/profiles/cookies", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }), { certifiedActive: async () => true } as any, s, null, {
+    setCookies: async (ws: string, cookies: any[]) => { calls.push({ ws, cookies }); },
+  } as any);
+
+  const json = JSON.stringify([
+    { name: "auth_token", value: "a1", domain: ".x.com", path: "/", secure: true, httpOnly: true, expirationDate: 4_000_000_000, sameSite: "no_restriction", partitionKey: "https://x.com" },
+    { name: "ct0", value: "c1", domain: ".x.com", path: "/", session: true },
+  ]);
+  const response = await post({ ids: ["k1d0cd11", "k1closed", "k1firefox"], text: json });
+  expect(await response!.json()).toEqual({ ok: true, count: 2, live: 2, nextStart: 1, errors: [] });
+  expect(calls.map((call) => call.ws)).toEqual(["ws://chromium", "firefox://live"]);
+  expect(calls[0]!.cookies[0]).toMatchObject({ name: "auth_token", sameSite: "None", secure: true, partitionKey: "https://x.com", expires: 4_000_000_000 });
+  // Firefox has no Chromium cookie partitions.
+  expect(calls[1]!.cookies[0].partitionKey).toBeUndefined();
+  expect(s.getPendingCookies("k1closed").map((cookie) => cookie.name)).toEqual(["auth_token", "ct0"]);
+
+  // cookies.txt replaces a pending cookie with the same name, domain and path.
+  const netscape = "# Netscape HTTP Cookie File\n#HttpOnly_.x.com\tTRUE\t/\tTRUE\t4000000000\tct0\tc2\n";
+  expect(await (await post({ ids: ["k1closed"], text: netscape }))!.json()).toMatchObject({ ok: true, count: 1, nextStart: 1 });
+  expect(s.getPendingCookies("k1closed")).toEqual([
+    expect.objectContaining({ name: "auth_token", value: "a1" }),
+    { name: "ct0", value: "c2", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 4_000_000_000 },
+  ]);
+
+  const unknown = await post({ ids: ["k1closed", "missing"], name: "a", value: "b", domain: "x.com" });
+  expect(await unknown!.json()).toMatchObject({ ok: false, nextStart: 1, errors: [{ id: "missing", error: "no such profile" }] });
+  s.close();
+});
+
+test("cookies for a closed Cloud profile join its Cloud session unless this device owes Cloud a newer one", async () => {
+  const s = store();
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-cookie-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const updates: any[] = [];
+  const client = {
+    getProfile: async () => ({ ok: true, profile: { id: "k1d0cd11", version: 3, activeOpens: [] }, payload: encodePortableProfile(s.getProfile("k1d0cd11")!) }),
+    updateProfile: async (_id: string, request: any) => { updates.push(request); },
+  };
+  let settled = true;
+  const post = () => handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/cookies", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "session", value: "v", domain: "example.com" }),
+  }), { certifiedActive: async () => { throw new Error("closed profiles need no browser"); } } as any, s, null, {
+    appConfig, cloudBrowser: { sessionSettled: () => settled } as any, cloudConnection: { client } as any,
+  } as any);
+
+  const added = await post();
+  expect(await added!.json()).toEqual({ ok: true, applied: "next-start", count: 1 });
+  expect(updates).toHaveLength(1);
+  expect(updates[0].expectedVersion).toBe(3);
+  expect(updates[0].payload.session.cookies.at(-1)).toMatchObject({ name: "session", value: "v", domain: "example.com", path: "/" });
+  // Cloud profiles keep nothing pending on this device.
+  expect(s.getPendingCookies("k1d0cd11")).toEqual([]);
+
+  settled = false;
+  expect((await post())!.status).toBe(409);
+  expect(updates).toHaveLength(1);
   s.close();
 });
 
@@ -445,7 +531,7 @@ test("cookie route never returns the cookie value or a raw worker error", async 
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "session", value: secret, domain: "example.com", path: "/" }),
   }), { certifiedActive: async () => true } as any, s, null, {
-    addCookie: async () => { throw new Error(`worker rejected ${secret}`); },
+    setCookies: async () => { throw new Error(`worker rejected ${secret}`); },
   } as any);
   const body = await response!.text();
 
@@ -1312,7 +1398,7 @@ test("Firefox profiles reject Chrome extension changes", async () => {
   s.close();
 });
 
-test("a Firefox screen edit saves the screen with its usable area and a window inside it, only while closed", async () => {
+test("a Firefox screen edit saves the screen with its usable area and a window inside it, also while open", async () => {
   const s = store();
   const profile = firefoxProfile(s, "firefox-screen");
   profile.screenWidth = 2560;
@@ -1327,11 +1413,16 @@ test("a Firefox screen edit saves the screen with its usable area and a window i
     {} as any,
     s,
   );
-  s.recordLaunch({ profileId: "firefox-screen", pid: 1, debugPort: 9412, ws: "firefox://live", startedAt: 123 });
-  expect((await edit())!.status).toBe(409);
-  expect(s.getProfile("firefox-screen")!.screenWidth).toBe(2560);
+  s.recordLaunch({
+    profileId: "firefox-screen", pid: 1, debugPort: 9412, ws: "firefox://live", startedAt: 123,
+    persona: launchPersona(s.getProfile("firefox-screen")!),
+  });
+  const open = await edit();
+  expect(open!.status).toBe(200);
+  // Saved now; the open browser keeps its launch screen until it restarts.
+  expect(await open!.json()).toEqual({ ok: true, restartRequired: true });
+  expect(s.getLaunch("firefox-screen")!.persona).toMatchObject({ screenWidth: 2560, screenHeight: 1440 });
   s.clearLaunch("firefox-screen");
-  expect((await edit())!.status).toBe(200);
   const saved = s.getProfile("firefox-screen")!;
   expect([saved.screenWidth, saved.screenHeight]).toEqual([1366, 768]);
   expect(saved.firefox!.config).toMatchObject({
@@ -1456,8 +1547,8 @@ test("a proxy edit keeps changes saved during its timezone lookup", async () => 
     expect(s.getProfile("k1d0cd11")).toMatchObject({
       name: "renamed during lookup",
       proxy: { host: "new-proxy.example" },
-      // A browser opened during the lookup keeps the timezone it launched with.
-      timezone: launch ? "America/Los_Angeles" : "Europe/Paris",
+      // Saved for the next start also when a browser opened during the lookup.
+      timezone: "Europe/Paris",
     });
     s.close();
   }
@@ -1488,7 +1579,7 @@ test("bulk proxy edits keep changes saved during the timezone lookups", async ()
   s.close();
 });
 
-test("bulk proxy edits reject an open profile before any lookup", async () => {
+test("bulk proxy edits save an open profile for its next start", async () => {
   const s = store();
   s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
   const form = new FormData();
@@ -1501,8 +1592,9 @@ test("bulk proxy edits reject an open profile before any lookup", async () => {
     null,
     { timezoneFetch: timezoneFetch({ "new-proxy.example": "Europe/Paris" }, calls) },
   );
-  expect(res!.status).toBe(409);
-  expect(calls).toEqual([]);
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")).toMatchObject({ proxy: { host: "new-proxy.example" }, timezone: "Europe/Paris" });
+  expect(s.getLaunch("k1d0cd11")).not.toBeNull();
   s.close();
 });
 
@@ -1822,7 +1914,7 @@ test("Chrome Web Store endpoint keeps the existing remote-mode restriction", asy
   s.close();
 });
 
-test("extension assignment is atomic and blocked when any selected profile is open", async () => {
+test("extension assignment also saves open profiles for their next start", async () => {
   const s = store();
   const first = s.getProfile("k1d0cd11")!;
   s.upsertProfile({ ...first, id: "k1d0cd22", name: "second", extensions: [] });
@@ -1838,9 +1930,9 @@ test("extension assignment is atomic and blocked when any selected profile is op
     s,
   );
 
-  expect(res!.status).toBe(409);
-  expect(s.getProfile("k1d0cd11")!.extensions).toEqual([]);
-  expect(s.getProfile("k1d0cd22")!.extensions).toEqual([]);
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.extensions).toEqual(["ext-one"]);
+  expect(s.getProfile("k1d0cd22")!.extensions).toEqual(["ext-one"]);
   s.close();
 });
 
@@ -1865,27 +1957,36 @@ test("extension deletion cannot mutate the persona of an open profile", async ()
   s.close();
 });
 
-test("open Local and Cloud profiles allow account edits but reject fingerprint changes", async () => {
+test("open Local and Cloud profiles save every field; proxy and fingerprint changes wait for the next start", async () => {
   for (const cloud of [false, true]) {
     const s = store();
-    s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+    const launched = s.getProfile("k1d0cd11")!;
+    s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1, persona: launchPersona(launched) });
     const options = cloud ? { cloudBrowser: {
       canEditLive: () => true,
       commitLiveEdit: async (profile: Profile) => { s.upsertProfile(profile); return true; },
     } as any } : {};
-    for (const set of [{ resolution: "1366x768" }, { platformOs: "macos" }, { timezone: "Europe/Paris" }, { locale: "fr-FR" }]) {
+    const save = async (set: Record<string, unknown>) => {
       const res = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/update", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ set }),
       }), {} as any, s, null, options);
-      expect(res!.status).toBe(409);
+      expect(res!.status).toBe(200);
+      return await res!.json();
+    };
+    // Live fields: no restart needed.
+    expect(await save({ name: "Renamed", group: "Team", platform: "telegram.org", tags: "a, b", username: "new-user" })).toEqual({ ok: true });
+    expect(listUiProfiles(s)[0]!.restartPending).toBeUndefined();
+    for (const set of [{ resolution: "1366x768" }, { platformOs: "macos" }, { timezone: "Europe/Paris" }, { locale: "fr-FR" }, { proxy: "next.example:8080" }]) {
+      expect(await save(set)).toEqual({ ok: true, restartRequired: true });
     }
-    const res = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/update", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ set: { name: "Renamed", resolution: "1680x1050", platformOs: "windows", timezone: "" } }),
-    }), {} as any, s, null, options);
-    expect(res!.status).toBe(200);
-    expect(s.getProfile("k1d0cd11")).toMatchObject({ name: "Renamed", screenWidth: 1680, screenHeight: 1050 });
-    expect(s.getLaunch("k1d0cd11")).not.toBeNull();
+    expect(s.getProfile("k1d0cd11")).toMatchObject({
+      name: "Renamed", group: "Team", platform: "telegram.org", tags: ["a", "b"], username: "new-user",
+      screenWidth: 1366, screenHeight: 768, platformOs: "macos", timezone: "Europe/Paris", locale: "fr-FR",
+      proxy: { host: "next.example", port: "8080" },
+    });
+    // The open browser keeps its launch identity.
+    expect(s.getLaunch("k1d0cd11")!.persona).toEqual(launchPersona(launched));
+    expect(listUiProfiles(s)[0]!.restartPending).toBe(true);
     s.close();
   }
 });
@@ -1941,15 +2042,15 @@ test("Firefox rejects OS edits and invalid timezone edits leave the profile unch
   s.close();
 });
 
-test("timezone lookup refuses an open profile before making a request", async () => {
+test("timezone lookup of an open profile saves the timezone for its next start", async () => {
   const s = store();
-  s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1 });
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 123, debugPort: 9333, ws: "ws://x", startedAt: 1, persona: launchPersona(s.getProfile("k1d0cd11")!) });
   const calls: string[][] = [];
   const res = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/timezone", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  }), {} as any, s, null, { timezoneFetch: timezoneFetch({}, calls) });
-  expect(res!.status).toBe(409);
-  expect(calls).toEqual([]);
+  }), {} as any, s, null, { timezoneFetch: timezoneFetch({ "1.2.3.4": "Europe/London" }, calls) });
+  expect(res!.status).toBe(200);
+  expect(await res!.json()).toMatchObject({ ok: true, timezone: "Europe/London", restartRequired: true });
   s.close();
 });
 
@@ -2044,7 +2145,7 @@ test("remote mobile persona conversion saves a fresh hub profile without touchin
   s.close();
 });
 
-test("bulk updates reject all rows when any target profile is open", async () => {
+test("bulk updates also change open profiles", async () => {
   const s = store();
   const first = s.getProfile("k1d0cd11")!;
   s.upsertProfile({ ...first, id: "k1bulk02", name: "second-before" });
@@ -2063,9 +2164,10 @@ test("bulk updates reject all rows when any target profile is open", async () =>
     {} as any,
     s,
   );
-  expect(res!.status).toBe(409);
-  expect(s.getProfile("k1d0cd11")!.name).toBe("sophia");
-  expect(s.getProfile("k1bulk02")!.name).toBe("second-before");
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.name).toBe("first-after");
+  expect(s.getProfile("k1bulk02")!.name).toBe("second-after");
+  expect(s.getLaunch("k1bulk02")).not.toBeNull();
   s.close();
 });
 

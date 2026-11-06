@@ -473,3 +473,31 @@ test("the Cloud edit view names an AliasMode Chromium profile's runtime and none
     expect((await editor.get("cloud1")).chromiumRuntime).toBe(runtime);
   }
 });
+
+test("cookies added to a closed Cloud profile join its Cloud session with the version check", async () => {
+  const authoritative = { ...response(7), payload: payload() };
+  const profileBefore = structuredClone(authoritative.payload.profile);
+  const updates: any[] = [];
+  const editor = new CloudProfileEditor({
+    getProfile: async () => authoritative,
+    updateProfile: async (_id: string, request: any) => { updates.push(request); },
+  } as any, readOnlyStore());
+  await editor.addSessionCookies("cloud1", [
+    { name: "auth_token", value: "new-secret", domain: ".x.com", path: "/", secure: true },
+    { name: "lang", value: "en", domain: "x.com", path: "/" },
+  ]);
+  expect(updates).toHaveLength(1);
+  expect(updates[0].expectedVersion).toBe(7);
+  // Same name, domain and path replaces the old cookie; the rest of the session and profile stay.
+  expect(updates[0].payload.session).toEqual({
+    ...authoritative.payload.session,
+    cookies: [
+      { name: "auth_token", value: "new-secret", domain: ".x.com", path: "/", secure: true },
+      { name: "lang", value: "en", domain: "x.com", path: "/" },
+    ],
+  });
+  expect(updates[0].payload.profile).toEqual(profileBefore);
+
+  const open = new CloudProfileEditor({ getProfile: async () => ({ ...response(7, [{}]), payload: payload() }), updateProfile: async () => { throw new Error("must not write"); } } as any, readOnlyStore());
+  await expect(open.addSessionCookies("cloud1", [{ name: "a", value: "b", domain: "x.com", path: "/" }])).rejects.toMatchObject({ status: 409 });
+});

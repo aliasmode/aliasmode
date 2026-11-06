@@ -25,6 +25,7 @@ import { normalizeProfileHardware } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { assertValidProfile } from "./profile-validation.ts";
+import { mergeCookies } from "./parse.ts";
 
 export class ProfileStore {
   private db: Database;
@@ -74,6 +75,12 @@ export class ProfileStore {
     } catch {
       /* column already exists */
     }
+    // Cookies added while the profile was closed. The next launch sets them, then clears them.
+    try {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN pending_cookies_json TEXT NOT NULL DEFAULT '[]'`);
+    } catch {
+      /* column already exists */
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS launches (
         profile_id TEXT PRIMARY KEY,
@@ -120,6 +127,7 @@ export class ProfileStore {
       "engine TEXT",
       "firefox_owner_json TEXT",
       "owner_binary_path TEXT",
+      "persona_json TEXT",
     ]) {
       try {
         this.db.exec(`ALTER TABLE launches ADD COLUMN ${column}`);
@@ -546,6 +554,42 @@ export class ProfileStore {
     })();
   }
 
+  /** Cookies the next launch sets. A cookie with the same name, domain, path and partition replaces the older one. */
+  addPendingCookies(id: string, cookies: CookieRecord[]): number {
+    return this.transaction(() => {
+      const row = this.db.query<{ pending_cookies_json: string }, [string]>(
+        `SELECT pending_cookies_json FROM profiles WHERE id = ? AND trashed_at = 0`,
+      ).get(id);
+      if (!row) throw new Error(`Unknown profile: ${id}`);
+      const merged = mergeCookies(safeParse<CookieRecord[]>(row.pending_cookies_json, []), cookies);
+      this.db.query(`UPDATE profiles SET pending_cookies_json = ? WHERE id = ?`).run(JSON.stringify(merged), id);
+      return merged.length;
+    })();
+  }
+
+  getPendingCookies(id: string): CookieRecord[] {
+    const row = this.db.query<{ pending_cookies_json: string }, [string]>(
+      `SELECT pending_cookies_json FROM profiles WHERE id = ?`,
+    ).get(id);
+    return row ? safeParse<CookieRecord[]>(row.pending_cookies_json, []) : [];
+  }
+
+  /** Remove the pending cookies a launch set. Cookies added during that launch stay pending. */
+  clearPendingCookies(id: string, applied: CookieRecord[]): void {
+    this.transaction(() => {
+      const done = new Set(applied.map((cookie) => JSON.stringify(cookie)));
+      const left = this.getPendingCookies(id).filter((cookie) => !done.has(JSON.stringify(cookie)));
+      this.db.query(`UPDATE profiles SET pending_cookies_json = ? WHERE id = ?`).run(JSON.stringify(left), id);
+    })();
+  }
+
+  /** Pending cookie count per profile with any. */
+  pendingCookieCounts(): Map<string, number> {
+    return new Map(this.db.query<{ id: string; n: number }, []>(
+      `SELECT id, json_array_length(pending_cookies_json) AS n FROM profiles WHERE pending_cookies_json <> '[]'`,
+    ).all().map((row) => [row.id, row.n] as const));
+  }
+
   markSeeded(id: string): void {
     this.db.query(`UPDATE profiles SET seeded = 1 WHERE id = ?`).run(id);
   }
@@ -946,16 +990,17 @@ export class ProfileStore {
            (profile_id, pid, debug_port, ws, started_at, relay_port, session_base_version,
             binary_path, user_data_dir, binary_sha256, persona_digest, headless,
             search_bootstrap_revision, process_group_id, root_start_time,
-            engine, firefox_owner_json, owner_binary_path)
+            engine, firefox_owner_json, owner_binary_path, persona_json)
          VALUES ($id,$pid,$port,$ws,$at,$relay,$base,$binary,$data,$binary_sha,$persona,$headless,$search_bootstrap,$pgid,$root_start,
-                 $engine,$firefox_owner,$owner_binary)
+                 $engine,$firefox_owner,$owner_binary,$persona_json)
          ON CONFLICT(profile_id) DO UPDATE SET
            pid=$pid, debug_port=$port, ws=$ws, started_at=$at, relay_port=$relay,
            session_base_version=$base, binary_path=$binary, user_data_dir=$data,
            binary_sha256=$binary_sha, persona_digest=$persona, headless=$headless,
            search_bootstrap_revision=$search_bootstrap,
            process_group_id=$pgid, root_start_time=$root_start,
-           engine=$engine, firefox_owner_json=$firefox_owner, owner_binary_path=$owner_binary`,
+           engine=$engine, firefox_owner_json=$firefox_owner, owner_binary_path=$owner_binary,
+           persona_json=$persona_json`,
       )
       .run({
         $id: info.profileId,
@@ -976,6 +1021,7 @@ export class ProfileStore {
         $engine: firefox.engine ?? null,
         $firefox_owner: firefox.firefoxOwner === undefined ? null : JSON.stringify(firefox.firefoxOwner),
         $owner_binary: firefox.ownerBinaryPath ?? null,
+        $persona_json: info.persona ? JSON.stringify(info.persona) : null,
       });
     // Mirror the launch time onto the profile so the AdsPower user/list facade
     // can report last_open_time (the launches row is deleted on stop).
@@ -1133,6 +1179,7 @@ function rowToLaunch(row: any): LaunchInfo {
     ...(engine ? { engine } : {}),
     ...(firefoxOwner === undefined ? {} : { firefoxOwner }),
     ...(row.owner_binary_path ? { ownerBinaryPath: row.owner_binary_path } : {}),
+    ...(row.persona_json ? { persona: JSON.parse(row.persona_json) } : {}),
   } as LaunchInfo;
 }
 

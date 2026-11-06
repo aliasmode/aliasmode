@@ -128,6 +128,31 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
 });
 
+test("Firefox sets cookies added while closed before its first page, and an edit while open waits for the next start", async () => {
+  const f = fixture();
+  const steps: string[] = [];
+  f.store.addPendingCookies(f.profile.id, [{ name: "auth_token", value: "new", domain: ".x.com", path: "/", partitionKey: "https://x.com" }]);
+  const launcher = new Launcher({
+    ...f.options,
+    setCookies: async (ws, cookies) => { steps.push(`cookies:${ws.slice(0, 10)}:${JSON.stringify(cookies)}`); },
+    navigate: async (_ws, urls) => { steps.push(`navigate:${urls.join(",")}`); },
+  });
+  await launcher.start(f.profile.id, ["https://x.com/home"]);
+  expect(steps).toEqual([
+    `cookies:firefox://:${JSON.stringify([{ name: "auth_token", value: "new", domain: ".x.com", path: "/" }])}`,
+    "navigate:https://x.com/home",
+  ]);
+  expect(f.store.getPendingCookies(f.profile.id)).toEqual([]);
+
+  // A screen saved while open changes the saved config only; the browser keeps running.
+  const saved = f.store.getProfile(f.profile.id)!;
+  f.store.upsertProfile({ ...saved, name: "Renamed", screenWidth: 1366, screenHeight: 768 });
+  expect(await launcher.certifiedActive(f.profile.id)).toBe(true);
+  expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
+  expect(f.launches()).toBe(1);
+  expect(await launcher.stop(f.profile.id)).toBe(true);
+});
+
 test("a proxied Firefox launch gives the engine the proxy exit IP for WebRTC, and no answer after a second try keeps today's config", async () => {
   for (const exitIp of ["203.0.113.7", null]) {
     const f = fixture();
