@@ -117,3 +117,46 @@
   .tools-stats > div { padding: 12px 16px; }
   .proxy-actions { gap: 8px; }
 }
+/* In-app wallet and proxy store (Cloud mode). */
+button.proxy-referral { width: 100%; font: inherit; text-align: left; cursor: pointer; }
+.store-page h4 { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+.store-balance { font-variant-numeric: tabular-nums; }
+.store-topup, .store-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.store-topup .fld { width: 160px; }
+.store-form .fld { flex: 1 1 180px; }
+.store-payment { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-sunken); }
+.store-payment > .btn { align-self: flex-start; text-decoration: none; }
+.store-wallet .tools-panel-body > .btn { align-self: flex-start; }
+.store-payment .fld { max-width: 320px; }
+.store-crypto { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+.store-qr { width: 176px; height: 176px; flex: 0 0 auto; border-radius: var(--r-sm); }
+.store-crypto-fields { display: flex; flex: 1 1 260px; flex-direction: column; gap: 12px; min-width: 0; }
+.store-field > span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; }
+.store-field > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.proxy-page .store-amount { font-size: 18px; }
+.store-address { font-size: 12px; overflow-wrap: anywhere; }
+.proxy-page .store-note { color: var(--warn-ink); font-weight: 600; }
+.store-waiting { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.store-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: store-pulse 1.2s ease-in-out infinite; }
+@keyframes store-pulse { 50% { opacity: .3; } }
+.store-pending, .store-assign, .store-result { display: flex; flex-direction: column; gap: 8px; }
+.store-row, .store-order-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.store-order-head small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.store-history summary, .store-order summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.store-history table { margin-top: 8px; }
+.store-entry.plus { color: var(--success-ink); }
+.store-entry.minus { color: var(--ink); }
+.store-tiers { display: flex; flex-wrap: wrap; gap: 6px; }
+.store-tiers span { padding: 3px 9px; border: 1px solid var(--line); border-radius: var(--r-pill); color: var(--muted); font-size: 11px; }
+.store-tiers span.active { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.store-total { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
+.store-total strong { color: var(--ink); font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.store-proxies { margin: 8px 0; padding: 0; list-style: none; max-height: 220px; overflow: auto; font-size: 12px; }
+.store-proxies li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+.store-proxies small { color: var(--muted); }
+.store-order { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
+.store-order:first-child { border-top: 0; padding-top: 0; }
+.store-topup .segmented { align-self: flex-end; }
+.store-manage { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 300px; text-align: right; }
+.store-manage a { color: var(--accent-ink); }
+button.navbuy { padding: 0; border: 0; background: none; cursor: pointer; }

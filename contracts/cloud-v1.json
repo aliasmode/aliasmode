@@ -69,7 +69,20 @@
     "trash": "POST /v1/profiles/:id/trash",
     "restore": "POST /v1/profiles/:id/restore",
     "purge": "DELETE /v1/profiles/:id/purge",
-    "events": "POST /v1/events"
+    "events": "POST /v1/events",
+    "wallet": "GET /v1/wallet",
+    "walletDeposits": "POST /v1/wallet/deposits; GET /v1/wallet/deposits/:id",
+    "proxyCatalog": "GET /v1/proxies/catalog",
+    "proxyPurchases": "POST /v1/proxies/purchases",
+    "purchasedProxies": "GET /v1/proxies",
+    "proxyAutoRenew": "POST /v1/proxies/orders/:id/auto-renew",
+    "nobleproxyHandoff": "POST /v1/nobleproxy/handoff"
+  },
+  "wallet": {
+    "currency": "USD",
+    "amounts": "integer_cents",
+    "depositAndBuy": ["owner"],
+    "view": ["owner", "admin", "member"]
   },
   "errorCodes": [
     "authentication_required",
@@ -87,6 +100,12 @@
     "version_conflict",
     "validation_failed",
     "rate_limited",
+    "insufficient_balance",
+    "deposit_amount_out_of_range",
+    "owner_only",
+    "partner_unavailable",
+    "partner_rejected",
+    "record_not_found",
     "internal_error"
   ],
   "analyticsEvents": [

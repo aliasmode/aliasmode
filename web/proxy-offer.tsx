@@ -1,4 +1,11 @@
+import { createContext, useContext } from "react";
 import { useTranslation } from "./i18n.tsx";
+
+/**
+ * Set when AliasMode Cloud has the in-app proxy store. Offers then open the
+ * store instead of the outside NobleProxy page; without it they stay links.
+ */
+export const ProxyStoreContext = createContext<((quantity: number) => void) | null>(null);
 
 const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";
 
@@ -37,11 +44,24 @@ export function ProxyProviderOffer({
   missing?: number;
 }) {
   const { t, language } = useTranslation();
+  const openStore = useContext(ProxyStoreContext);
   const title = missing === 1
     ? t("1 profile has no proxy")
     : missing > 1
       ? t("{count} profiles have no proxy", { count: missing })
       : replacement ? t("Buy Replacement Proxy") : t("Buy Static Residential Proxy");
+  if (openStore) {
+    return (
+      <button type="button" className="proxy-referral" onClick={() => openStore(missing)}>
+        <span className="proxy-referral-icon"><CartIcon /></span>
+        <span className="proxy-referral-text">
+          <strong>{title}</strong>
+          <small>{t("Buy static residential proxies in the app and give each profile its own IP.")}</small>
+        </span>
+        <span className="proxy-referral-go" aria-hidden="true">→</span>
+      </button>
+    );
+  }
   return (
     <a
       className="proxy-referral"

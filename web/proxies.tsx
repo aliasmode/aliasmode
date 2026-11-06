@@ -12,7 +12,7 @@ import type {
   ProxyScope,
 } from "../proxy-tools-types.ts";
 
-class ProxyToolsError extends Error {}
+export class ProxyToolsError extends Error {}
 
 const PAGE_SIZE = 50;
 const CHECK_STATUSES = ["working", "failed", "unstable", "unavailable", "missing", "invalid", "unsupported"] as const;
@@ -76,7 +76,7 @@ export function retryProxyProfileIds(rows: ProxyReplacementView[]): string[] {
     .flatMap((row) => row.profileId ? [row.profileId] : []))];
 }
 
-function proxyRequest(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+export function proxyRequest(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
   return fetch(`/ui/api/proxies/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal,
   });
