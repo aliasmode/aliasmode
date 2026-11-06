@@ -39,6 +39,7 @@ function harness(options: {
     : null;
   let profileExists = true;
   let temporary = options.temporary ?? false;
+  let cacheClearing = false;
   const store = {
     getLaunch: (id: string) => id === "profile1" ? launch : null,
     listAgentTemporary: () => temporary ? ["profile1"] : [],
@@ -75,9 +76,12 @@ function harness(options: {
       events.push(`stop:${id}`);
       if (options.stopResult === false) return false;
       launch = null;
+      cacheClearing = true;
       return true;
     },
-    profileDeletionBlocked: () => false,
+    // The post-stop cache delete blocks deletion until it ends.
+    cacheCleanupSettled: async (id: string) => { events.push(`cache-settled:${id}`); cacheClearing = false; },
+    profileDeletionBlocked: () => cacheClearing,
     removeUserDataDir: (id: string) => events.push(`remove-data:${id}`),
   };
   const admission = {
@@ -266,6 +270,7 @@ test("temporary profiles delete only after confirmed browser close", async () =>
   expect(response).toMatchObject({ ok: true, result: { closed: true, deleted: true } });
   expect(h.events).toEqual([
     "stop:profile1",
+    "cache-settled:profile1",
     "remove-data:profile1",
     "delete:profile1",
   ]);

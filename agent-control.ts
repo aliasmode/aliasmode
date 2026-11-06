@@ -594,6 +594,8 @@ export class AgentControlSession {
       this.deps.store.clearAgentTemporary(profileId);
       return false;
     }
+    // The cache delete after a close runs on after stop() returns; the profile is closed, so wait for it.
+    await this.deps.launcher.cacheCleanupSettled(profileId);
     if (this.deps.launcher.profileDeletionBlocked(profileId)) {
       throw agentError("profile_open", "close the profile before deleting it");
     }

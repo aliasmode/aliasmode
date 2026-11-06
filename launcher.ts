@@ -3573,6 +3573,11 @@ export class Launcher {
     void this.lookupExitLocationFn?.(proxy).catch(() => null);
   }
 
+  /** Resolves when the post-stop cache delete that runs on after stop() has ended. */
+  async cacheCleanupSettled(profileId: string): Promise<void> {
+    await this.cacheClears.get(profileId);
+  }
+
   /** Block destructive profile deletion while any owned lifecycle (or post-stop cache delete) can still use its data directory. */
   profileDeletionBlocked(profileId: string): boolean {
     return this.startsInFlight.has(profileId)
