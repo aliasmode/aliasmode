@@ -381,6 +381,11 @@ jobs:
           else
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof"
           fi
+          # A Cloud V3 payload on Apple Silicon must download and open AliasMode's own Mac Chromium 155 build.
+          if [[ "${{ matrix.platform }}" == "darwin" && "${{ matrix.architecture }}" == "arm64" ]]; then
+            bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --chromium-runtime aliasmode --headless --state-root "$proof/cloud-beta-state"
+            test -x "$proof/cloud-beta-state/runtimes/chromium-155.0.8059.85-aliasmode.5/Chromium.app/Contents/MacOS/Chromium"
+          fi
           bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof"
           printf 'ALIASMODE_SOURCE_RUNTIME_ROOT=%s\n' "$proof" >> "$GITHUB_ENV"
       # The previous runtime has no Intel package.

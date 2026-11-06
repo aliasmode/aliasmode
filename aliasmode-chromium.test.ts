@@ -215,13 +215,21 @@ test("Linux x64 installs AliasMode's own 155 build from its zstd tar archive", a
   expect(readdirSync(root)).toEqual(["chromium-155.0.8059.85-aliasmode.5"]);
 });
 
-test("Windows and Linux pin AliasMode's own 155.0.8059.85 build while macOS keeps upstream's 155.0.8059.31", () => {
+test("Windows, Linux and Apple Silicon macOS pin AliasMode's own 155.0.8059.85 build", () => {
   expect(aliasmodeChromiumExecutable("/runtimes", "win32")).toBe(join("/runtimes", "chromium-155.0.8059.85-aliasmode.5", "chrome.exe"));
   expect(aliasmodeChromiumExecutable("/runtimes", "darwin"))
-    .toBe(join("/runtimes", "chromium-155.0.8059.31", "Chromium.app/Contents/MacOS/Chromium"));
+    .toBe(join("/runtimes", "chromium-155.0.8059.85-aliasmode.5", "Chromium.app/Contents/MacOS/Chromium"));
   expect(aliasmodeChromiumExecutable("/runtimes", "linux")).toBe(join("/runtimes", "chromium-155.0.8059.85-aliasmode.5", "chrome"));
-  expect(aliasmodeChromiumArchive("darwin").url)
-    .toBe("https://github.com/heretic-tech/apostate/releases/download/v0.5.1/apostate-155.0.8059.31-macos-arm64.zip");
+  const mac = aliasmodeChromiumArchive("darwin");
+  expect(mac.url)
+    .toBe("https://github.com/aliasmode/aliasmode-chromium/releases/download/v155.0.8059.85-aliasmode.5/aliasmode-chromium-155.0.8059.85-macos-arm64.zip");
+  expect([mac.archiveSha256, mac.executableSha256]).toEqual([
+    "5723d95c1d13e5efa6eba581ff799472cb9f4042a6a46961f43ba7eac7f78084",
+    "cb03f4622ea0dbbcb4fc0a5b8a2a3d63ed2e59f427230d4dcb6d494fdabf1744",
+  ]);
+  // Intel Macs have no Chromium 155 build and keep CloakBrowser.
+  expect(supportsChromium155Host("darwin", "arm64")).toBe(true);
+  expect(supportsChromium155Host("darwin", "x64")).toBe(false);
 });
 
 test("rejects an archive or executable that does not match its pin", async () => {

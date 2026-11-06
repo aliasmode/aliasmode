@@ -2550,8 +2550,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
   }
 
   /**
-   * A browser that outlives its last window (macOS keeps it running; on Windows AliasMode Chromium
-   * and on Windows and Linux AliasMode Firefox are told to) is invisible to the user.
+   * A browser that outlives its last window (macOS keeps it running; AliasMode Chromium and, on
+   * Windows and Linux, AliasMode Firefox are told to) is invisible to the user.
    * Save it and stop it as the app's Close does. A script that closes every page and opens a
    * new one at once keeps its browser: the page comes back before the checks in a row end.
    */

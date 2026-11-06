@@ -13,7 +13,7 @@ import {
 } from "./browser-install.ts";
 import { trackRuntimeDownload } from "./runtime-download.ts";
 
-// AliasMode's own Windows and Linux builds of the patch series. The Windows package includes
+// AliasMode's own Windows, Linux and macOS arm64 builds of the patch series. The Windows package includes
 // Chromium's version manifest, which upstream's Windows archive omits. Each build gets its
 // own directory, so a browser still running from an earlier build keeps its files.
 // A new build changes the version, the release tag, and each target's two SHA-256 values and archive size.
@@ -38,21 +38,20 @@ const WINDOWS_BUILD = {
   // --aliasmode-keep-alive keeps the browser running after its last window closes.
   keepAlive: true,
 };
-// Upstream's Apostate v0.5.1 (macOS only) keeps its own Chromium version.
-const APOSTATE_VERSION = "155.0.8059.31";
-const APOSTATE_RELEASE = "https://github.com/heretic-tech/apostate/releases/download/v0.5.1";
+// The Mac build is ad-hoc signed by the linker only (not notarized). The app downloads it with
+// curl, which sets no quarantine mark, so Gatekeeper does not check it.
 const MACOS_BUILD = {
-  root: `apostate-${APOSTATE_VERSION}-macos-arm64`,
-  url: `${APOSTATE_RELEASE}/apostate-${APOSTATE_VERSION}-macos-arm64.zip`,
-  dir: `chromium-${APOSTATE_VERSION}`,
-  archiveSha256: "58176ba9b3e9cfd74029165bdf716c636e618af17a48bd905fe6d5f1552d901a",
-  size: 158101227,
+  root: `aliasmode-chromium-${OWN_VERSION}-macos-arm64`,
+  url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-macos-arm64.zip`,
+  dir: `chromium-${OWN_VERSION}-${OWN_RELEASE}`,
+  archiveSha256: "5723d95c1d13e5efa6eba581ff799472cb9f4042a6a46961f43ba7eac7f78084",
+  size: 159506881,
   executable: "Chromium.app/Contents/MacOS/Chromium",
-  executableSha256: "2dfa8b148e6d06598981c4a1e1bc0d7c2c7860d74401ad0d934d21a10c7916d7",
+  executableSha256: "cb03f4622ea0dbbcb4fc0a5b8a2a3d63ed2e59f427230d4dcb6d494fdabf1744",
   hostScale: false,
-  windowLabel: false,
-  webRtcIp: false,
-  keepAlive: false,
+  windowLabel: true,
+  webRtcIp: true,
+  keepAlive: true,
 };
 const LINUX_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-linux-x64`,
@@ -67,7 +66,7 @@ const LINUX_BUILD = {
   webRtcIp: true,
   keepAlive: true,
 };
-// Apple Silicon macOS gets upstream's build; Windows and Linux get AliasMode's own builds.
+// Windows, Linux and Apple Silicon macOS get AliasMode's own builds.
 function chromiumBuild(platform: NodeJS.Platform): typeof WINDOWS_BUILD {
   return platform === "darwin" ? MACOS_BUILD : platform === "linux" ? LINUX_BUILD : WINDOWS_BUILD;
 }
@@ -77,11 +76,11 @@ export const ALIASMODE_CHROMIUM_ARCHIVE_SHA256 = BUILD.archiveSha256;
 export const ALIASMODE_CHROMIUM_EXECUTABLE_SHA256 = BUILD.executableSha256;
 /** The pinned Windows build can draw pages at the display's own scale; an earlier build must get scale 1. */
 export const ALIASMODE_CHROMIUM_HOST_SCALE = WINDOWS_BUILD.hostScale;
-/** The pinned Windows build takes --aliasmode-window-label. */
+/** The pinned builds take --aliasmode-window-label. */
 export const ALIASMODE_CHROMIUM_WINDOW_LABEL = WINDOWS_BUILD.windowLabel;
-/** The pinned Windows build shows --fingerprint-webrtc-ip behind an HTTP proxy, where WebRTC has no UDP. */
+/** The pinned builds show --fingerprint-webrtc-ip behind an HTTP proxy, where WebRTC has no UDP. */
 export const ALIASMODE_CHROMIUM_WEBRTC_IP = WINDOWS_BUILD.webRtcIp;
-/** The pinned Windows build takes --aliasmode-keep-alive. */
+/** The pinned builds take --aliasmode-keep-alive. */
 export const ALIASMODE_CHROMIUM_KEEP_ALIVE = WINDOWS_BUILD.keepAlive;
 
 /** One downloadable, hash-pinned browser runtime under the runtimes root. */

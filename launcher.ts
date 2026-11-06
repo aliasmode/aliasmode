@@ -1451,8 +1451,9 @@ export class Launcher {
     // Headful matches AdsPower (real windows) and avoids the headless signal.
     if (headless) args.push("--headless=new");
     if (restoreLastSession) args.push("--restore-last-session");
-    // On macOS the browser outlives its last window anyway. Elsewhere only AliasMode's own builds can.
-    if (keepAlive && this.hostPlatform !== "darwin" && profile.chromiumRuntime && ALIASMODE_CHROMIUM_KEEP_ALIVE) {
+    // Only AliasMode's own builds keep running after the last window closes with a usable browser
+    // context. On macOS the process stays without it, but reading cookies then fails.
+    if (keepAlive && profile.chromiumRuntime && ALIASMODE_CHROMIUM_KEEP_ALIVE) {
       args.push("--aliasmode-keep-alive");
     }
     // Relayed proxies use a loopback HTTP endpoint. Everything else uses the
@@ -1557,16 +1558,15 @@ export class Launcher {
   }
 
   /**
-   * AliasMode's own Chromium 155 builds (Windows, Linux) show --fingerprint-webrtc-ip behind the HTTP proxy
-   * they always get. Upstream's Mac build opens no WebRTC UDP socket there, so the switch shows nothing.
+   * AliasMode's own Chromium 155 builds show --fingerprint-webrtc-ip behind the HTTP proxy they always get.
    */
   private chromiumWebRtcIp(profile: Profile): boolean {
-    return this.hostPlatform !== "darwin" && !!profile.proxy && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WEBRTC_IP;
+    return !!profile.proxy && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WEBRTC_IP;
   }
 
-  /** AliasMode's own Chromium 155 builds (Windows, Linux) take the window label as a launch switch instead of a page script. */
+  /** AliasMode's own Chromium 155 builds take the window label as a launch switch instead of a page script. */
   private nativeWindowLabel(profile: Profile): boolean {
-    return this.hostPlatform !== "darwin" && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WINDOW_LABEL;
+    return !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WINDOW_LABEL;
   }
 
   private startWindowFit(profile: Profile, ws: string, sample: FingerprintSample | null): void {
@@ -2269,10 +2269,9 @@ export class Launcher {
       // Label the window so the operator can tell which account this browser is
       // among many open profiles (the cue AdsPower's panel gave). Registered
       // before navigation so the title script is in place when the platform page
-      // loads. Strictly best-effort — never fail or stall a launch on it. Chromium 155 on
-      // Windows got the label as a launch switch, so its pages get no title script. On Mac no
-      // Chromium build has such a switch, and a title script is visible to pages, so Chromium 155
-      // and CloakBrowser windows there go unlabeled.
+      // loads. Strictly best-effort — never fail or stall a launch on it. Chromium 155
+      // got the label as a launch switch, so its pages get no title script. On Mac CloakBrowser has
+      // no such switch, and a title script is visible to pages, so its windows there go unlabeled.
       const pageLabelHidden = this.hostPlatform === "darwin";
       if (!this.skipDefaultWindowLabel && !this.nativeWindowLabel(profile) && !pageLabelHidden) {
         try {
