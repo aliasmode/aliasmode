@@ -1888,8 +1888,9 @@ export class Launcher {
       try {
         this.assertStoredLaunchPersona(profile, existing, approvedBinarySha256);
       } catch {
-        // A browser that this process proved before its profile was edited (see certifiedActive)
-        // reopens with the edit. Any other mismatch is not trusted.
+        // A launch row with its start identity passes above, and Open returns that browser. One
+        // recorded before launch identities were saved, which this process proved before its
+        // profile was edited (see certifiedActive), reopens with the edit. Any other mismatch is not trusted.
         if (this.provenGenerations.get(profileId)?.generation !== `${existing.debugPort}:${existing.startedAt}`) {
           return await this.rejectUnsafeExistingLaunch(profileId, "launch-time persona verification", new BrowserLaunchError("preflight", "stored_identity"));
         }
