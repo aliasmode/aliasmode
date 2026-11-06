@@ -17,6 +17,7 @@ type CloudProfileEditorStore = Pick<ProfileStore, "getLaunch">;
 export interface CloudProfileEditView {
   id: string;
   engine?: "chromium" | "firefox";
+  chromiumRuntime?: "aliasmode";
   name: string;
   group: string;
   platform: string;
@@ -66,6 +67,7 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
   return {
     id: profile.id,
     ...(profile.engine === "firefox" ? { engine: "firefox" as const } : {}),
+    ...(profile.chromiumRuntime ? { chromiumRuntime: profile.chromiumRuntime } : {}),
     name: profile.name,
     group: profile.group,
     platform: profile.platform ?? "",

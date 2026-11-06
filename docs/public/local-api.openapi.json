@@ -1559,7 +1559,7 @@
               "aliasmode",
               "cloakbrowser"
             ],
-            "description": "AliasMode field for Chromium profiles; it implies `engine` `chromium`. `aliasmode` is Chromium 155, the default where this computer can run it. `cloakbrowser` creates a CloakBrowser (Chrome 146) profile. CloakBrowser profiles on one computer can be linked to each other."
+            "description": "AliasMode field for Chromium profiles; it implies `engine` `chromium`. `aliasmode` is AliasMode Chromium 155, the default where this computer can run it. `cloakbrowser` creates a CloakBrowser (Chrome 146) profile. CloakBrowser profiles on one computer can be linked to each other."
           }
         }
       },
