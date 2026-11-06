@@ -389,15 +389,17 @@ test("user/update returns a useful persistence failure", async () => {
 
 test("user/delete removes the profile row", async () => {
   const { store } = setup();
-  const stopped: string[] = [];
+  const events: string[] = [];
   const launcher = {
-    stop: async (id: string) => { stopped.push(id); return true; },
-    removeUserDataDir: () => true,
+    stop: async (id: string) => { events.push(`stop:${id}`); return true; },
+    // The folder is removed only after the post-stop cache delete has ended.
+    cacheCleanupSettled: async (id: string) => { events.push(`cache-settled:${id}`); },
+    removeUserDataDir: (id: string) => { events.push(`remove:${id}`); return true; },
   } as unknown as Launcher;
   const body = await (await handleUserApi(post("/api/v1/user/delete", { user_ids: ["k1d0cd11"] }), launcher, store))!.json();
   expect(body.code).toBe(0);
   expect(body.data.deleted).toBe(1);
-  expect(stopped).toEqual(["k1d0cd11"]);
+  expect(events).toEqual(["stop:k1d0cd11", "cache-settled:k1d0cd11", "remove:k1d0cd11"]);
   expect(store.getProfile("k1d0cd11")).toBeNull();
 });
 
@@ -424,6 +426,7 @@ test("user/delete drops the SQLite row even when the user-data path is refused",
   const launcher = {
     userDataDir: (id: string) => `/tmp/cloak-adspower-users-test/${id}`,
     stop: async () => true,
+    cacheCleanupSettled: async () => {},
     // Real Launcher.removeUserDataDir refuses out-of-root paths (returns false);
     // model that and assert the row is still cleaned up (path-safe SQL delete).
     removeUserDataDir: (id: string) => {

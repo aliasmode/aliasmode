@@ -48,6 +48,7 @@ import { buildNewProfile } from "./create.ts";
 import { aliasmodeChromiumExecutable } from "./aliasmode-chromium.ts";
 import { SessionRestoreError } from "./session.ts";
 import type { FingerprintSample } from "./diagnose.ts";
+import { handleUiRequest } from "./ui.ts";
 
 const linuxTest = process.platform === "win32" ? test.skip : test;
 
@@ -3389,6 +3390,49 @@ test("concurrent stop calls share one destructive teardown", async () => {
   // Deletion waits for the post-stop cache delete, which runs on after stop() returns.
   await (launcher as any).cacheClears.get("k1d0cd11");
   expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(false);
+  store.close();
+});
+
+test("app delete right after stop waits for the post-stop cache delete; a running profile stays undeletable", async () => {
+  const store = seeded();
+  const launcher = newLauncher(store, fleet(), []);
+  const post = (path: string, ids: string[]) => handleUiRequest(
+    new Request(`http://x/ui/api/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) }),
+    launcher, store,
+  ).then((r) => r!);
+  await launcher.start("k1d0cd11");
+
+  const running = await post("profiles/delete", ["k1d0cd11"]);
+  expect(running.status).toBe(409);
+  expect(await running.json()).toMatchObject({ deleted: 0, locked: ["k1d0cd11"] });
+  expect(store.getProfile("k1d0cd11")).not.toBeNull();
+
+  expect(await launcher.stop("k1d0cd11")).toBe(true);
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true); // the cache delete runs on
+  const closed = await post("profiles/delete", ["k1d0cd11"]);
+  expect(closed.status).toBe(200);
+  expect(await closed.json()).toMatchObject({ ok: true, deleted: 1, locked: [] });
+  expect(store.listTrashed().map((p) => p.id)).toEqual(["k1d0cd11"]);
+
+  // Empty Trash right after a close also waits instead of answering profile_open.
+  expect(store.restoreProfile("k1d0cd11")).toBe(true);
+  await launcher.start("k1d0cd11");
+  expect(await launcher.stop("k1d0cd11")).toBe(true);
+  expect(store.trashProfile("k1d0cd11")).toBe(true);
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true);
+  const purged = await post("trash/purge", ["k1d0cd11"]);
+  expect(await purged.json()).toMatchObject({ ok: true, results: [{ id: "k1d0cd11", status: "purged" }] });
+  store.close();
+});
+
+test("the wait for the post-stop cache delete is bounded and deletion stays blocked after it", async () => {
+  const store = seeded();
+  const launcher = newLauncher(store, fleet(), []);
+  (launcher as any).cacheClears.set("k1d0cd11", new Promise<void>(() => {}));
+  const startedAt = Date.now();
+  await launcher.cacheCleanupSettled("k1d0cd11", 20);
+  expect(Date.now() - startedAt).toBeLessThan(1000);
+  expect(launcher.profileDeletionBlocked("k1d0cd11")).toBe(true);
   store.close();
 });
 

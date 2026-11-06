@@ -3656,9 +3656,16 @@ export class Launcher {
     void this.lookupExitLocationFn?.(proxy).catch(() => null);
   }
 
-  /** Resolves when the post-stop cache delete that runs on after stop() has ended. */
-  async cacheCleanupSettled(profileId: string): Promise<void> {
-    await this.cacheClears.get(profileId);
+  /**
+   * Resolves when the post-stop cache delete that runs on after stop() has ended, or after
+   * timeoutMs. Delete paths call this first, then still apply profileDeletionBlocked.
+   */
+  async cacheCleanupSettled(profileId: string, timeoutMs = 30_000): Promise<void> {
+    const clearing = this.cacheClears.get(profileId);
+    if (!clearing) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([clearing, new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
+    clearTimeout(timer);
   }
 
   /** Block destructive profile deletion while any owned lifecycle (or post-stop cache delete) can still use its data directory. */

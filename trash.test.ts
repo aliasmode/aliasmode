@@ -28,6 +28,7 @@ function fixture(fileDatabase = false) {
   const data = join(dir, "p1"); mkdirSync(data); writeFileSync(join(data, "browser-data"), "retained");
   const blocked = new Set<string>();
   const launcher = {
+    cacheCleanupSettled: async () => {},
     profileDeletionBlocked: (id: string) => blocked.has(id),
     removeUserDataDir: (id: string) => { rmSync(join(dir, id), { recursive: true, force: true }); return true; },
   } as unknown as Launcher;

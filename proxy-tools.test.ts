@@ -13,7 +13,7 @@ function setup(ids = ["p1", "p2"]) {
   const store = new ProfileStore(":memory:"); stores.push(store);
   for (const id of ids) store.upsertProfile({ ...buildNewProfile({ name: id, group: "folder", proxy }, () => false), id });
   const blocked = new Set<string>();
-  const launcher = { profileDeletionBlocked: (id: string) => blocked.has(id) } as unknown as Launcher;
+  const launcher = { cacheCleanupSettled: async () => {}, profileDeletionBlocked: (id: string) => blocked.has(id) } as unknown as Launcher;
   const options: UiRuntimeOptions = { timezoneFetch: async () => new Response('{"status":"success","timezone":"Europe/London"}') };
   const request = (action: string, body: unknown, extra: UiRuntimeOptions = options, headers = { "Content-Type": "application/json" }) =>
     handleUiRequest(new Request(`http://localhost/ui/api/proxies/${action}`, { method: "POST", headers, body: JSON.stringify(body) }), launcher, store, null, extra).then((r) => r!);

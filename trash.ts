@@ -36,6 +36,7 @@ export async function handleTrashRequest(req: Request, store: ProfileStore, laun
       const profile = byId.get(id);
       if (!profile) return { id, status: "failed", code: "not_in_trash" };
       if (purge ? !profile.canPurge : !profile.canRestore) return { id, status: "failed", code: "permission_denied" };
+      await launcher.cacheCleanupSettled(id);
       if (launcher.profileDeletionBlocked(id)) return { id, status: "failed", code: "profile_open" };
       try {
         if (cloud) {

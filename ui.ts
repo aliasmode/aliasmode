@@ -1455,6 +1455,7 @@ export async function handleUiRequest(
               if (!current()) continue;
               const profile = summaries.get(id);
               if (!profile || profile.trashedAt !== null || profile.permission !== "edit" || !isSafeProfileId(id)) continue;
+              await launcher.cacheCleanupSettled(id);
               if (profile.activeOpens.length || launcher.profileDeletionBlocked(id)) { outcomes[index] = "locked"; continue; }
               try {
                 await cloud.trashProfile(id, { expectedVersion: profile.version });
@@ -1480,6 +1481,7 @@ export async function handleUiRequest(
       // Standalone deletion never closes a browser implicitly. Preflight the
       // full selection before mutation so a mixed open/closed batch is atomic.
       const existing = ids.filter((id) => store.getProfile(id));
+      await Promise.all(existing.map((id) => launcher.cacheCleanupSettled(id)));
       const locked = existing.filter((id) => launcher.profileDeletionBlocked(id));
       if (locked.length > 0) {
         return Response.json({

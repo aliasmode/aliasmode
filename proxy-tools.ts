@@ -50,6 +50,7 @@ export async function handleProxyToolsRequest(
       assertCurrent();
       if (cloud) {
         const result = await cloud.listProfileProxies(req.signal);
+        await Promise.all(result.profiles.map((p) => launcher.cacheCleanupSettled(p.id)));
         assertCurrent();
         return result.profiles.map((p) => ({
           id: p.id, name: p.name, group: p.group, version: p.version, permission: p.permission,
@@ -57,7 +58,9 @@ export async function handleProxyToolsRequest(
           running: p.activeOpens.length > 0 || launcher.profileDeletionBlocked(p.id),
         }));
       }
-      return store.listProfiles().map((p) => ({
+      const profiles = store.listProfiles();
+      await Promise.all(profiles.map((p) => launcher.cacheCleanupSettled(p.id)));
+      return profiles.map((p) => ({
         id: p.id, name: p.name, group: p.group, proxy: p.proxy, proxyError: p.proxyError,
         permission: "edit", running: launcher.profileDeletionBlocked(p.id),
       }));
@@ -153,6 +156,7 @@ export async function handleProxyToolsRequest(
                     if (!profile || proxyIdentityKey(profile.proxy) !== row.originalKey || profile.group !== row.view.group) {
                       Object.assign(row.view, { status: "skipped", code: "version_conflict" }); continue;
                     }
+                    await launcher.cacheCleanupSettled(id);
                     if (launcher.profileDeletionBlocked(id)) { Object.assign(row.view, { status: "skipped", code: "profile_open" }); continue; }
                     const changed = { ...profile, proxy: row.next!, timezone: "" };
                     await attachTimezones([changed], options.timezoneFetch).catch(() => {});
