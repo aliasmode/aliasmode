@@ -56,14 +56,15 @@ import {
   type PublishScriptInput,
   type PublishedScriptsQuery,
   type ListPublishedScriptsResponse,
-  type WalletResponse,
+  type GetWalletResponse,
   type CreateDepositRequest,
-  type CreateDepositResponse,
-  type DepositStatusResponse,
+  type DepositResponse,
   type ProxyCatalogResponse,
-  type ProxyPurchaseRequest,
+  type CreateProxyPurchaseRequest,
   type ProxyPurchaseResponse,
-  type ListProxyOrdersResponse,
+  type ListPurchasedProxiesResponse,
+  type SetAutoRenewResponse,
+  type NobleProxyHandoffResponse,
 } from "./contracts/cloud-v1.ts";
 
 export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -460,15 +461,15 @@ export class CloudClient {
     this.rosterInFlight = undefined;
   }
 
-  getWallet(): Promise<WalletResponse> {
+  getWallet(): Promise<GetWalletResponse> {
     return this.call("/wallet", { cache: "no-store" });
   }
 
-  createDeposit(request: CreateDepositRequest): Promise<CreateDepositResponse> {
+  createDeposit(request: CreateDepositRequest): Promise<DepositResponse> {
     return this.call("/wallet/deposits", { method: "POST", body: JSON.stringify(request) });
   }
 
-  getDeposit(depositId: string): Promise<DepositStatusResponse> {
+  getDeposit(depositId: string): Promise<DepositResponse> {
     return this.call(`/wallet/deposits/${encodeURIComponent(depositId)}`, { cache: "no-store" });
   }
 
@@ -476,16 +477,21 @@ export class CloudClient {
     return this.call("/proxies/catalog", { cache: "no-store" });
   }
 
-  purchaseProxies(request: ProxyPurchaseRequest): Promise<ProxyPurchaseResponse> {
+  purchaseProxies(request: CreateProxyPurchaseRequest): Promise<ProxyPurchaseResponse> {
     return this.call("/proxies/purchases", { method: "POST", body: JSON.stringify(request) });
   }
 
-  listProxyOrders(): Promise<ListProxyOrdersResponse> {
+  listPurchasedProxies(): Promise<ListPurchasedProxiesResponse> {
     return this.call("/proxies", { cache: "no-store" });
   }
 
-  setProxyAutoRenew(orderId: string, enabled: boolean): Promise<{ orderId: string; autoRenew: boolean }> {
+  setProxyAutoRenew(orderId: string, enabled: boolean): Promise<SetAutoRenewResponse> {
     return this.call(`/proxies/orders/${encodeURIComponent(orderId)}/auto-renew`, { method: "POST", body: JSON.stringify({ enabled }) });
+  }
+
+  /** A short-lived link that signs the workspace owner in to NobleProxy. Older Clouds answer 404. */
+  createNobleProxyHandoff(): Promise<NobleProxyHandoffResponse> {
+    return this.call("/nobleproxy/handoff", { method: "POST" });
   }
 
   listProfileProxies(signal?: AbortSignal): Promise<ListProfileProxiesResponse> {

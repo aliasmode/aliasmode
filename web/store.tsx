@@ -3,26 +3,29 @@ import { useTranslation } from "./i18n.tsx";
 import { ProxyToolsError, proxyRequest, readProxyProgress, requestProxyPreview } from "./proxies.tsx";
 import { qrMatrix, qrSvgPath } from "./qr.ts";
 import type {
-  CreateDepositResponse,
-  CryptoPaymentMethod,
-  DepositStatus,
-  DepositStatusResponse,
-  ProxyCatalogProduct,
+  CloudProxyOrder,
+  CloudProxyProduct,
+  CloudProxyPurchase,
+  CloudPurchasedProxy,
+  CloudWalletDeposit,
+  CloudWalletEntry,
+  DepositResponse,
+  GetWalletResponse,
+  ListPurchasedProxiesResponse,
+  NobleProxyHandoffResponse,
   ProxyCatalogResponse,
-  ProxyOrder,
   ProxyPurchaseResponse,
-  PurchasedProxy,
-  WalletEntry,
-  WalletResponse,
 } from "../contracts/cloud-v1.ts";
 
 type Translate = (key: string, values?: Record<string, string | number>) => string;
 
+/** The Cloud bodies of GET /v1/wallet, GET /v1/proxies and GET /v1/proxies/catalog, unchanged. */
 export interface StoreSnapshot {
   available: true;
-  wallet: WalletResponse;
-  catalog: ProxyCatalogResponse;
-  orders: ProxyOrder[];
+  wallet: GetWalletResponse;
+  proxies: ListPurchasedProxiesResponse;
+  /** null while NobleProxy's catalog is down; the wallet and the owned proxies still show. */
+  catalog: ProxyCatalogResponse | null;
 }
 /** null while loading. `available: false` keeps the outside NobleProxy offer. */
 export type StoreState = null | { available: false } | StoreSnapshot;
@@ -49,7 +52,15 @@ export function isStripeCheckoutUrl(url: unknown): url is string {
   return typeof url === "string" && /^https:\/\/checkout\.stripe\.com\/[A-Za-z0-9/_\-.#%=+~]{1,2000}$/.test(url);
 }
 
-async function storeRequest<T>(body?: Record<string, unknown>): Promise<T> {
+/** The NobleProxy sign-in link from Cloud: exactly this form, with no other parameter or fragment. */
+export function isNobleProxyHandoffUrl(url: unknown): url is string {
+  return typeof url === "string" && /^https:\/\/nobleproxy\.com\/continue\/aliasmode\?h=[A-Za-z0-9_-]{20,}$/.test(url);
+}
+
+/** Which request failed, so a NobleProxy refusal gets the text for that request. */
+type StoreContext = "deposit" | "purchase" | "handoff" | "other";
+
+async function storeRequest<T>(body?: Record<string, unknown>, context: StoreContext = "other"): Promise<T> {
   let response: Response;
   try {
     response = await fetch("/ui/api/cloud-store", body
@@ -65,9 +76,16 @@ async function storeRequest<T>(body?: Record<string, unknown>): Promise<T> {
   switch (data?.code) {
     case "insufficient_balance": throw new StoreError("Your balance is too low for this purchase.", "insufficient");
     case "owner_only": throw new StoreError("Only the workspace owner can do this.", "forbidden");
+    case "email_not_verified": throw new StoreError("Verify your email in AliasMode first.", "forbidden");
     case "deposit_amount_out_of_range": throw new StoreError("Top-ups must be between $5 and $10,000.", "other");
-    case "partner_unavailable": throw new StoreError("Proxies are not available right now. You were not charged. Try again in a few minutes.", "other");
-    case "partner_rejected": throw new StoreError("This order could not be filled. You were not charged. Try another country or a smaller quantity.", "other");
+    case "partner_unavailable":
+      if (context === "deposit") throw new StoreError("Top-ups are not available right now. Try again in a few minutes.", "other");
+      if (context === "handoff") throw new StoreError("NobleProxy is not available right now. Try again in a few minutes.", "other");
+      throw new StoreError("Proxies are not available right now. You were not charged. Try again in a few minutes.", "other");
+    case "partner_rejected":
+      if (context === "deposit") throw new StoreError("NobleProxy did not accept this top-up. Try another amount or payment method.", "other");
+      if (context === "handoff") throw new StoreError("NobleProxy could not open your account. Try again later or contact support.", "other");
+      throw new StoreError("This order could not be filled. You were not charged. Try another country or a smaller quantity.", "other");
     case "record_not_found": throw new StoreError("This item was not found. Refresh the page and try again.", "other");
   }
   if (response.status === 402) throw new StoreError("Your balance is too low for this purchase.", "insufficient");
@@ -79,9 +97,9 @@ async function storeRequest<T>(body?: Record<string, unknown>): Promise<T> {
 
 export async function loadStoreState(): Promise<StoreState> {
   try {
-    const data = await storeRequest<{ available: boolean; wallet?: WalletResponse; catalog?: ProxyCatalogResponse; orders?: ProxyOrder[] }>();
-    if (!data.available || !data.wallet || !data.catalog) return { available: false };
-    return { available: true, wallet: data.wallet, catalog: data.catalog, orders: data.orders ?? [] };
+    const data = await storeRequest<{ available: boolean; wallet?: GetWalletResponse; proxies?: ListPurchasedProxiesResponse; catalog?: ProxyCatalogResponse | null }>();
+    if (!data.available || !data.wallet || !data.proxies) return { available: false };
+    return { available: true, wallet: data.wallet, proxies: data.proxies, catalog: data.catalog ?? null };
   } catch {
     return { available: false };
   }
@@ -102,10 +120,18 @@ export function useCloudStore(enabled: boolean, key: string) {
     setState(null);
     if (enabled) void reload();
   }, [enabled, key, reload]);
+  // While the shop is down, try again each time the window comes back to the front.
+  const catalogMissing = state?.available === true && !state.catalog;
+  useEffect(() => {
+    if (!enabled || !catalogMissing) return;
+    const retry = () => void reload();
+    window.addEventListener("focus", retry);
+    return () => window.removeEventListener("focus", retry);
+  }, [enabled, catalogMissing, reload]);
   return { state: enabled ? state : null, reload };
 }
 
-export function quoteProxyPrice(product: ProxyCatalogProduct | undefined, quantity: number): { unitPriceCents: number; totalCents: number } | null {
+export function quoteProxyPrice(product: CloudProxyProduct | undefined, quantity: number): { unitPriceCents: number; totalCents: number } | null {
   if (!product || !Number.isSafeInteger(quantity) || quantity < 1) return null;
   const tier = [...product.tiers].sort((a, b) => b.minQty - a.minQty).find((candidate) => quantity >= candidate.minQty);
   return tier ? { unitPriceCents: tier.unitPriceCents, totalCents: tier.unitPriceCents * quantity } : null;
@@ -126,10 +152,7 @@ export class PurchaseAttempts {
 }
 
 export type PurchaseOutcome =
-  | { kind: "active"; purchase: ProxyPurchaseResponse }
-  | { kind: "pending"; purchase: ProxyPurchaseResponse }
-  | { kind: "review"; purchase: ProxyPurchaseResponse }
-  | { kind: "failed"; purchase: ProxyPurchaseResponse }
+  | { kind: "active" | "pending" | "review" | "failed"; result: ProxyPurchaseResponse }
   | { kind: "error"; error: StoreError };
 
 export async function buyProxies(
@@ -138,10 +161,11 @@ export async function buyProxies(
 ): Promise<PurchaseOutcome> {
   const idempotencyKey = attempts.keyFor(`${order.type}|${order.country}|${order.quantity}`);
   try {
-    const { purchase } = await storeRequest<{ purchase: ProxyPurchaseResponse }>({ action: "purchase", ...order, idempotencyKey });
+    const result = await storeRequest<ProxyPurchaseResponse>({ action: "purchase", ...order, idempotencyKey }, "purchase");
     attempts.settle();
-    const kind = purchase.status === "active" ? "active" : purchase.status === "failed" ? "failed" : purchase.status === "needs_review" ? "review" : "pending";
-    return { kind, purchase };
+    const { status } = result.purchase;
+    const kind = status === "active" ? "active" : status === "failed" ? "failed" : status === "needs_review" ? "review" : "pending";
+    return { kind, result };
   } catch (error) {
     const failure = error instanceof StoreError ? error : new StoreError("The request failed. Try again.", "other");
     if (failure.kind !== "network") attempts.settle();
@@ -149,12 +173,19 @@ export async function buyProxies(
   }
 }
 
-export async function createDeposit(amountCents: number, method: "card" | "crypto"): Promise<CreateDepositResponse> {
-  return (await storeRequest<{ deposit: CreateDepositResponse }>({ action: "deposit", amountCents, method })).deposit;
+export async function createDeposit(amountCents: number, method: "card" | "crypto"): Promise<CloudWalletDeposit> {
+  return (await storeRequest<DepositResponse>({ action: "deposit", amountCents, method }, "deposit")).deposit;
 }
 
-export async function depositStatus(depositId: string): Promise<DepositStatusResponse> {
-  return (await storeRequest<{ deposit: DepositStatusResponse }>({ action: "deposit-status", depositId })).deposit;
+export async function depositStatus(depositId: string): Promise<CloudWalletDeposit> {
+  return (await storeRequest<DepositResponse>({ action: "deposit-status", depositId }, "deposit")).deposit;
+}
+
+const LATE_CREDIT_MS = 24 * 60 * 60 * 1000;
+
+/** An expired or failed crypto deposit is still credited if the exact payment arrives within 24 hours. */
+export function mayStillBeCredited(deposit: CloudWalletDeposit, now = Date.now()): boolean {
+  return deposit.method === "crypto" && (deposit.status === "expired" || deposit.status === "failed") && now < deposit.createdAt + LATE_CREDIT_MS;
 }
 
 const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
@@ -162,21 +193,29 @@ const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) =
   signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
 });
 
-/** Polls a deposit until it is paid, expired or failed. Short network faults do not stop it. */
+/**
+ * Polls a deposit until it settles. A crypto deposit that expired or failed is
+ * still checked lightly (every 30 seconds) while it can be credited late.
+ * Short network faults do not stop it.
+ */
 export async function watchDeposit(
   depositId: string,
-  onUpdate: (deposit: DepositStatusResponse) => void,
+  onUpdate: (deposit: CloudWalletDeposit) => void,
   signal: AbortSignal,
   intervalMs = 4000,
-): Promise<DepositStatusResponse | null> {
+  lateIntervalMs = 30_000,
+): Promise<CloudWalletDeposit | null> {
+  let wait = intervalMs;
   while (!signal.aborted) {
-    await sleep(intervalMs, signal);
+    await sleep(wait, signal);
     if (signal.aborted) break;
     try {
       const deposit = await depositStatus(depositId);
       if (signal.aborted) break;
       onUpdate(deposit);
-      if (deposit.status !== "pending") return deposit;
+      if (deposit.status === "pending") wait = intervalMs;
+      else if (mayStillBeCredited(deposit)) wait = lateIntervalMs;
+      else return deposit;
     } catch {}
   }
   return null;
@@ -191,7 +230,7 @@ function csvField(value: string): string {
  * preview-and-apply path as Proxies → Replace proxies. Open profiles are skipped.
  */
 export async function assignProxiesToProfiles(
-  proxies: PurchasedProxy[], profileIds: string[], t: Translate, signal?: AbortSignal,
+  proxies: CloudPurchasedProxy[], profileIds: string[], t: Translate, signal?: AbortSignal,
 ): Promise<{ updated: number; unchanged: number; skipped: number }> {
   const ids = profileIds.slice(0, proxies.length);
   if (!ids.length) return { updated: 0, unchanged: 0, skipped: 0 };
@@ -210,7 +249,7 @@ export async function assignProxiesToProfiles(
   return { updated, unchanged, skipped: ids.length - updated - unchanged };
 }
 
-export function proxyLine(proxy: PurchasedProxy): string {
+export function proxyLine(proxy: CloudPurchasedProxy): string {
   const auth = proxy.username ? `:${proxy.username}:${proxy.password}` : "";
   return proxy.protocol === "http" ? `${proxy.host}:${proxy.port}${auth}` : `${proxy.protocol}://${proxy.host}:${proxy.port}${auth}`;
 }
@@ -225,10 +264,9 @@ function useNow(active: boolean): number {
   return now;
 }
 
-function countdown(expiresAt: string | undefined, now: number): string | null {
-  const end = expiresAt ? Date.parse(expiresAt) : NaN;
-  if (!Number.isFinite(end)) return null;
-  const seconds = Math.max(0, Math.floor((end - now) / 1000));
+function countdown(expiresAt: number | null | undefined, now: number): string | null {
+  if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return null;
+  const seconds = Math.max(0, Math.floor((expiresAt - now) / 1000));
   const hours = Math.floor(seconds / 3600), minutes = Math.floor((seconds % 3600) / 60), rest = seconds % 60;
   const pad = (value: number) => String(value).padStart(2, "0");
   return hours ? `${hours}:${pad(minutes)}:${pad(rest)}` : `${pad(minutes)}:${pad(rest)}`;
@@ -254,23 +292,21 @@ export function QrCode({ value, label }: { value: string; label: string }) {
   </svg>;
 }
 
-export interface ActiveDeposit {
-  depositId: string;
-  amountCents: number;
-  method: "card" | "crypto";
-  status: DepositStatus;
-  expiresAt?: string;
-  checkoutUrl?: string;
-  methods?: CryptoPaymentMethod[];
-  /** Reopened from the pending list, for example after an app restart. */
-  resumed?: boolean;
-}
+/** The deposit as Cloud returns it, plus whether it was reopened from the pending list (for example after a restart). */
+export type ActiveDeposit = CloudWalletDeposit & { resumed?: boolean };
 
 function DepositStatusLine({ deposit }: { deposit: ActiveDeposit }) {
   const { t, language } = useTranslation();
+  const late = mayStillBeCredited(deposit);
   if (deposit.status === "paid") return <div className="tools-notice store-paid" role="status">{t("Payment received. {amount} was added to your balance.", { amount: formatUsd(deposit.amountCents, language) })}</div>;
-  if (deposit.status === "expired") return <div className="tools-alert" role="alert">{t("This payment request expired. Start a new top-up if you still want to add funds.")}</div>;
-  if (deposit.status === "failed") return <div className="tools-alert" role="alert">{t("The payment failed. You were not charged. Try again or choose another method.")}</div>;
+  if (deposit.status === "expired") return late
+    ? <div className="tools-notice" role="status">{t("Expired — if you already sent the exact amount, it will still be credited.")}</div>
+    : <div className="tools-alert" role="alert">{t("This payment request expired. Start a new top-up if you still want to add funds.")}</div>;
+  if (deposit.status === "failed") return late
+    ? <div className="tools-notice" role="status">{t("The payment failed. If you already sent the exact amount, it will still be credited.")}</div>
+    : <div className="tools-alert" role="alert">{t("The payment failed. You were not charged. Try again or choose another method.")}</div>;
+  if (deposit.status === "disputed") return <div className="tools-alert" role="alert">{t("This payment is disputed. Support is reviewing it; your balance stays as it is until then.")}</div>;
+  if (deposit.status === "refunded") return <div className="tools-alert" role="alert">{t("This payment was refunded. Support is reviewing it; your balance stays as it is until then.")}</div>;
   return <p className="store-waiting" role="status"><span className="store-dot" aria-hidden="true" />{t("Waiting for your payment… This page updates by itself.")}</p>;
 }
 
@@ -278,10 +314,10 @@ export function CardPaymentView({ deposit }: { deposit: ActiveDeposit }) {
   const { t, language } = useTranslation();
   return <div className="store-payment">
     <h4>{t("Pay {amount} by card", { amount: formatUsd(deposit.amountCents, language) })}</h4>
-    {deposit.status === "pending" && (isStripeCheckoutUrl(deposit.checkoutUrl)
+    {deposit.status === "pending" && (isStripeCheckoutUrl(deposit.card?.checkoutUrl)
       ? <>
         <p className="tools-hint">{t("Checkout opens in your browser on Stripe's secure page. Come back here when you are done.")}</p>
-        <a className="btn primary" href={deposit.checkoutUrl} target="_blank" rel="noreferrer">{deposit.resumed ? t("Reopen checkout ↗") : t("Open secure checkout ↗")}</a>
+        <a className="btn primary" href={deposit.card.checkoutUrl} target="_blank" rel="noreferrer">{deposit.resumed ? t("Reopen checkout ↗") : t("Open secure checkout ↗")}</a>
       </>
       : <p className="tools-hint">{t("Finish the card payment in your browser. This page updates when it arrives.")}</p>)}
     <DepositStatusLine deposit={deposit} />
@@ -290,7 +326,7 @@ export function CardPaymentView({ deposit }: { deposit: ActiveDeposit }) {
 
 export function CryptoPaymentView({ deposit, now = Date.now() }: { deposit: ActiveDeposit; now?: number }) {
   const { t } = useTranslation();
-  const methods = deposit.methods ?? [];
+  const methods = deposit.crypto?.methods ?? [];
   const [methodId, setMethodId] = useState(methods[0]?.id ?? "");
   const method = methods.find((candidate) => candidate.id === methodId) ?? methods[0];
   const left = countdown(deposit.expiresAt, now);
@@ -321,12 +357,12 @@ export function CryptoPaymentView({ deposit, now = Date.now() }: { deposit: Acti
   </div>;
 }
 
-const ENTRY_LABELS: Record<WalletEntry["kind"], string> = {
+const ENTRY_LABELS: Record<CloudWalletEntry["kind"], string> = {
   deposit: "Top-up", purchase: "Proxy purchase", renewal: "Proxy renewal", refund: "Refund", adjustment: "Adjustment",
 };
 
 function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: {
-  wallet: WalletResponse;
+  wallet: GetWalletResponse;
   owner: boolean;
   amount: string;
   setAmount: (value: string) => void;
@@ -342,25 +378,23 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
   const amountCents = Math.round(Number(amount) * 100);
   const validAmount = Number.isSafeInteger(amountCents) && amountCents >= MIN_DEPOSIT_CENTS && amountCents <= MAX_DEPOSIT_CENTS;
 
+  const watching = !!deposit && (deposit.status === "pending" || mayStillBeCredited(deposit));
   useEffect(() => {
-    if (!deposit || deposit.status !== "pending") return;
+    if (!deposit || !watching) return;
     const controller = new AbortController();
-    void watchDeposit(deposit.depositId, (next) => {
-      setDeposit((current) => current && current.depositId === next.depositId ? { ...current, status: next.status, ...(next.crypto?.methods ? { methods: next.crypto.methods } : {}) } : current);
+    void watchDeposit(deposit.id, (next) => {
+      setDeposit((current) => current && current.id === next.id ? { ...next, resumed: current.resumed } : current);
       if (next.status === "paid") void onReload();
     }, controller.signal);
     return () => controller.abort();
-  }, [deposit?.depositId, deposit?.status === "pending"]);
+  }, [deposit?.id, watching]);
 
   const start = async () => {
     if (!validAmount || busy) return;
     setBusy(true); setError(null);
     try {
       const created = await createDeposit(amountCents, method);
-      setDeposit({
-        depositId: created.depositId, amountCents: created.amountCents, method: created.method, status: created.status,
-        expiresAt: created.expiresAt, checkoutUrl: created.card?.checkoutUrl, methods: created.crypto?.methods,
-      });
+      setDeposit(created);
       if (created.method === "card" && !isStripeCheckoutUrl(created.card?.checkoutUrl)) setError(t("The checkout link is not valid. Try again."));
     } catch (failure) {
       setError(t(failure instanceof StoreError ? failure.message : "The request failed. Try again."));
@@ -370,8 +404,7 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
   const resume = async (depositId: string) => {
     setError(null);
     try {
-      const found = await depositStatus(depositId);
-      setDeposit({ depositId: found.depositId, amountCents: found.amountCents, method: found.method, status: found.status, expiresAt: found.expiresAt, checkoutUrl: found.card?.checkoutUrl, methods: found.crypto?.methods, resumed: true });
+      setDeposit({ ...await depositStatus(depositId), resumed: true });
     } catch (failure) {
       setError(t(failure instanceof StoreError ? failure.message : "The request failed. Try again."));
     }
@@ -418,7 +451,7 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
 }
 
 function ProxyAssign({ proxies, selectedProfileIds, onProfilesChanged }: {
-  proxies: PurchasedProxy[];
+  proxies: CloudPurchasedProxy[];
   selectedProfileIds: string[];
   onProfilesChanged: () => Promise<void>;
 }) {
@@ -450,14 +483,14 @@ function ProxyAssign({ proxies, selectedProfileIds, onProfilesChanged }: {
   </div>;
 }
 
-function ProxyList({ proxies, countryLabel }: { proxies: PurchasedProxy[]; countryLabel: (code: string) => string }) {
+function ProxyList({ proxies, countryLabel }: { proxies: CloudPurchasedProxy[]; countryLabel: (code: string) => string }) {
   return <ul className="store-proxies">{proxies.map((proxy) => <li key={proxy.id} className="tools-mono">{proxyLine(proxy)}<small>{countryLabel(proxy.country)}</small></li>)}</ul>;
 }
 
 export function PurchaseResult({ outcome, orders = [], countryLabel = (code) => code, selectedProfileIds, onProfilesChanged, onTopUp }: {
   outcome: PurchaseOutcome;
   /** Latest owned orders. Their credentials win: a renewal can change them. */
-  orders?: ProxyOrder[];
+  orders?: CloudProxyOrder[];
   countryLabel?: (code: string) => string;
   selectedProfileIds: string[];
   onProfilesChanged: () => Promise<void>;
@@ -470,11 +503,9 @@ export function PurchaseResult({ outcome, orders = [], countryLabel = (code) => 
       {outcome.error.kind === "insufficient" && <> <button type="button" className="btn xs" onClick={onTopUp}>{t("Top up")}</button></>}
     </div>;
   }
-  const { purchase } = outcome;
+  const { purchase, order } = outcome.result;
   if (outcome.kind === "failed") {
-    return <div className="tools-alert" role="alert">{purchase.chargedCents > 0
-      ? t("We could not deliver this order. {amount} was refunded to your balance.", { amount: formatUsd(purchase.chargedCents, language) })
-      : t("We could not deliver this order. You were not charged.")}</div>;
+    return <div className="tools-alert" role="alert">{t("We could not deliver this order. {amount} was refunded to your balance.", { amount: formatUsd(purchase.totalCents, language) })}</div>;
   }
   if (outcome.kind === "review") {
     return <div className="tools-notice" role="status">{t("We're checking this order. You'll see the proxies or a refund soon.")}</div>;
@@ -482,7 +513,7 @@ export function PurchaseResult({ outcome, orders = [], countryLabel = (code) => 
   if (outcome.kind === "pending") {
     return <div className="tools-notice" role="status">{t("Your order is being prepared. The proxies appear under Your proxies in a few minutes.")}</div>;
   }
-  const proxies = orders.find((order) => purchase.orderId && order.orderId === purchase.orderId)?.proxies ?? purchase.proxies ?? [];
+  const proxies = orders.find((item) => purchase.orderId && item.id === purchase.orderId)?.proxies ?? order?.proxies ?? [];
   return <div className="store-result">
     <div className="tools-notice" role="status">{t("Your {count} proxies are ready.", { count: proxies.length })}</div>
     <ProxyList proxies={proxies} countryLabel={countryLabel} />
@@ -492,7 +523,7 @@ export function PurchaseResult({ outcome, orders = [], countryLabel = (code) => 
 
 export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity = 1, selectedProfileIds, onTopUp, onReload, onProfilesChanged }: {
   catalog: ProxyCatalogResponse;
-  orders?: ProxyOrder[];
+  orders?: CloudProxyOrder[];
   balanceCents: number;
   initialQuantity?: number;
   selectedProfileIds: string[];
@@ -548,7 +579,7 @@ export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity 
           : <span>{t("Order at least {count} proxies.", { count: minimum })}</span>}</div>
         <button type="button" className="btn primary" disabled={!quote || shortfall > 0 || busy} onClick={() => void buy()}>{busy ? t("Buying…") : t("Buy")}</button>
       </div>
-      {quote && shortfall > 0 && <div className="tools-alert store-short" role="status">
+      {quote && shortfall > 0 && !outcome && <div className="tools-alert store-short" role="status">
         {t("Your balance is {balance}. Add {amount} to buy this order.", { balance: formatUsd(balanceCents, language), amount: formatUsd(shortfall, language) })}
         {" "}<button type="button" className="btn xs primary" onClick={() => onTopUp(shortfall)}>{t("Top up")}</button>
       </div>}
@@ -557,9 +588,30 @@ export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity 
   </section>;
 }
 
-function OwnedProxies({ orders, catalog, owner, selectedProfileIds, onReload, onProfilesChanged }: {
-  orders: ProxyOrder[];
-  catalog: ProxyCatalogResponse;
+/** Shown instead of the shop while NobleProxy's catalog cannot be read. The wallet and owned proxies stay. */
+function ShopUnavailable({ onReload }: { onReload: () => Promise<void> }) {
+  const { t } = useTranslation();
+  return <section className="tools-panel store-shop" aria-labelledby="store-shop-title">
+    <div className="tools-panel-head"><div><h3 id="store-shop-title">{t("Buy proxies")}</h3>
+      <p role="status">{t("Store temporarily unavailable. Your balance and proxies are not affected.")}</p></div>
+      <button type="button" className="btn" onClick={() => void onReload()}>{t("Try again")}</button></div>
+  </section>;
+}
+
+function RenewalStatus({ order }: { order: CloudProxyOrder }) {
+  const { t } = useTranslation();
+  if (order.renewalStatus === "pending") return <div className="tools-notice" role="status">{t("Renewal in progress…")}</div>;
+  if (order.renewalStatus === "needs_review") return <div className="tools-notice" role="status">{t("The renewal is being checked by support. These proxies keep working.")}</div>;
+  if (order.renewalStatus !== "renewal_failed") return null;
+  return <div className="tools-alert" role="alert">{order.renewalFailure === "partner_failed"
+    ? t("Renewal could not be completed. You were not charged. It is tried again before these proxies expire.")
+    : t("Renewal failed. Add funds to your wallet to keep these proxies.")}</div>;
+}
+
+function OwnedProxies({ orders, pendingPurchases, catalog, owner, selectedProfileIds, onReload, onProfilesChanged }: {
+  orders: CloudProxyOrder[];
+  pendingPurchases: CloudProxyPurchase[];
+  catalog: ProxyCatalogResponse | null;
   owner: boolean;
   selectedProfileIds: string[];
   onReload: () => Promise<void>;
@@ -568,12 +620,13 @@ function OwnedProxies({ orders, catalog, owner, selectedProfileIds, onReload, on
   const { t, language } = useTranslation();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const label = (type: string) => catalog.products.find((product) => product.type === type)?.label ?? t("Proxies");
-  const country = (type: string, code: string) => countryName(code, catalog.products.find((product) => product.type === type)?.countries.find((item) => item.code === code)?.name, t, language);
-  const toggle = async (order: ProxyOrder) => {
-    setBusy(order.orderId); setError(null);
+  const product = (type: string) => catalog?.products.find((item) => item.type === type);
+  const label = (type: string) => product(type)?.label ?? t("Proxies");
+  const country = (type: string, code: string) => countryName(code, product(type)?.countries.find((item) => item.code === code)?.name, t, language);
+  const toggle = async (order: CloudProxyOrder) => {
+    setBusy(order.id); setError(null);
     try {
-      await storeRequest({ action: "auto-renew", orderId: order.orderId, enabled: !order.autoRenew });
+      await storeRequest({ action: "auto-renew", orderId: order.id, enabled: !order.autoRenew });
       await onReload();
     } catch (failure) {
       setError(t(failure instanceof StoreError ? failure.message : "The request failed. Try again."));
@@ -584,22 +637,88 @@ function OwnedProxies({ orders, catalog, owner, selectedProfileIds, onReload, on
       <button type="button" className="btn" onClick={() => void onReload()}>{t("Refresh")}</button></div>
     <div className="tools-panel-body">
       {error && <div className="tools-alert" role="alert">{error}</div>}
-      {orders.length ? orders.map((order) => <div className="store-order" key={order.orderId}>
+      {pendingPurchases.map((purchase) => <div className="store-order" key={purchase.id}>
+        <div className="store-order-head">
+          <div><strong>{t("{count} × {type}", { count: purchase.quantity, type: label(purchase.type) })}</strong>
+            <small>{country(purchase.type, purchase.country)} · {formatUsd(purchase.totalCents, language)}</small></div>
+          <span className="store-waiting" role="status"><span className="store-dot" aria-hidden="true" />
+            {purchase.status === "needs_review" ? t("Being checked by support") : t("Processing…")}</span>
+        </div>
+      </div>)}
+      {orders.map((order) => <div className="store-order" key={order.id}>
         <div className="store-order-head">
           <div><strong>{t("{count} × {type}", { count: order.quantity, type: label(order.type) })}</strong>
             <small>{country(order.type, order.country)} · {t("Expires {date}", { date: new Date(order.expiresAt).toLocaleDateString(language) })}</small></div>
           {owner
-            ? <label className="proxy-choice"><input type="checkbox" checked={order.autoRenew} disabled={busy === order.orderId} onChange={() => void toggle(order)} />{t("Auto-renew")}</label>
+            ? <label className="proxy-choice"><input type="checkbox" checked={order.autoRenew} disabled={busy === order.id} onChange={() => void toggle(order)} />{t("Auto-renew")}</label>
             : <span className="tools-hint">{order.autoRenew ? t("Auto-renew is on") : t("Auto-renew is off")}</span>}
         </div>
-        {order.renewalStatus === "renewal_failed" && <div className="tools-alert" role="alert">{t("Renewal failed. Add funds to your wallet to keep these proxies.")}</div>}
+        <RenewalStatus order={order} />
         <details><summary>{t("Show {count} proxies", { count: order.proxies.length })}</summary>
           <ProxyList proxies={order.proxies} countryLabel={(code) => country(order.type, code)} />
           {owner && order.proxies.length > 0 && <ProxyAssign proxies={order.proxies} selectedProfileIds={selectedProfileIds} onProfilesChanged={onProfilesChanged} />}
         </details>
-      </div>) : <p className="tools-hint">{t("No proxies yet. Proxies you buy appear here.")}</p>}
+      </div>)}
+      {!orders.length && !pendingPurchases.length && <p className="tools-hint">{t("No proxies yet. Proxies you buy appear here.")}</p>}
     </div>
   </section>;
+}
+
+export type HandoffOutcome =
+  | { kind: "opened"; url: string; expiresAt: number }
+  /** This Cloud has no handoff route yet (404): the button goes away. */
+  | { kind: "missing" }
+  | { kind: "error"; error: StoreError };
+
+/** Asks Cloud for a short-lived NobleProxy sign-in link and opens it, only if it has the exact expected form. */
+export async function openNobleProxy(open: (url: string) => void): Promise<HandoffOutcome> {
+  try {
+    const handoff = await storeRequest<NobleProxyHandoffResponse>({ action: "nobleproxy-handoff" }, "handoff");
+    if (!isNobleProxyHandoffUrl(handoff.url)) return { kind: "error", error: new StoreError("NobleProxy returned a link that is not valid. Try again.", "other") };
+    open(handoff.url);
+    return { kind: "opened", url: handoff.url, expiresAt: handoff.expiresAt };
+  } catch (error) {
+    const failure = error instanceof StoreError ? error : new StoreError("The request failed. Try again.", "other");
+    return failure.kind === "unavailable" ? { kind: "missing" } : { kind: "error", error: failure };
+  }
+}
+
+/**
+ * Opens an outside link the same way as a click on a normal `target="_blank"` link,
+ * so the desktop shell's allowlist decides. The link is placed inside the app root,
+ * where the click guard keeps the shell plugin from cancelling it.
+ */
+function openOutsideLink(url: string, container: HTMLElement) {
+  const link = document.createElement("a");
+  link.href = url; link.target = "_blank"; link.rel = "noreferrer"; link.hidden = true;
+  container.append(link);
+  link.click();
+  link.remove();
+}
+
+export function NobleProxyButton({ outcome, busy, onClick }: { outcome: HandoffOutcome | null; busy: boolean; onClick: () => void }) {
+  const { t } = useTranslation();
+  if (outcome?.kind === "missing") return null;
+  return <div className="store-manage">
+    <button type="button" className="btn" disabled={busy} onClick={onClick}>{busy ? t("Opening…") : t("Manage on NobleProxy ↗")}</button>
+    {outcome?.kind === "opened" && outcome.expiresAt > Date.now() && <small className="tools-hint">
+      {t("NobleProxy opens in your browser.")} <a href={outcome.url} target="_blank" rel="noreferrer">{t("Not opened? Open NobleProxy")}</a>
+    </small>}
+    {outcome?.kind === "error" && <div className="tools-alert" role="alert">{t(outcome.error.message)}</div>}
+  </div>;
+}
+
+function ManageOnNobleProxy() {
+  const [outcome, setOutcome] = useState<HandoffOutcome | null>(null);
+  const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const open = async () => {
+    if (busy) return;
+    setBusy(true); setOutcome(null);
+    const next = await openNobleProxy((url) => { if (ref.current) openOutsideLink(url, ref.current); });
+    setOutcome(next); setBusy(false);
+  };
+  return <div ref={ref}><NobleProxyButton outcome={outcome} busy={busy} onClick={() => void open()} /></div>;
 }
 
 export function StorePage({ active, state, role, selectedProfileIds, requestedQuantity = 0, onReload, onProfilesChanged }: {
@@ -622,9 +741,12 @@ export function StorePage({ active, state, role, selectedProfileIds, requestedQu
   };
   return <div className="workspace proxy-page store-page" hidden={!active}>
     <div className="tools-intro"><div><span className="tools-eyebrow">{t("WALLET & PROXIES")}</span><h2>{t("Give every account its own IP.")}</h2>
-      <p>{t("Add funds once, then buy static residential proxies and assign them to your profiles in a few clicks.")}</p></div></div>
+      <p>{t("Add funds once, then buy static residential proxies and assign them to your profiles in a few clicks.")}</p></div>
+      {owner && <ManageOnNobleProxy />}</div>
     <WalletPanel wallet={state.wallet} owner={owner} amount={amount} setAmount={setAmount} amountRef={amountRef} onReload={onReload} />
-    {owner && <ProxyShop catalog={state.catalog} orders={state.orders} balanceCents={state.wallet.balanceCents} initialQuantity={requestedQuantity} selectedProfileIds={selectedProfileIds} onTopUp={topUp} onReload={onReload} onProfilesChanged={onProfilesChanged} />}
-    <OwnedProxies orders={state.orders} catalog={state.catalog} owner={owner} selectedProfileIds={selectedProfileIds} onReload={onReload} onProfilesChanged={onProfilesChanged} />
+    {owner && (state.catalog
+      ? <ProxyShop catalog={state.catalog} orders={state.proxies.orders} balanceCents={state.wallet.balanceCents} initialQuantity={requestedQuantity} selectedProfileIds={selectedProfileIds} onTopUp={topUp} onReload={onReload} onProfilesChanged={onProfilesChanged} />
+      : <ShopUnavailable onReload={onReload} />)}
+    <OwnedProxies orders={state.proxies.orders} pendingPurchases={state.proxies.pendingPurchases} catalog={state.catalog} owner={owner} selectedProfileIds={selectedProfileIds} onReload={onReload} onProfilesChanged={onProfilesChanged} />
   </div>;
 }

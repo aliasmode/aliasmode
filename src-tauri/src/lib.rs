@@ -54,7 +54,22 @@ fn windows_acceptance_browser_args(enabled: bool, debug_port: Option<&str>) -> O
 }
 
 fn allowed_external_url(url: &str) -> bool {
-    ALLOWED_EXTERNAL_URLS.contains(&url) || proxy_offer_url(url) || stripe_checkout_url(url)
+    ALLOWED_EXTERNAL_URLS.contains(&url)
+        || proxy_offer_url(url)
+        || stripe_checkout_url(url)
+        || nobleproxy_handoff_url(url)
+}
+
+/// "Manage on NobleProxy" opens the short-lived sign-in link that AliasMode Cloud got from NobleProxy.
+/// Only this exact form: one `h` token of URL-safe characters, no other parameter and no fragment.
+fn nobleproxy_handoff_url(url: &str) -> bool {
+    let Some(token) = url.strip_prefix("https://nobleproxy.com/continue/aliasmode?h=") else {
+        return false;
+    };
+    token.len() >= 20
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 /// A wallet top-up by card opens the Stripe Checkout page that AliasMode Cloud created.
@@ -311,6 +326,9 @@ mod tests {
             "https://nobleproxy.com/t/aliasmode?src=profile-dialog&lang=zh-CN",
             "https://nobleproxy.com/t/aliasmode?src=import-no-proxy&qty=3&lang=ru-RU",
             "https://checkout.stripe.com/c/pay/cs_test_a1B2c3D4e5#fidkdWxOYHwnPyd1blpxYHZxWjA0SmZ%2FPWBWfQ%3D%3D",
+            "https://checkout.stripe.com/g/pay/cs_live_a1jR9tbRvftQTDnmkkEdu4o1ARCgIj9J3DTTo8l00zJaV7fDtKOBAig94s#fidkIqPtHjp%2FJquzcfcZx1PosH%2Bk1gj53e5bB%2FYEU9Qeax5zomqD%2BbPa6YlsAE%2BmL8aLtkhyX%3DK4spAcpw7fMm%2Bbs9vYnQYSD%2FwifHdJs%2BCcwEWQ5Ke%2Bl41LGRZa0Bt1%3DgVgfpLfu%2FzO89tc6XiCHUD%3DS5R5GSWN12T3%2B3Aqr9O%2FIhWPKNwrb%3DiJ2AdzHwM%2FZMNWNVJgF%3Da3J29nmKI%2BWnnH9Xl4iUX5%2BS5tRschFC3YGY%2F6XLgHVx7O5pQeG%2FCB%3D%3D",
+            "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://nobleproxy.com/continue/aliasmode?h=hJ8kQ2mN5pR7sT9vW1xY3zA6bC8dE0fG",
         ] {
             assert!(allowed_external_url(url));
         }
@@ -342,6 +360,19 @@ mod tests {
             "https://checkout.stripe.com/c/pay/cs_test\\@example.com",
             "https://dashboard.stripe.com/c/pay/cs_test_a1",
             "https://stripe.com/c/pay/cs_test_a1",
+            "https://nobleproxy.com/continue/aliasmode?h=",
+            "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz0",
+            "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09&next=https://example.com",
+            "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09#fragment",
+            "https://nobleproxy.com/continue/aliasmode?next=x&h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09%2F",
+            "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09.Ab3_x-Yz09",
+            "https://nobleproxy.com/continue/aliasmode/?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://nobleproxy.com/continue/other?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "http://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://nobleproxy.com.example.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://nobleproxy.com@example.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://app.nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
         ] {
             assert!(!allowed_external_url(url));
         }

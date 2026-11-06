@@ -685,121 +685,168 @@ export interface ListPublishedScriptsResponse {
   nextOffset: number | null;
 }
 
-// Wallet and proxy store. Amounts are integer USD cents.
-export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment";
-export type DepositMethod = "card" | "crypto";
-export type DepositStatus = "pending" | "paid" | "expired" | "failed";
+/* Credits wallet and proxy purchases. Amounts are integer USD cents; times are epoch milliseconds.
+   Owners deposit and buy; every active member sees the balance and the purchased proxies. */
 
-export interface WalletEntry {
+export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment";
+
+export interface CloudWalletEntry {
   id: string;
+  /** Positive adds credits, negative spends them. */
   amountCents: number;
   kind: WalletEntryKind;
-  createdAt: string;
+  createdAt: number;
   description?: string;
 }
 
-export interface PendingDeposit {
-  depositId: string;
-  amountCents: number;
-  method: DepositMethod;
-  status: DepositStatus;
-  expiresAt?: string;
-}
-
-export interface WalletResponse {
-  balanceCents: number;
-  entries: WalletEntry[];
-  pendingDeposits: PendingDeposit[];
-}
-
-export interface CryptoPaymentMethod {
+export interface CloudCryptoPaymentMethod {
   id: string;
   coin: string;
   network: string;
   label: string;
-  /** Exact amount to send, as a decimal string with every digit. */
+  /** Decimal string in the coin's units, for example "10.25". */
   amount: string;
   address: string;
   paymentUri: string;
 }
 
-export interface CreateDepositRequest {
+export interface CloudWalletDeposit {
+  id: string;
   amountCents: number;
-  method: DepositMethod;
+  method: "card" | "crypto";
+  /** disputed / refunded: a card chargeback or refund after payment; the balance is unchanged until support decides. */
+  status: "pending" | "paid" | "expired" | "failed" | "disputed" | "refunded";
+  createdAt: number;
+  expiresAt: number | null;
+  paidAt: number | null;
+  /** Present while pending for card deposits: open this page to pay. */
+  card?: { checkoutUrl: string };
+  /** Present while pending for crypto deposits: pay one of these. */
+  crypto?: { methods: CloudCryptoPaymentMethod[] };
 }
 
-export interface CreateDepositResponse {
+export interface GetWalletResponse {
+  ok: true;
+  balanceCents: number;
+  currency: "USD";
+  /** Newest first, at most 50. */
+  entries: CloudWalletEntry[];
+  pendingDeposits: CloudPendingDeposit[];
+}
+
+export interface CloudPendingDeposit {
   depositId: string;
   amountCents: number;
-  method: DepositMethod;
+  method: "card" | "crypto";
   status: "pending";
-  expiresAt: string;
-  card?: { checkoutUrl: string };
-  crypto?: { methods: CryptoPaymentMethod[] };
+  expiresAt?: number;
 }
 
-export interface DepositStatusResponse {
-  depositId: string;
+export interface CreateDepositRequest {
+  /** 500..1000000 ($5.00 to $10,000.00); outside that range the answer is 400 deposit_amount_out_of_range. */
   amountCents: number;
-  method: DepositMethod;
-  status: DepositStatus;
-  paidAt?: string;
-  expiresAt?: string;
-  /** Present while a card deposit is pending, so checkout can be reopened. */
-  card?: { checkoutUrl: string };
-  crypto?: { methods: CryptoPaymentMethod[] };
+  method: "card" | "crypto";
 }
 
-export interface ProxyCatalogProduct {
+export interface DepositResponse {
+  ok: true;
+  deposit: CloudWalletDeposit;
+}
+
+/** `type` is an opaque NobleProxy id such as `x-twitter-12`; country codes are ISO codes or `ANY`.
+    Send them back unchanged and show `label` and `name`. */
+export interface CloudProxyProduct {
   type: string;
   label: string;
   countries: Array<{ code: string; name: string }>;
+  /** Unit price for quantities from minQty up to the next tier. */
   tiers: Array<{ minQty: number; unitPriceCents: number }>;
 }
 
 export interface ProxyCatalogResponse {
-  products: ProxyCatalogProduct[];
+  ok: true;
+  products: CloudProxyProduct[];
 }
 
-export interface PurchasedProxy {
+export interface CreateProxyPurchaseRequest {
+  type: string;
+  country: string;
+  quantity: number;
+  /** Client-chosen key; the same key returns the same purchase and never charges twice. */
+  idempotencyKey: string;
+}
+
+export interface CloudProxyPurchase {
+  id: string;
+  idempotencyKey: string;
+  type: string;
+  country: string;
+  quantity: number;
+  totalCents: number;
+  /** pending: charged, waiting for NobleProxy; failed: refunded; needs_review: no NobleProxy answer for
+      24 hours, still charged, support settles it. */
+  status: "pending" | "active" | "failed" | "needs_review";
+  orderId: string | null;
+  failure: string | null;
+  createdAt: number;
+}
+
+export interface CloudPurchasedProxy {
   id: string;
   host: string;
   port: number;
   username: string;
   password: string;
-  protocol: string;
+  /** NobleProxy names are mapped: any SOCKS variant is socks5, everything else is http. */
+  protocol: "http" | "socks5";
   country: string;
 }
 
-export interface ProxyPurchaseRequest {
+/** needs_review: the renewal was charged but NobleProxy gave no answer for 24 hours; support settles it. */
+export type ProxyRenewalStatus = "ok" | "pending" | "renewal_failed" | "needs_review";
+export type ProxyRenewalFailure = "insufficient_balance" | "partner_failed";
+
+export interface CloudProxyOrder {
+  id: string;
   type: string;
   country: string;
   quantity: number;
-  idempotencyKey: string;
+  expiresAt: number;
+  autoRenew: boolean;
+  renewalStatus: ProxyRenewalStatus;
+  renewalFailure: ProxyRenewalFailure | null;
+  proxies: CloudPurchasedProxy[];
 }
 
 export interface ProxyPurchaseResponse {
-  purchaseId: string;
-  status: "active" | "pending" | "needs_review" | "failed";
-  chargedCents: number;
-  orderId?: string;
-  expiresAt?: string;
-  proxies?: PurchasedProxy[];
+  ok: true;
+  purchase: CloudProxyPurchase;
+  order: CloudProxyOrder | null;
 }
 
-export interface ProxyOrder {
+export interface ListPurchasedProxiesResponse {
+  ok: true;
+  orders: CloudProxyOrder[];
+  /** Purchases with status pending or needs_review. */
+  pendingPurchases: CloudProxyPurchase[];
+}
+
+export interface SetAutoRenewRequest {
+  enabled: boolean;
+}
+
+export interface SetAutoRenewResponse {
+  ok: true;
   orderId: string;
-  type: string;
-  country: string;
-  quantity: number;
-  expiresAt: string;
   autoRenew: boolean;
-  renewalStatus?: "ok" | "renewal_failed";
-  proxies: PurchasedProxy[];
 }
 
-export interface ListProxyOrdersResponse {
-  orders: ProxyOrder[];
+/** POST /v1/nobleproxy/handoff (owner only, no body): a short-lived link that opens NobleProxy signed in with the
+    owner's verified email. Open `url` in the system browser before `expiresAt` (epoch milliseconds). */
+export interface NobleProxyHandoffResponse {
+  ok: true;
+  url: string;
+  expiresAt: number;
 }
 
 export type CloudResult<T> = T | CloudError;

@@ -157,4 +157,6 @@ button.proxy-referral { width: 100%; font: inherit; text-align: left; cursor: po
 .store-order { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
 .store-order:first-child { border-top: 0; padding-top: 0; }
 .store-topup .segmented { align-self: flex-end; }
+.store-manage { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 300px; text-align: right; }
+.store-manage a { color: var(--accent-ink); }
 button.navbuy { padding: 0; border: 0; background: none; cursor: pointer; }

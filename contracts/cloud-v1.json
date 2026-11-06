@@ -71,12 +71,18 @@
     "purge": "DELETE /v1/profiles/:id/purge",
     "events": "POST /v1/events",
     "wallet": "GET /v1/wallet",
-    "deposits": "POST /v1/wallet/deposits (owner only)",
-    "deposit": "GET /v1/wallet/deposits/:id",
+    "walletDeposits": "POST /v1/wallet/deposits; GET /v1/wallet/deposits/:id",
     "proxyCatalog": "GET /v1/proxies/catalog",
-    "proxyPurchases": "POST /v1/proxies/purchases (owner only, idempotencyKey)",
-    "proxyOrders": "GET /v1/proxies",
-    "proxyOrderAutoRenew": "POST /v1/proxies/orders/:id/auto-renew (owner only)"
+    "proxyPurchases": "POST /v1/proxies/purchases",
+    "purchasedProxies": "GET /v1/proxies",
+    "proxyAutoRenew": "POST /v1/proxies/orders/:id/auto-renew",
+    "nobleproxyHandoff": "POST /v1/nobleproxy/handoff"
+  },
+  "wallet": {
+    "currency": "USD",
+    "amounts": "integer_cents",
+    "depositAndBuy": ["owner"],
+    "view": ["owner", "admin", "member"]
   },
   "errorCodes": [
     "authentication_required",
