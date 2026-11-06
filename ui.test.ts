@@ -2783,6 +2783,7 @@ test("delete (standalone) blocks an open profile without stopping it or removing
   const s = store();
   const dataRoot = join("/tmp", `ui-del-${process.pid}-${s.count()}`);
   const launcher: any = {
+    cacheCleanupSettled: async () => {},
     profileDeletionBlocked: () => true,
     stop: async () => { throw new Error("must not stop an open profile during delete"); },
     removeUserDataDir: () => { throw new Error("must not remove an open profile"); },
@@ -2820,6 +2821,7 @@ test("delete (standalone) keeps a mixed open and closed selection atomic", async
   writeFileSync(join(closedDir, "Cookies"), "closed");
   s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
   const launcher: any = {
+    cacheCleanupSettled: async () => {},
     profileDeletionBlocked: (id: string) => id === "k1d0cd11",
     stop: async () => { throw new Error("must not stop profiles during delete"); },
     removeUserDataDir: () => { throw new Error("must not mutate a blocked batch"); },
@@ -2846,6 +2848,7 @@ test("delete (standalone) trashes a closed profile without calling stop or remov
   const s = store();
   const calls: string[] = [];
   const launcher: any = {
+    cacheCleanupSettled: async () => {},
     profileDeletionBlocked: () => false,
     stop: async () => { throw new Error("delete must not stop a profile"); },
     removeUserDataDir: (id: string) => { calls.push(id); return true; },
@@ -2867,6 +2870,7 @@ test("delete (standalone) trashes a closed profile without calling stop or remov
 test("delete (standalone) keeps recoverable data without cleanup and is idempotent", async () => {
   const s = store();
   const launcher: any = {
+    cacheCleanupSettled: async () => {},
     profileDeletionBlocked: () => false,
     removeUserDataDir: () => { throw new Error("Trash must not clean up saved data"); },
   };
@@ -4652,7 +4656,7 @@ test("Cloud bulk delete keeps closed profiles, rejects opens, and continues afte
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ ids: ["closed", "open", "raced", "broken"] }),
     }),
-    { profileDeletionBlocked: () => false } as any,
+    { cacheCleanupSettled: async () => {}, profileDeletionBlocked: () => false } as any,
     s,
     null,
     { appConfig, cloudBrowser: {} as any, cloudConnection },

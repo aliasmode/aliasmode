@@ -309,6 +309,8 @@ export async function handleUserApi(
         locked.push(id);
         continue;
       }
+      // The cache delete after stop() runs on; let it end before the folder is removed.
+      await launcher.cacheCleanupSettled(id);
       // removeUserDataDir refuses any path outside the data root (a crafted or
       // legacy "../" id), so rmSync can't escape; the row is dropped regardless.
       launcher.removeUserDataDir(id);
