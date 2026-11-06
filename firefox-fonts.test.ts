@@ -294,17 +294,19 @@ test("pruning removes packs that are no longer pinned and interrupted installs, 
 test("Chromium's fontconfig file adds the pack to the system fonts and is written once", () => {
   const root = mkdtempSync(join(tmpdir(), "chromium-fontconfig-"));
   cleanup.push(root);
-  const fontsDir = join(root, "a&b <pack>", "fonts");
+  // Windows paths cannot hold < and >; fontconfig only runs on Linux, so there the name tests & alone.
+  const name = process.platform === "win32" ? "a&b pack" : "a&b <pack>";
+  const fontsDir = join(root, name, "fonts");
   mkdirSync(fontsDir, { recursive: true });
   const file = chromiumFontconfigFile(fontsDir);
-  expect(file).toBe(join(root, "a&b <pack>", "chromium-fonts.conf"));
+  expect(file).toBe(join(root, name, "chromium-fonts.conf"));
   const content = readFileSync(file, "utf8");
   expect(content).toContain('<include ignore_missing="yes">/etc/fonts/fonts.conf</include>');
-  expect(content).toContain(`<dir>${join(root, "a&amp;b &lt;pack&gt;", "fonts")}</dir>`);
+  expect(content).toContain(`<dir>${join(root, name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), "fonts")}</dir>`);
   const written = statSync(file).mtimeMs;
   expect(chromiumFontconfigFile(fontsDir)).toBe(file);
   expect(statSync(file).mtimeMs).toBe(written);
   // Another system configuration replaces the file; no temporary file is left.
   expect(readFileSync(chromiumFontconfigFile(fontsDir, "/opt/fonts.conf"), "utf8")).toContain(">/opt/fonts.conf</include>");
-  expect(readdirSync(join(root, "a&b <pack>")).sort()).toEqual(["chromium-fonts.conf", "fonts"]);
+  expect(readdirSync(join(root, name)).sort()).toEqual(["chromium-fonts.conf", "fonts"]);
 });
