@@ -467,23 +467,23 @@ test("bulk cookie route sets open browsers now and keeps cookies for closed prof
   } as any);
 
   const json = JSON.stringify([
-    { name: "auth_token", value: "a1", domain: ".x.com", path: "/", secure: true, httpOnly: true, expirationDate: 4_000_000_000, sameSite: "no_restriction", partitionKey: "https://x.com" },
+    { name: "auth_token", value: "a1", domain: ".x.com", path: "/", secure: true, httpOnly: true, expirationDate: 1_800_000_000, sameSite: "no_restriction", partitionKey: "https://x.com" },
     { name: "ct0", value: "c1", domain: ".x.com", path: "/", session: true },
   ]);
   const response = await post({ ids: ["k1d0cd11", "k1closed", "k1firefox"], text: json });
   expect(await response!.json()).toEqual({ ok: true, count: 2, live: 2, nextStart: 1, errors: [] });
   expect(calls.map((call) => call.ws)).toEqual(["ws://chromium", "firefox://live"]);
-  expect(calls[0]!.cookies[0]).toMatchObject({ name: "auth_token", sameSite: "None", secure: true, partitionKey: "https://x.com", expires: 4_000_000_000 });
+  expect(calls[0]!.cookies[0]).toMatchObject({ name: "auth_token", sameSite: "None", secure: true, partitionKey: "https://x.com", expires: 1_800_000_000 });
   // Firefox has no Chromium cookie partitions.
   expect(calls[1]!.cookies[0].partitionKey).toBeUndefined();
   expect(s.getPendingCookies("k1closed").map((cookie) => cookie.name)).toEqual(["auth_token", "ct0"]);
 
   // cookies.txt replaces a pending cookie with the same name, domain and path.
-  const netscape = "# Netscape HTTP Cookie File\n#HttpOnly_.x.com\tTRUE\t/\tTRUE\t4000000000\tct0\tc2\n";
+  const netscape = "# Netscape HTTP Cookie File\n#HttpOnly_.x.com\tTRUE\t/\tTRUE\t1800000000\tct0\tc2\n";
   expect(await (await post({ ids: ["k1closed"], text: netscape }))!.json()).toMatchObject({ ok: true, count: 1, nextStart: 1 });
   expect(s.getPendingCookies("k1closed")).toEqual([
     expect.objectContaining({ name: "auth_token", value: "a1" }),
-    { name: "ct0", value: "c2", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 4_000_000_000 },
+    { name: "ct0", value: "c2", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 1_800_000_000 },
   ]);
 
   const unknown = await post({ ids: ["k1closed", "missing"], name: "a", value: "b", domain: "x.com" });

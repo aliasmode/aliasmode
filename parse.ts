@@ -201,10 +201,14 @@ export function parseCookieText(text: string): CookieRecord[] {
       });
     }
   }
-  const cookies = normalizeCookies(raw).cookies.map((cookie) =>
+  // Browsers keep a cookie at most 400 days. Chromium shortens a longer one; Firefox drops it without an error.
+  const latest = Math.floor(Date.now() / 1000) + 400 * 86_400;
+  const cookies = normalizeCookies(raw).cookies.map((cookie) => {
+    if (cookie.expires === undefined) return cookie;
     // An expiry past year 9999 in seconds is in milliseconds; the browser takes seconds.
-    cookie.expires !== undefined && cookie.expires > 253_402_300_799 ? { ...cookie, expires: Math.floor(cookie.expires / 1000) } : cookie,
-  ).filter((cookie) =>
+    const expires = cookie.expires > 253_402_300_799 ? Math.floor(cookie.expires / 1000) : cookie.expires;
+    return { ...cookie, expires: Math.min(expires, latest) };
+  }).filter((cookie) =>
     !/[\s\x00-\x1f\x7f;=]/.test(cookie.name) && !/[\x00-\x1f\x7f;]/.test(cookie.value) && cookie.path.startsWith("/") &&
     // Chromium refuses the whole batch for a cookie that breaks its name prefix rules.
     (!cookie.name.startsWith("__Secure-") || cookie.secure) &&

@@ -475,23 +475,27 @@ test("an old export with none of the new keys imports exactly as before", () => 
 });
 
 test("pasted cookies accept JSON exports and Netscape cookies.txt", () => {
-  expect(parseCookieText('{"cookies":[{"name":"a","value":"1","domain":".x.com","expirationDate":4000000000,"sameSite":"no_restriction"}]}')).toEqual([
-    { name: "a", value: "1", domain: ".x.com", path: "/", httpOnly: false, secure: true, sameSite: "None", expires: 4_000_000_000 },
+  expect(parseCookieText('{"cookies":[{"name":"a","value":"1","domain":".x.com","expirationDate":1800000000,"sameSite":"no_restriction"}]}')).toEqual([
+    { name: "a", value: "1", domain: ".x.com", path: "/", httpOnly: false, secure: true, sameSite: "None", expires: 1_800_000_000 },
   ]);
   expect(parseCookieText('{"name":"b","value":"2","domain":"x.com","path":"/"}')).toHaveLength(1);
   expect(parseCookieText([
     "# Netscape HTTP Cookie File",
     "",
-    "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t4000000000\tauth_token\ttok",
+    "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t1800000000\tauth_token\ttok",
     "x.com\tFALSE\t/home\tFALSE\t0\tlang\ten",
   ].join("\r\n"))).toEqual([
-    { name: "auth_token", value: "tok", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 4_000_000_000 },
+    { name: "auth_token", value: "tok", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 1_800_000_000 },
     { name: "lang", value: "en", domain: "x.com", path: "/home", httpOnly: false, secure: false },
   ]);
   // Subdomain flag without a leading dot, a dropped empty value, an expiry in milliseconds.
-  expect(parseCookieText("x.com\tTRUE\t/\tTRUE\t4000000000000\tempty")).toEqual([
-    { name: "empty", value: "", domain: ".x.com", path: "/", httpOnly: false, secure: true, expires: 4_000_000_000 },
+  expect(parseCookieText("x.com\tTRUE\t/\tTRUE\t1800000000000\tempty")).toEqual([
+    { name: "empty", value: "", domain: ".x.com", path: "/", httpOnly: false, secure: true, expires: 1_800_000_000 },
   ]);
+  // At most 400 days: Firefox drops a cookie that lives longer.
+  const [far] = parseCookieText('[{"name":"far","value":"1","domain":"x.com","expires":4000000000}]');
+  expect(far!.expires).toBeLessThanOrEqual(Date.now() / 1000 + 400 * 86_400);
+  expect(far!.expires).toBeGreaterThan(Date.now() / 1000 + 399 * 86_400);
   // Cookies that break the name prefix rules are left out; Chromium would refuse the whole batch.
   expect(parseCookieText(JSON.stringify([
     { name: "__Secure-a", value: "1", domain: "x.com", secure: false },
