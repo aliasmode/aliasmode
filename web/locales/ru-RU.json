@@ -521,5 +521,11 @@
   "Any country": "Любая страна",
   "Unknown country": "Неизвестная страна",
   "Enter an amount from {min} to {max}.": "Введите сумму от {min} до {max}.",
-  "We're checking this order. You'll see the proxies or a refund soon.": "Мы проверяем этот заказ. Скоро вы увидите прокси или возврат средств."
+  "We're checking this order. You'll see the proxies or a refund soon.": "Мы проверяем этот заказ. Скоро вы увидите прокси или возврат средств.",
+  "Top-ups must be between $5 and $10,000.": "Сумма пополнения — от 5 до 10 000 $.",
+  "Proxies are not available right now. You were not charged. Try again in a few minutes.": "Прокси сейчас недоступны. Деньги не списаны. Повторите через несколько минут.",
+  "This order could not be filled. You were not charged. Try another country or a smaller quantity.": "Не удалось выполнить заказ. Деньги не списаны. Выберите другую страну или меньшее количество.",
+  "This item was not found. Refresh the page and try again.": "Запись не найдена. Обновите страницу и повторите попытку.",
+  "Reopen checkout ↗": "Снова открыть оплату ↗",
+  "Reopen checkout": "Снова открыть оплату"
 }

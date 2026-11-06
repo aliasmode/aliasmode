@@ -61,12 +61,19 @@ async function storeRequest<T>(body?: Record<string, unknown>): Promise<T> {
   let data: any = null;
   try { data = await response.json(); } catch {}
   if (response.ok && data?.ok === true) return data as T;
-  if (response.status === 402 || data?.code === "insufficient_balance") throw new StoreError("Your balance is too low for this purchase.", "insufficient");
+  // Known Cloud codes get our own translated text; the server's English text is never shown.
+  switch (data?.code) {
+    case "insufficient_balance": throw new StoreError("Your balance is too low for this purchase.", "insufficient");
+    case "owner_only": throw new StoreError("Only the workspace owner can do this.", "forbidden");
+    case "deposit_amount_out_of_range": throw new StoreError("Top-ups must be between $5 and $10,000.", "other");
+    case "partner_unavailable": throw new StoreError("Proxies are not available right now. You were not charged. Try again in a few minutes.", "other");
+    case "partner_rejected": throw new StoreError("This order could not be filled. You were not charged. Try another country or a smaller quantity.", "other");
+    case "record_not_found": throw new StoreError("This item was not found. Refresh the page and try again.", "other");
+  }
+  if (response.status === 402) throw new StoreError("Your balance is too low for this purchase.", "insufficient");
   if (response.status === 403) throw new StoreError("Only the workspace owner can do this.", "forbidden");
   if (response.status === 404) throw new StoreError("This is not available on your AliasMode Cloud yet.", "unavailable");
   if (response.status === 502 || response.status === 503 || response.status === 504) throw new StoreError("AliasMode Cloud could not be reached. Check your connection and try again.", "network");
-  // Cloud explains a rejected request (for example an amount out of range); show its words.
-  if ((response.status === 400 || response.status === 422) && typeof data?.error === "string" && data.error) throw new StoreError(data.error, "other");
   throw new StoreError("The request failed. Try again.", "other");
 }
 
@@ -255,6 +262,8 @@ export interface ActiveDeposit {
   expiresAt?: string;
   checkoutUrl?: string;
   methods?: CryptoPaymentMethod[];
+  /** Reopened from the pending list, for example after an app restart. */
+  resumed?: boolean;
 }
 
 function DepositStatusLine({ deposit }: { deposit: ActiveDeposit }) {
@@ -272,7 +281,7 @@ export function CardPaymentView({ deposit }: { deposit: ActiveDeposit }) {
     {deposit.status === "pending" && (isStripeCheckoutUrl(deposit.checkoutUrl)
       ? <>
         <p className="tools-hint">{t("Checkout opens in your browser on Stripe's secure page. Come back here when you are done.")}</p>
-        <a className="btn primary" href={deposit.checkoutUrl} target="_blank" rel="noreferrer">{t("Open secure checkout ↗")}</a>
+        <a className="btn primary" href={deposit.checkoutUrl} target="_blank" rel="noreferrer">{deposit.resumed ? t("Reopen checkout ↗") : t("Open secure checkout ↗")}</a>
       </>
       : <p className="tools-hint">{t("Finish the card payment in your browser. This page updates when it arrives.")}</p>)}
     <DepositStatusLine deposit={deposit} />
@@ -362,7 +371,7 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
     setError(null);
     try {
       const found = await depositStatus(depositId);
-      setDeposit({ depositId: found.depositId, amountCents: found.amountCents, method: found.method, status: found.status, expiresAt: found.expiresAt, methods: found.crypto?.methods });
+      setDeposit({ depositId: found.depositId, amountCents: found.amountCents, method: found.method, status: found.status, expiresAt: found.expiresAt, checkoutUrl: found.card?.checkoutUrl, methods: found.crypto?.methods, resumed: true });
     } catch (failure) {
       setError(t(failure instanceof StoreError ? failure.message : "The request failed. Try again."));
     }
@@ -389,7 +398,7 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
           <h4>{t("Waiting for payment")}</h4>
           {wallet.pendingDeposits.map((pending) => <div className="store-row" key={pending.depositId}>
             <span>{formatUsd(pending.amountCents, language)} · {pending.method === "card" ? t("Card") : t("Crypto")}</span>
-            <button type="button" className="btn xs" onClick={() => void resume(pending.depositId)}>{t("Show payment")}</button>
+            <button type="button" className="btn xs" onClick={() => void resume(pending.depositId)}>{pending.method === "card" ? t("Reopen checkout") : t("Show payment")}</button>
           </div>)}
         </div>}
       </> : <p className="tools-hint">{t("Only the workspace owner can add funds and buy proxies.")}</p>}

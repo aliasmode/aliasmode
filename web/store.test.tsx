@@ -13,6 +13,7 @@ import {
   assignProxiesToProfiles,
   buyProxies,
   createDeposit,
+  depositStatus,
   isStripeCheckoutUrl,
   loadStoreState,
   quoteProxyPrice,
@@ -126,17 +127,52 @@ test("the live total follows catalog tiers and Buy is disabled with a Top up off
   expect(enough).not.toContain(">Top up</button>");
 });
 
-test("top-ups accept $5 to $10,000, and Cloud's own words explain a rejected amount", async () => {
+test("top-ups accept $5 to $10,000, and a rejected amount gets our own text", async () => {
   const html = render(<StorePage active state={snapshot(0)} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
   expect(html).toContain('value="20"');
   expect(html).toContain('min="5" max="10000" step="0.01"');
   expect(html).toMatch(/<button type="button" class="btn primary">Top up<\/button>/);
   expect(html).not.toContain("Enter an amount from");
 
-  const requests = fakeCloud(() => cloudError(400, "validation_failed"));
+  const requests = fakeCloud(() => cloudError(400, "deposit_amount_out_of_range"));
   const error = await createDeposit(400, "card").catch((value) => value);
-  expect(error.message).toBe("validation_failed");
+  expect(error.message).toBe("Top-ups must be between $5 and $10,000.");
   expect(requests[0]).toMatchObject({ method: "POST", path: "/wallet/deposits", body: { amountCents: 400, method: "card" } });
+});
+
+test("Cloud error codes become translated messages, never the server's English text", async () => {
+  const cases: Array<[number, string, string, string]> = [
+    [402, "insufficient_balance", "insufficient", "Your balance is too low for this purchase."],
+    [403, "owner_only", "forbidden", "Only the workspace owner can do this."],
+    [400, "deposit_amount_out_of_range", "other", "Top-ups must be between $5 and $10,000."],
+    [503, "partner_unavailable", "other", "Proxies are not available right now. You were not charged. Try again in a few minutes."],
+    [409, "partner_rejected", "other", "This order could not be filled. You were not charged. Try another country or a smaller quantity."],
+    [404, "record_not_found", "other", "This item was not found. Refresh the page and try again."],
+    [400, "something_new", "other", "The request failed. Try again."],
+  ];
+  for (const [status, code, kind, message] of cases) {
+    fakeCloud(() => Response.json({ ok: false, error: { code, message: "SERVER ENGLISH TEXT" } }, { status }));
+    const outcome = await buyProxies(new PurchaseAttempts(), { type: "x-twitter-12", country: "US", quantity: 1 });
+    expect(outcome).toMatchObject({ kind: "error", error: { kind, message } });
+    expect([ruRU, zhCN].map((catalog) => typeof (catalog as Record<string, string>)[message])).toEqual(["string", "string"]);
+  }
+});
+
+test("a pending card top-up can reopen its Stripe checkout from the deposit status", async () => {
+  const checkoutUrl = "https://checkout.stripe.com/c/pay/cs_test_resume#fid%3D";
+  fakeCloud((_, path) => path === "/wallet/deposits/d7"
+    ? Response.json({ depositId: "d7", amountCents: 2000, method: "card", status: "pending", expiresAt: "2026-11-06T13:00:00Z", card: { checkoutUrl } })
+    : cloudError(404, "record_not_found"));
+  expect((await depositStatus("d7")).card?.checkoutUrl).toBe(checkoutUrl);
+
+  const state = snapshot(0);
+  state.wallet.pendingDeposits = [{ depositId: "d7", amountCents: 2000, method: "card", status: "pending" }, { depositId: "d8", amountCents: 3000, method: "crypto", status: "pending" }];
+  const page = render(<StorePage active state={state} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  expect(page).toContain(">Reopen checkout</button>");
+  expect(page).toContain(">Show payment</button>");
+
+  const view = render(<CardPaymentView deposit={{ depositId: "d7", amountCents: 2000, method: "card", status: "pending", checkoutUrl, resumed: true }} />);
+  expect(view).toContain(`href="${checkoutUrl}" target="_blank" rel="noreferrer">Reopen checkout ↗</a>`);
 });
 
 test("proxy types and countries show their names, never raw ids", () => {
@@ -218,7 +254,7 @@ test("purchases through a fake Cloud show ready proxies, a refund, or a pending 
   expect(short).toMatchObject({ kind: "error", error: { kind: "insufficient" } });
   expect(show(short)).toContain(">Top up</button>");
 
-  answer = cloudError(403, "validation_failed");
+  answer = cloudError(403, "owner_only");
   expect(await buyProxies(new PurchaseAttempts(), order)).toMatchObject({ kind: "error", error: { kind: "forbidden" } });
 });
 

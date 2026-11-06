@@ -820,5 +820,11 @@
   "Any country": "任意国家/地区",
   "Unknown country": "未知国家/地区",
   "Enter an amount from {min} to {max}.": "请输入 {min} 到 {max} 之间的金额。",
-  "We're checking this order. You'll see the proxies or a refund soon.": "我们正在核查此订单。您很快会看到代理或退款。"
+  "We're checking this order. You'll see the proxies or a refund soon.": "我们正在核查此订单。您很快会看到代理或退款。",
+  "Top-ups must be between $5 and $10,000.": "充值金额须在 5 至 10,000 美元之间。",
+  "Proxies are not available right now. You were not charged. Try again in a few minutes.": "代理暂时无法提供，未扣款。请几分钟后重试。",
+  "This order could not be filled. You were not charged. Try another country or a smaller quantity.": "无法完成此订单，未扣款。请尝试其他国家/地区或更少的数量。",
+  "This item was not found. Refresh the page and try again.": "未找到此项目。请刷新页面后重试。",
+  "Reopen checkout ↗": "重新打开付款页面 ↗",
+  "Reopen checkout": "重新打开付款页面"
 }

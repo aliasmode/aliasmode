@@ -34,6 +34,11 @@ export type CloudErrorCode =
   | "validation_failed"
   | "rate_limited"
   | "insufficient_balance"
+  | "deposit_amount_out_of_range"
+  | "owner_only"
+  | "partner_unavailable"
+  | "partner_rejected"
+  | "record_not_found"
   | "internal_error";
 
 export interface CloudError {
@@ -740,6 +745,8 @@ export interface DepositStatusResponse {
   status: DepositStatus;
   paidAt?: string;
   expiresAt?: string;
+  /** Present while a card deposit is pending, so checkout can be reopened. */
+  card?: { checkoutUrl: string };
   crypto?: { methods: CryptoPaymentMethod[] };
 }
 

@@ -484,7 +484,7 @@ export class CloudClient {
     return this.call("/proxies", { cache: "no-store" });
   }
 
-  setProxyAutoRenew(orderId: string, enabled: boolean): Promise<unknown> {
+  setProxyAutoRenew(orderId: string, enabled: boolean): Promise<{ orderId: string; autoRenew: boolean }> {
     return this.call(`/proxies/orders/${encodeURIComponent(orderId)}/auto-renew`, { method: "POST", body: JSON.stringify({ enabled }) });
   }
 
