@@ -463,3 +463,13 @@ test("Cloud editor rejects a stale expected version before PATCH", async () => {
     .rejects.toMatchObject({ status: 409 });
   expect(updateCalls).toBe(0);
 });
+
+test("the Cloud edit view names an AliasMode Chromium profile's runtime and none for CloakBrowser", async () => {
+  const legacy = payload();
+  const chromium155 = { ...response(), payload: { ...legacy, schemaVersion: 3, profile: { ...legacy.profile, chromiumRuntime: "aliasmode" } } as any };
+  const cloak = { ...response(), payload: payload() };
+  for (const [authoritative, runtime] of [[chromium155, "aliasmode"], [cloak, undefined]] as const) {
+    const editor = new CloudProfileEditor({ getProfile: async () => authoritative } as any, readOnlyStore());
+    expect((await editor.get("cloud1")).chromiumRuntime).toBe(runtime);
+  }
+});

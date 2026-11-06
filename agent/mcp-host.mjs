@@ -127,7 +127,7 @@ const ALIAS_TOOLS = [
         chromiumRuntime: {
           type: "string",
           enum: ["aliasmode", "cloakbrowser"],
-          description: "Chromium profiles only. aliasmode (Chromium 155) is the default where this computer can run it. CloakBrowser profiles on one computer can be linked to each other.",
+          description: "Chromium profiles only. aliasmode (AliasMode Chromium 155) is the default where this computer can run it. CloakBrowser profiles on one computer can be linked to each other.",
         },
         screen: { type: "string" },
         proxy: {

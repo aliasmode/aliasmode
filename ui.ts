@@ -1310,7 +1310,7 @@ export async function handleUiRequest(
     // Create a new profile: unique id → unique seed → unique fingerprint/UA.
     try {
       const input = (await req.json()) as NewProfileInput;
-      if (remote && input.chromiumRuntime) throw new Error("Chromium 155 beta is unavailable in legacy Remote mode");
+      if (remote && input.chromiumRuntime) throw new Error("AliasMode Chromium is unavailable in legacy Remote mode");
       if (remote) {
         const { id } = await remote.createProfile(input);
         return Response.json({ ok: true, id });

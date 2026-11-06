@@ -265,10 +265,10 @@ const PREFLIGHT_GUIDANCE = {
   firefox_arguments: "Firefox profiles cannot use Chromium launch arguments.",
   firefox_fonts_download: "The fonts for this profile's operating system could not be downloaded. Check your internet connection, then open the profile again.",
   cloakbrowser_download: "CloakBrowser could not be downloaded. Check your internet connection, then open the profile again.",
-  chromium155_host: "Chromium 155 beta requires Windows x64, Apple Silicon macOS, or Linux x64.",
-  chromium155_macos_on_windows: "Chromium 155 cannot open a macOS profile on Windows. Open it on a Mac, or set its operating system to Windows.",
+  chromium155_host: "AliasMode Chromium requires Windows x64, Apple Silicon macOS, or Linux x64.",
+  chromium155_macos_on_windows: "AliasMode Chromium cannot open a macOS profile on Windows. Open it on a Mac, or set its operating system to Windows.",
   chromium_sandbox: "This Linux computer blocks the Chrome sandbox. Run the AliasMode install command again. It asks for your password once to allow Chrome.",
-  chromium155_download: "Chromium 155 beta could not be downloaded. Check your internet connection, then open the profile again.",
+  chromium155_download: "AliasMode Chromium could not be downloaded. Check your internet connection, then open the profile again.",
   stored_identity: "The saved browser launch does not match this profile's current identity. Close the existing browser, then reopen the profile.",
   cookie_key_unreadable: "AliasMode did not open this profile. This Windows account cannot read its saved cookies " +
     "(they were saved on another computer or Windows account, or before a Windows password reset), and opening it would delete them. " +
@@ -1130,7 +1130,7 @@ export class Launcher {
       this.prefetchRuntime("CloakBrowser", this.ensureDownloadedCloakBrowserFn);
     }
     if (chromium.some((profile) => profile.chromiumRuntime) && supportsChromium155Host(this.hostPlatform, this.hostArch)) {
-      this.prefetchRuntime("Chromium 155 beta", this.ensureAliasmodeChromiumFn, (executable) => this.shareStoppedProfilesComponents(executable));
+      this.prefetchRuntime("AliasMode Chromium", this.ensureAliasmodeChromiumFn, (executable) => this.shareStoppedProfilesComponents(executable));
     }
   }
 
@@ -1195,7 +1195,7 @@ export class Launcher {
       try {
         binaryPath = await this.ensureAliasmodeChromiumFn(this.chromiumRuntimeRoot);
       } catch (error) {
-        this.log(`Chromium 155 beta install failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.log(`AliasMode Chromium install failed: ${error instanceof Error ? error.message : String(error)}`);
         throw new BrowserLaunchError("preflight", "chromium155_download");
       }
     } else if (engine === "chromium" && this.downloadsCloakBrowser()) {

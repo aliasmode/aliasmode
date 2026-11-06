@@ -264,7 +264,7 @@ export async function handleUserApi(
     }
     const input = inputFromCreateBody(body);
     try {
-      if (remote && input.chromiumRuntime) throw new Error("Chromium 155 beta is unavailable in legacy Remote mode");
+      if (remote && input.chromiumRuntime) throw new Error("AliasMode Chromium is unavailable in legacy Remote mode");
       if (remote) {
         // Hub owns id generation, fingerprint seed, and geoip timezone.
         const { id } = await remote.createProfile(input);

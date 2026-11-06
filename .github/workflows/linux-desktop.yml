@@ -435,7 +435,7 @@ jobs:
           opened "https://nobleproxy.com/t/aliasmode?src=sidebar-cart"
           click "$(wait_element xpath "//button[normalize-space()='New Profile']")"
           # A new Chrome profile on Linux starts on Chromium 155, and the help text must say so.
-          wait_element "css selector" 'button[aria-label="Chrome: Chromium 155 beta"]' >/dev/null
+          wait_element "css selector" 'button[aria-label="Chrome: AliasMode Chromium"]' >/dev/null
           click "$(wait_element "css selector" 'a[href*="src=profile-dialog"]')"
           opened "https://nobleproxy.com/t/aliasmode?src=profile-dialog"
           import -window root "$evidence/link-new-profile.png" || true

@@ -76,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/aliasmode/aliasmode/main/scripts/in
 
 The script downloads the newest macOS build for the Mac's processor from GitHub Releases, verifies its published SHA-256 and its code signature seal, and installs `AliasMode.app` into Applications. Each release also has a `.dmg` for each processor (`_aarch64` for Apple Silicon, `_x64` for Intel). The beta is not notarized by Apple, so an app that comes from the `.dmg` needs approval in **System Settings → Privacy & Security → Open Anyway**.
 
-New profiles made on macOS use AliasMode Firefox. New Chromium profiles use the Chromium 155 beta on Apple Silicon and CloakBrowser on Intel, because Chromium 155 has no Intel Mac build. A CloakBrowser profile opens on macOS with the macOS build of CloakBrowser (Chrome 145), which the app downloads on first use. The app updates itself from the dashboard, with the same signed update check as the Windows app. Remote MCP hosting needs the Windows app.
+New profiles made on macOS use AliasMode Firefox. New Chromium profiles use AliasMode Chromium on Apple Silicon and CloakBrowser on Intel, because AliasMode Chromium has no Intel Mac build. A CloakBrowser profile opens on macOS with the macOS build of CloakBrowser (Chrome 145), which the app downloads on first use. The app updates itself from the dashboard, with the same signed update check as the Windows app. Remote MCP hosting needs the Windows app.
 
 Packaging requires a Mac, Bun, and the Rust toolchain. It builds for the Mac's own processor:
 
@@ -94,7 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/aliasmode/aliasmode/main/scripts/in
 
 The script downloads the newest Linux build from GitHub Releases, verifies its published SHA-256, installs the app into `~/.local/share/aliasmode`, and adds AliasMode to the app menu. It asks for your password once (sudo) when the computer misses WebKitGTK 4.1 or a library that the browsers need, and on Ubuntu 23.10 or newer to let the Chrome sandbox start through an AppArmor profile.
 
-New profiles use AliasMode Firefox. Chromium profiles use the Chromium 155 beta or CloakBrowser (Chrome 146), which the app downloads on first use. The app updates itself from the dashboard, with the same signed update check as the Windows and macOS apps.
+New profiles use AliasMode Firefox. Chromium profiles use AliasMode Chromium or CloakBrowser (Chrome 146), which the app downloads on first use. The app updates itself from the dashboard, with the same signed update check as the Windows and macOS apps.
 
 Packaging requires Linux x64, Bun, the Rust toolchain and the WebKitGTK 4.1 development package:
 

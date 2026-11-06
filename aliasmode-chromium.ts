@@ -103,7 +103,7 @@ interface PinnedRuntime {
 function chromium155(platform: NodeJS.Platform): PinnedRuntime {
   const build = chromiumBuild(platform);
   return {
-    label: "Chromium 155",
+    label: "AliasMode Chromium 155",
     runtime: "aliasmode",
     dir: build.dir,
     url: build.url,
