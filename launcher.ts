@@ -4034,7 +4034,7 @@ export class Launcher {
         if (componentsDir) await this.shareComponents(profileId, componentsDir);
       })
       // Nothing awaits this after stop() returns, and an unhandled rejection ends the sidecar.
-      .catch((error) => this.log(`${profileId}: post-stop cache cleanup failed (${error instanceof Error ? error.name : "error"})`))
+      .catch((error) => this.log(`${profileId}: post-stop cache cleanup failed: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => {
         if (this.cacheClears.get(profileId) === clearing) this.cacheClears.delete(profileId);
       });

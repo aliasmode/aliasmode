@@ -2482,6 +2482,7 @@ async function runCloudLauncherSmoke(paths: StatePaths, rest: string[]): Promise
   } finally {
     await coordinator.releaseAll(true).catch(() => false);
     await launcher.stop(profileId).catch(() => false);
+    await launcher.cacheCleanupSettled(profileId);
     smokeProxy?.close?.();
     queue.close();
     store.close();
