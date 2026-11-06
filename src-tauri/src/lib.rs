@@ -54,7 +54,19 @@ fn windows_acceptance_browser_args(enabled: bool, debug_port: Option<&str>) -> O
 }
 
 fn allowed_external_url(url: &str) -> bool {
-    ALLOWED_EXTERNAL_URLS.contains(&url) || proxy_offer_url(url)
+    ALLOWED_EXTERNAL_URLS.contains(&url) || proxy_offer_url(url) || stripe_checkout_url(url)
+}
+
+/// A wallet top-up by card opens the Stripe Checkout page that AliasMode Cloud created.
+/// Only that host, with plain path and fragment characters, so no query can redirect elsewhere.
+fn stripe_checkout_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://checkout.stripe.com/") else {
+        return false;
+    };
+    (1..=2000).contains(&rest.len())
+        && rest
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_-.#%=+~".contains(&byte))
 }
 
 /// The proxy offer link can name the button that was clicked, a quantity and the app language.
@@ -298,6 +310,7 @@ mod tests {
             "https://nobleproxy.com/t/aliasmode?src=proxies-no-proxy&qty=12",
             "https://nobleproxy.com/t/aliasmode?src=profile-dialog&lang=zh-CN",
             "https://nobleproxy.com/t/aliasmode?src=import-no-proxy&qty=3&lang=ru-RU",
+            "https://checkout.stripe.com/c/pay/cs_test_a1B2c3D4e5#fidkdWxOYHwnPyd1blpxYHZxWjA0SmZ%2FPWBWfQ%3D%3D",
         ] {
             assert!(allowed_external_url(url));
         }
@@ -320,6 +333,15 @@ mod tests {
             "https://nobleproxy.com/t/another-campaign",
             "https://example.com/t/aliasmode",
             "https://xreacher.com/?utm_source=aliasmode&utm_medium=app&utm_campaign=outreach&utm_content=profile-editor&profile=example",
+            "https://checkout.stripe.com/",
+            "http://checkout.stripe.com/c/pay/cs_test_a1",
+            "https://checkout.stripe.com.example.com/c/pay/cs_test_a1",
+            "https://checkout.stripe.com@example.com/c/pay/cs_test_a1",
+            "https://checkout.stripe.com/c/pay/cs_test_a1?redirect=https://example.com",
+            "https://checkout.stripe.com/c/pay/cs test",
+            "https://checkout.stripe.com/c/pay/cs_test\\@example.com",
+            "https://dashboard.stripe.com/c/pay/cs_test_a1",
+            "https://stripe.com/c/pay/cs_test_a1",
         ] {
             assert!(!allowed_external_url(url));
         }

@@ -1207,6 +1207,51 @@ export async function handleUiRequest(
     }
   }
 
+  if (pathname === "/ui/api/cloud-store" && (req.method === "GET" || req.method === "POST")) {
+    if (!options.cloudConnection) return noStoreJson({ ok: false, error: "AliasMode Cloud connection is unavailable" }, 503);
+    const cloud = options.cloudConnection.client;
+    try {
+      if (req.method === "GET") {
+        const [wallet, catalog, proxies] = await Promise.all([cloud.getWallet(), cloud.getProxyCatalog(), cloud.listProxyOrders()]);
+        return noStoreJson({ ok: true, available: true, wallet, catalog, orders: proxies.orders ?? [] });
+      }
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+      const body = await req.json() as Record<string, unknown>;
+      const text = (value: unknown) => typeof value === "string" && value ? value : null;
+      const count = (value: unknown) => Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+      if (body.action === "deposit") {
+        const amountCents = count(body.amountCents);
+        if (!amountCents || (body.method !== "card" && body.method !== "crypto")) return noStoreJson({ ok: false, error: "Enter an amount and a payment method" }, 400);
+        return noStoreJson({ ok: true, deposit: await cloud.createDeposit({ amountCents, method: body.method }) });
+      }
+      if (body.action === "deposit-status") {
+        const depositId = text(body.depositId);
+        if (!depositId) return noStoreJson({ ok: false, error: "depositId is required" }, 400);
+        return noStoreJson({ ok: true, deposit: await cloud.getDeposit(depositId) });
+      }
+      if (body.action === "purchase") {
+        const type = text(body.type), country = text(body.country), quantity = count(body.quantity), idempotencyKey = text(body.idempotencyKey);
+        if (!type || !country || !quantity || !idempotencyKey) return noStoreJson({ ok: false, error: "Choose a proxy type, country and quantity" }, 400);
+        return noStoreJson({ ok: true, purchase: await cloud.purchaseProxies({ type, country, quantity, idempotencyKey }) });
+      }
+      if (body.action === "auto-renew") {
+        const orderId = text(body.orderId);
+        if (!orderId || typeof body.enabled !== "boolean") return noStoreJson({ ok: false, error: "orderId and enabled are required" }, 400);
+        await cloud.setProxyAutoRenew(orderId, body.enabled);
+        return noStoreJson({ ok: true });
+      }
+      return noStoreJson({ ok: false, error: "unknown Cloud store action" }, 400);
+    } catch (error) {
+      // An older Cloud has no wallet or store yet: the app keeps the outside offer link.
+      if (req.method === "GET" && error instanceof CloudApiError && error.status === 404) return noStoreJson({ ok: true, available: false });
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 400;
+      return noStoreJson({ ok: false, error: msg(error), ...(error instanceof CloudApiError ? { code: error.code } : {}) }, status);
+    }
+  }
+
   if (options.appConfig?.read().mode === "cloud" && !remote && !options.cloudBrowser) {
     return Response.json(
       { ok: false, error: "AliasMode Cloud authentication is required" },

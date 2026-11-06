@@ -33,6 +33,7 @@ export type CloudErrorCode =
   | "version_conflict"
   | "validation_failed"
   | "rate_limited"
+  | "insufficient_balance"
   | "internal_error";
 
 export interface CloudError {
@@ -677,6 +678,121 @@ export interface ListPublishedScriptsResponse {
   ok: true;
   scripts: PublishedScriptSummary[];
   nextOffset: number | null;
+}
+
+// Wallet and proxy store. Amounts are integer USD cents.
+export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment";
+export type DepositMethod = "card" | "crypto";
+export type DepositStatus = "pending" | "paid" | "expired" | "failed";
+
+export interface WalletEntry {
+  id: string;
+  amountCents: number;
+  kind: WalletEntryKind;
+  createdAt: string;
+  description?: string;
+}
+
+export interface PendingDeposit {
+  depositId: string;
+  amountCents: number;
+  method: DepositMethod;
+  status: DepositStatus;
+  expiresAt?: string;
+}
+
+export interface WalletResponse {
+  balanceCents: number;
+  entries: WalletEntry[];
+  pendingDeposits: PendingDeposit[];
+}
+
+export interface CryptoPaymentMethod {
+  id: string;
+  coin: string;
+  network: string;
+  label: string;
+  /** Exact amount to send, as a decimal string with every digit. */
+  amount: string;
+  address: string;
+  paymentUri: string;
+}
+
+export interface CreateDepositRequest {
+  amountCents: number;
+  method: DepositMethod;
+}
+
+export interface CreateDepositResponse {
+  depositId: string;
+  amountCents: number;
+  method: DepositMethod;
+  status: "pending";
+  expiresAt: string;
+  card?: { checkoutUrl: string };
+  crypto?: { methods: CryptoPaymentMethod[] };
+}
+
+export interface DepositStatusResponse {
+  depositId: string;
+  amountCents: number;
+  method: DepositMethod;
+  status: DepositStatus;
+  paidAt?: string;
+  expiresAt?: string;
+  crypto?: { methods: CryptoPaymentMethod[] };
+}
+
+export interface ProxyCatalogProduct {
+  type: string;
+  label: string;
+  countries: Array<{ code: string; name: string }>;
+  tiers: Array<{ minQty: number; unitPriceCents: number }>;
+}
+
+export interface ProxyCatalogResponse {
+  products: ProxyCatalogProduct[];
+}
+
+export interface PurchasedProxy {
+  id: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  protocol: string;
+  country: string;
+}
+
+export interface ProxyPurchaseRequest {
+  type: string;
+  country: string;
+  quantity: number;
+  idempotencyKey: string;
+}
+
+export interface ProxyPurchaseResponse {
+  purchaseId: string;
+  status: "active" | "pending" | "needs_review" | "failed";
+  chargedCents: number;
+  orderId?: string;
+  expiresAt?: string;
+  proxies?: PurchasedProxy[];
+}
+
+export interface ProxyOrder {
+  orderId: string;
+  type: string;
+  country: string;
+  quantity: number;
+  expiresAt: string;
+  autoRenew: boolean;
+  renewalStatus?: "ok" | "renewal_failed";
+  proxies: PurchasedProxy[];
+}
+
+export interface ListProxyOrdersResponse {
+  orders: ProxyOrder[];
 }
 
 export type CloudResult<T> = T | CloudError;

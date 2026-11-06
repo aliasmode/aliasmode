@@ -56,6 +56,14 @@ import {
   type PublishScriptInput,
   type PublishedScriptsQuery,
   type ListPublishedScriptsResponse,
+  type WalletResponse,
+  type CreateDepositRequest,
+  type CreateDepositResponse,
+  type DepositStatusResponse,
+  type ProxyCatalogResponse,
+  type ProxyPurchaseRequest,
+  type ProxyPurchaseResponse,
+  type ListProxyOrdersResponse,
 } from "./contracts/cloud-v1.ts";
 
 export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -450,6 +458,34 @@ export class CloudClient {
   private forgetRoster(): void {
     this.profileRoster = undefined;
     this.rosterInFlight = undefined;
+  }
+
+  getWallet(): Promise<WalletResponse> {
+    return this.call("/wallet", { cache: "no-store" });
+  }
+
+  createDeposit(request: CreateDepositRequest): Promise<CreateDepositResponse> {
+    return this.call("/wallet/deposits", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  getDeposit(depositId: string): Promise<DepositStatusResponse> {
+    return this.call(`/wallet/deposits/${encodeURIComponent(depositId)}`, { cache: "no-store" });
+  }
+
+  getProxyCatalog(): Promise<ProxyCatalogResponse> {
+    return this.call("/proxies/catalog", { cache: "no-store" });
+  }
+
+  purchaseProxies(request: ProxyPurchaseRequest): Promise<ProxyPurchaseResponse> {
+    return this.call("/proxies/purchases", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  listProxyOrders(): Promise<ListProxyOrdersResponse> {
+    return this.call("/proxies", { cache: "no-store" });
+  }
+
+  setProxyAutoRenew(orderId: string, enabled: boolean): Promise<unknown> {
+    return this.call(`/proxies/orders/${encodeURIComponent(orderId)}/auto-renew`, { method: "POST", body: JSON.stringify({ enabled }) });
   }
 
   listProfileProxies(signal?: AbortSignal): Promise<ListProfileProxiesResponse> {

@@ -69,7 +69,14 @@
     "trash": "POST /v1/profiles/:id/trash",
     "restore": "POST /v1/profiles/:id/restore",
     "purge": "DELETE /v1/profiles/:id/purge",
-    "events": "POST /v1/events"
+    "events": "POST /v1/events",
+    "wallet": "GET /v1/wallet",
+    "deposits": "POST /v1/wallet/deposits (owner only)",
+    "deposit": "GET /v1/wallet/deposits/:id",
+    "proxyCatalog": "GET /v1/proxies/catalog",
+    "proxyPurchases": "POST /v1/proxies/purchases (owner only, idempotencyKey)",
+    "proxyOrders": "GET /v1/proxies",
+    "proxyOrderAutoRenew": "POST /v1/proxies/orders/:id/auto-renew (owner only)"
   },
   "errorCodes": [
     "authentication_required",
@@ -87,6 +94,7 @@
     "version_conflict",
     "validation_failed",
     "rate_limited",
+    "insufficient_balance",
     "internal_error"
   ],
   "analyticsEvents": [
