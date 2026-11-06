@@ -30,8 +30,8 @@ jobs:
       matrix:
         include:
           # arch is the file name part of the release files, as Tauri names a .dmg.
-          - { arch: aarch64, runner: macos-15, artifact: aliasmode-macos-arm64, chrome: AliasMode Chromium, chrome_runtime: chromium-155 }
-          # Upstream has no Intel Mac build of Chromium 155, so Chrome profiles on an Intel Mac use CloakBrowser.
+          - { arch: aarch64, runner: macos-15, artifact: aliasmode-macos-arm64, chrome: AliasMode Chromium, chrome_runtime: chromium-155.0.8059.85-aliasmode.5 }
+          # There is no Intel Mac build of Chromium 155, so Chrome profiles on an Intel Mac use CloakBrowser.
           - { arch: x64, runner: macos-15-intel, artifact: aliasmode-macos-x64, chrome: CloakBrowser, chrome_runtime: cloakbrowser- }
     env:
       ARCH: ${{ matrix.arch }}

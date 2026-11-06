@@ -74,7 +74,7 @@ test("Firefox setup uses the exact approved public release archive for each host
   for (const [platform, arch] of [["linux", "x64"], ["darwin", "arm64"], ["darwin", "x64"], ["win32", "x64"]] as const) {
     const archive = expected[`${platform}-${arch}` as keyof typeof expected];
     expect(firefoxReleaseArchiveUrl(firefoxBuildForHost(platform, arch))).toBe(
-      `https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-156.0.1-beta.36-r12/${archive}`,
+      `https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-156.0.1-beta.36-r13/${archive}`,
     );
   }
 });
@@ -91,7 +91,7 @@ test("Firefox setup downloads, verifies, and pins the host release without envir
     },
   });
 
-  expect(requested).toBe("https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-156.0.1-beta.36-r12/aliasmode-156.0.1-beta.36-mac.arm64.zip");
+  expect(requested).toBe("https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-156.0.1-beta.36-r13/aliasmode-156.0.1-beta.36-mac.arm64.zip");
   expect(result.sha256).toBe(f.build.executableSha256);
   expect(existsSync(join(f.cwd, ".env"))).toBe(false);
   expect(readdirSync(f.cwd).some((entry) => entry.startsWith(".aliasmode-firefox-download-"))).toBe(false);

@@ -1451,8 +1451,9 @@ export class Launcher {
     // Headful matches AdsPower (real windows) and avoids the headless signal.
     if (headless) args.push("--headless=new");
     if (restoreLastSession) args.push("--restore-last-session");
-    // On macOS the browser outlives its last window anyway. Elsewhere only AliasMode's own builds can.
-    if (keepAlive && this.hostPlatform !== "darwin" && profile.chromiumRuntime && ALIASMODE_CHROMIUM_KEEP_ALIVE) {
+    // Only AliasMode's own builds keep running after the last window closes with a usable browser
+    // context. On macOS the process stays without it, but reading cookies then fails.
+    if (keepAlive && profile.chromiumRuntime && ALIASMODE_CHROMIUM_KEEP_ALIVE) {
       args.push("--aliasmode-keep-alive");
     }
     // Relayed proxies use a loopback HTTP endpoint. Everything else uses the
@@ -1557,16 +1558,15 @@ export class Launcher {
   }
 
   /**
-   * AliasMode's own Chromium 155 builds (Windows, Linux) show --fingerprint-webrtc-ip behind the HTTP proxy
-   * they always get. Upstream's Mac build opens no WebRTC UDP socket there, so the switch shows nothing.
+   * AliasMode's own Chromium 155 builds show --fingerprint-webrtc-ip behind the HTTP proxy they always get.
    */
   private chromiumWebRtcIp(profile: Profile): boolean {
-    return this.hostPlatform !== "darwin" && !!profile.proxy && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WEBRTC_IP;
+    return !!profile.proxy && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WEBRTC_IP;
   }
 
-  /** AliasMode's own Chromium 155 builds (Windows, Linux) take the window label as a launch switch instead of a page script. */
+  /** AliasMode's own Chromium 155 builds take the window label as a launch switch instead of a page script. */
   private nativeWindowLabel(profile: Profile): boolean {
-    return this.hostPlatform !== "darwin" && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WINDOW_LABEL;
+    return !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WINDOW_LABEL;
   }
 
   private startWindowFit(profile: Profile, ws: string, sample: FingerprintSample | null): void {
@@ -2025,7 +2025,7 @@ export class Launcher {
 
     const userDataDir = this.userDataDir(profileId);
     const existingUserDataDir = existsSync(userDataDir);
-    const personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
+    let personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
     mkdirSync(userDataDir, { recursive: true });
 
     // A directory that did not exist before this launch cannot have a foreign
@@ -2227,6 +2227,9 @@ export class Launcher {
         this.store.setHardware(profileId, { cores: drawnCores! });
         profile = this.store.getProfile(profileId)!;
         profileSnapshot = JSON.stringify(profile);
+        // The browser already shows these cores, so the launch is recorded with them; otherwise
+        // the next identity check (Cloud's session restore, a reattach) reads it as a changed persona.
+        personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
       }
 
       // Only a caller that navigates by itself (Cloud) and the Windows session launch use a late
@@ -2269,10 +2272,9 @@ export class Launcher {
       // Label the window so the operator can tell which account this browser is
       // among many open profiles (the cue AdsPower's panel gave). Registered
       // before navigation so the title script is in place when the platform page
-      // loads. Strictly best-effort — never fail or stall a launch on it. Chromium 155 on
-      // Windows got the label as a launch switch, so its pages get no title script. On Mac no
-      // Chromium build has such a switch, and a title script is visible to pages, so Chromium 155
-      // and CloakBrowser windows there go unlabeled.
+      // loads. Strictly best-effort — never fail or stall a launch on it. Chromium 155
+      // got the label as a launch switch, so its pages get no title script. On Mac CloakBrowser has
+      // no such switch, and a title script is visible to pages, so its windows there go unlabeled.
       const pageLabelHidden = this.hostPlatform === "darwin";
       if (!this.skipDefaultWindowLabel && !this.nativeWindowLabel(profile) && !pageLabelHidden) {
         try {
@@ -3569,6 +3571,11 @@ export class Launcher {
   /** Start a proxy exit lookup early (Cloud does while its open request runs); start() reuses it. */
   prefetchProxyExit(proxy: ProxySpec): void {
     void this.lookupExitLocationFn?.(proxy).catch(() => null);
+  }
+
+  /** Resolves when the post-stop cache delete that runs on after stop() has ended. */
+  async cacheCleanupSettled(profileId: string): Promise<void> {
+    await this.cacheClears.get(profileId);
   }
 
   /** Block destructive profile deletion while any owned lifecycle (or post-stop cache delete) can still use its data directory. */

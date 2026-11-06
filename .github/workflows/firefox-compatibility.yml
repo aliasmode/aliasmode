@@ -69,15 +69,15 @@ permissions:
   actions: read
   contents: read
 
-# The aliasmode/aliasmode-firefox build.yml run under test (release aliasmode-runtime-156.0.1-beta.36-r12).
+# The aliasmode/aliasmode-firefox build.yml run under test (release aliasmode-runtime-156.0.1-beta.36-r13).
 # The macOS and Linux jobs install the archive of the release that the app pins; its archives are
 # that run's archives, without fonts of other operating systems (the app downloads font packs).
 env:
-  ALIASMODE_FIREFOX_RELEASE: aliasmode-runtime-156.0.1-beta.36-r12
-  ALIASMODE_FIREFOX_BUILD_RUN_ID: "41635251097"
+  ALIASMODE_FIREFOX_RELEASE: aliasmode-runtime-156.0.1-beta.36-r13
+  ALIASMODE_FIREFOX_BUILD_RUN_ID: "42160047583"
   ALIASMODE_FIREFOX_BUILD_EVENT: workflow_dispatch
-  ALIASMODE_FIREFOX_BUILD_BRANCH: engine/156-lean-network
-  ALIASMODE_FIREFOX_BUILD_SHA: b4566a0f8e1203221f85763b71a0f6946dd713c8
+  ALIASMODE_FIREFOX_BUILD_BRANCH: fix/canvas-noise-audit
+  ALIASMODE_FIREFOX_BUILD_SHA: 95177e754072755e45338fa1db6a6b1901da62df
 
 jobs:
   windows:
@@ -380,6 +380,11 @@ jobs:
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --no-sandbox --state-root "$proof"
           else
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof"
+          fi
+          # A Cloud V3 payload on Apple Silicon must download and open AliasMode's own Mac Chromium 155 build.
+          if [[ "${{ matrix.platform }}" == "darwin" && "${{ matrix.architecture }}" == "arm64" ]]; then
+            bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --chromium-runtime aliasmode --headless --state-root "$proof/cloud-beta-state"
+            test -x "$proof/cloud-beta-state/runtimes/chromium-155.0.8059.85-aliasmode.5/Chromium.app/Contents/MacOS/Chromium"
           fi
           bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof"
           printf 'ALIASMODE_SOURCE_RUNTIME_ROOT=%s\n' "$proof" >> "$GITHUB_ENV"

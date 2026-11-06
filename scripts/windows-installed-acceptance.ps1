@@ -1266,7 +1266,7 @@ async def run(*, log, **_):
       if ($betaVersion.'User-Agent' -notmatch 'Chrome/155\.') {
         throw "Chromium 155 beta reported an unexpected browser version: $($betaVersion.'User-Agent')"
       }
-      $betaRuntime = Join-Path $appDataRoot "runtimes\chromium-155.0.8059.85-aliasmode.4"
+      $betaRuntime = Join-Path $appDataRoot "runtimes\chromium-155.0.8059.85-aliasmode.5"
       if (-not (Test-Path -LiteralPath (Join-Path $betaRuntime "155.0.8059.85.manifest") -PathType Leaf)) {
         throw "Chromium 155 beta runtime is missing its version manifest"
       }

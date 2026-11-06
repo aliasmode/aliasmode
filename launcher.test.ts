@@ -5271,6 +5271,8 @@ test("a Chromium 155 profile keeps the processor count of its first open", async
       watchWindowFit: () => ({ stop: () => {} }),
     });
     await launcher.start(profile.id);
+    // The launch is recorded with the kept count, so Cloud's identity check after the open passes.
+    await launcher.verifyRunningIdentity(profile.id);
     await launcher.stop(profile.id);
     return spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-hardware-concurrency="));
   };
@@ -5351,7 +5353,7 @@ test("Chromium 155 on a scaled Windows display reports the screen in CSS pixels,
   ]);
 });
 
-test("Chromium 155 on Windows names its window with a launch switch instead of a page title script", async () => {
+test("Chromium 155 names its window with a launch switch instead of a page title script", async () => {
   const launch = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
     const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), name: "sophie" };
@@ -5379,21 +5381,23 @@ test("Chromium 155 on Windows names its window with a launch switch instead of a
   // The engine adds the trailing space itself; Windows would strip it from a switch value.
   expect(native.switches).toEqual(["--aliasmode-window-label=sophie · #1 —"]);
   expect(native.scripted).toEqual([]);
-  // AliasMode's own Linux build takes the same switch.
-  expect((await launch("linux", "aliasmode")).switches).toEqual(["--aliasmode-window-label=sophie · #1 —"]);
+  // AliasMode's own Linux and Mac builds take the same switch.
+  for (const host of ["linux", "darwin"] as const) {
+    const own = await launch(host, "aliasmode");
+    expect(own.switches).toEqual(["--aliasmode-window-label=sophie · #1 —"]);
+    expect(own.scripted).toEqual([]);
+  }
   // CloakBrowser on Windows has no such switch, so it keeps the page script.
   const cloak = await launch("win32", "cloakbrowser");
   expect(cloak.switches).toEqual([]);
   expect(cloak.scripted).toEqual([cloak.label]);
-  // On Mac no Chromium build has the switch, and pages could read a title script.
-  for (const engine of ["aliasmode", "cloakbrowser"] as const) {
-    const mac = await launch("darwin", engine);
-    expect(mac.switches).toEqual([]);
-    expect(mac.scripted).toEqual([]);
-  }
+  // On Mac CloakBrowser has no switch, and pages could read a title script.
+  const mac = await launch("darwin", "cloakbrowser");
+  expect(mac.switches).toEqual([]);
+  expect(mac.scripted).toEqual([]);
 });
 
-test("a Cloud launch of Chromium 155 on Windows or Linux keeps the browser after its last window; other launches do not", async () => {
+test("a Cloud launch of Chromium 155 keeps the browser after its last window; other launches do not", async () => {
   const launch = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser", keepAliveWithoutWindows?: boolean) => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
@@ -5415,9 +5419,12 @@ test("a Cloud launch of Chromium 155 on Windows or Linux keeps the browser after
   };
   expect(await launch("win32", "aliasmode", true)).toBe(true);
   expect(await launch("linux", "aliasmode", true)).toBe(true);
+  // On macOS the process outlives its last window anyway, but reading cookies then needs the switch.
+  expect(await launch("darwin", "aliasmode", true)).toBe(true);
   expect(await launch("win32", "aliasmode")).toBe(false);
-  // macOS keeps every browser after its last window; CloakBrowser lacks the switch.
-  for (const [host, engine] of [["darwin", "aliasmode"], ["win32", "cloakbrowser"]] as const) {
+  expect(await launch("darwin", "aliasmode")).toBe(false);
+  // CloakBrowser lacks the switch.
+  for (const [host, engine] of [["darwin", "cloakbrowser"], ["win32", "cloakbrowser"]] as const) {
     expect(await launch(host, engine, true)).toBe(false);
   }
 });
@@ -5482,7 +5489,7 @@ test("a Windows profile of Chromium 155 on Linux gets the Windows font pack thro
     .rejects.toEqual(new BrowserLaunchError("preflight", "firefox_fonts_download"));
 });
 
-test("Chromium 155 on Windows and Linux shows the proxy exit IP to WebRTC; macOS and CloakBrowser do not", async () => {
+test("Chromium 155 shows the proxy exit IP to WebRTC; CloakBrowser does not", async () => {
   const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
   const launch = async (
     hostPlatform: NodeJS.Platform,
@@ -5531,9 +5538,10 @@ test("Chromium 155 on Windows and Linux shows the proxy exit IP to WebRTC; macOS
   expect(await launch("win32", "aliasmode", async () => "203.0.113.7", null))
     .toEqual({ asked: [], webrtc: ["--force-webrtc-ip-handling-policy=default_public_interface_only"] });
   expect((await launch("linux", "aliasmode", async () => "203.0.113.7")).webrtc).toEqual([policy, "--fingerprint-webrtc-ip=203.0.113.7"]);
-  // Upstream's Mac build and CloakBrowser lack the engine change. Their exit is asked
-  // for its timezone only, once.
-  for (const [host, engine] of [["darwin", "aliasmode"], ["win32", "cloakbrowser"]] as const) {
+  expect(await launch("darwin", "aliasmode", async () => "203.0.113.7"))
+    .toEqual({ asked: [proxy], webrtc: [policy, "--fingerprint-webrtc-ip=203.0.113.7"] });
+  // CloakBrowser lacks the engine change. Its exit is asked for its timezone only, once.
+  for (const [host, engine] of [["darwin", "cloakbrowser"], ["win32", "cloakbrowser"]] as const) {
     expect(await launch(host, engine, async () => "203.0.113.7")).toEqual({ asked: [proxy], webrtc: [policy] });
     expect(await launch(host, engine, async () => null)).toEqual({ asked: [proxy], webrtc: [policy] });
   }
