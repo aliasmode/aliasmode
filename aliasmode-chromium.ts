@@ -18,14 +18,14 @@ import { trackRuntimeDownload } from "./runtime-download.ts";
 // own directory, so a browser still running from an earlier build keeps its files.
 // A new build changes the version, the release tag, and each target's two SHA-256 values and archive size.
 const OWN_VERSION = "155.0.8059.85";
-const OWN_RELEASE = "aliasmode.4";
+const OWN_RELEASE = "aliasmode.5";
 const OWN_RELEASE_URL = `https://github.com/aliasmode/aliasmode-chromium/releases/download/v${OWN_VERSION}-${OWN_RELEASE}`;
 const WINDOWS_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-windows-x64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-windows-x64.zip`,
   dir: `chromium-${OWN_VERSION}-${OWN_RELEASE}`,
-  archiveSha256: "cfea275e4b7f3274b701e64c0483b46cbf6cd12ead9a6cfda6ff77b2680e7a23",
-  size: 203519527,
+  archiveSha256: "52ab2c6a616813bd95f5473fd73c492b7ee333ae4f0e57c4a366da956b2a7b8c",
+  size: 203517665,
   executable: "chrome.exe",
   executableSha256: "0ef4de1bef7c12534031318e07ac89fa7942916a3abc89057985aafefbca619f",
   // Pages read and draw at --force-device-scale-factor, and
@@ -58,10 +58,10 @@ const LINUX_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-linux-x64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-linux-x64.tar.zst`,
   dir: `chromium-${OWN_VERSION}-${OWN_RELEASE}`,
-  archiveSha256: "00981c9e79e80accabd5707b140cf710c68797b6f905e990393d2a1224121f98",
-  size: 198069298,
+  archiveSha256: "86e6c4304161ece6628ceb79eb6c9e5f57a148f5bec211753b8b4399319220d0",
+  size: 197916653,
   executable: "chrome",
-  executableSha256: "ee0bfec11c3da08f9ab8da0ef42f8b420cc13e80f389f09bcdc94fa582d3172a",
+  executableSha256: "a49eb6c62fe794d9cf32d14ddfd59731a96074af02e5563da7b7fc800ffce2f1",
   hostScale: false,
   windowLabel: true,
   webRtcIp: true,
