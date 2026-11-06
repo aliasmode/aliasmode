@@ -627,3 +627,32 @@ test("every profile save, single or in a batch, reaches the save hook", () => {
   expect(saved).toEqual(["hook0001", "hook0002"]);
   store.close();
 });
+
+test("pending cookies persist outside the profile identity and a launch clears only the ones it set", () => {
+  const store = memStore();
+  store.upsertProfile(parseExport(SAMPLE).profiles[0]!);
+  const profileBefore = store.getProfile("k1d0cd11");
+  const first = { name: "auth_token", value: "a1", domain: ".x.com", path: "/" };
+  expect(store.addPendingCookies("k1d0cd11", [first, { name: "ct0", value: "c1", domain: ".x.com", path: "/" }])).toBe(2);
+  const applied = store.getPendingCookies("k1d0cd11");
+  // Added while that launch set the others: replaces the same key, stays pending.
+  store.addPendingCookies("k1d0cd11", [{ ...first, value: "a2" }]);
+  store.clearPendingCookies("k1d0cd11", applied);
+  expect(store.getPendingCookies("k1d0cd11")).toEqual([{ ...first, value: "a2" }]);
+  expect(store.pendingCookieCounts()).toEqual(new Map([["k1d0cd11", 1]]));
+  // Profile edits never touch pending cookies, and the profile does not carry them.
+  store.upsertProfile({ ...store.getProfile("k1d0cd11")!, name: "renamed" });
+  expect(store.getPendingCookies("k1d0cd11")).toHaveLength(1);
+  expect(store.getProfile("k1d0cd11")).toEqual({ ...profileBefore!, name: "renamed" });
+  expect(() => store.addPendingCookies("missing", [first])).toThrow("Unknown profile");
+});
+
+test("a launch row keeps the identity the browser was launched with", () => {
+  const store = memStore();
+  store.upsertProfile(parseExport(SAMPLE).profiles[0]!);
+  const persona = { proxy: { type: "http" as const, host: "1.2.3.4", port: "8080", user: "u", pass: "p" }, timezone: "Europe/Paris", screenWidth: 1680 };
+  store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1, persona });
+  expect(store.getLaunch("k1d0cd11")!.persona).toEqual(persona);
+  store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
+  expect(store.getLaunch("k1d0cd11")!.persona).toBeUndefined();
+});

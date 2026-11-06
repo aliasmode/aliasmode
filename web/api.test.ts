@@ -1,7 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   acceptCloudLegal,
-  addProfileCookie,
+  addProfileCookies,
   CloudSessionRestoreError,
   cloudSessionContextReady,
   createCloudConnector,
@@ -152,21 +152,24 @@ test("dashboard roster carries health and group metadata while tolerating an old
   expect(legacy.groups).toEqual([]);
 });
 
-test("dashboard adds one cookie through a same-origin JSON request", async () => {
+test("dashboard adds cookies to selected profiles through a same-origin JSON request", async () => {
   let input: RequestInfo | URL | undefined;
   let init: RequestInit | undefined;
   globalThis.fetch = (async (nextInput: RequestInfo | URL, nextInit?: RequestInit) => {
     input = nextInput;
     init = nextInit;
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, live: 1, nextStart: 1 });
   }) as unknown as typeof fetch;
 
   const cookie = { name: "session", value: "private", domain: "example.com", path: "/" };
-  await expect(addProfileCookie("profile/id", cookie)).resolves.toEqual({ ok: true });
-  expect(input).toBe("/ui/api/profiles/profile%2Fid/cookies");
+  await expect(addProfileCookies(["profile/id", "b"], cookie)).resolves.toEqual({ ok: true, live: 1, nextStart: 1 });
+  expect(input).toBe("/ui/api/profiles/cookies");
   expect(init?.method).toBe("POST");
   expect(init?.headers).toEqual({ "Content-Type": "application/json" });
-  expect(JSON.parse(String(init?.body))).toEqual(cookie);
+  expect(JSON.parse(String(init?.body))).toEqual({ ids: ["profile/id", "b"], ...cookie });
+
+  await addProfileCookies(["a"], { text: "[]" });
+  expect(JSON.parse(String(init?.body))).toEqual({ ids: ["a"], text: "[]" });
 });
 
 test("dashboard checks an unsaved proxy through same-origin JSON", async () => {

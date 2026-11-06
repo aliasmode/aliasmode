@@ -146,6 +146,77 @@ export function normalizeCookies(raw: unknown): { cookies: CookieRecord[]; strip
   return { cookies, stripped };
 }
 
+/** Same name, domain, path and partition: the browser keeps one of these. */
+function cookieKey(cookie: CookieRecord): string {
+  return JSON.stringify([cookie.name, cookie.domain.toLowerCase(), cookie.path || "/", cookie.partitionKey ?? ""]);
+}
+
+/** Add cookies to a list. An added cookie replaces an older one with the same key. */
+export function mergeCookies(existing: CookieRecord[], added: CookieRecord[]): CookieRecord[] {
+  const merged = new Map(existing.map((cookie) => [cookieKey(cookie), cookie]));
+  for (const cookie of added) {
+    merged.delete(cookieKey(cookie));
+    merged.set(cookieKey(cookie), cookie);
+  }
+  return [...merged.values()];
+}
+
+/** Firefox has no Chromium cookie partitions; it gets the cookies without those fields. */
+export function cookiesForEngine(cookies: CookieRecord[], engine: "chromium" | "firefox"): CookieRecord[] {
+  if (engine === "chromium") return cookies;
+  return cookies.map(({ partitionKey: _partitionKey, _crHasCrossSiteAncestor: _ancestor, ...cookie }) => cookie);
+}
+
+/**
+ * Parse pasted cookies: a JSON cookie export (an array, `{ cookies: [...] }` or one cookie, in the
+ * AdsPower / EditThisCookie / Playwright shapes the importer reads) or a Netscape cookies.txt.
+ */
+export function parseCookieText(text: string): CookieRecord[] {
+  const input = text.trim();
+  let raw: unknown[];
+  if (input.startsWith("[") || input.startsWith("{")) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(input); } catch { throw new Error("cookie JSON is invalid"); }
+    const value = parsed as { cookies?: unknown; name?: unknown };
+    raw = Array.isArray(parsed) ? parsed
+      : Array.isArray(value?.cookies) ? value.cookies
+        : value && typeof value === "object" && typeof value.name === "string" ? [parsed]
+          : [];
+  } else {
+    raw = [];
+    for (const line of input.split(/\r?\n/)) {
+      const httpOnly = line.startsWith("#HttpOnly_");
+      const body = httpOnly ? line.slice("#HttpOnly_".length) : line;
+      if (!body.trim() || body.startsWith("#")) continue;
+      const fields = body.split("\t");
+      // Some exporters drop the tab before an empty value.
+      if (fields.length < 6) throw new Error("cookies.txt lines need 7 tab-separated fields");
+      const [host, subdomains, path, secure, expires, name, ...value] = fields;
+      // A cookie for subdomains too is a domain cookie: its domain starts with a dot.
+      const domain = subdomains!.toUpperCase() === "TRUE" && !host!.startsWith(".") ? `.${host}` : host;
+      raw.push({
+        domain, path, name, value: value.join("\t"), httpOnly,
+        secure: secure!.toUpperCase() === "TRUE",
+        ...(Number(expires) > 0 ? { expires: Number(expires) } : { session: true }),
+      });
+    }
+  }
+  // Browsers keep a cookie at most 400 days. Chromium shortens a longer one; Firefox drops it without an error.
+  const latest = Math.floor(Date.now() / 1000) + 400 * 86_400;
+  const cookies = normalizeCookies(raw).cookies.map((cookie) => {
+    if (cookie.expires === undefined) return cookie;
+    // An expiry past year 9999 in seconds is in milliseconds; the browser takes seconds.
+    const expires = cookie.expires > 253_402_300_799 ? Math.floor(cookie.expires / 1000) : cookie.expires;
+    return { ...cookie, expires: Math.min(expires, latest) };
+  }).filter((cookie) =>
+    !/[\s\x00-\x1f\x7f;=]/.test(cookie.name) && !/[\x00-\x1f\x7f;]/.test(cookie.value) && cookie.path.startsWith("/") &&
+    // Chromium refuses the whole batch for a cookie that breaks its name prefix rules.
+    (!cookie.name.startsWith("__Secure-") || cookie.secure) &&
+    (!cookie.name.startsWith("__Host-") || (cookie.secure && cookie.path === "/" && !cookie.domain.startsWith("."))));
+  if (!cookies.length) throw new Error("no valid cookies found");
+  return cookies;
+}
+
 /** Parse AdsPower's `host:port:user:pass` proxy string. Empty/blank → null. */
 export function parseProxy(type: string, proxy: string): ProxySpec | null {
   return parseProxySpec(type, proxy);

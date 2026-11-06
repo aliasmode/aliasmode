@@ -9,7 +9,7 @@
  * cookie values, or proxy credentials. Same rule the `inspect` command follows.
  */
 
-import { BrowserLaunchError, type Launcher } from "./launcher.ts";
+import { BrowserLaunchError, defaultSetCookies, launchIdentityChanged, type Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
 import type { AutomationHealthStatus } from "./remote-types.ts";
 import type { RemoteCoordinator } from "./remote.ts";
@@ -40,7 +40,7 @@ import { buildNewProfile, defaultProfileEngine, type NewProfileInput } from "./c
 import { firefoxGraphicsRenderer } from "./firefox-config.ts";
 import { attachTimezones, lookupExitLocation, type FetchLike } from "./geoip.ts";
 import { localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
-import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictTimezone, parseStrictCustomNo, parseStrictCores, parseStrictSeed, decodeText } from "./parse.ts";
+import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictTimezone, parseStrictCustomNo, parseStrictCores, parseStrictSeed, decodeText, parseCookieText, cookiesForEngine } from "./parse.ts";
 import type { ProfileExport } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
@@ -56,7 +56,6 @@ import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { normalizeProxySpec, proxyHostPort, proxyLegacyString, type ProxyInput } from "./proxy.ts";
 import { convertMobilePersonaToDesktop, editedProfileHardware, isMobileUserAgent } from "./fingerprint.ts";
 import { setFirefoxScreen, syncFirefoxTimezone } from "./firefox-config.ts";
-import { addBrowserCookie } from "./session.ts";
 import { join, resolve, dirname } from "node:path";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { validAgentAuthorization } from "./agent-control.ts";
@@ -102,6 +101,10 @@ export interface UiProfile {
   /** Operator-chosen "custom NO.", or "" when the serial is used instead. */
   customNo: string;
   running: boolean;
+  /** The open browser runs with an older proxy or fingerprint than the saved one. */
+  restartPending?: boolean;
+  /** Cookies added while the profile was closed; the next start sets them. */
+  pendingCookieCount?: number;
   debugPort?: number;
   startedAt?: number;
   healthStatus?: AutomationHealthStatus;
@@ -144,6 +147,7 @@ function openResponse(
 export function listUiProfiles(store: ProfileStore): UiProfile[] {
   const launches = new Map(store.listLaunches().map((l) => [l.profileId, l]));
   const meta = store.listProfileMeta();
+  const pendingCookies = store.pendingCookieCounts();
   return store.listProfiles().map((p) => {
     const l = launches.get(p.id);
     return {
@@ -167,6 +171,8 @@ export function listUiProfiles(store: ProfileStore): UiProfile[] {
       customNo: p.customNo ?? "",
       mobilePersona: isMobileUserAgent(p.ua),
       running: !!l,
+      ...(l && launchIdentityChanged(p, l) ? { restartPending: true } : {}),
+      ...(pendingCookies.get(p.id) ? { pendingCookieCount: pendingCookies.get(p.id) } : {}),
       ...(profileEngine(p) === "chromium" ? { debugPort: l?.debugPort } : {}),
       startedAt: l?.startedAt,
       // null when nothing was imported to check this profile against.
@@ -323,6 +329,27 @@ function normalizeCookieDomain(value: unknown): string | null {
   }
 }
 
+/** One cookie from the Add cookie form, or the reason it is invalid. */
+function singleCookie(body: Record<string, unknown>): CookieRecord | string {
+  const name = body.name;
+  const value = body.value;
+  const domain = normalizeCookieDomain(body.domain);
+  const path = body.path === undefined ? "/" : body.path;
+  if (typeof name !== "string" || !name || /[\s\x00-\x1f\x7f;=]/.test(name)) return "cookie name is invalid";
+  if (typeof value !== "string" || /[\x00-\x1f\x7f;]/.test(value)) return "cookie value is invalid";
+  if (!domain) return "cookie domain is invalid";
+  if (typeof path !== "string" || !path.startsWith("/")) return "cookie path must start with /";
+  return {
+    name,
+    value,
+    domain,
+    path,
+    expires: Math.floor(Date.now() / 1_000) + 31_536_000,
+    secure: true,
+    sameSite: "Lax",
+  };
+}
+
 function cloudCloseResponse(result: CloudBrowserCloseResult): Response {
   if (!result.closed) {
     return Response.json(
@@ -476,14 +503,11 @@ function profileEditView(p: Profile) {
   };
 }
 
-function fingerprintChanges(p: Profile, set: Record<string, unknown>): boolean {
-  const screen = "resolution" in set ? parseStrictResolution(set.resolution) : null;
-  return !!(screen && (screen.width !== p.screenWidth || screen.height !== p.screenHeight)) ||
-    ("platformOs" in set && parseStrictPlatformOs(set.platformOs) !== (p.platformOs ?? "")) ||
-    ("timezone" in set && parseStrictTimezone(set.timezone) !== p.timezone) ||
-    ("locale" in set && (normalizeProfileLocale(set.locale) ?? p.locale) !== p.locale) ||
-    ("cores" in set && parseStrictCores(set.cores) !== p.hardware?.cores) ||
-    ("fingerprintSeed" in set && parseStrictSeed(set.fingerprintSeed) !== p.fingerprintSeed);
+/** `{ restartRequired: true }` when the open browser runs with an older proxy or fingerprint than the saved one. */
+function restartRequired(store: ProfileStore, id: string): { restartRequired?: true } {
+  const launch = store.getLaunch(id);
+  const profile = launch ? store.getProfile(id) : null;
+  return profile && launchIdentityChanged(profile, launch) ? { restartRequired: true } : {};
 }
 
 /**
@@ -582,7 +606,8 @@ export interface UiRuntimeOptions {
   timezoneFetch?: FetchLike;
   proxyCheck?: (proxy: ProxySpec) => Promise<ProxyCheckResult>;
   extensionFetch?: ExtensionFetch;
-  addCookie?: (ws: string, cookie: CookieRecord) => Promise<void>;
+  /** Sets cookies in an open browser. Defaults to Playwright's addCookies. */
+  setCookies?: (ws: string, cookies: CookieRecord[]) => Promise<void>;
   /** Mode whose runtimes were wired when this process started. */
   runtimeMode?: "unconfigured" | "local" | "cloud";
 }
@@ -1293,7 +1318,8 @@ export async function handleUiRequest(
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
     (req.method === "POST" &&
-      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session|check-fingerprint)$/.test(pathname));
+      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session|check-fingerprint)$/.test(pathname)) ||
+    (pathname === "/ui/api/profiles/cookies" && req.method === "POST");
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
     (req.method === "POST" && /^\/ui\/api\/profiles\/[^/]+\/update$/.test(pathname));
@@ -1770,15 +1796,7 @@ export async function handleUiRequest(
         }
         return Response.json({ ok: errors.length === 0, updated, skipped, notFound, errors });
       }
-      const openProfiles = () => {
-        const liveIds = [...pending.keys()].filter((id) => !!store.getLaunch(id));
-        return liveIds.length === 0 ? null : Response.json(
-          { ok: false, error: `profile(s) ${liveIds.join(", ")} are currently open; no profiles were changed` },
-          { status: 409 },
-        );
-      };
-      const open = openProfiles();
-      if (open) return open;
+      // Open profiles change too. Their browsers keep the identity they launched with until the next start.
       // A new proxy gets its exit timezone. A failed lookup keeps the saved one.
       const located = [...proxyChanged]
         .map((id) => pending.get(id))
@@ -1803,8 +1821,6 @@ export async function handleUiRequest(
             syncFirefoxTimezone(p);
           }
         }
-        const opened = openProfiles();
-        if (opened) return opened;
       }
       store.upsertProfiles([...pending.values()]);
       updated = pending.size;
@@ -2024,13 +2040,7 @@ export async function handleUiRequest(
         return Response.json({ ok: false, error: "Chrome extensions are unavailable for Firefox profiles" }, { status: 400 });
       }
       if (add && !store.getExtension(extId)) return Response.json({ ok: false, error: "unknown extension" }, { status: 404 });
-      const liveIds = [...new Set(ids.filter((id) => !!store.getLaunch(id)))];
-      if (liveIds.length > 0) {
-        return Response.json(
-          { ok: false, error: `profile(s) ${liveIds.join(", ")} are currently open; no extension assignments were changed` },
-          { status: 409 },
-        );
-      }
+      // An open browser loads the change at its next start.
       return Response.json({ ok: true, updated: store.assignExtension(ids, extId, add) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
@@ -2050,46 +2060,30 @@ export async function handleUiRequest(
       const profile = store.getProfile(id);
       if (!profile) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
       if (profile.proxyError) return Response.json({ ok: false, error: "Fix or remove the invalid proxy before setting the timezone." }, { status: 400 });
-      if (store.getLaunch(id)) {
-        return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
-      }
       const location = await lookupExitLocation(profile.proxy, options.timezoneFetch);
       if (!location) return Response.json({ ok: false, error: "Could not determine the connection timezone. The saved timezone is unchanged." }, { status: 502 });
       const current = store.getProfile(id);
       if (!current || current.proxyError || JSON.stringify(current.proxy) !== JSON.stringify(profile.proxy)) {
         return Response.json({ ok: false, error: "Profile connection changed. Reopen Edit and try again." }, { status: 409 });
       }
-      if (store.getLaunch(id)) {
-        return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
-      }
       current.timezone = location.timezone;
       delete current.timezoneManual;
       current.locale = localeForCountry(location.country) ?? localeForTimezone(location.timezone);
       syncFirefoxTimezone(current);
       store.upsertProfile(current);
-      return Response.json({ ok: true, timezone: current.timezone, locale: current.locale });
+      return Response.json({ ok: true, timezone: current.timezone, locale: current.locale, ...restartRequired(store, id) });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 500 });
     }
   }
 
+  // Add cookies to one profile (/profiles/<id>/cookies) or to the selected ones (/profiles/cookies).
+  // An open browser gets them now. A closed profile keeps them and its next start sets them before
+  // the first page opens: a Local profile in its pending list, a Cloud profile in its Cloud session.
   const cookieRoute = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/cookies$/);
-  if (cookieRoute && req.method === "POST") {
+  if ((cookieRoute || pathname === "/ui/api/profiles/cookies") && req.method === "POST") {
     const rejected = rejectUntrustedJsonMutation(req);
     if (rejected) return rejected;
-
-    let id: string;
-    try {
-      id = decodeURIComponent(cookieRoute[1]!);
-    } catch {
-      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
-    }
-    if (!isSafeProfileId(id)) {
-      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
-    }
-    if (profileEngine(store.getProfile(id)) === "firefox") {
-      return Response.json({ ok: false, error: "adding cookies to an open Firefox profile is unavailable" }, { status: 400 });
-    }
 
     let body: Record<string, unknown>;
     try {
@@ -2099,47 +2093,107 @@ export async function handleUiRequest(
     } catch {
       return Response.json({ ok: false, error: "invalid cookie request" }, { status: 400 });
     }
-
-    const name = body.name;
-    const value = body.value;
-    const domain = normalizeCookieDomain(body.domain);
-    const path = body.path === undefined ? "/" : body.path;
-    if (typeof name !== "string" || !name || /[\s\x00-\x1f\x7f;=]/.test(name)) {
-      return Response.json({ ok: false, error: "cookie name is invalid" }, { status: 400 });
-    }
-    if (typeof value !== "string" || /[\x00-\x1f\x7f;]/.test(value)) {
-      return Response.json({ ok: false, error: "cookie value is invalid" }, { status: 400 });
-    }
-    if (!domain) {
-      return Response.json({ ok: false, error: "cookie domain is invalid" }, { status: 400 });
-    }
-    if (typeof path !== "string" || !path.startsWith("/")) {
-      return Response.json({ ok: false, error: "cookie path must start with /" }, { status: 400 });
-    }
-
-    if (!await launcher.certifiedActive(id).catch(() => false)) {
-      return Response.json({ ok: false, error: "profile browser is not open" }, { status: 409 });
-    }
-    const launch = store.getLaunch(id);
-    if (!launch?.ws) {
-      return Response.json({ ok: false, error: "profile browser is not open" }, { status: 409 });
-    }
-
-    const cookie: CookieRecord = {
-      name,
-      value,
-      domain,
-      path,
-      expires: Math.floor(Date.now() / 1_000) + 31_536_000,
-      secure: true,
-      sameSite: "Lax",
-    };
+    let ids: string[];
     try {
-      await (options.addCookie ?? addBrowserCookie)(launch.ws, cookie);
-      return Response.json({ ok: true });
+      ids = cookieRoute ? [decodeURIComponent(cookieRoute[1]!)] : Array.isArray(body.ids) ? [...new Set(body.ids.map(String))] : [];
     } catch {
-      return Response.json({ ok: false, error: "cookie could not be added" }, { status: 500 });
+      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
     }
+    if (!ids.length) return Response.json({ ok: false, error: "no profiles selected" }, { status: 400 });
+    if (!ids.every(isSafeProfileId)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+
+    let cookies: CookieRecord[];
+    if (typeof body.text === "string") {
+      try {
+        cookies = parseCookieText(body.text);
+      } catch (error) {
+        return Response.json({ ok: false, error: msg(error) }, { status: 400 });
+      }
+    } else {
+      const cookie = singleCookie(body);
+      if (typeof cookie === "string") return Response.json({ ok: false, error: cookie }, { status: 400 });
+      cookies = [cookie];
+    }
+
+    const setCookies = options.setCookies ?? defaultSetCookies;
+    let live = 0;
+    let nextStart = 0;
+    const errors: Array<{ id: string; error: string; status: number }> = [];
+    for (const id of ids) {
+      try {
+        const launch = store.getLaunch(id);
+        if (launch) {
+          if (!await launcher.certifiedActive(id).catch(() => false) || !store.getLaunch(id)?.ws) {
+            errors.push({ id, error: "profile browser is not open", status: 409 });
+            continue;
+          }
+          const engine = launch.engine === "firefox" || profileEngine(store.getProfile(id)) === "firefox" ? "firefox" : "chromium";
+          try {
+            await setCookies(store.getLaunch(id)!.ws, cookiesForEngine(cookies, engine));
+          } catch {
+            // The worker error can quote the cookie value.
+            errors.push({ id, error: "cookie could not be added", status: 500 });
+            continue;
+          }
+          live++;
+        } else if (options.cloudBrowser) {
+          if (!options.cloudConnection) {
+            errors.push({ id, error: "AliasMode Cloud connection is unavailable", status: 503 });
+            continue;
+          }
+          // A newer session this device still has to upload would be replaced by the Cloud copy.
+          if (options.cloudBrowser.sessionSettled?.(id) === false) {
+            errors.push({ id, error: "This device has a newer session of this profile that is not in Cloud yet. Open the profile once, then add the cookies.", status: 409 });
+            continue;
+          }
+          await new CloudProfileEditor(options.cloudConnection.client, store, options.timezoneFetch).addSessionCookies(id, cookies);
+          nextStart++;
+        } else if (remote) {
+          errors.push({ id, error: "profile browser is not open", status: 409 });
+        } else {
+          if (!store.getProfile(id)) {
+            errors.push({ id, error: "no such profile", status: 404 });
+            continue;
+          }
+          store.addPendingCookies(id, cookies);
+          nextStart++;
+        }
+      } catch (error) {
+        errors.push({ id, error: msg(error), status: options.cloudBrowser ? cloudProfileEditorErrorStatus(error) : 500 });
+      }
+    }
+    if (cookieRoute) {
+      const error = errors[0];
+      if (error) return Response.json({ ok: false, error: error.error }, { status: error.status });
+      return Response.json(live ? { ok: true, applied: "now", count: cookies.length } : { ok: true, applied: "next-start", count: cookies.length });
+    }
+    return Response.json({
+      ok: errors.length === 0, count: cookies.length, live, nextStart,
+      errors: errors.map(({ id, error }) => ({ id, error })),
+    });
+  }
+
+  // Cookies a closed Local profile sets at its next start: list them (domain and name only) or remove them.
+  const pendingCookieRoute = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/pending-cookies(\/clear)?$/);
+  if (pendingCookieRoute && (pendingCookieRoute[2] ? req.method === "POST" : req.method === "GET")) {
+    if (req.method === "POST") {
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+    }
+    let id: string;
+    try {
+      id = decodeURIComponent(pendingCookieRoute[1]!);
+    } catch {
+      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    }
+    if (!isSafeProfileId(id)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    if (!store.getProfile(id)) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    const pending = store.getPendingCookies(id);
+    if (pendingCookieRoute[2]) {
+      store.clearPendingCookies(id, pending);
+      return Response.json({ ok: true, removed: pending.length });
+    }
+    return noStoreJson({ ok: true, cookies: pending.map(({ domain, name }) => ({ domain, name })) });
   }
 
   // Open the AliasMode fingerprint test in a new tab of a running profile. Only these pages can be opened.
@@ -2254,9 +2308,7 @@ export async function handleUiRequest(
           // one here would only survive until the next open erased it. Ignore
           // it, like the closed-profile Cloud editor does.
           delete set.customNo;
-          if (fingerprintChanges(live, set)) {
-            return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
-          }
+          // The open browser keeps its launch identity; a changed proxy or fingerprint applies at its next start.
           const liveProxyChanged = applyEdits(live, set) && !live.timezoneManual;
           if (liveProxyChanged && live.proxy && !("timezone" in set)) {
             const location = await lookupExitLocation(live.proxy, options.timezoneFetch);
@@ -2273,7 +2325,7 @@ export async function handleUiRequest(
               { status: 409 },
             );
           }
-          return Response.json({ ok: true });
+          return Response.json({ ok: true, ...restartRequired(store, id) });
         }
         if (body.expectedVersion === undefined) {
           // The dialog was opened against a running profile that has since
@@ -2293,28 +2345,21 @@ export async function handleUiRequest(
       }
       const body = (await req.json()) as { set?: unknown };
       const set = body.set && typeof body.set === "object" ? (body.set as Record<string, unknown>) : {};
-      // Account details can be edited live; fingerprint changes require a closed browser.
+      // Every field saves now, also while the browser is open. That browser keeps the identity it
+      // launched with; a changed proxy or fingerprint applies at its next start.
       let p = remote ? await remote.getProfile(id).catch(() => null) : store.getProfile(id);
       if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
-      if (!remote && store.getLaunch(id) && fingerprintChanges(p, set)) {
-        return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
-      }
       let previousGroup = p.group;
       const proxyChanged = applyEdits(p, set);
       // A new proxy gets its exit timezone, like a Cloud edit. A failed lookup keeps the saved one.
-      if (!remote && proxyChanged && p.proxy && !("timezone" in set) && !p.timezoneManual && !store.getLaunch(id)) {
+      if (!remote && proxyChanged && p.proxy && !("timezone" in set) && !p.timezoneManual) {
         const location = await lookupExitLocation(p.proxy, options.timezoneFetch);
         // Apply the edit to the current copy, so changes saved during the lookup are kept.
         p = store.getProfile(id);
         if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
-        const running = !!store.getLaunch(id);
-        if (running && fingerprintChanges(p, set)) {
-          return Response.json({ ok: false, error: "close the browser before editing fingerprint settings" }, { status: 409 });
-        }
         previousGroup = p.group;
         applyEdits(p, set);
-        // A browser opened during the lookup keeps the timezone it launched with.
-        if (location && !running) {
+        if (location) {
           p.timezone = location.timezone;
           syncFirefoxTimezone(p);
         }
@@ -2326,7 +2371,7 @@ export async function handleUiRequest(
         if ("timezone" in set) store.setTimezone(id, p.timezone);
         if ("cores" in set) store.setHardware(id, p.hardware);
       }
-      return Response.json({ ok: true });
+      return Response.json({ ok: true, ...(remote ? {} : restartRequired(store, id)) });
     } catch (e) {
       return Response.json(
         { ok: false, error: msg(e) },

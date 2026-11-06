@@ -17,6 +17,9 @@ import {
   serializeAdsTxt,
   serializeXlsxRows,
   serializeCsv,
+  parseCookieText,
+  mergeCookies,
+  cookiesForEngine,
 } from "./parse.ts";
 import { deterministicSeed } from "./fingerprint.ts";
 
@@ -469,4 +472,45 @@ test("an old export with none of the new keys imports exactly as before", () => 
   expect(out.profile.extensions).toEqual([]);
   expect(out.profile.tags).toEqual([]);
   expect(out.validationErrors).toEqual([]);
+});
+
+test("pasted cookies accept JSON exports and Netscape cookies.txt", () => {
+  expect(parseCookieText('{"cookies":[{"name":"a","value":"1","domain":".x.com","expirationDate":1800000000,"sameSite":"no_restriction"}]}')).toEqual([
+    { name: "a", value: "1", domain: ".x.com", path: "/", httpOnly: false, secure: true, sameSite: "None", expires: 1_800_000_000 },
+  ]);
+  expect(parseCookieText('{"name":"b","value":"2","domain":"x.com","path":"/"}')).toHaveLength(1);
+  expect(parseCookieText([
+    "# Netscape HTTP Cookie File",
+    "",
+    "#HttpOnly_.x.com\tTRUE\t/\tTRUE\t1800000000\tauth_token\ttok",
+    "x.com\tFALSE\t/home\tFALSE\t0\tlang\ten",
+  ].join("\r\n"))).toEqual([
+    { name: "auth_token", value: "tok", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 1_800_000_000 },
+    { name: "lang", value: "en", domain: "x.com", path: "/home", httpOnly: false, secure: false },
+  ]);
+  // Subdomain flag without a leading dot, a dropped empty value, an expiry in milliseconds.
+  expect(parseCookieText("x.com\tTRUE\t/\tTRUE\t1800000000000\tempty")).toEqual([
+    { name: "empty", value: "", domain: ".x.com", path: "/", httpOnly: false, secure: true, expires: 1_800_000_000 },
+  ]);
+  // At most 400 days: Firefox drops a cookie that lives longer.
+  const [far] = parseCookieText('[{"name":"far","value":"1","domain":"x.com","expires":4000000000}]');
+  expect(far!.expires).toBeLessThanOrEqual(Date.now() / 1000 + 400 * 86_400);
+  expect(far!.expires).toBeGreaterThan(Date.now() / 1000 + 399 * 86_400);
+  // Cookies that break the name prefix rules are left out; Chromium would refuse the whole batch.
+  expect(parseCookieText(JSON.stringify([
+    { name: "__Secure-a", value: "1", domain: "x.com", secure: false },
+    { name: "__Host-b", value: "1", domain: ".x.com", secure: true },
+    { name: "__Host-c", value: "1", domain: "x.com", secure: true },
+  ])).map((cookie) => cookie.name)).toEqual(["__Host-c"]);
+  for (const bad of ["", "[]", "{bad", "x.com TRUE / FALSE", '[{"name":"bad name","value":"v","domain":"x.com"}]']) {
+    expect(() => parseCookieText(bad)).toThrow();
+  }
+});
+
+test("cookie merges replace the same name, domain, path and partition", () => {
+  const a = { name: "a", value: "1", domain: ".X.com", path: "/" };
+  expect(mergeCookies([a, { ...a, name: "b" }], [{ ...a, domain: ".x.com", value: "2" }, { ...a, partitionKey: "https://x.com" }])).toEqual([
+    { ...a, name: "b" }, { ...a, domain: ".x.com", value: "2" }, { ...a, partitionKey: "https://x.com" },
+  ]);
+  expect(cookiesForEngine([{ ...a, partitionKey: "p", _crHasCrossSiteAncestor: false }], "firefox")).toEqual([a]);
 });

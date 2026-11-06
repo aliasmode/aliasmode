@@ -51,6 +51,10 @@ export interface UiProfile {
   /** Operator-chosen "custom NO."; "" when the serial is used instead. */
   customNo?: string;
   running: boolean;
+  /** The open browser runs with an older proxy or fingerprint than the saved one. */
+  restartPending?: boolean;
+  /** Local mode: cookies added while closed; the next start sets them. */
+  pendingCookieCount?: number;
   debugPort?: number;
   startedAt?: number;
   /** Remote (hub) mode only: who currently has it open elsewhere, if anyone. */
@@ -483,19 +487,44 @@ export interface ProfileCookieInput {
   path: string;
 }
 
-export async function addProfileCookie(id: string, cookie: ProfileCookieInput): Promise<any> {
-  const path = `/ui/api/profiles/${encodeURIComponent(id)}/cookies`;
+/**
+ * Add one cookie, or pasted cookies (`text`: JSON export or cookies.txt), to profiles. Open
+ * browsers get them now; closed profiles get them at their next start.
+ */
+export async function addProfileCookies(
+  ids: string[],
+  input: ProfileCookieInput | { text: string },
+): Promise<{ ok: boolean; count?: number; live?: number; nextStart?: number; error?: string; errors?: Array<{ id: string; error: string }> }> {
+  const path = "/ui/api/profiles/cookies";
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cookie),
+    body: JSON.stringify({ ids, ...input }),
   });
   return apiJson(response, path);
+}
+
+/** Local mode: the cookies a closed profile sets at its next start (domain and name only). */
+export async function fetchPendingCookies(id: string): Promise<{ ok: boolean; cookies?: Array<{ domain: string; name: string }>; error?: string }> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/pending-cookies`;
+  return apiJson(await fetch(path), path);
+}
+
+export async function clearPendingCookies(id: string): Promise<{ ok: boolean; removed?: number; error?: string }> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/pending-cookies/clear`;
+  return apiJson(await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }), path);
 }
 
 export const openProfile = (id: string, force = false) =>
   post(`/ui/api/profiles/${encodeURIComponent(id)}/open${force ? "?force=1" : ""}`);
 export const closeProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/close`);
+/** Close and open again, so saved proxy and fingerprint changes apply. */
+export async function restartProfile(id: string): Promise<any> {
+  const closed = await closeProfile(id);
+  if (closed?.ok === false) return closed;
+  const opened = await openProfile(id);
+  return opened?.ok === false || opened?.warning ? opened : closed;
+}
 export const raiseProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/raise`);
 /** Opens the AliasMode fingerprint test (`page`: en, ru or zh-cn) in a new tab of a running profile. */
 export async function checkFingerprint(id: string, page: string): Promise<any> {

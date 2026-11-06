@@ -31,6 +31,7 @@ import {
   parseDarwinKernelArgv,
   parseDarwinPsSnapshot,
   parseLinuxProcStat,
+  launchIdentityChanged,
   platformHomeUrl,
   quoteWindowsCommandArg,
   readSnapshotChildBounded,
@@ -453,14 +454,18 @@ for (const changed of ["proxy", "fingerprint", "timezone", "extensions", "ua", "
     try {
       await prior.start(id);
       (prior as any).closeRelay(id);
-      const profile = store.getProfile(id)!;
       const original = store.getLaunch(id)!;
+      // Saved edits wait for the next start, so a changed identity here is one the launch row
+      // claims but its digest does not match.
+      const persona = original.persona!;
+      const claim = (changes: Partial<NonNullable<typeof original.persona>>) =>
+        store.recordLaunch({ ...original, persona: { ...persona, ...changes } });
       switch (changed) {
-        case "proxy": store.upsertProfile({ ...profile, proxy: null }); break;
-        case "fingerprint": store.upsertProfile({ ...profile, fingerprintSeed: profile.fingerprintSeed + 1 }); break;
-        case "timezone": store.upsertProfile({ ...profile, timezone: "Etc/UTC" }); break;
-        case "extensions": store.upsertProfile({ ...profile, extensions: ["different-extension"] }); break;
-        case "ua": store.upsertProfile({ ...profile, ua: `${profile.ua} changed` }); break;
+        case "proxy": claim({ proxy: null }); break;
+        case "fingerprint": claim({ fingerprintSeed: persona.fingerprintSeed! + 1 }); break;
+        case "timezone": claim({ timezone: "Etc/UTC" }); break;
+        case "extensions": claim({ extensions: ["different-extension"] }); break;
+        case "ua": claim({ ua: `${persona.ua} changed` }); break;
         case "kernel": store.recordLaunch({ ...original, binarySha256: "f".repeat(64) }); break;
         case "headless": store.recordLaunch({ ...original, headless: true }); break;
         case "missing digest": store.recordLaunch({ ...original, personaDigest: undefined }); break;
@@ -1316,7 +1321,7 @@ test("after a restart, a surviving SOCKS5 browser rebinds its relay before reuse
   store.close();
 });
 
-test("certifiedActive keeps a proven browser after a live edit and stops an unproven survivor with a changed timezone", async () => {
+test("certifiedActive keeps a browser edited while open; a launch row without its start identity needs this process's proof", async () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;
   store.upsertProfile({
@@ -1343,14 +1348,10 @@ test("certifiedActive keeps a proven browser after a live edit and stops an unpr
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
 
   const edited = store.getProfile("k1d0cd11")!;
-  store.upsertProfile({ ...edited, timezone: "Europe/London" });
-  // This process proved the running browser, so it keeps its launch-time identity until it closes.
+  store.upsertProfile({ ...edited, timezone: "Europe/London", proxy: { type: "socks5", host: "other.example", port: "1081", user: "", pass: "" } });
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
-  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
-  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
-
-  // After an app restart nothing proved it, and a survivor that differs from its profile stops.
-  const restarted = new Launcher({
+  expect(launchIdentityChanged(store.getProfile("k1d0cd11")!, store.getLaunch("k1d0cd11"))).toBe(true);
+  const fresh = () => new Launcher({
     store,
     binaryPath: "/fake/cloak",
     spawn: () => { throw new Error("must not spawn"); },
@@ -1360,29 +1361,129 @@ test("certifiedActive keeps a proven browser after a live edit and stops an unpr
     browserClose: async () => false,
     killPid: async (pid) => f.killPid(pid),
   });
-  expect(await restarted.certifiedActive("k1d0cd11")).toBe(false);
+  // The launch row keeps the start identity, so a process that never proved the browser keeps it too.
+  (launcher as any).closeRelay("k1d0cd11");
+  const unproven = fresh();
+  expect(await unproven.certifiedActive("k1d0cd11")).toBe(true);
+  (unproven as any).closeRelay("k1d0cd11");
+
+  // A launch row from before launch identities were saved: this process proved the browser, so it keeps running.
+  const { persona: _persona, ...legacy } = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch(legacy);
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  expect(store.getLaunch("k1d0cd11")).not.toBeNull();
+  // After an app restart nothing proved it, and a survivor that differs from its profile stops.
+  expect(await fresh().certifiedActive("k1d0cd11")).toBe(false);
   expect(store.getLaunch("k1d0cd11")).toBeNull();
   store.close();
 });
 
-test("Open restarts a running browser that was edited while open, with the change", async () => {
+test("a proxy or fingerprint saved while the browser runs keeps it running; its next start uses them", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const args: string[][] = [];
+  const launcher = newLauncher(store, f, args);
+  await launcher.start("k1d0cd11");
+  const before = store.getLaunch("k1d0cd11")!;
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, name: "Renamed", screenWidth: 1366, screenHeight: 768, fingerprintSeed: profile.fingerprintSeed + 1 });
+  // Open again while it runs: the running browser is returned, not stopped or relaunched.
+  await launcher.start("k1d0cd11");
+  expect(args).toHaveLength(1);
+  expect(store.getLaunch("k1d0cd11")!.startedAt).toBe(before.startedAt);
+  expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  await launcher.stop("k1d0cd11");
+  await launcher.start("k1d0cd11");
+  expect(args).toHaveLength(2);
+  expect(args[1]).toContain("--fingerprint-screen-width=1366");
+  expect(launchIdentityChanged(store.getProfile("k1d0cd11")!, store.getLaunch("k1d0cd11"))).toBe(false);
+  await launcher.stop("k1d0cd11");
+  store.close();
+});
+
+test("Open restarts a browser with a launch row from before launch identities when it was edited while open", async () => {
   const store = seeded();
   const f = fleet();
   const spawned: string[][] = [];
   const launcher = newLauncher(store, f, spawned);
   await launcher.start("k1d0cd11");
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
+  const { persona: _persona, ...legacy } = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch(legacy);
 
   store.upsertProfile({ ...store.getProfile("k1d0cd11")!, timezone: "Europe/London" });
   // Until the next open it keeps running with its launch-time settings.
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
 
+  // Without a stored start identity the relay and checks would read the edited profile, so Open restarts it.
   const second = await launcher.start("k1d0cd11");
   expect(spawned).toHaveLength(2);
   expect(second.reattached).toBeUndefined();
   expect(await launcher.certifiedActive("k1d0cd11")).toBe(true);
   await launcher.stop("k1d0cd11");
   store.close();
+});
+
+test("a browser launched before launch identities were saved gets its identity at the next check", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const launcher = newLauncher(store, f, []);
+  await launcher.start("k1d0cd11");
+  const { persona: _persona, ...legacy } = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch(legacy);
+  const survivor = newLauncher(store, f, []);
+  expect(await survivor.certifiedActive("k1d0cd11")).toBe(true);
+  expect(store.getLaunch("k1d0cd11")!.persona).toBeDefined();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, screenWidth: 1366, screenHeight: 768 });
+  expect(await survivor.certifiedActive("k1d0cd11")).toBe(true);
+  expect(launchIdentityChanged(store.getProfile("k1d0cd11")!, store.getLaunch("k1d0cd11"))).toBe(true);
+  await survivor.stop("k1d0cd11");
+  store.close();
+});
+
+test("start sets cookies added while closed before the first page, then clears them", async () => {
+  const store = seeded();
+  makeDirect(store);
+  store.addPendingCookies("k1d0cd11", [
+    { name: "auth_token", value: "new", domain: ".x.com", path: "/", expires: Date.now() / 1000 + 3600 },
+    { name: "expired", value: "old", domain: ".x.com", path: "/", expires: 1 },
+  ]);
+  const events: string[] = [];
+  const set: unknown[] = [];
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    setCookies: async (_ws, cookies) => { events.push("setCookies"); set.push(cookies.map((cookie) => cookie.name)); },
+    navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
+  });
+  try {
+    await launcher.start("k1d0cd11", ["https://x.com/home"]);
+    expect(set).toEqual([["auth_token"]]);
+    expect(events).toEqual(["setCookies", "navigate:https://x.com/home"]);
+    expect(store.getPendingCookies("k1d0cd11")).toEqual([]);
+  } finally {
+    await launcher.stop("k1d0cd11");
+    store.close();
+  }
+});
+
+test("cookies added while closed stay for the next start when setting them fails", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const cookie = { name: "auth_token", value: "new", domain: ".x.com", path: "/" };
+  store.addPendingCookies("k1d0cd11", [cookie]);
+  const launcher = newLauncher(store, fleet(), [], undefined, undefined, {
+    setCookies: async () => { throw new Error("worker failed"); },
+  });
+  try {
+    await launcher.start("k1d0cd11");
+    expect(store.getLaunch("k1d0cd11")).not.toBeNull();
+    expect(store.getPendingCookies("k1d0cd11")).toEqual([cookie]);
+  } finally {
+    await launcher.stop("k1d0cd11");
+    store.close();
+  }
 });
 
 test("certifiedActive rides out a transient CDP miss and retains a survivor that stays silent", async () => {
@@ -5273,6 +5374,8 @@ test("a Chromium 155 profile keeps the processor count of its first open", async
     await launcher.start(profile.id);
     // The launch is recorded with the kept count, so Cloud's identity check after the open passes.
     await launcher.verifyRunningIdentity(profile.id);
+    // Nothing waits for a restart.
+    expect(launchIdentityChanged(store.getProfile(profile.id)!, store.getLaunch(profile.id))).toBe(false);
     await launcher.stop(profile.id);
     return spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-hardware-concurrency="));
   };

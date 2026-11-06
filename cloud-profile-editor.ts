@@ -2,14 +2,14 @@ import { CloudApiError, type CloudClient } from "./cloud-client.ts";
 import type { PortableProfile } from "./contracts/cloud-v1.ts";
 import { convertMobilePersonaToDesktop, editedProfileHardware, isMobileUserAgent } from "./fingerprint.ts";
 import { attachTimezones, type FetchLike } from "./geoip.ts";
-import { parseStrictCores, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictSeed, parseStrictTimezone } from "./parse.ts";
+import { mergeCookies, parseStrictCores, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictSeed, parseStrictTimezone } from "./parse.ts";
 import { completeProfileFingerprint, setFirefoxScreen, syncFirefoxTimezone } from "./firefox-config.ts";
 import { normalizeProfileLocale } from "./profile-locale.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { proxyLegacyString } from "./proxy.ts";
 import type { ProfileStore } from "./store.ts";
-import type { Profile } from "./types.ts";
+import type { CookieRecord, Profile } from "./types.ts";
 
 type CloudProfileEditorClient = Pick<CloudClient, "getProfile" | "moveProfile" | "updateProfile">;
 type CloudProfileEditorStore = Pick<ProfileStore, "getLaunch">;
@@ -251,6 +251,24 @@ export class CloudProfileEditor {
       session: authoritative.payload.session,
     } as PortableProfile;
     await this.cloud.updateProfile(profileId, { expectedVersion: updateVersion, payload });
+  }
+
+  /**
+   * Add cookies to a closed profile's Cloud session. The next open on any device restores that
+   * session (it differs from the copy the device kept), so the cookies are set before the first page.
+   */
+  async addSessionCookies(profileId: string, cookies: CookieRecord[]): Promise<void> {
+    assertSafeProfileId(profileId);
+    const authoritative = await this.cloud.getProfile(profileId);
+    this.assertClosed(profileId, authoritative.profile.activeOpens.length);
+    const session = authoritative.payload.session;
+    const payload = {
+      ...authoritative.payload,
+      session: { ...session, cookies: mergeCookies(session.cookies, cookies) },
+    } as PortableProfile;
+    // Refuse a payload this app could not open again.
+    decodePortableProfile(payload);
+    await this.cloud.updateProfile(profileId, { expectedVersion: authoritative.profile.version, payload });
   }
 
   private assertClosed(profileId: string, activeOpenCount: number): void {

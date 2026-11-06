@@ -65,9 +65,12 @@ import {
   ProxyCheckError,
   type ProxyCheckInput,
   type ProxyCheckResult,
-  addProfileCookie,
+  addProfileCookies,
+  fetchPendingCookies,
+  clearPendingCookies,
   openProfile,
   closeProfile,
+  restartProfile,
   raiseProfile,
   checkFingerprint,
   restoreParkedSession,
@@ -878,13 +881,11 @@ function FingerprintSettings({
           );
         })}
         <div className="hint">{t("We recommend keeping every setting automatic. Custom values can make the browser look inconsistent, easier to detect, and can trigger account checks.")}</div>
-        <div className="hint">{disabled
-          ? t("Close the browser before changing fingerprint settings.")
-          : onTimezoneChange
-            ? `${t("Leave a field blank to keep it automatic. A timezone you type stays when the proxy changes.")}${chromiumRuntime && cores ? ` ${t("AliasMode Chromium shows at most the processor count of the computer it runs on.")}` : ""}`
-            : engine === "firefox"
-              ? t("AliasMode Firefox uses its native profile. CDP, PDF, and Chrome extensions are unavailable.")
-              : t("The browser keeps the locked values coordinated. Screen and operating system are the only fingerprint settings you can override.")}</div>
+        <div className="hint">{onTimezoneChange
+          ? `${t("Leave a field blank to keep it automatic. A timezone you type stays when the proxy changes.")}${chromiumRuntime && cores ? ` ${t("AliasMode Chromium shows at most the processor count of the computer it runs on.")}` : ""}`
+          : engine === "firefox"
+            ? t("AliasMode Firefox uses its native profile. CDP, PDF, and Chrome extensions are unavailable.")
+            : t("The browser keeps the locked values coordinated. Screen and operating system are the only fingerprint settings you can override.")}</div>
         {onUndo && <button type="button" className="btn ghost" disabled={disabled} onClick={onUndo}>{t("Undo fingerprint edits")}</button>}
       </div>
     </details>
@@ -1312,10 +1313,12 @@ function App() {
   const [form, setForm] = useState(BLANK_FORM);
   const [createProxyCheck, setCreateProxyCheck] = useState<ProxyCheckUiState>(EMPTY_PROXY_CHECK);
   const createProxyCheckGeneration = useRef(0);
-  const [cookieProfile, setCookieProfile] = useState<UiProfile | null>(null);
+  const [cookieTargets, setCookieTargets] = useState<UiProfile[] | null>(null);
   const [cookieForm, setCookieForm] = useState(BLANK_COOKIE_FORM);
+  const [cookieText, setCookieText] = useState("");
   const [cookieErr, setCookieErr] = useState<string | null>(null);
   const [cookieSaving, setCookieSaving] = useState(false);
+  const [pendingView, setPendingView] = useState<{ profile: UiProfile; cookies: Array<{ domain: string; name: string }> | null; error: string | null; busy: boolean } | null>(null);
   const [proxyPaste, setProxyPaste] = useState("");
   const [proxyPasteOk, setProxyPasteOk] = useState<string | null>(null);
   // Edit modal + bulk export/update + group rename
@@ -1449,7 +1452,8 @@ function App() {
       if (logView || logErr) { setLogView(null); setLogErr(null); return; }
       if (showUpdate) { setShowUpdate(false); return; }
       if (showBulk) { closeBulk(); return; }
-      if (cookieProfile) { if (!cookieSaving) closeCookie(); return; }
+      if (pendingView) { if (!pendingView.busy) setPendingView(null); return; }
+      if (cookieTargets) { if (!cookieSaving) closeCookie(); return; }
       if (editId) { closeEdit(); return; }
       if (showCreate) closeCreate();
     };
@@ -2512,36 +2516,69 @@ function App() {
     void act(profile.id, restoreParkedSession);
   };
 
-  const openCookie = (profile: UiProfile) => {
-    setCookieProfile(profile);
-    setCookieForm({ ...BLANK_COOKIE_FORM, domain: profile.platform });
+  const openCookie = (targets: UiProfile[]) => {
+    setCookieTargets(targets);
+    setCookieForm({ ...BLANK_COOKIE_FORM, domain: targets.length === 1 ? targets[0]!.platform : "" });
+    setCookieText("");
     setCookieErr(null);
   };
   const closeCookie = () => {
-    setCookieProfile(null);
+    setCookieTargets(null);
     setCookieForm(BLANK_COOKIE_FORM);
+    setCookieText("");
     setCookieErr(null);
+  };
+  const openPendingCookies = async (profile: UiProfile) => {
+    setPendingView({ profile, cookies: null, error: null, busy: false });
+    try {
+      const result = await fetchPendingCookies(profile.id);
+      setPendingView((view) => view && { ...view, cookies: result.cookies ?? [], error: result.ok ? null : result.error ?? t("Cookies could not be loaded.") });
+    } catch (error) {
+      setPendingView((view) => view && { ...view, cookies: [], error: error instanceof Error ? error.message : t("Cookies could not be loaded.") });
+    }
+  };
+  const removePendingCookies = async () => {
+    if (!pendingView) return;
+    setPendingView({ ...pendingView, busy: true, error: null });
+    try {
+      const result = await clearPendingCookies(pendingView.profile.id);
+      if (!result.ok) throw new Error(result.error || t("Cookies could not be removed."));
+      setPendingView(null);
+      await load().catch(() => {});
+      flash(t("Pending cookies removed."));
+    } catch (error) {
+      setPendingView((view) => view && { ...view, busy: false, error: error instanceof Error ? error.message : t("Cookies could not be removed.") });
+    }
   };
   const setCookieField = (key: keyof typeof BLANK_COOKIE_FORM, value: string) =>
     setCookieForm((current) => ({ ...current, [key]: value }));
   const submitCookie = async () => {
-    if (!cookieProfile) return;
+    if (!cookieTargets) return;
     setCookieSaving(true);
     setCookieErr(null);
     try {
-      const result = await addProfileCookie(cookieProfile.id, cookieForm);
-      if (result.ok !== true) {
-        setCookieErr(result.error || "Cookie could not be added.");
+      const result = await addProfileCookies(cookieTargets.map((profile) => profile.id), cookieText.trim() ? { text: cookieText } : cookieForm);
+      await load().catch(() => {});
+      if (result.errors?.length) {
+        const names = new Map(cookieTargets.map((profile) => [profile.id, profile.name]));
+        setCookieErr(result.errors.map((item) => `${names.get(item.id) ?? item.id}: ${item.error}`).join("\n"));
+        return;
+      }
+      if (!result.ok) {
+        setCookieErr(result.error || t("Cookies could not be added."));
         return;
       }
       closeCookie();
-      flash("Cookie added to the open browser.");
+      flash(t("{count} cookie(s) added: {now} open browser(s) now, {later} profile(s) at next start.", {
+        count: String(result.count ?? 0), now: String(result.live ?? 0), later: String(result.nextStart ?? 0),
+      }));
     } catch (error) {
-      setCookieErr(error instanceof Error ? error.message : "Cookie could not be added.");
+      setCookieErr(error instanceof Error ? error.message : t("Cookies could not be added."));
     } finally {
       setCookieSaving(false);
     }
   };
+
 
   const doUpload = async (files: FileList | File[]) => {
     setActionErr(null);
@@ -2833,7 +2870,7 @@ function App() {
     }
   };
   const refreshEditedTimezone = async () => {
-    if (!editId || editProxyChanged || timezoneBusy || editSaving || editForm.proxyError || editRunning || editLive || !confirm(t(FINGERPRINT_EDIT_WARNING))) return;
+    if (!editId || editProxyChanged || timezoneBusy || editSaving || editForm.proxyError || editLive || !confirm(t(FINGERPRINT_EDIT_WARNING))) return;
     const id = editId;
     const generation = editProxyCheckGeneration.current;
     setTimezoneBusy(true);
@@ -2869,7 +2906,11 @@ function App() {
         ...(!isCloudMode ? { customNo: editForm.customNo ?? "" } : {}),
         ...(!sameExtensionSelection(editExts, editInitialExts) && editEngine === "chromium" ? { extensions: editExts } : {}),
       }, isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined);
-      if (r.ok) { closeEdit(); await load(); }
+      if (r.ok) {
+        closeEdit();
+        await load();
+        if (r.restartRequired) flash(t("Saved. The open browser keeps its current proxy and fingerprint until it restarts."));
+      }
       else if (r.status === 409) {
         const message = r.error || "Cloud profile changed; reopen Edit before saving";
         closeEdit();
@@ -3851,6 +3892,12 @@ function App() {
               setScriptRunOpen(true);
             }}
           ><Icon name="play" className="sm" />{t("Run script")}</button>
+          <button
+            className="btn tip"
+            type="button"
+            data-tip={t("Open browsers get the cookies now; closed profiles at their next start")}
+            onClick={() => openCookie(profiles.filter((profile) => selected.has(profile.id)))}
+          ><Icon name="cookie" className="sm" />{t("Add cookies")}</button>
           <span className="vsep" />
           {!isCloudMode && selectedMobileCount > 0 && (
             <button className="btn warn" onClick={convertSelectedMobile}>
@@ -3980,6 +4027,28 @@ function App() {
                             </span>
                           )}
                         </span>
+                        {(p.restartPending || !!p.pendingCookieCount) && (
+                          <span className="status">
+                            {p.restartPending && (
+                              <button
+                                type="button"
+                                className="status-chip warn tip"
+                                data-tip={t("Saved proxy or fingerprint changes apply when this browser restarts. Click to restart it now.")}
+                                aria-label={t("Restart {profile} so the saved changes apply", { profile: p.name })}
+                                disabled={busy[p.id]}
+                                onClick={() => act(p.id, restartProfile)}
+                              ><Icon name="refresh" className="sm" />{t("Applies at next start")}</button>
+                            )}
+                            {!!p.pendingCookieCount && (
+                              <button
+                                type="button"
+                                className="status-chip tip"
+                                data-tip={t("The browser sets these cookies the next time it starts. Click to see or remove them.")}
+                                onClick={() => void openPendingCookies(p)}
+                              ><Icon name="cookie" className="sm" />{t("{count} cookie(s) at next start", { count: String(p.pendingCookieCount) })}</button>
+                            )}
+                          </span>
+                        )}
                       </span>
                     </td>
                   )}
@@ -4022,15 +4091,17 @@ function App() {
                             <Icon name="edit" className="sm" />
                           </button>
                         )}
+                        {canEditRow && (
+                          <button
+                            className="iconbtn tip"
+                            data-tip={t("Add cookies")}
+                            aria-label={t("Add cookies to {profile}", { profile: p.name })}
+                            onClick={() => openCookie([p])}
+                          ><Icon name="cookie" className="sm" /></button>
+                        )}
                         {p.running ? (
                           <>
                             {p.engine === "chromium" && <>
-                              <button
-                                className="iconbtn tip"
-                                data-tip={t("Add cookie")}
-                                aria-label={`Add a cookie to ${p.name}`}
-                                onClick={() => openCookie(p)}
-                              ><Icon name="cookie" className="sm" /></button>
                               <button
                                 className="iconbtn tip"
                                 data-tip={t("Bring to front")}
@@ -4626,7 +4697,33 @@ function App() {
         />
       )}
 
-      {cookieProfile && (
+      {pendingView && (
+        <div className="modal-backdrop" onClick={() => { if (!pendingView.busy) setPendingView(null); }}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="pending-cookie-title" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head" id="pending-cookie-title">
+              <Icon name="cookie" />{t("Cookies at next start")}<span className="mono muted">{pendingView.profile.name}</span>
+              <button type="button" className="modal-close" aria-label={t("Close")} disabled={pendingView.busy} onClick={() => setPendingView(null)}><Icon name="close" className="sm" /></button>
+            </div>
+            <div className="modal-body">
+              {pendingView.error && <div className="modal-err"><Icon name="alert" className="sm" />{pendingView.error}</div>}
+              <p className="hint">{t("The browser sets these cookies the next time it starts, before the first page opens.")}</p>
+              {pendingView.cookies === null
+                ? <p className="muted">{t("Loading…")}</p>
+                : <ul className="pending-cookies">{pendingView.cookies.map((cookie, index) => (
+                  <li key={index}><span className="mono">{cookie.domain}</span><span className="mono muted">{cookie.name}</span></li>
+                ))}</ul>}
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" type="button" disabled={pendingView.busy} onClick={() => setPendingView(null)}>{t("Close")}</button>
+              <button className="btn danger" type="button" disabled={pendingView.busy || !pendingView.cookies?.length} onClick={() => void removePendingCookies()}>
+                <Icon name="trash" className="sm" />{t("Remove pending cookies")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cookieTargets && (
         <div className="modal-backdrop">
           <form
             className="modal"
@@ -4636,37 +4733,49 @@ function App() {
             onSubmit={(event) => { event.preventDefault(); void submitCookie(); }}
           >
             <div className="modal-head" id="add-cookie-title">
-              <Icon name="cookie" />{t("Add cookie")}<span className="mono muted">{cookieProfile.name}</span>
+              <Icon name="cookie" />{t("Add cookies")}
+              <span className="mono muted">{cookieTargets.length === 1 ? cookieTargets[0]!.name : t("{count} profiles", { count: String(cookieTargets.length) })}</span>
               <button type="button" className="modal-close" aria-label={t("Close")} disabled={cookieSaving} onClick={closeCookie}><Icon name="close" className="sm" /></button>
             </div>
             <div className="modal-body">
-              {cookieErr && <div className="modal-err"><Icon name="alert" className="sm" />{cookieErr}</div>}
-              <p className="hint">{t("Add one cookie directly to this open browser.")}</p>
-              <div className="fld-row">
-                <label className="fld grow">
-                  <span>{t("Name")}</span>
-                  <input autoFocus value={cookieForm.name} onChange={(event) => setCookieField("name", event.target.value)} />
-                </label>
-                <label className="fld grow">
-                  <span>{t("Value")}</span>
-                  <input type="password" autoComplete="off" value={cookieForm.value} onChange={(event) => setCookieField("value", event.target.value)} />
-                </label>
-              </div>
-              <div className="fld-row">
-                <label className="fld grow">
-                  <span>{t("Domain")}</span>
-                  <input value={cookieForm.domain} placeholder="example.com" onChange={(event) => setCookieField("domain", event.target.value)} />
-                </label>
-                <label className="fld port">
-                  <span>{t("Path")}</span>
-                  <input value={cookieForm.path} onChange={(event) => setCookieField("path", event.target.value)} />
-                </label>
-              </div>
+              {cookieErr && <div className="modal-err" style={{ whiteSpace: "pre-line" }}><Icon name="alert" className="sm" />{cookieErr}</div>}
+              <p className="hint">{cookieTargets.length > 1
+                ? t("Open browsers get the cookies now. Closed profiles get them the next time they start, before the first page opens.")
+                : cookieTargets[0]!.running
+                  ? t("The open browser gets the cookies now.")
+                  : t("The browser sets these cookies the next time it starts, before the first page opens.")}</p>
+              <label className="fld">
+                <span>{t("Paste cookies (JSON export or cookies.txt)")}</span>
+                <textarea rows={5} spellCheck={false} autoComplete="off" value={cookieText} placeholder={'[{"name":"auth_token","value":"…","domain":".x.com","path":"/"}]'} onChange={(event) => setCookieText(event.target.value)} />
+              </label>
+              {!cookieText.trim() && <>
+                <p className="hint">{t("Or add one cookie:")}</p>
+                <div className="fld-row">
+                  <label className="fld grow">
+                    <span>{t("Name")}</span>
+                    <input value={cookieForm.name} onChange={(event) => setCookieField("name", event.target.value)} />
+                  </label>
+                  <label className="fld grow">
+                    <span>{t("Value")}</span>
+                    <input type="password" autoComplete="off" value={cookieForm.value} onChange={(event) => setCookieField("value", event.target.value)} />
+                  </label>
+                </div>
+                <div className="fld-row">
+                  <label className="fld grow">
+                    <span>{t("Domain")}</span>
+                    <input value={cookieForm.domain} placeholder="example.com" onChange={(event) => setCookieField("domain", event.target.value)} />
+                  </label>
+                  <label className="fld port">
+                    <span>{t("Path")}</span>
+                    <input value={cookieForm.path} onChange={(event) => setCookieField("path", event.target.value)} />
+                  </label>
+                </div>
+              </>}
             </div>
             <div className="modal-foot">
               <button className="btn ghost" type="button" disabled={cookieSaving} onClick={closeCookie}>{t("Cancel")}</button>
-              <button className="btn primary" type="submit" disabled={cookieSaving || !cookieForm.name || !cookieForm.domain.trim() || !cookieForm.path.startsWith("/")}>
-                {cookieSaving ? t("Adding…") : t("Add cookie")}
+              <button className="btn primary" type="submit" disabled={cookieSaving || (!cookieText.trim() && (!cookieForm.name || !cookieForm.domain.trim() || !cookieForm.path.startsWith("/")))}>
+                {cookieSaving ? t("Adding…") : t("Add cookies")}
               </button>
             </div>
           </form>
@@ -4875,8 +4984,8 @@ function App() {
                   {(editLive || (!isCloudMode && editRunning)) && (
                     <p className="hint" role="status">
                       {editLive
-                        ? t("This browser is open. Changes save to this device now and sync to Cloud when it closes.")
-                        : t("This browser is open. Changes save now and apply the next time it launches.")}
+                        ? t("This browser is open. Changes save to this device now and sync to Cloud when it closes. Proxy and fingerprint changes apply at the next start.")
+                        : t("This browser is open. Changes save now. Proxy and fingerprint changes apply at the next start.")}
                     </p>
                   )}
                   {!isCloudMode && editMobile && (
@@ -4981,7 +5090,7 @@ function App() {
                         <button
                           type="button"
                           className="btn proxy-check-btn"
-                          disabled={timezoneBusy || editSaving || editProxyChanged || !!editForm.proxyError || editRunning || editLive}
+                          disabled={timezoneBusy || editSaving || editProxyChanged || !!editForm.proxyError || editLive}
                           onClick={refreshEditedTimezone}
                         >
                           <Icon name="activity" className="sm" />
@@ -5022,7 +5131,7 @@ function App() {
                     locale={editForm.locale ?? ""} onLocaleChange={(value) => setEF("locale", value)}
                     cores={editForm.cores ?? ""} onCoresChange={(value) => setEF("cores", value)}
                     seed={editForm.fingerprintSeed ?? ""} onSeedChange={(value) => setEF("fingerprintSeed", value)}
-                    disabled={editRunning || editLive || editSaving || timezoneBusy}
+                    disabled={editSaving || timezoneBusy}
                     onUndo={() => setEditForm((form) => ({ ...form, ...editInitialFingerprint }))}
                     hardware={editHardware}
                   />}

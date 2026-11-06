@@ -365,23 +365,26 @@ test("running profile rows expose Bring to front in Local and Cloud mode", () =>
   expect(runningBranch).not.toContain("isCloudMode");
 });
 
-test("running profile rows expose live cookie addition in every mode", () => {
-  expect(app).toContain('data-tip={t("Add cookie")}');
-  expect(app).toContain('aria-label={`Add a cookie to ${p.name}`}');
-  expect(app).toContain('onClick={() => openCookie(p)}');
-
+test("every editable row and the selection bar can add cookies; closed profiles get them at next start", () => {
+  expect(app).toContain('data-tip={t("Add cookies")}');
+  expect(app).toContain('aria-label={t("Add cookies to {profile}", { profile: p.name })}');
+  expect(app).toContain("onClick={() => openCookie([p])}");
+  expect(app).toContain("onClick={() => openCookie(profiles.filter((profile) => selected.has(profile.id)))}");
+  // The row button is not limited to running browsers.
   const runningBranch = app.slice(app.indexOf("{p.running ? ("), app.indexOf(") : p.mobilePersona ? ("));
-  expect(runningBranch).toContain("Add cookie");
-  expect(runningBranch).not.toContain("isCloudMode");
+  expect(runningBranch).not.toContain("openCookie");
+  expect(app.indexOf("onClick={() => openCookie([p])}")).toBeLessThan(app.indexOf("{p.running ? ("));
 
   expect(app).toContain('aria-labelledby="add-cookie-title"');
+  expect(app).toContain('<span>{t("Paste cookies (JSON export or cookies.txt)")}</span>');
   expect(app).toContain('<span>{t("Name")}</span>');
   expect(app).toContain('<span>{t("Value")}</span>');
   expect(app).toContain('<span>{t("Domain")}</span>');
   expect(app).toContain('<span>{t("Path")}</span>');
   expect(app).toContain('type="password" autoComplete="off"');
-  expect(app).toContain("await addProfileCookie(cookieProfile.id, cookieForm);");
-  expect(app).toContain('flash("Cookie added to the open browser.");');
+  expect(app).toContain("await addProfileCookies(cookieTargets.map((profile) => profile.id), cookieText.trim() ? { text: cookieText } : cookieForm);");
+  expect(app).toContain('t("The browser sets these cookies the next time it starts, before the first page opens.")');
+  expect(app).toContain('{t("{count} cookie(s) at next start", { count: String(p.pendingCookieCount) })}');
   expect(app).not.toContain('className="modal-backdrop" onClick={closeCookie}');
 });
 
@@ -733,8 +736,29 @@ test("running profiles are editable, live-synced in Cloud mode", () => {
   expect(app).toContain("setEditLive(p.liveEdit === true);");
   expect(app).toContain("isCloudMode && !editLive && editExpectedVersion === null");
   expect(app).toContain("isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined");
-  expect(app).toContain("Changes save to this device now and sync to Cloud when it closes.");
-  expect(app).toContain("Changes save now and apply the next time it launches.");
+  expect(app).toContain("Changes save to this device now and sync to Cloud when it closes. Proxy and fingerprint changes apply at the next start.");
+  expect(app).toContain("This browser is open. Changes save now. Proxy and fingerprint changes apply at the next start.");
+  // Fingerprint fields stay editable while the browser runs.
+  expect(app).toContain("disabled={editSaving || timezoneBusy}");
+  expect(app).not.toContain("disabled={editRunning || editLive || editSaving || timezoneBusy}");
+});
+
+test("a running row with saved proxy or fingerprint changes offers a restart", () => {
+  expect(app).toContain("{p.restartPending && (");
+  expect(app).toContain('{t("Applies at next start")}');
+  expect(app).toContain("onClick={() => act(p.id, restartProfile)}");
+  expect(app).toContain("if (r.restartRequired) flash(");
+  // The restart is the status chip on its own line in the name cell, so the row actions keep their width.
+  expect(app).toContain('className="status-chip warn tip"');
+  expect(app).not.toContain('{t("Restart now")}');
+});
+
+test("pending cookies of a closed profile can be seen (domain and name) and removed", () => {
+  expect(app).toContain("onClick={() => void openPendingCookies(p)}");
+  expect(app).toContain("await fetchPendingCookies(profile.id)");
+  expect(app).toContain("await clearPendingCookies(pendingView.profile.id)");
+  expect(app).toContain('<li key={index}><span className="mono">{cookie.domain}</span><span className="mono muted">{cookie.name}</span></li>');
+  expect(app).toContain('{t("Remove pending cookies")}');
 });
 
 test("the sidebar collapses to an icon rail and remembers it", () => {

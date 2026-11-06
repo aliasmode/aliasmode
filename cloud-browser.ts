@@ -13,6 +13,7 @@ import {
 } from "./cloud-diagnostics.ts";
 import {
   BrowserLaunchError,
+  launchIdentityChanged,
   platformHomeUrl,
   splitLaunchUrls,
   type BrowserOpenOptions,
@@ -103,6 +104,8 @@ export interface CloudBrowserProfile {
   /** Since when Cloud holds an older copy: live checkpoint uploads keep failing, or the profile
       closed without its final capture. */
   cloudUnsavedSince?: number;
+  /** The open browser runs with an older proxy or fingerprint than the saved one. */
+  restartPending?: boolean;
 }
 
 export interface CloudBrowserLifecycle {
@@ -114,6 +117,8 @@ export interface CloudBrowserLifecycle {
   /** A live edit changed the cached profile of an open session — make the next
       checkpoint re-encode it and happen promptly. Optional for partial fakes. */
   noteProfileEdited?(profileId: string): void;
+  /** False while this device still owes Cloud a newer session of the profile, so its Cloud session must not change. */
+  sessionSettled?(profileId: string): boolean;
   create(profile: Profile): Promise<{ id: string }>;
   importProfiles(destination: string, profiles: ProfileExport[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
@@ -440,6 +445,16 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     });
   }
 
+  sessionSettled(profileId: string): boolean {
+    if (this.closedUnsaved.has(profileId)) return false;
+    try {
+      const { queue, accountId } = this.requireContext(false);
+      return !queue.getOpen(profileId, accountId) && !queue.list(accountId).some((pending) => pending.profileId === profileId);
+    } catch {
+      return false;
+    }
+  }
+
   private hasLiveEditGeneration(profileId: string): boolean {
     let context: { queue: PendingSyncQueue; accountId: string };
     try {
@@ -513,6 +528,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         .map((profile) => {
           const launch = launches.get(profile.id);
           const cached = cachedProfiles.get(profile.id);
+          // Roster fields lack the identity, so only an open profile reads its full stored copy.
+          const stored = launch ? this.options.store.getProfile(profile.id) : null;
           const parked = parkedSessions.get(profile.id);
           const upload = launch ? this.uploads.get(profile.id) : undefined;
           // A parked session means Cloud took another device's copy; its own notice covers that.
@@ -541,6 +558,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
             running: !!launch,
             ...(launch?.engine === "firefox" ? {} : { debugPort: launch?.debugPort }),
             startedAt: launch?.startedAt,
+            ...(stored && launchIdentityChanged(stored, launch) ? { restartPending: true } : {}),
             lockedBy: otherActiveOpens.length > 0
               ? `${otherActiveOpens.length} other session(s)`
               : null,
