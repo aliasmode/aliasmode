@@ -6,9 +6,9 @@
  * passes the folder to the engine in the aliasmode:fontsDir config key. All profiles
  * share one copy. The host's own OS needs no pack: the engine uses the real fonts.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { renameWhenUnlocked } from "./browser-install.ts";
 import { sha256File, windowsSystemTool } from "./browser-install.ts";
 import { trackRuntimeDownload } from "./runtime-download.ts";
@@ -85,6 +85,32 @@ export function firefoxFontPackPrefs(fontsDir: string, platform: NodeJS.Platform
   if (platform === "win32") return { "security.sandbox.content.read_path_whitelist": `${fontsDir},${fontsDir}\\` };
   // Linux: a trailing slash allows the folder's whole tree; without it, only the folder itself.
   return { "security.sandbox.content.read_path_whitelist": `${fontsDir}/` };
+}
+
+/**
+ * A fontconfig file for AliasMode Chromium on Linux that adds the pack's fonts to the system's,
+ * given to the browser as FONTCONFIG_FILE. Chromium reads every font through fontconfig there, and
+ * its engine shows only the fonts of the profile's OS, so a Windows profile needs Windows fonts
+ * installed. The system's fonts stay installed for everything else. Written once, beside the pack.
+ */
+export function chromiumFontconfigFile(fontsDir: string, systemConf = "/etc/fonts/fonts.conf"): string {
+  const escape = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const content = `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">${escape(systemConf)}</include>
+  <dir>${escape(fontsDir)}</dir>
+</fontconfig>
+`;
+  const file = join(dirname(fontsDir), "chromium-fonts.conf");
+  try {
+    if (readFileSync(file, "utf8") === content) return file;
+  } catch {}
+  // Renamed into place, so a browser starting at the same time never reads half a file.
+  const temp = `${file}.${process.pid}-${Date.now()}.tmp`;
+  writeFileSync(temp, content);
+  renameSync(temp, file);
+  return file;
 }
 
 export interface FirefoxFontPackDeps {

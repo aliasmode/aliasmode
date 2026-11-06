@@ -46,7 +46,7 @@ export function generateProfileHardware(seed: number): ProfileHardware {
   return { cores: CORE_COUNTS[Math.floor(seedFraction(seed ^ 0x9e3779b9) * CORE_COUNTS.length)]! };
 }
 
-/** Validate stored hardware. CloakBrowser profiles always carry it; the other engines only when the user sets it. */
+/** Validate stored hardware. CloakBrowser profiles always carry it; Chromium 155 from its first open; Firefox only when the user sets it. */
 export function normalizeProfileHardware(value: unknown): ProfileHardware | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   const cores = typeof value === "object" && !Array.isArray(value) ? (value as { cores?: unknown }).cores : undefined;

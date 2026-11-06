@@ -128,7 +128,7 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.store.getLaunch(f.profile.id)).toBeNull();
 });
 
-test("a proxied Firefox launch gives the engine the proxy exit IP for WebRTC, and no answer keeps today's config", async () => {
+test("a proxied Firefox launch gives the engine the proxy exit IP for WebRTC, and no answer after a second try keeps today's config", async () => {
   for (const exitIp of ["203.0.113.7", null]) {
     const f = fixture();
     const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
@@ -140,7 +140,7 @@ test("a proxied Firefox launch gives the engine the proxy exit IP for WebRTC, an
       lookupExitLocation: async (spec) => { asked.push(spec); return exitIp ? { timezone: profile.timezone, ip: exitIp } : null; },
     });
     await launcher.start(profile.id);
-    expect(asked).toEqual([proxy]);
+    expect(asked).toEqual(exitIp ? [proxy] : [proxy, proxy]);
     expect(f.config()).toEqual(firefoxLaunchConfig(profile, LABEL, undefined, exitIp ?? undefined));
     expect((f.config() as Record<string, unknown>)["webrtc:ipv4"]).toBe(exitIp ?? undefined);
     expect(f.store.getProfile(profile.id)!.firefox!.config).not.toHaveProperty("webrtc:ipv4");

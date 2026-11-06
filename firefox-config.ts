@@ -8,6 +8,7 @@ import headerNetworkDefinitionPath from "./node_modules/header-generator/data_fi
 import webglDataPath from "./node_modules/camoufox-js/dist/data-files/webgl_data.db" with { type: "file" };
 import { Database } from "bun:sqlite";
 import { isIP } from "node:net";
+import { availableParallelism } from "node:os";
 import type { ChromiumRuntime, FirefoxProfileConfig, JsonValue, Profile, ProfileEngine } from "./types.ts";
 import fonts from "camoufox-js/dist/mappings/fonts.config.js";
 import { deterministicSeed, launchWindowSize, platformFromUA, seedFraction } from "./fingerprint.ts";
@@ -296,7 +297,7 @@ const DROPPED_LAUNCH_KEYS = [
  */
 export function firefoxLaunchConfig(
   profile: Profile, windowLabel?: string, fontsDir?: string, webRtcIp?: string, intelMac?: { vendor?: MacGraphicsVendor },
-  hostAvail?: { width: number; height: number },
+  hostAvail?: { width: number; height: number }, hostCores = availableParallelism(),
 ): Record<string, JsonValue> {
   const config = { ...profile.firefox!.config };
   for (const key of DROPPED_LAUNCH_KEYS) delete config[key];
@@ -317,6 +318,8 @@ export function firefoxLaunchConfig(
   fitThreads(config, os, !!intelMac, (key) => seedFraction(seed(key)));
   // A count the user set wins, even one no real desktop of this card shows.
   if (profile.hardware) config["navigator.hardwareConcurrency"] = profile.hardware.cores;
+  // Pages that run workers in parallel measure this computer's count, so more is a tell. Chromium 155 caps it the same way.
+  if (Number(config["navigator.hardwareConcurrency"]) > hostCores) config["navigator.hardwareConcurrency"] = hostCores;
   // With the stock list every profile of one OS shows the same fonts.
   if (isStrings(config.fonts)) config.fonts = firefoxProfileFonts(os, config.fonts, (group) => seedFraction(seed(`fonts:${group}`)), !fontsDir);
   // Of the Hiragino faces the macOS font pack holds only Hiragino Sans GB, so on another computer

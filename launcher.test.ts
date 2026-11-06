@@ -173,6 +173,12 @@ function newLauncher(
     },
     browserClose: async () => false, // force-kill path; graceful close is unit-tested in server.test.ts
     cdpReadyTimeoutMs: 1000,
+    // A Windows profile of Chromium 155 on Linux needs the Windows font pack; tests never download it.
+    ensureFirefoxFontPack: async () => {
+      const fontsDir = join(testDataRoot(store), "font-pack", "fonts");
+      mkdirSync(fontsDir, { recursive: true });
+      return fontsDir;
+    },
     ...overrides,
   });
 }
@@ -2097,6 +2103,22 @@ test("buildArgs accepts the fixed Automation runtime flag bundle", () => {
   ];
   const args = launcher.buildArgs(profile, 9333, "/data", launchArgs);
   for (const arg of launchArgs) expect(args).toContain(arg);
+  store.close();
+});
+
+test("buildArgs keeps Chromium 155 Google logins off the TPM binding and merges a forwarded --disable-features", () => {
+  const store = seeded();
+  const f = fleet();
+  const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn });
+  const cloak = store.getProfile("k1d0cd11")!;
+  const chromium155 = { ...cloak, chromiumRuntime: "aliasmode" as const };
+  const features = (args: string[]) => args.filter((arg) => arg.startsWith("--disable-features="));
+
+  expect(features(launcher.buildArgs(chromium155, 9333, "/data", [])))
+    .toEqual(["--disable-features=DeviceBoundSessions,EnableBoundSessionCredentials"]);
+  expect(features(launcher.buildArgs(chromium155, 9333, "/data", ["--disable-features=BackForwardCache"])))
+    .toEqual(["--disable-features=DeviceBoundSessions,EnableBoundSessionCredentials,BackForwardCache"]);
+  expect(features(launcher.buildArgs(cloak, 9333, "/data", []))).toEqual([]);
   store.close();
 });
 
@@ -5234,6 +5256,33 @@ test("a Chromium 155 profile keeps the display scale of its first open on every 
   store.close();
 });
 
+test("a Chromium 155 profile keeps the processor count of its first open", async () => {
+  const store = new ProfileStore(":memory:");
+  const profile = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
+  store.upsertProfile(profile);
+  const open = async (hardwareConcurrency: number) => {
+    const spawnedArgs: string[][] = [];
+    const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
+      hostPlatform: "win32",
+      hostArch: "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
+      captureFingerprint: async () => ({ hardwareConcurrency }),
+      watchWindowFit: () => ({ stop: () => {} }),
+    });
+    await launcher.start(profile.id);
+    await launcher.stop(profile.id);
+    return spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-hardware-concurrency="));
+  };
+  // The first open shows the engine's own count and keeps it.
+  expect(await open(2)).toEqual([]);
+  expect(store.getProfile(profile.id)!.hardware).toEqual({ cores: 2 });
+  // Another computer, where the engine would draw another count, shows the kept one.
+  expect(await open(3)).toEqual(["--fingerprint-hardware-concurrency=2"]);
+  expect(store.getProfile(profile.id)!.hardware).toEqual({ cores: 2 });
+  store.close();
+});
+
 test("Chromium 155 on a scaled Windows display reports the screen in CSS pixels, as Chrome does there", async () => {
   const launch = async (
     hostPlatform: NodeJS.Platform,
@@ -5373,6 +5422,66 @@ test("a Cloud launch of Chromium 155 on Windows or Linux keeps the browser after
   }
 });
 
+test("a Windows profile of Chromium 155 on Linux gets the Windows font pack through fontconfig; others keep the system fonts", async () => {
+  const launch = async (
+    hostPlatform: NodeJS.Platform,
+    engine: "aliasmode" | "cloakbrowser",
+    platformOs: string,
+    ensureFirefoxFontPack?: (root: string, pack: { os: string }) => Promise<string>,
+  ) => {
+    const store = new ProfileStore(":memory:");
+    const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs }, () => false);
+    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
+    const f = fleet();
+    const envs: Array<Record<string, string> | undefined> = [];
+    const packs: string[] = [];
+    const fontsDir = join(testDataRoot(store), "font-pack", "fonts");
+    const launcher = newLauncher(store, f, [], undefined, undefined, {
+      hostPlatform,
+      hostArch: hostPlatform === "darwin" ? "arm64" : "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome",
+      ensureDownloadedCloakBrowser: async () => "/fake/cloak",
+      chromiumSandboxBlocked: () => false,
+      captureFingerprint: async () => null,
+      ensureFirefoxFontPack: ensureFirefoxFontPack ?? (async (_root, pack) => {
+        packs.push(pack.os);
+        mkdirSync(fontsDir, { recursive: true });
+        return fontsDir;
+      }),
+      spawn: (bin, args, env) => {
+        envs.push(env);
+        return f.spawn(bin, args);
+      },
+    });
+    try {
+      await launcher.start(chromium155.id);
+      await launcher.stop(chromium155.id);
+    } finally {
+      store.close();
+    }
+    const conf = envs[0]?.FONTCONFIG_FILE;
+    return { packs, conf, content: conf ? readFileSync(conf, "utf8") : undefined, fontsDir, env: envs[0] };
+  };
+  const linux = await launch("linux", "aliasmode", "windows");
+  expect(linux.packs).toEqual(["windows"]);
+  expect(linux.conf).toBe(join(linux.fontsDir, "..", "chromium-fonts.conf"));
+  // The pack is added to the system's fonts, which stay.
+  expect(linux.content).toContain(`<dir>${linux.fontsDir}</dir>`);
+  expect(linux.content).toContain(`<include ignore_missing="yes">${process.env.FONTCONFIG_FILE || "/etc/fonts/fonts.conf"}</include>`);
+  expect(linux.env).toMatchObject({ GOOGLE_API_KEY: "no" });
+  // The host's own OS, another host, and CloakBrowser get no pack.
+  for (const [host, engine, os] of [["linux", "aliasmode", "linux"], ["win32", "aliasmode", "windows"], ["linux", "cloakbrowser", "windows"]] as const) {
+    const other = await launch(host, engine, os);
+    expect(other.packs).toEqual([]);
+    expect(other.conf).toBeUndefined();
+  }
+  // Without the fonts the profile does not open with this computer's fonts.
+  await expect(launch("linux", "aliasmode", "windows", async () => { throw new Error("offline"); }))
+    .rejects.toEqual(new BrowserLaunchError("preflight", "firefox_fonts_download"));
+});
+
 test("Chromium 155 on Windows and Linux shows the proxy exit IP to WebRTC; macOS and CloakBrowser do not", async () => {
   const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
   const launch = async (
@@ -5411,18 +5520,22 @@ test("Chromium 155 on Windows and Linux shows the proxy exit IP to WebRTC; macOS
     .toEqual({ asked: [proxy], webrtc: [policy, "--fingerprint-webrtc-ip=203.0.113.7"] });
   expect((await launch("win32", "aliasmode", async () => "2001:db8::7")).webrtc)
     .toEqual([policy, "--fingerprint-webrtc-ip=2001:db8::7"]);
-  // No answer, or a failed lookup, keeps the arguments as they were.
-  expect(await launch("win32", "aliasmode", async () => null)).toEqual({ asked: [proxy], webrtc: [policy] });
+  // No answer, or a failed lookup, is asked once more; still none keeps the arguments as they were.
+  expect(await launch("win32", "aliasmode", async () => null)).toEqual({ asked: [proxy, proxy], webrtc: [policy] });
   expect(await launch("win32", "aliasmode", () => Promise.reject(new Error("offline"))))
-    .toEqual({ asked: [proxy], webrtc: [policy] });
+    .toEqual({ asked: [proxy, proxy], webrtc: [policy] });
+  const answers = [null, "203.0.113.9"];
+  expect(await launch("linux", "aliasmode", async () => answers.shift() ?? null))
+    .toEqual({ asked: [proxy, proxy], webrtc: [policy, "--fingerprint-webrtc-ip=203.0.113.9"] });
   // Without a proxy WebRTC keeps the computer's own route and nothing is looked up.
   expect(await launch("win32", "aliasmode", async () => "203.0.113.7", null))
     .toEqual({ asked: [], webrtc: ["--force-webrtc-ip-handling-policy=default_public_interface_only"] });
   expect((await launch("linux", "aliasmode", async () => "203.0.113.7")).webrtc).toEqual([policy, "--fingerprint-webrtc-ip=203.0.113.7"]);
   // Upstream's Mac build and CloakBrowser lack the engine change. Their exit is asked
-  // for its timezone only.
+  // for its timezone only, once.
   for (const [host, engine] of [["darwin", "aliasmode"], ["win32", "cloakbrowser"]] as const) {
     expect(await launch(host, engine, async () => "203.0.113.7")).toEqual({ asked: [proxy], webrtc: [policy] });
+    expect(await launch(host, engine, async () => null)).toEqual({ asked: [proxy], webrtc: [policy] });
   }
 });
 

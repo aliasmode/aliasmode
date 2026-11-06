@@ -198,8 +198,9 @@ test("a Linux profile on another computer gets Linux's stock fonts, GTK colours 
 
 test("a Firefox profile's processor count fits its graphics card class, at launch and when generated", () => {
   const card = (renderer: string) => ({ "webGl:vendor": "Google Inc. (NVIDIA)", "webGl:renderer": renderer });
+  // On a 64-thread computer, so no count is capped to the computer's own.
   const threadsAt = (renderer: string, threads: number, seed = 5) =>
-    firefoxLaunchConfig(profile(seed, { ...card(renderer), "navigator.hardwareConcurrency": threads }))["navigator.hardwareConcurrency"];
+    firefoxLaunchConfig(profile(seed, { ...card(renderer), "navigator.hardwareConcurrency": threads }), undefined, undefined, undefined, undefined, undefined, 64)["navigator.hardwareConcurrency"];
   // Stock Firefox names every GeForce from the 900 series on as a GTX 980, so a 32-thread one is real.
   expect(threadsAt("ANGLE (NVIDIA, NVIDIA GeForce GTX 980 Direct3D11 vs_5_0 ps_5_0), or similar", 32)).toBe(32);
   expect(threadsAt("ANGLE (Intel, Intel(R) HD Graphics Direct3D11 vs_5_0 ps_5_0), or similar", 16)).toBe(16);
@@ -213,10 +214,16 @@ test("a Firefox profile's processor count fits its graphics card class, at launc
   const old = profile(7, { ...card("ANGLE (NVIDIA, NVIDIA GeForce GTX 480 Direct3D11 vs_5_0 ps_5_0), or similar"), "navigator.hardwareConcurrency": 32 });
   expect(firefoxLaunchConfig(old)["navigator.hardwareConcurrency"]).toBe(firefoxLaunchConfig(structuredClone(old))["navigator.hardwareConcurrency"]!);
   expect(old.firefox!.config["navigator.hardwareConcurrency"]).toBe(32);
+  // A computer with fewer threads than the count shows its own, as Chromium 155 does; the saved count stays.
+  const big = profile(5, { ...card("ANGLE (NVIDIA, NVIDIA GeForce GTX 980 Direct3D11 vs_5_0 ps_5_0), or similar"), "navigator.hardwareConcurrency": 24 });
+  expect(firefoxLaunchConfig(big, undefined, undefined, undefined, undefined, undefined, 8)["navigator.hardwareConcurrency"]).toBe(8);
+  expect(firefoxLaunchConfig({ ...big, hardware: { cores: 16 } }, undefined, undefined, undefined, undefined, undefined, 12)["navigator.hardwareConcurrency"]).toBe(12);
+  expect(firefoxLaunchConfig(big, undefined, undefined, undefined, undefined, undefined, 24)["navigator.hardwareConcurrency"]).toBe(24);
+  expect(big.firefox!.config["navigator.hardwareConcurrency"]).toBe(24);
   // Generated profiles already have a fitting count, the one their launch shows.
   for (let seed = 1; seed <= 60; seed++) {
     const generated = createFirefoxProfileConfig(1920, 1080, "windows", seed).config;
-    const launched = firefoxLaunchConfig({ ...profile(seed, generated), fingerprintSeed: seed });
+    const launched = firefoxLaunchConfig({ ...profile(seed, generated), fingerprintSeed: seed }, undefined, undefined, undefined, undefined, undefined, 64);
     expect(launched["navigator.hardwareConcurrency"]).toBe(generated["navigator.hardwareConcurrency"]!);
     if (/GTX 480|8800 GTX|HD 3200|Intel\(R\) HD Graphics Direct/.test(String(generated["webGl:renderer"]))) {
       expect(Number(generated["navigator.hardwareConcurrency"])).toBeLessThanOrEqual(20);
@@ -505,12 +512,12 @@ test("on an Intel Mac a macOS profile shows an Intel or AMD Mac card of that Mac
   for (let seed = 1; seed <= 50; seed++) {
     for (const cores of [8, 14]) {
       const stored = profile(seed, { "navigator.platform": "MacIntel", ...apple, "navigator.hardwareConcurrency": cores });
-      const intel = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "intel" })["navigator.hardwareConcurrency"];
-      const amd = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "amd" })["navigator.hardwareConcurrency"];
+      const intel = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "intel" }, undefined, 64)["navigator.hardwareConcurrency"];
+      const amd = firefoxLaunchConfig(stored, undefined, undefined, undefined, { vendor: "amd" }, undefined, 64)["navigator.hardwareConcurrency"];
       expect([4, 8]).toContain(intel as number);
       expect([8, 12, 16]).toContain(amd as number);
       if (cores === 8) expect([intel, amd]).toEqual([8, 8]);
-      expect(firefoxLaunchConfig(stored)["navigator.hardwareConcurrency"]).toBe(cores);
+      expect(firefoxLaunchConfig(stored, undefined, undefined, undefined, undefined, undefined, 64)["navigator.hardwareConcurrency"]).toBe(cores);
     }
   }
   // A card of the Mac's vendor stays; a Windows profile keeps its own card.
