@@ -2096,7 +2096,7 @@ export class Launcher {
     const userDataDir = this.userDataDir(profileId);
     const existingUserDataDir = existsSync(userDataDir);
     let personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
-    const persona = launchPersona(profile);
+    let persona = launchPersona(profile);
     mkdirSync(userDataDir, { recursive: true });
 
     // A directory that did not exist before this launch cannot have a foreign
@@ -2301,6 +2301,7 @@ export class Launcher {
         profileSnapshot = JSON.stringify(profile);
         // The browser already shows these cores, so the launch is recorded with them; otherwise
         // the next identity check (Cloud's session restore, a reattach) reads it as a changed persona.
+        persona = launchPersona(profile);
         personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
       }
 
@@ -3806,6 +3807,9 @@ export class Launcher {
     this.assertStoredLaunchPersona(profile, launch, approvedBinarySha256);
     const generation = `${launch.debugPort}:${launch.startedAt}`;
     profile = this.requireUnchangedProfile(profileId, snapshot, "survivor CDP verification");
+    // A launch recorded before its identity was stored: the check above proved it runs with the
+    // stored profile, so later edits apply at its next start instead of failing this check.
+    if (!launch.persona) this.store.setLaunchPersona(profileId, launch.startedAt, launchPersona(profile));
     if (!launchedProfile(profile, launch).proxy) {
       this.markIdentityCertified(profileId);
       void this.watchSurvivorWindow(profileId);

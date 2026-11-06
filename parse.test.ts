@@ -488,6 +488,16 @@ test("pasted cookies accept JSON exports and Netscape cookies.txt", () => {
     { name: "auth_token", value: "tok", domain: ".x.com", path: "/", httpOnly: true, secure: true, expires: 4_000_000_000 },
     { name: "lang", value: "en", domain: "x.com", path: "/home", httpOnly: false, secure: false },
   ]);
+  // Subdomain flag without a leading dot, a dropped empty value, an expiry in milliseconds.
+  expect(parseCookieText("x.com\tTRUE\t/\tTRUE\t4000000000000\tempty")).toEqual([
+    { name: "empty", value: "", domain: ".x.com", path: "/", httpOnly: false, secure: true, expires: 4_000_000_000 },
+  ]);
+  // Cookies that break the name prefix rules are left out; Chromium would refuse the whole batch.
+  expect(parseCookieText(JSON.stringify([
+    { name: "__Secure-a", value: "1", domain: "x.com", secure: false },
+    { name: "__Host-b", value: "1", domain: ".x.com", secure: true },
+    { name: "__Host-c", value: "1", domain: "x.com", secure: true },
+  ])).map((cookie) => cookie.name)).toEqual(["__Host-c"]);
   for (const bad of ["", "[]", "{bad", "x.com TRUE / FALSE", '[{"name":"bad name","value":"v","domain":"x.com"}]']) {
     expect(() => parseCookieText(bad)).toThrow();
   }

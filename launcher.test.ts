@@ -1425,6 +1425,25 @@ test("Open restarts a browser with a launch row from before launch identities wh
   store.close();
 });
 
+test("a browser launched before launch identities were saved gets its identity at the next check", async () => {
+  const store = seeded();
+  makeDirect(store);
+  const f = fleet();
+  const launcher = newLauncher(store, f, []);
+  await launcher.start("k1d0cd11");
+  const { persona: _persona, ...legacy } = store.getLaunch("k1d0cd11")!;
+  store.recordLaunch(legacy);
+  const survivor = newLauncher(store, f, []);
+  expect(await survivor.certifiedActive("k1d0cd11")).toBe(true);
+  expect(store.getLaunch("k1d0cd11")!.persona).toBeDefined();
+  const profile = store.getProfile("k1d0cd11")!;
+  store.upsertProfile({ ...profile, screenWidth: 1366, screenHeight: 768 });
+  expect(await survivor.certifiedActive("k1d0cd11")).toBe(true);
+  expect(launchIdentityChanged(store.getProfile("k1d0cd11")!, store.getLaunch("k1d0cd11"))).toBe(true);
+  await survivor.stop("k1d0cd11");
+  store.close();
+});
+
 test("start sets cookies added while closed before the first page, then clears them", async () => {
   const store = seeded();
   makeDirect(store);
@@ -5355,6 +5374,8 @@ test("a Chromium 155 profile keeps the processor count of its first open", async
     await launcher.start(profile.id);
     // The launch is recorded with the kept count, so Cloud's identity check after the open passes.
     await launcher.verifyRunningIdentity(profile.id);
+    // Nothing waits for a restart.
+    expect(launchIdentityChanged(store.getProfile(profile.id)!, store.getLaunch(profile.id))).toBe(false);
     await launcher.stop(profile.id);
     return spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-hardware-concurrency="));
   };

@@ -189,8 +189,11 @@ export function parseCookieText(text: string): CookieRecord[] {
       const body = httpOnly ? line.slice("#HttpOnly_".length) : line;
       if (!body.trim() || body.startsWith("#")) continue;
       const fields = body.split("\t");
-      if (fields.length < 7) throw new Error("cookies.txt lines need 7 tab-separated fields");
-      const [domain, , path, secure, expires, name, ...value] = fields;
+      // Some exporters drop the tab before an empty value.
+      if (fields.length < 6) throw new Error("cookies.txt lines need 7 tab-separated fields");
+      const [host, subdomains, path, secure, expires, name, ...value] = fields;
+      // A cookie for subdomains too is a domain cookie: its domain starts with a dot.
+      const domain = subdomains!.toUpperCase() === "TRUE" && !host!.startsWith(".") ? `.${host}` : host;
       raw.push({
         domain, path, name, value: value.join("\t"), httpOnly,
         secure: secure!.toUpperCase() === "TRUE",
@@ -198,8 +201,14 @@ export function parseCookieText(text: string): CookieRecord[] {
       });
     }
   }
-  const cookies = normalizeCookies(raw).cookies.filter((cookie) =>
-    !/[\s\x00-\x1f\x7f;=]/.test(cookie.name) && !/[\x00-\x1f\x7f;]/.test(cookie.value) && cookie.path.startsWith("/"));
+  const cookies = normalizeCookies(raw).cookies.map((cookie) =>
+    // An expiry past year 9999 in seconds is in milliseconds; the browser takes seconds.
+    cookie.expires !== undefined && cookie.expires > 253_402_300_799 ? { ...cookie, expires: Math.floor(cookie.expires / 1000) } : cookie,
+  ).filter((cookie) =>
+    !/[\s\x00-\x1f\x7f;=]/.test(cookie.name) && !/[\x00-\x1f\x7f;]/.test(cookie.value) && cookie.path.startsWith("/") &&
+    // Chromium refuses the whole batch for a cookie that breaks its name prefix rules.
+    (!cookie.name.startsWith("__Secure-") || cookie.secure) &&
+    (!cookie.name.startsWith("__Host-") || (cookie.secure && cookie.path === "/" && !cookie.domain.startsWith("."))));
   if (!cookies.length) throw new Error("no valid cookies found");
   return cookies;
 }

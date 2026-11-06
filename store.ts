@@ -15,6 +15,7 @@ import type {
   CookieRecord,
   FingerprintVerdict,
   LaunchInfo,
+  LaunchPersona,
   ObservedFingerprint,
   Profile,
   ProfileEngine,
@@ -1026,6 +1027,12 @@ export class ProfileStore {
     // Mirror the launch time onto the profile so the AdsPower user/list facade
     // can report last_open_time (the launches row is deleted on stop).
     this.db.query(`UPDATE profiles SET last_open_at = ? WHERE id = ?`).run(info.startedAt, info.profileId);
+  }
+
+  /** Record the launch identity of a launch made before it was stored. */
+  setLaunchPersona(profileId: string, startedAt: number, persona: LaunchPersona): void {
+    this.db.query(`UPDATE launches SET persona_json = ? WHERE profile_id = ? AND started_at = ? AND persona_json IS NULL`)
+      .run(JSON.stringify(persona), profileId, startedAt);
   }
 
   updateLaunchSessionBaseVersion(profileId: string, version: number): void {
