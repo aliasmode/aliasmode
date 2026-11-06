@@ -747,8 +747,18 @@ test("a running row with saved proxy or fingerprint changes offers a restart", (
   expect(app).toContain("{p.restartPending && (");
   expect(app).toContain('{t("Applies at next start")}');
   expect(app).toContain("onClick={() => act(p.id, restartProfile)}");
-  expect(app).toContain('{t("Restart now")}');
   expect(app).toContain("if (r.restartRequired) flash(");
+  // The restart is the status chip on its own line in the name cell, so the row actions keep their width.
+  expect(app).toContain('className="status-chip warn tip"');
+  expect(app).not.toContain('{t("Restart now")}');
+});
+
+test("pending cookies of a closed profile can be seen (domain and name) and removed", () => {
+  expect(app).toContain("onClick={() => void openPendingCookies(p)}");
+  expect(app).toContain("await fetchPendingCookies(profile.id)");
+  expect(app).toContain("await clearPendingCookies(pendingView.profile.id)");
+  expect(app).toContain('<li key={index}><span className="mono">{cookie.domain}</span><span className="mono muted">{cookie.name}</span></li>');
+  expect(app).toContain('{t("Remove pending cookies")}');
 });
 
 test("the sidebar collapses to an icon rail and remembers it", () => {

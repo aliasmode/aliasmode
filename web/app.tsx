@@ -66,6 +66,8 @@ import {
   type ProxyCheckInput,
   type ProxyCheckResult,
   addProfileCookies,
+  fetchPendingCookies,
+  clearPendingCookies,
   openProfile,
   closeProfile,
   restartProfile,
@@ -1316,6 +1318,7 @@ function App() {
   const [cookieText, setCookieText] = useState("");
   const [cookieErr, setCookieErr] = useState<string | null>(null);
   const [cookieSaving, setCookieSaving] = useState(false);
+  const [pendingView, setPendingView] = useState<{ profile: UiProfile; cookies: Array<{ domain: string; name: string }> | null; error: string | null; busy: boolean } | null>(null);
   const [proxyPaste, setProxyPaste] = useState("");
   const [proxyPasteOk, setProxyPasteOk] = useState<string | null>(null);
   // Edit modal + bulk export/update + group rename
@@ -1449,6 +1452,7 @@ function App() {
       if (logView || logErr) { setLogView(null); setLogErr(null); return; }
       if (showUpdate) { setShowUpdate(false); return; }
       if (showBulk) { closeBulk(); return; }
+      if (pendingView) { if (!pendingView.busy) setPendingView(null); return; }
       if (cookieTargets) { if (!cookieSaving) closeCookie(); return; }
       if (editId) { closeEdit(); return; }
       if (showCreate) closeCreate();
@@ -2523,6 +2527,28 @@ function App() {
     setCookieForm(BLANK_COOKIE_FORM);
     setCookieText("");
     setCookieErr(null);
+  };
+  const openPendingCookies = async (profile: UiProfile) => {
+    setPendingView({ profile, cookies: null, error: null, busy: false });
+    try {
+      const result = await fetchPendingCookies(profile.id);
+      setPendingView((view) => view && { ...view, cookies: result.cookies ?? [], error: result.ok ? null : result.error ?? t("Cookies could not be loaded.") });
+    } catch (error) {
+      setPendingView((view) => view && { ...view, cookies: [], error: error instanceof Error ? error.message : t("Cookies could not be loaded.") });
+    }
+  };
+  const removePendingCookies = async () => {
+    if (!pendingView) return;
+    setPendingView({ ...pendingView, busy: true, error: null });
+    try {
+      const result = await clearPendingCookies(pendingView.profile.id);
+      if (!result.ok) throw new Error(result.error || t("Cookies could not be removed."));
+      setPendingView(null);
+      await load().catch(() => {});
+      flash(t("Pending cookies removed."));
+    } catch (error) {
+      setPendingView((view) => view && { ...view, busy: false, error: error instanceof Error ? error.message : t("Cookies could not be removed.") });
+    }
   };
   const setCookieField = (key: keyof typeof BLANK_COOKIE_FORM, value: string) =>
     setCookieForm((current) => ({ ...current, [key]: value }));
@@ -3988,16 +4014,6 @@ function App() {
                             {browserLabel(p.engine, p.chromiumRuntime)}
                           </span>
                           {p.running && <span className="live"><StatusDot running />running</span>}
-                          {p.restartPending && (
-                            <span className="unsaved" title={t("Saved proxy or fingerprint changes apply when this browser restarts.")}>
-                              <Icon name="warning" className="sm" />{t("Applies at next start")}
-                            </span>
-                          )}
-                          {!!p.pendingCookieCount && (
-                            <span className="muted" title={t("The browser sets these cookies the next time it starts.")}>
-                              <Icon name="cookie" className="sm" />{t("{count} cookie(s) at next start", { count: String(p.pendingCookieCount) })}
-                            </span>
-                          )}
                           {p.lockedBy && (
                             <span className="lockedby" title={`in use by ${p.lockedBy}`}>
                               <Icon name="lock" className="sm" />{p.lockedBy}
@@ -4011,6 +4027,28 @@ function App() {
                             </span>
                           )}
                         </span>
+                        {(p.restartPending || !!p.pendingCookieCount) && (
+                          <span className="status">
+                            {p.restartPending && (
+                              <button
+                                type="button"
+                                className="status-chip warn tip"
+                                data-tip={t("Saved proxy or fingerprint changes apply when this browser restarts. Click to restart it now.")}
+                                aria-label={t("Restart {profile} so the saved changes apply", { profile: p.name })}
+                                disabled={busy[p.id]}
+                                onClick={() => act(p.id, restartProfile)}
+                              ><Icon name="refresh" className="sm" />{t("Applies at next start")}</button>
+                            )}
+                            {!!p.pendingCookieCount && (
+                              <button
+                                type="button"
+                                className="status-chip tip"
+                                data-tip={t("The browser sets these cookies the next time it starts. Click to see or remove them.")}
+                                onClick={() => void openPendingCookies(p)}
+                              ><Icon name="cookie" className="sm" />{t("{count} cookie(s) at next start", { count: String(p.pendingCookieCount) })}</button>
+                            )}
+                          </span>
+                        )}
                       </span>
                     </td>
                   )}
@@ -4063,14 +4101,6 @@ function App() {
                         )}
                         {p.running ? (
                           <>
-                            {p.restartPending && (
-                              <button
-                                className="btn sm warn tip"
-                                data-tip={t("Close and open this browser so the saved changes apply")}
-                                disabled={busy[p.id]}
-                                onClick={() => act(p.id, restartProfile)}
-                              ><Icon name="play" className="sm" />{t("Restart now")}</button>
-                            )}
                             {p.engine === "chromium" && <>
                               <button
                                 className="iconbtn tip"
@@ -4665,6 +4695,32 @@ function App() {
           onConfirm={() => void confirmModeSwitch()}
           onCancel={() => { if (!modeBusy) setPendingMode(null); }}
         />
+      )}
+
+      {pendingView && (
+        <div className="modal-backdrop" onClick={() => { if (!pendingView.busy) setPendingView(null); }}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="pending-cookie-title" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head" id="pending-cookie-title">
+              <Icon name="cookie" />{t("Cookies at next start")}<span className="mono muted">{pendingView.profile.name}</span>
+              <button type="button" className="modal-close" aria-label={t("Close")} disabled={pendingView.busy} onClick={() => setPendingView(null)}><Icon name="close" className="sm" /></button>
+            </div>
+            <div className="modal-body">
+              {pendingView.error && <div className="modal-err"><Icon name="alert" className="sm" />{pendingView.error}</div>}
+              <p className="hint">{t("The browser sets these cookies the next time it starts, before the first page opens.")}</p>
+              {pendingView.cookies === null
+                ? <p className="muted">{t("Loading…")}</p>
+                : <ul className="pending-cookies">{pendingView.cookies.map((cookie, index) => (
+                  <li key={index}><span className="mono">{cookie.domain}</span><span className="mono muted">{cookie.name}</span></li>
+                ))}</ul>}
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" type="button" disabled={pendingView.busy} onClick={() => setPendingView(null)}>{t("Close")}</button>
+              <button className="btn danger" type="button" disabled={pendingView.busy || !pendingView.cookies?.length} onClick={() => void removePendingCookies()}>
+                <Icon name="trash" className="sm" />{t("Remove pending cookies")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {cookieTargets && (

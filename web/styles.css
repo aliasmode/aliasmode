@@ -874,6 +874,21 @@ td.col-no .no-text.custom { color: var(--accent-2-ink); }
 .name-cell .n { color: var(--ink); font-weight: 600; font-size: var(--t-base); letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; }
 .name-cell .sub { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11.5px; font-family: var(--mono); letter-spacing: -0.01em; }
 .name-cell .sub .live { display: inline-flex; align-items: center; gap: 4px; color: var(--success-ink); font-family: var(--font); font-weight: 600; }
+/* States that need a click (restart to apply, cookies at next start) get their own line, so
+   they stay readable in every language and never widen the row's actions. */
+.name-cell .status { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.status-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  padding: 1px 7px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-sunken); color: var(--muted);
+  font-family: var(--font); font-size: 11px; font-weight: 550; line-height: 1.35; text-align: left; white-space: normal; min-width: 0; cursor: pointer;
+}
+.status-chip .icon { flex: none; }
+.status-chip:hover:not(:disabled) { color: var(--ink); }
+.status-chip.warn { color: var(--warn-ink); background: var(--warn-soft); border-color: var(--warn-line); }
+.status-chip:disabled { opacity: .6; cursor: default; }
+.pending-cookies { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow: auto; }
+.pending-cookies li { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .name-cell .sub .lockedby, .name-cell .sub .unsaved {
   display: inline-flex; align-items: center; gap: 4px;
   color: var(--warn-ink); font-family: var(--font); font-size: 11px; font-weight: 550; white-space: nowrap;

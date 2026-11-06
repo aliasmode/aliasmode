@@ -436,6 +436,17 @@ test("cookie route rejects untrusted and malformed requests, and keeps cookies f
   expect(await closed!.json()).toEqual({ ok: true, applied: "next-start", count: 1 });
   expect(s.getPendingCookies("k1d0cd11")).toMatchObject([{ name: "session", value: "value", domain: "example.com", path: "/" }]);
   expect(listUiProfiles(s).find((profile) => profile.id === "k1d0cd11")!.pendingCookieCount).toBe(1);
+  // The pending list shows domain and name only, and can be removed.
+  const listed = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/pending-cookies"), launcher, s, null, options);
+  expect(await listed!.json()).toEqual({ ok: true, cookies: [{ domain: "example.com", name: "session" }] });
+  const removed = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/pending-cookies/clear", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  }), launcher, s, null, options);
+  expect(await removed!.json()).toEqual({ ok: true, removed: 1 });
+  expect(s.getPendingCookies("k1d0cd11")).toEqual([]);
+  expect(listUiProfiles(s).find((profile) => profile.id === "k1d0cd11")!.pendingCookieCount).toBeUndefined();
 
   // A recorded browser that is not certified yet (still starting) gets nothing.
   s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://live-browser", startedAt: 123 });
@@ -448,7 +459,7 @@ test("cookie route rejects untrusted and malformed requests, and keeps cookies f
   expect(await starting!.json()).toEqual({ ok: false, error: "profile browser is not open" });
   expect(certifications).toBe(1);
   expect(writes).toBe(0);
-  expect(s.getPendingCookies("k1d0cd11")).toHaveLength(1);
+  expect(s.getPendingCookies("k1d0cd11")).toHaveLength(0);
   s.close();
 });
 

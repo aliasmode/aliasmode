@@ -504,6 +504,17 @@ export async function addProfileCookies(
   return apiJson(response, path);
 }
 
+/** Local mode: the cookies a closed profile sets at its next start (domain and name only). */
+export async function fetchPendingCookies(id: string): Promise<{ ok: boolean; cookies?: Array<{ domain: string; name: string }>; error?: string }> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/pending-cookies`;
+  return apiJson(await fetch(path), path);
+}
+
+export async function clearPendingCookies(id: string): Promise<{ ok: boolean; removed?: number; error?: string }> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/pending-cookies/clear`;
+  return apiJson(await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }), path);
+}
+
 export const openProfile = (id: string, force = false) =>
   post(`/ui/api/profiles/${encodeURIComponent(id)}/open${force ? "?force=1" : ""}`);
 export const closeProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/close`);

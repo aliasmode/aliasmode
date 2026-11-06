@@ -2173,6 +2173,29 @@ export async function handleUiRequest(
     });
   }
 
+  // Cookies a closed Local profile sets at its next start: list them (domain and name only) or remove them.
+  const pendingCookieRoute = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/pending-cookies(\/clear)?$/);
+  if (pendingCookieRoute && (pendingCookieRoute[2] ? req.method === "POST" : req.method === "GET")) {
+    if (req.method === "POST") {
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+    }
+    let id: string;
+    try {
+      id = decodeURIComponent(pendingCookieRoute[1]!);
+    } catch {
+      return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    }
+    if (!isSafeProfileId(id)) return Response.json({ ok: false, error: PROFILE_ID_ERROR }, { status: 400 });
+    if (!store.getProfile(id)) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
+    const pending = store.getPendingCookies(id);
+    if (pendingCookieRoute[2]) {
+      store.clearPendingCookies(id, pending);
+      return Response.json({ ok: true, removed: pending.length });
+    }
+    return noStoreJson({ ok: true, cookies: pending.map(({ domain, name }) => ({ domain, name })) });
+  }
+
   // Open the AliasMode fingerprint test in a new tab of a running profile. Only these pages can be opened.
   const fingerprintCheck = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/check-fingerprint$/);
   if (fingerprintCheck && req.method === "POST") {
