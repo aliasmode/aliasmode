@@ -2025,7 +2025,7 @@ export class Launcher {
 
     const userDataDir = this.userDataDir(profileId);
     const existingUserDataDir = existsSync(userDataDir);
-    const personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
+    let personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
     mkdirSync(userDataDir, { recursive: true });
 
     // A directory that did not exist before this launch cannot have a foreign
@@ -2227,6 +2227,9 @@ export class Launcher {
         this.store.setHardware(profileId, { cores: drawnCores! });
         profile = this.store.getProfile(profileId)!;
         profileSnapshot = JSON.stringify(profile);
+        // The browser already shows these cores, so the launch is recorded with them; otherwise
+        // the next identity check (Cloud's session restore, a reattach) reads it as a changed persona.
+        personaDigest = this.launchPersonaDigest(profile, verifiedBinary.sha256, headless);
       }
 
       // Only a caller that navigates by itself (Cloud) and the Windows session launch use a late

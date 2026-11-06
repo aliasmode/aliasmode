@@ -5271,6 +5271,8 @@ test("a Chromium 155 profile keeps the processor count of its first open", async
       watchWindowFit: () => ({ stop: () => {} }),
     });
     await launcher.start(profile.id);
+    // The launch is recorded with the kept count, so Cloud's identity check after the open passes.
+    await launcher.verifyRunningIdentity(profile.id);
     await launcher.stop(profile.id);
     return spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-hardware-concurrency="));
   };
