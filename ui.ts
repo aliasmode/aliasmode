@@ -20,6 +20,7 @@ import type {
   CloudBrowserCloseResult,
   CloudBrowserLifecycle,
 } from "./cloud-browser.ts";
+import type { StoreEventType } from "./contracts/cloud-v1.ts";
 import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import { normalizeCloudDiagnostics } from "./cloud-diagnostics.ts";
 import { CloudApiError, CloudRequestError } from "./cloud-client.ts";
@@ -299,6 +300,13 @@ function cloudRestoreFailure(error: unknown, stage: CloudRestoreStage): CloudRes
     category: "service",
     code: "response_invalid",
   };
+}
+
+const STORE_EVENT_TYPES = new Set<unknown>(["entry_click", "store_view", "pay_click"] satisfies StoreEventType[]);
+
+/** A store placement slug such as `sidebar-cart`, or null. */
+function storeSrc(value: unknown): string | null {
+  return typeof value === "string" && /^[a-z0-9-]{1,64}$/.test(value) ? value : null;
 }
 
 function rejectUntrustedJsonMutation(req: Request): Response | null {
@@ -1264,7 +1272,24 @@ export async function handleUiRequest(
       if (body.action === "purchase") {
         const type = text(body.type), country = text(body.country), quantity = count(body.quantity), idempotencyKey = text(body.idempotencyKey);
         if (!type || !country || !quantity || !idempotencyKey) return noStoreJson({ ok: false, error: "Choose a proxy type, country and quantity" }, 400);
-        return noStoreJson(await cloud.purchaseProxies({ type, country, quantity, idempotencyKey }));
+        const src = storeSrc(body.src);
+        try {
+          return noStoreJson(await cloud.purchaseProxies({ type, country, quantity, idempotencyKey, ...(src ? { src } : {}) }));
+        } catch (error) {
+          // A Cloud without `src` rejects the field before it charges anything: buy again without it, same key.
+          if (!src || !(error instanceof CloudApiError && error.code === "validation_failed")) throw error;
+          return noStoreJson(await cloud.purchaseProxies({ type, country, quantity, idempotencyKey }));
+        }
+      }
+      if (body.action === "store-events") {
+        // Only the type, the placement slug and the time go to Cloud.
+        const events = (Array.isArray(body.events) ? body.events : []).flatMap((event: any) => {
+          const src = storeSrc(event?.src);
+          return STORE_EVENT_TYPES.has(event?.type) && src && Number.isSafeInteger(event?.at) && event.at > 0
+            ? [{ type: event.type, src, at: event.at }] : [];
+        });
+        if (!events.length) return noStoreJson({ ok: false, error: "events are required" }, 400);
+        return noStoreJson(await cloud.postStoreEvents({ events }));
       }
       if (body.action === "auto-renew") {
         const orderId = text(body.orderId);

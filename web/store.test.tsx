@@ -2,7 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement } from "react";
 import { I18nProvider } from "./i18n.tsx";
-import { ProxyProviderOffer, ProxyStoreContext } from "./proxy-offer.tsx";
+import { PROXY_SRC, ProxyProviderOffer, ProxyStoreContext } from "./proxy-offer.tsx";
+import { storeEvents } from "./store-events.ts";
 import { ProxiesPage } from "./proxies.tsx";
 import {
   CardPaymentView,
@@ -916,4 +917,180 @@ test("the sidebar has one Proxies item and no Wallet or Logs item; logs open fro
   const advanced = app.slice(app.indexOf('settingsTab === "advanced"'));
   expect(advanced).toContain('{t("View detailed logs")}</button>');
   expect(advanced).toContain("fetchLogs().then(setLogView)");
+});
+
+/** Runs a component as part of a render and gives back the elements it returned, so a test can call their handlers. */
+function capture(make: () => ReactElement | null, wrap: (child: ReactElement) => ReactElement = (child) => child): ReactElement {
+  let tree: ReactElement | null = null;
+  function Probe() { tree = make(); return null; }
+  render(wrap(<Probe />));
+  return tree!;
+}
+function findAll(node: unknown, match: (element: ReactElement<any>) => boolean, found: ReactElement<any>[] = []): ReactElement<any>[] {
+  if (Array.isArray(node)) node.forEach((child) => findAll(child, match, found));
+  else if (node && typeof node === "object" && "props" in node) {
+    if (match(node as ReactElement<any>)) found.push(node as ReactElement<any>);
+    findAll((node as ReactElement<any>).props.children, match, found);
+  }
+  return found;
+}
+const ctaOf = (tree: ReactElement) => findAll(tree, (element) => element.type === "button" && /store-cta/.test(element.props.className))[0]!;
+async function until(check: () => boolean) {
+  for (let round = 0; round < 200 && !check(); round++) await new Promise((resolve) => setTimeout(resolve, 1));
+  expect(check()).toBe(true);
+}
+/** The store events Cloud received through the app's /ui/api/cloud-store route. */
+const sentEvents = (requests: Array<{ path: string; body: any }>) =>
+  requests.filter((request) => request.path === "/store/events").flatMap((request) => request.body.events.map(({ type, src }: any) => `${type}:${src}`));
+
+test("every in-app offer opens the store with the same src slug as its NobleProxy link", () => {
+  const placements = ["profile-dialog", "profile-dialog-check-failed", "import-no-proxy", "proxies-no-proxy", "proxies-check", "proxies-check-failed"] as const;
+  for (const placement of placements) {
+    expect(PROXY_SRC).toContain(placement);
+    // Local mode: the link is unchanged.
+    expect(render(<ProxyProviderOffer placement={placement} missing={2} />)).toContain(`href="https://nobleproxy.com/t/aliasmode?src=${placement}&amp;qty=2"`);
+    // Cloud mode: the button opens the store with that slug.
+    const opened: Array<[number, string]> = [];
+    const offer = capture(() => ProxyProviderOffer({ placement, missing: 2 }), (child) =>
+      <ProxyStoreContext.Provider value={(quantity, src) => opened.push([quantity, src])}>{child}</ProxyStoreContext.Provider>);
+    findAll(offer, (element) => element.type === "button")[0]!.props.onClick();
+    expect(opened).toEqual([[2, placement]]);
+  }
+});
+
+test("buttons inside the store open the shop as my-proxies-buy-more and success-buy-more; the shop gets the opening src", () => {
+  const entered: string[] = [];
+  const page = capture(() => StorePage({ state: snapshot(), role: "owner", selectedProfileIds: [], src: "proxies-tab", entryKey: 3, onReload: noop, onProfilesChanged: noop, onEnter: (src) => entered.push(src) }));
+  const shop = findAll(page, (element) => element.type === ProxyShop)[0]!;
+  expect(shop.props.src).toBe("proxies-tab");
+  findAll(page, (element) => typeof element.type === "function" && element.type.name === "OwnedProxies")[0]!.props.onBuy();
+  shop.props.onBuyMore();
+  expect(entered).toEqual(["my-proxies-buy-more", "success-buy-more"]);
+  // Without an opening src the shop reports "direct".
+  expect(findAll(capture(() => StorePage({ state: snapshot(), role: "owner", selectedProfileIds: [], onReload: noop, onProfilesChanged: noop })), (element) => element.type === ProxyShop)[0]!.props.src).toBe("direct");
+});
+
+test("the Buy tab view and the app's entry points record their src (wiring in the page and the app)", async () => {
+  const store = await Bun.file(new URL("./store.tsx", import.meta.url)).text();
+  const app = await Bun.file(new URL("./app.tsx", import.meta.url)).text();
+  // store_view: each time the Buy tab is on screen for an owner with a catalog, with the src that opened it.
+  expect(store).toContain('const shopShown = active && tab === "buy" && owner && !!state.catalog;');
+  expect(store).toContain('useEffect(() => { if (shopShown) trackStoreEvent("store_view", src); }, [shopShown, src, entryKey]);');
+  expect(store).toContain("onDone={() => { onBuyMore?.(); setOutcome(null); }}");
+  // entry_click: one function records every way in and makes it the store's src.
+  expect(app).toContain('trackStoreEvent("entry_click", src);\n    setStoreEntry((current) => ({ src, key: current.key + 1 }));');
+  expect(app).toContain("const openStore = useCallback((quantity: number, src: ProxySrc) => {\n    enterStore(src);");
+  expect(app).toContain('onClick={() => openStore(0, "sidebar-cart")}><CartIcon /></button>');
+  expect(app).toContain('if (storeSnapshot) { enterStore("proxies-tab"); void cloudStore.reload(); }');
+  expect(app).toContain('active={view === "proxies"} src={storeEntry.src} entryKey={storeEntry.key}\n            onEnter={enterStore}');
+  // Events go to Cloud only while the Cloud store is available; Local mode keeps the NobleProxy link.
+  expect(app).toContain("useStoreEvents(!!storeSnapshot);");
+  expect(app).toContain('href={proxyOfferUrl("sidebar-cart", language)}');
+});
+
+test("Buy records pay_click with the opening src, and the purchase sends that src to Cloud", async () => {
+  const requests = liveCloud((method, path) => {
+    if (method === "POST" && path === "/proxies/purchases") return Response.json(purchase("active"));
+    if (method === "POST" && path === "/store/events") return Response.json({ ok: true });
+    return undefined;
+  });
+  storeEvents.setEnabled(true);
+  try {
+    const page = capture(() => StorePage({ state: snapshot(5000), role: "owner", selectedProfileIds: [], src: "sidebar-cart", onReload: noop, onProfilesChanged: noop }));
+    const props = findAll(page, (element) => element.type === ProxyShop)[0]!.props;
+    const shop = capture(() => ProxyShop({ ...props, initialQuantity: 2 }));
+    ctaOf(shop).props.onClick();
+    ctaOf(shop).props.onClick();
+    await until(() => requests.some((request) => request.path === "/proxies/purchases"));
+    expect(requests.find((request) => request.path === "/proxies/purchases")!.body).toMatchObject({ type: "isp", country: "US", quantity: 2, src: "sidebar-cart" });
+    await storeEvents.flush();
+    // The double click counts once.
+    expect(sentEvents(requests)).toEqual(["pay_click:sidebar-cart"]);
+    const body = requests.find((request) => request.path === "/store/events")!.body;
+    expect(Object.keys(body)).toEqual(["events"]);
+    expect(Object.keys(body.events[0]).sort()).toEqual(["at", "src", "type"]);
+    expect(Math.abs(body.events[0].at - Date.now())).toBeLessThan(10_000);
+  } finally { storeEvents.setEnabled(false); }
+});
+
+test("Pay records pay_click; the src chosen at Pay is saved with the top-up and sent with the purchase after it is paid", async () => {
+  const requests = liveCloud((method, path) => {
+    if (path === `/wallet/deposits/${pendingOrder.depositId}`) return Response.json({ ok: true, deposit: paidDeposit("paid") } satisfies DepositResponse);
+    if (method === "POST" && path === "/proxies/purchases") return Response.json(purchase("active"));
+    if (method === "POST" && path === "/store/events") return Response.json({ ok: true });
+    return undefined;
+  });
+  storeEvents.setEnabled(true);
+  try {
+    const shop = capture(() => ProxyShop({ catalog: cloudCatalog, balanceCents: 0, src: "profile-dialog", selectedProfileIds: [], onReload: noop, onProfilesChanged: noop }));
+    expect(ctaOf(shop).props.children).toBe("Pay $5.00");
+    ctaOf(shop).props.onClick();
+    await storeEvents.flush();
+    expect(sentEvents(requests)).toEqual(["pay_click:profile-dialog"]);
+  } finally { storeEvents.setEnabled(false); }
+
+  // The pending pay-to-buy state keeps its src across a restart; the paid deposit buys with it.
+  savePendingOrder({ ...pendingOrder, src: "profile-dialog" });
+  const saved = loadPendingOrder()!;
+  expect(saved.src).toBe("profile-dialog");
+  expect(await resumePendingOrder()).toEqual({ kind: "finish", order: saved });
+  expect(await buyAfterDeposit(saved, paidDeposit("paid"), new Set())).toMatchObject({ kind: "active" });
+  expect(requests.filter((request) => request.path === "/proxies/purchases").map((request) => request.body)).toEqual([
+    { type: "isp", country: "US", quantity: 12, idempotencyKey: "order-key-1", src: "profile-dialog" },
+  ]);
+  // An order saved by an older app has no src and still loads.
+  savePendingOrder(pendingOrder);
+  expect(loadPendingOrder()).toEqual(pendingOrder);
+});
+
+test("the app's Cloud route sends only type, src and time to POST /v1/store/events; an older Cloud's 404 comes back as 404", async () => {
+  let supported = true;
+  const requests = fakeCloud((method, path) => method === "POST" && path === "/store/events" && supported ? Response.json({ ok: true }) : noRoute());
+  const post = (body: unknown) => fetch("/ui/api/cloud-store", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const sent = await post({ action: "store-events", events: [
+    { type: "entry_click", src: "sidebar-cart", at: 1762400000000, email: "someone@example.com" },
+    { type: "signup", src: "sidebar-cart", at: 1762400000000 },
+    { type: "pay_click", src: "Not A Slug", at: 1762400000000 },
+    { type: "store_view", src: "sidebar-cart", at: "now" },
+  ] });
+  expect(sent.status).toBe(200);
+  expect(requests).toEqual([{ method: "POST", path: "/store/events", body: { events: [{ type: "entry_click", src: "sidebar-cart", at: 1762400000000 }] } }]);
+  expect((await post({ action: "store-events", events: [] })).status).toBe(400);
+  supported = false;
+  expect((await post({ action: "store-events", events: [{ type: "pay_click", src: "direct", at: 1 }] })).status).toBe(404);
+  expect(requests).toHaveLength(2);
+});
+
+test("a purchase src reaches Cloud; a Cloud that does not know src yet still gets the order, once, with the same key", async () => {
+  let knowsSrc = true;
+  const requests = fakeCloud((method, path, body) => {
+    if (method !== "POST" || path !== "/proxies/purchases") return noRoute();
+    return "src" in body && !knowsSrc ? cloudError(400, "validation_failed", "The request is invalid.") : Response.json(purchase("active"));
+  });
+  const order = { type: "isp", country: "US", quantity: 2, src: "proxies-tab" };
+  expect(await buyProxies(new PurchaseAttempts(() => "key-1"), order)).toMatchObject({ kind: "active" });
+  knowsSrc = false;
+  expect(await buyProxies(new PurchaseAttempts(() => "key-2"), order)).toMatchObject({ kind: "active" });
+  expect(requests.map((request) => request.body)).toEqual([
+    { type: "isp", country: "US", quantity: 2, idempotencyKey: "key-1", src: "proxies-tab" },
+    { type: "isp", country: "US", quantity: 2, idempotencyKey: "key-2", src: "proxies-tab" },
+    { type: "isp", country: "US", quantity: 2, idempotencyKey: "key-2" },
+  ]);
+  // Other refusals are not retried.
+  const refused = fakeCloud(() => cloudError(402, "insufficient_balance"));
+  expect(await buyProxies(new PurchaseAttempts(), order)).toMatchObject({ kind: "error" });
+  expect(refused).toHaveLength(1);
+});
+
+test("Local mode sends no store events: without a Cloud connection the route refuses and nothing reaches Cloud", async () => {
+  globalThis.fetch = (async (url: string, init?: RequestInit) =>
+    (await handleUiRequest(new Request(`http://127.0.0.1${url}`, init), {} as any, {} as any, null, {})) ?? new Response("not found", { status: 404 })) as typeof fetch;
+  const response = await fetch("/ui/api/cloud-store", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "store-events", events: [{ type: "entry_click", src: "sidebar-cart", at: 1 }] }) });
+  expect(response.status).toBe(503);
+  // And the page never sends: the tracker is off unless the Cloud store turned it on.
+  const calls: unknown[] = [];
+  globalThis.fetch = (async (...args: unknown[]) => { calls.push(args); return new Response("{}"); }) as typeof fetch;
+  storeEvents.track("entry_click", "sidebar-cart");
+  await storeEvents.flush();
+  expect(calls).toEqual([]);
 });

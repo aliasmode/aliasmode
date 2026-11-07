@@ -775,6 +775,8 @@ export interface CreateProxyPurchaseRequest {
   quantity: number;
   /** Client-chosen key; the same key returns the same purchase and never charges twice. */
   idempotencyKey: string;
+  /** Store placement that led to this purchase (for example `sidebar-cart`); `direct` when none. */
+  src?: string;
 }
 
 export interface CloudProxyPurchase {
@@ -848,6 +850,24 @@ export interface NobleProxyHandoffResponse {
   ok: true;
   url: string;
   expiresAt: number;
+}
+
+/** One in-app proxy store event. `src` is the placement slug, `at` epoch milliseconds. No personal data. */
+export type StoreEventType = "entry_click" | "store_view" | "pay_click";
+
+export interface StoreEvent {
+  type: StoreEventType;
+  src: string;
+  at: number;
+}
+
+/** POST /v1/store/events: a batch of store events for the placement conversion report. Older Clouds answer 404. */
+export interface StoreEventsRequest {
+  events: StoreEvent[];
+}
+
+export interface StoreEventsResponse {
+  ok: true;
 }
 
 export type CloudResult<T> = T | CloudError;

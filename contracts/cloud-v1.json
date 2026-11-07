@@ -76,7 +76,8 @@
     "proxyPurchases": "POST /v1/proxies/purchases",
     "purchasedProxies": "GET /v1/proxies",
     "proxyAutoRenew": "POST /v1/proxies/orders/:id/auto-renew",
-    "nobleproxyHandoff": "POST /v1/nobleproxy/handoff"
+    "nobleproxyHandoff": "POST /v1/nobleproxy/handoff",
+    "storeEvents": "POST /v1/store/events"
   },
   "wallet": {
     "currency": "USD",

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { useTranslation } from "./i18n.tsx";
 import { ProxyToolsError, proxyRequest, readProxyProgress, requestProxyPreview } from "./proxies.tsx";
 import { qrMatrix, qrSvgPath } from "./qr.ts";
+import type { ProxySrc } from "./proxy-offer.tsx";
+import { trackStoreEvent } from "./store-events.ts";
 import type {
   CloudProxyOrder,
   CloudProxyProduct,
@@ -199,14 +201,15 @@ export type PurchaseOutcome =
   | { kind: "active" | "pending" | "review" | "failed"; result: ProxyPurchaseResponse }
   | { kind: "error"; error: StoreError };
 
-export interface ProxyOrder { type: string; country: string; quantity: number }
+/** `src` is the placement that opened the store; Cloud keeps it with the purchase. */
+export interface ProxyOrder { type: string; country: string; quantity: number; src?: string }
 
 /** `key` is a key chosen earlier (pay-then-buy): every retry of that order sends the same one. */
 export async function buyProxies(attempts: PurchaseAttempts, order: ProxyOrder, key?: string): Promise<PurchaseOutcome> {
-  const { type, country, quantity } = order;
+  const { type, country, quantity, src } = order;
   const idempotencyKey = key ?? attempts.keyFor(`${type}|${country}|${quantity}`);
   try {
-    const result = await storeRequest<ProxyPurchaseResponse>({ action: "purchase", type, country, quantity, idempotencyKey }, "purchase");
+    const result = await storeRequest<ProxyPurchaseResponse>({ action: "purchase", type, country, quantity, idempotencyKey, ...(src ? { src } : {}) }, "purchase");
     attempts.settle();
     const { status } = result.purchase;
     const kind = status === "active" ? "active" : status === "failed" ? "failed" : status === "needs_review" ? "review" : "pending";
@@ -282,7 +285,7 @@ export function payPlan(totalCents: number, balanceCents: number): PayPlan {
   return { kind: "pay", payCents, extraCents: payCents - shortfall };
 }
 
-/** An order waiting for its top-up. The purchase key is made when the user clicks Pay. */
+/** An order waiting for its top-up. The purchase key and `src` are fixed when the user clicks Pay. */
 export interface PendingOrder extends ProxyOrder { totalCents: number; idempotencyKey: string; depositId: string }
 
 const PENDING_ORDER_KEY = "aliasmode.store.pending-order";
@@ -303,7 +306,8 @@ export function loadPendingOrder(): PendingOrder | null {
   try {
     const value = JSON.parse(browserStorage()?.getItem(PENDING_ORDER_KEY) ?? "null");
     const valid = value && typeof value.type === "string" && typeof value.country === "string" && Number.isSafeInteger(value.quantity)
-      && Number.isSafeInteger(value.totalCents) && typeof value.idempotencyKey === "string" && typeof value.depositId === "string";
+      && Number.isSafeInteger(value.totalCents) && typeof value.idempotencyKey === "string" && typeof value.depositId === "string"
+      && (value.src === undefined || typeof value.src === "string");
     return valid ? value : null;
   } catch { return null; }
 }
@@ -744,17 +748,21 @@ type Checkout =
  * covers the order, or takes the missing amount by card or crypto and then
  * buys by itself when the payment arrives.
  */
-export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity = 1, focusKey = 0, selectedProfileIds, onReload, onProfilesChanged, onViewOwned }: {
+export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity = 1, focusKey = 0, src = "direct", selectedProfileIds, onReload, onProfilesChanged, onViewOwned, onBuyMore }: {
   catalog: ProxyCatalogResponse;
   orders?: CloudProxyOrder[];
   balanceCents: number;
   initialQuantity?: number;
   /** Changes when an offer elsewhere opens the shop: it scrolls into view with the asked quantity. */
   focusKey?: number;
+  /** The placement that opened the store. */
+  src?: ProxySrc;
   selectedProfileIds: string[];
   onReload: () => Promise<void>;
   onProfilesChanged: () => Promise<void>;
   onViewOwned?: () => void;
+  /** Buy more, after a purchase. */
+  onBuyMore?: () => void;
 }) {
   const { t, language } = useTranslation();
   const products = shopProducts(catalog);
@@ -814,7 +822,7 @@ export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity 
   if (!product) return <ShopUnavailable onReload={onReload} />;
   const countryCode = product.countries.some((candidate) => candidate.code === country) ? country : product.countries[0]?.code ?? "";
   const countryLabel = (code: string) => countryName(code, product.countries.find((item) => item.code === code)?.name, t, language);
-  const order: ProxyOrder = { type: product.type, country: countryCode, quantity };
+  const order: ProxyOrder = { type: product.type, country: countryCode, quantity, src };
   const quote = quoteProxyPrice(product, quantity);
   const minimum = Math.min(...product.tiers.map((tier) => tier.minQty));
   const plan = quote ? payPlan(quote.totalCents, balanceCents) : null;
@@ -823,14 +831,18 @@ export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity 
 
   const buy = async () => {
     if (!quote || plan?.kind !== "balance" || busy) return;
+    trackStoreEvent("pay_click", src);
     setBusy("buy"); setOutcome(null); setError(null);
-    const next = await buyProxies(attempts.current, order, finish && sameOrder(finish, order) ? finish.idempotencyKey : undefined);
+    // A paid top-up's order keeps the key and the src chosen at Pay.
+    const paid = finish && sameOrder(finish, order) ? finish : null;
+    const next = await buyProxies(attempts.current, paid ? { ...order, src: paid.src } : order, paid?.idempotencyKey);
     if (!(next.kind === "error" && next.error.kind === "network")) { setFinish(null); savePendingOrder(null); }
     setOutcome(next); setBusy(null);
     if (next.kind !== "error" || next.error.kind === "insufficient") await onReload();
   };
   const startPay = () => {
     if (!quote || plan?.kind !== "pay" || busy) return;
+    trackStoreEvent("pay_click", src);
     setOutcome(null); setError(null);
     setCheckout({ step: "choose", order: { ...order, totalCents: quote.totalCents, idempotencyKey: crypto.randomUUID() }, payCents: plan.payCents, extraCents: plan.extraCents });
   };
@@ -886,7 +898,7 @@ export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity 
         : <p className="store-checkout-foot"><Glyph name="lock" />{t("Your order is placed by itself once the payment arrives.")}</p>}
     </div>;
   } else if (outcome && outcome.kind !== "error") {
-    body = <PurchaseResult outcome={outcome} orders={orders} countryLabel={countryLabel} selectedProfileIds={selectedProfileIds} onProfilesChanged={onProfilesChanged} onViewOwned={onViewOwned} onDone={() => setOutcome(null)} />;
+    body = <PurchaseResult outcome={outcome} orders={orders} countryLabel={countryLabel} selectedProfileIds={selectedProfileIds} onProfilesChanged={onProfilesChanged} onViewOwned={onViewOwned} onDone={() => { onBuyMore?.(); setOutcome(null); }} />;
   } else {
     body = <div className="store-hero-grid">
       <div className="store-hero-main">
@@ -1094,17 +1106,24 @@ function ManageOnNobleProxy() {
 export type StoreTab = "buy" | "owned" | "tools";
 
 /** The Cloud Proxies page: Buy proxies, My proxies and the proxy tools as tabs, with the balance in the corner. */
-export function StorePage({ state, role, selectedProfileIds, requestedQuantity = 0, focusKey = 0, tools, initialTab, onReload, onProfilesChanged }: {
+export function StorePage({ state, role, selectedProfileIds, requestedQuantity = 0, focusKey = 0, active = true, src = "direct", entryKey = 0, tools, initialTab, onReload, onProfilesChanged, onEnter }: {
   state: StoreSnapshot;
   role?: string;
   selectedProfileIds: string[];
   requestedQuantity?: number;
   focusKey?: number;
+  /** The Proxies page is on screen. */
+  active?: boolean;
+  /** The placement that opened the store, and a number that changes with each opening. */
+  src?: ProxySrc;
+  entryKey?: number;
   /** The Check and Replace proxy tools. */
   tools?: ReactNode;
   initialTab?: StoreTab;
   onReload: () => Promise<void>;
   onProfilesChanged: () => Promise<void>;
+  /** A button on this page opens the shop: records the entry and makes `src` its placement. */
+  onEnter?: (src: ProxySrc) => void;
 }) {
   const { t, language } = useTranslation();
   const owner = role === "owner";
@@ -1112,6 +1131,8 @@ export function StorePage({ state, role, selectedProfileIds, requestedQuantity =
   const [tab, setTab] = useState<StoreTab>(initialTab ?? (owner ? "buy" : "owned"));
   const [funds, setFunds] = useState(false);
   useEffect(() => { if (focusKey) setTab("buy"); }, [focusKey]);
+  const shopShown = active && tab === "buy" && owner && !!state.catalog;
+  useEffect(() => { if (shopShown) trackStoreEvent("store_view", src); }, [shopShown, src, entryKey]);
   const owned = state.proxies.orders.reduce((total, order) => total + order.quantity, 0);
   const tabs: Array<[StoreTab, string]> = [["buy", t("Buy proxies")], ["owned", owned ? t("My proxies ({count})", { count: owned }) : t("My proxies")], ["tools", t("Tools")]];
   return <div className="store-page">
@@ -1130,8 +1151,8 @@ export function StorePage({ state, role, selectedProfileIds, requestedQuantity =
     <div role="tabpanel" id="store-panel-buy" aria-labelledby="store-tab-buy" className="store-panel" hidden={tab !== "buy"}>
       {owner
         ? state.catalog
-          ? <ProxyShop catalog={state.catalog} orders={state.proxies.orders} balanceCents={state.wallet.balanceCents} initialQuantity={requestedQuantity} focusKey={focusKey}
-            selectedProfileIds={selectedProfileIds} onReload={onReload} onProfilesChanged={onProfilesChanged} onViewOwned={() => setTab("owned")} />
+          ? <ProxyShop catalog={state.catalog} orders={state.proxies.orders} balanceCents={state.wallet.balanceCents} initialQuantity={requestedQuantity} focusKey={focusKey} src={src}
+            selectedProfileIds={selectedProfileIds} onReload={onReload} onProfilesChanged={onProfilesChanged} onViewOwned={() => setTab("owned")} onBuyMore={() => onEnter?.("success-buy-more")} />
           : <ShopUnavailable onReload={onReload} />
         : <section className="tools-panel store-empty-card">
           <span className="store-empty-icon"><Glyph name="lock" /></span>
@@ -1140,7 +1161,7 @@ export function StorePage({ state, role, selectedProfileIds, requestedQuantity =
     </div>
     <div role="tabpanel" id="store-panel-owned" aria-labelledby="store-tab-owned" className="store-panel" hidden={tab !== "owned"}>
       <OwnedProxies orders={state.proxies.orders} pendingPurchases={state.proxies.pendingPurchases} catalog={state.catalog} owner={owner} selectedProfileIds={selectedProfileIds}
-        onReload={onReload} onProfilesChanged={onProfilesChanged} onBuy={owner && state.catalog ? () => setTab("buy") : undefined} />
+        onReload={onReload} onProfilesChanged={onProfilesChanged} onBuy={owner && state.catalog ? () => { onEnter?.("my-proxies-buy-more"); setTab("buy"); } : undefined} />
     </div>
     <div role="tabpanel" id="store-panel-tools" aria-labelledby="store-tab-tools" className="store-panel store-tools" hidden={tab !== "tools"}>{tools}</div>
   </div>;

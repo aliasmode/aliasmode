@@ -4,8 +4,9 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./proxies.css";
 import { ProxiesPage } from "./proxies.tsx";
-import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl } from "./proxy-offer.tsx";
+import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
 import { StorePage, useCloudStore } from "./store.tsx";
+import { trackStoreEvent, useStoreEvents } from "./store-events.ts";
 import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
@@ -1428,13 +1429,22 @@ function App() {
   // the offers stay links to NobleProxy.
   const cloudStore = useCloudStore(isCloudMode && workspaceReady && !restartRequired, `${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`);
   const storeSnapshot = cloudStore.state?.available === true ? cloudStore.state : null;
+  // Store placement events go to Cloud only while the in-app store is available (never in Local mode).
+  useStoreEvents(!!storeSnapshot);
+  // Each way into the store records its placement; the Buy tab view, Pay and the purchase carry it.
+  const [storeEntry, setStoreEntry] = useState<{ src: ProxySrc; key: number }>({ src: "direct", key: 0 });
+  const enterStore = useCallback((src: ProxySrc) => {
+    trackStoreEvent("entry_click", src);
+    setStoreEntry((current) => ({ src, key: current.key + 1 }));
+  }, []);
   // Offers open the shop on the Proxies page: the quantity is preselected and the shop scrolls into view.
   const [storeRequest, setStoreRequest] = useState({ quantity: 0, key: 0 });
-  const openStore = useCallback((quantity: number) => {
+  const openStore = useCallback((quantity: number, src: ProxySrc) => {
+    enterStore(src);
     setStoreRequest((current) => ({ quantity, key: current.key + 1 }));
     setView("proxies");
     void cloudStore.reload();
-  }, [cloudStore.reload]);
+  }, [cloudStore.reload, enterStore]);
 
   // The app resolves "system" itself and stamps the result on <html>, so the
   // stylesheet carries exactly one dark palette instead of a duplicated media query.
@@ -3504,11 +3514,11 @@ function App() {
           </button>}
           {!appMode?.legacyRemote && <>
             <div className="navrow">
-              <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip={t("Proxies")} title={t("Proxies")} onClick={() => { setView("proxies"); if (storeSnapshot) void cloudStore.reload(); }}>
+              <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip={t("Proxies")} title={t("Proxies")} onClick={() => { setView("proxies"); if (storeSnapshot) { enterStore("proxies-tab"); void cloudStore.reload(); } }}>
                 <Icon name="activity" /><span className="navlabel">{t("Proxies")}</span>
               </button>
               {storeSnapshot ? (
-                <button type="button" className="navbuy" title={t("Buy proxies")} aria-label={t("Buy proxies")} onClick={() => openStore(0)}><CartIcon /></button>
+                <button type="button" className="navbuy" title={t("Buy proxies")} aria-label={t("Buy proxies")} onClick={() => openStore(0, "sidebar-cart")}><CartIcon /></button>
               ) : (
                 <a
                   className="navbuy"
@@ -3819,7 +3829,8 @@ function App() {
           active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} folders={folders} onChanged={load}
           store={storeSnapshot ? (tools) => <StorePage state={storeSnapshot} role={cloudAuth?.workspace?.role} tools={tools}
             selectedProfileIds={profiles.filter((profile) => selected.has(profile.id)).map((profile) => profile.id)}
-            requestedQuantity={storeRequest.quantity} focusKey={storeRequest.key} onReload={cloudStore.reload} onProfilesChanged={load} /> : undefined} />
+            requestedQuantity={storeRequest.quantity} focusKey={storeRequest.key} active={view === "proxies"} src={storeEntry.src} entryKey={storeEntry.key}
+            onEnter={enterStore} onReload={cloudStore.reload} onProfilesChanged={load} /> : undefined} />
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
