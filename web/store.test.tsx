@@ -3,12 +3,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactElement } from "react";
 import { I18nProvider } from "./i18n.tsx";
 import { ProxyProviderOffer, ProxyStoreContext } from "./proxy-offer.tsx";
+import { ProxiesPage } from "./proxies.tsx";
 import {
   CardPaymentView,
   CryptoPaymentView,
   NobleProxyButton,
   ProxyShop,
   PurchaseAttempts,
+  QUANTITY_STEPS,
+  WalletPanel,
+  catalogSavingPercent,
+  clampQuantity,
+  quantityStep,
+  shopProducts,
   PurchaseResult,
   StorePage,
   assignProxiesToProfiles,
@@ -176,7 +183,7 @@ test("the live Cloud bodies reach the page unchanged: balance, owned proxies and
   expect(state).toEqual({ available: true, wallet: cloudWallet, proxies: cloudProxies, catalog: cloudCatalog });
   expect(requests.map((request) => request.path).sort()).toEqual(["/proxies", "/proxies/catalog", "/wallet"]);
 
-  const page = render(<StorePage active state={state as StoreSnapshot} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  const page = render(<StorePage state={state as StoreSnapshot} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
   expect(page).toContain("$12.50");
   expect(page).toContain("2 × ISP");
   expect(page).toContain("1.2.3.4:8000:u:p");
@@ -193,7 +200,7 @@ test("a NobleProxy outage hides only the shop: the wallet and owned proxies stil
   expect(state).toEqual({ available: true, wallet: cloudWallet, proxies: cloudProxies, catalog: null });
   expect(requests).toHaveLength(3);
 
-  const page = render(<StorePage active state={state as StoreSnapshot} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  const page = render(<StorePage state={state as StoreSnapshot} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
   expect(page).toContain("Store temporarily unavailable.");
   expect(page).toContain(">Try again</button>");
   expect(page).toContain("$12.50");
@@ -211,7 +218,7 @@ test("charged purchases that are still settling stay visible as Processing or Be
   const review = { ...purchase("needs_review").purchase, id: "9e2d4c1b-7a6f-4e3d-8c2b-1a0f9e8d7c02", quantity: 5, totalCents: 1500 };
   const proxies = { ok: true, orders: [], pendingPurchases: [pending, review] } satisfies ListPurchasedProxiesResponse;
   for (const role of ["owner", "member"]) {
-    const page = render(<StorePage active state={snapshot(0, proxies)} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+    const page = render(<StorePage state={snapshot(0, proxies)} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
     expect(page).toContain("2 × ISP");
     expect(page).toContain("Processing…");
     expect(page).toContain("5 × ISP");
@@ -223,8 +230,8 @@ test("charged purchases that are still settling stay visible as Processing or Be
 
 test("renewal states each get their own text; only a short balance asks for funds", () => {
   const page = (order: Partial<CloudProxyOrder>) =>
-    render(<StorePage active state={snapshot(5000, { ...cloudProxies, orders: [{ ...cloudOrder, ...order }] })} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
-  const addFunds = "Renewal failed. Add funds to your wallet to keep these proxies.";
+    render(<StorePage state={snapshot(5000, { ...cloudProxies, orders: [{ ...cloudOrder, ...order }] })} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  const addFunds = "Renewal failed. Top up your balance to keep these proxies.";
   expect(page({ renewalStatus: "ok" })).not.toMatch(/Renewal (failed|in progress|could not)|renewal is being checked/);
   expect(page({ renewalStatus: "pending" })).toContain("Renewal in progress…");
   expect(page({ renewalStatus: "needs_review" })).toContain("The renewal is being checked by support.");
@@ -242,13 +249,13 @@ test("the live total follows catalog tiers and Buy is disabled with a Top up off
 
   const props = { catalog: cloudCatalog, selectedProfileIds: [], onTopUp: () => {}, onReload: noop, onProfilesChanged: noop };
   const short = render(<ProxyShop {...props} balanceCents={1000} initialQuantity={12} />);
-  expect(short).toMatch(/<button type="button" class="btn primary" disabled="">Buy<\/button>/);
+  expect(short).toMatch(/<button type="button" class="btn primary store-buy-button" disabled="">Buy<\/button>/);
   expect(short).toContain("$30.00");
   expect(short).toContain("Add $20.00 to buy this order.");
   expect(short).toContain(">Top up</button>");
 
   const enough = render(<ProxyShop {...props} balanceCents={5000} initialQuantity={12} />);
-  expect(enough).toMatch(/<button type="button" class="btn primary">Buy<\/button>/);
+  expect(enough).toMatch(/<button type="button" class="btn primary store-buy-button">Buy<\/button>/);
   expect(enough).not.toContain(">Top up</button>");
 });
 
@@ -318,11 +325,20 @@ test("a crypto deposit is polled to paid, also after it expired, while it can st
 });
 
 test("top-ups accept $5 to $10,000, and Cloud refusals of a top-up get top-up text", async () => {
-  const html = render(<StorePage active state={snapshot(0)} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  // The balance card keeps the form folded behind Top up; opened, it asks for $5 to $10,000.
+  const page = render(<StorePage state={snapshot(0)} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  expect(page).toMatch(/<button type="button" class="btn primary">Top up<\/button>/);
+  expect(page).not.toContain('min="5" max="10000"');
+  const form = (amount: string) => render(<WalletPanel wallet={{ ...cloudWallet, pendingDeposits: [] }} owner amount={amount} setAmount={() => {}} amountRef={{ current: null }} open setOpen={() => {}} focusKey={0} onReload={noop} />);
+  const html = form("20");
   expect(html).toContain('value="20"');
   expect(html).toContain('min="5" max="10000" step="0.01"');
-  expect(html).toMatch(/<button type="button" class="btn primary">Top up<\/button>/);
+  expect(html).toContain('role="radio" aria-checked="true" class="active">Card</button>');
+  expect(html).toMatch(/<button type="button" class="btn primary">Add \$20\.00<\/button>/);
+  expect(html).not.toContain(">Top up</button>");
   expect(html).not.toContain("Enter an amount from");
+  expect(form("4")).toMatch(/<button type="button" class="btn primary" disabled="">Add funds<\/button>/);
+  expect(form("4")).toContain("Enter an amount from $5.00 to $10,000.00.");
 
   const cases: Array<[number, string, string]> = [
     [400, "deposit_amount_out_of_range", "Top-ups must be between $5 and $10,000."],
@@ -362,7 +378,7 @@ test("proxy types and countries show their names, never raw ids", () => {
     { ...cloudOrder, type: "x-twitter-12", country: "ANY", proxies: [{ ...cloudProxy(1), country: "DE" }] },
     { ...cloudOrder, id: "ord_2", type: "retired-type-7", country: "FR", proxies: [] },
   ] } };
-  const html = render(<StorePage active state={state} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  const html = render(<StorePage state={state} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
   expect(html).toContain("Static residential for X");
   expect(html).toContain("Any country");
   expect(html).toContain("Germany");
@@ -373,7 +389,7 @@ test("proxy types and countries show their names, never raw ids", () => {
 });
 
 test("owners can top up, buy and manage on NobleProxy; members see balance and proxies without those buttons", () => {
-  const page = (role: string) => render(<StorePage active state={snapshot(5000)} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  const page = (role: string) => render(<StorePage state={snapshot(5000)} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
   const owner = page("owner");
   expect(owner).toContain("$50.00");
   expect(owner).toContain(">Top up</button>");
@@ -607,10 +623,133 @@ test("every wallet and store string has Russian and Chinese text", async () => {
     ...[...source.matchAll(/\bt\("((?:[^"\\]|\\.)*)"/g)].map((match) => match[1]!),
     ...[...source.matchAll(/StoreError\("([^"]+)"/g)].map((match) => match[1]!),
     ...[...source.slice(source.indexOf("const ENTRY_LABELS"), source.indexOf("};", source.indexOf("const ENTRY_LABELS"))).matchAll(/: "([^"]+)"/g)].map((match) => match[1]!),
-    "Wallet & proxies", "Wallet", "Buy proxies", "Buy static residential proxies in the app and give each profile its own IP.",
+    "Proxy tools", "Buy proxies", "Buy static residential proxies in the app and give each profile its own IP.",
   ]);
   expect(keys.size).toBeGreaterThan(60);
   for (const catalog of [ruRU, zhCN] as Array<Record<string, string>>) {
     expect([...keys].filter((key) => !catalog[key])).toEqual([]);
   }
+});
+
+/* The catalog NobleProxy sends now: most-used purposes first, and tiers with the public price next to the AliasMode price. */
+const orderedCatalog = {
+  ok: true,
+  products: ["Google", "Instagram", "Xreacher outreach", "Facebook", "X (Twitter)"].map((label, index) => ({
+    type: `type-${index}`, label, countries: [{ code: "US", name: "United States" }],
+    tiers: [{ minQty: 1, unitPriceCents: 300, publicUnitPriceCents: 500 }, { minQty: 10, unitPriceCents: 250, publicUnitPriceCents: 417 }],
+  })),
+} satisfies ProxyCatalogResponse;
+const shopProps = { selectedProfileIds: [], onTopUp: () => {}, onReload: noop, onProfilesChanged: noop };
+
+test("quantity runs from 1 to 1,000 with a stepped slider, and the total follows the tier price", () => {
+  expect(QUANTITY_STEPS[0]).toBe(1);
+  expect(QUANTITY_STEPS.at(-1)).toBe(1000);
+  expect([...QUANTITY_STEPS].sort((a, b) => a - b)).toEqual(QUANTITY_STEPS);
+  expect([0, 1, 7.9, 999, 1000, 5000, Number.NaN].map(clampQuantity)).toEqual([1, 1, 7, 999, 1000, 1000, 1]);
+  expect(QUANTITY_STEPS[quantityStep(1)]).toBe(1);
+  expect(QUANTITY_STEPS[quantityStep(13)]).toBe(12);
+  expect(QUANTITY_STEPS[quantityStep(1000)]).toBe(1000);
+
+  const html = render(<ProxyShop {...shopProps} catalog={cloudCatalog} balanceCents={5000} initialQuantity={12} />);
+  expect(html).toContain('type="range"');
+  expect(html).toContain(`min="0" max="${QUANTITY_STEPS.length - 1}"`);
+  expect(html).toContain(`value="${quantityStep(12)}"`);
+  expect(html).toContain('aria-valuetext="12"');
+  expect(html).toContain('aria-label="Fewer proxies"');
+  expect(html).toContain('aria-label="More proxies"');
+  expect(html).toContain('type="number" min="1" max="1000" step="1" aria-label="Number of proxies" value="12"');
+  expect(html).toContain("Price per proxy");
+  expect(html).toContain("$2.50");
+  expect(html).toContain("$30.00");
+  // No tier chips any more, and the select is named Purpose.
+  expect(html).not.toContain("store-tiers");
+  expect(html).not.toContain("+: ");
+  expect(html).toContain(">Purpose</span>");
+  expect(html).not.toContain("Proxy type");
+  // An offer for 4,000 profiles still stays within the slider.
+  expect(render(<ProxyShop {...shopProps} catalog={cloudCatalog} balanceCents={0} initialQuantity={4000} />)).toContain('value="1000"');
+});
+
+test("the saving and the deal percent come from the public price; without it no number is shown", () => {
+  const product = orderedCatalog.products[0]!;
+  expect(quoteProxyPrice(product, 12)).toEqual({ unitPriceCents: 250, totalCents: 3000, publicTotalCents: 5004, savingPercent: 40 });
+  expect(catalogSavingPercent(product)).toBe(40);
+  expect(catalogSavingPercent(cloudCatalog.products[0])).toBeNull();
+  expect(catalogSavingPercent({ ...product, tiers: [{ minQty: 1, unitPriceCents: 300, publicUnitPriceCents: 300 }] })).toBeNull();
+
+  const withPublic = render(<ProxyShop {...shopProps} catalog={orderedCatalog} balanceCents={5000} initialQuantity={12} />);
+  expect(withPublic).toContain("Proxies by NobleProxy — AliasMode users get 40% off the public price.");
+  expect(withPublic).toContain("<s>$50.04</s>");
+  expect(withPublic).toContain("$20.04 (40%)");
+
+  const without = render(<ProxyShop {...shopProps} catalog={cloudCatalog} balanceCents={5000} initialQuantity={12} />);
+  expect(without).toContain("Proxies by NobleProxy — AliasMode users pay less than the public price.");
+  expect(without).not.toMatch(/\d+% off/);
+  expect(without).not.toContain("You save");
+  expect(without).not.toContain("Public price");
+});
+
+test("purposes keep the server order and never show an Xreacher purpose", () => {
+  expect(shopProducts(orderedCatalog).map((product) => product.label)).toEqual(["Google", "Instagram", "Facebook", "X (Twitter)"]);
+  expect(shopProducts({ ok: true, products: [{ ...orderedCatalog.products[0]!, label: "XREACHER" }] })).toEqual([]);
+  const html = render(<ProxyShop {...shopProps} catalog={orderedCatalog} balanceCents={5000} />);
+  expect([...html.matchAll(/<option value="type-\d"(?: selected="")?>([^<]+)<\/option>/g)].map((match) => match[1])).toEqual(["Google", "Instagram", "Facebook", "X (Twitter)"]);
+  expect(html.toLowerCase()).not.toContain("xreacher");
+  // A catalog with only an Xreacher purpose shows the unavailable card instead of an empty form.
+  const only = { ok: true, products: [orderedCatalog.products[2]!] } satisfies ProxyCatalogResponse;
+  expect(render(<ProxyShop {...shopProps} catalog={only} balanceCents={5000} />)).toContain("Store temporarily unavailable.");
+});
+
+test("one Proxies page: balance, shop and owned proxies come first, the proxy tools follow", async () => {
+  liveCloud();
+  const state = await loadStoreState() as StoreSnapshot;
+  const page = (role: string) => render(<ProxiesPage active groups={["", "Team"]} onChanged={noop}
+    store={<StorePage state={state} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />} />);
+  const owner = page("owner");
+  const order = ["store-wallet", "store-shop", "store-orders", "Proxy tools", "Check proxies", "Replace proxies"].map((marker) => owner.indexOf(marker));
+  expect(order.every((index) => index >= 0)).toBe(true);
+  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(owner).toContain('class="store-balance">$12.50</strong>');
+  expect(owner).toContain(">Top up</button>");
+  expect(owner).toContain(">Buy</button>");
+  expect(owner).toContain("Proxies by NobleProxy");
+  // The shop is on the page, so the tools show no extra buy cards and no outside link.
+  expect(owner).not.toContain("proxy-referral");
+  expect(owner).not.toContain("nobleproxy.com/t/aliasmode");
+  expect(owner).not.toContain("PROXY TOOLS");
+
+  const member = page("member");
+  expect(member).toContain('class="store-balance">$12.50</strong>');
+  expect(member).toContain("Only the workspace owner can add funds and buy proxies.");
+  expect(member).toContain("1.2.3.4:8000:u:p");
+  expect(member).toContain("Proxy tools");
+  expect(member).not.toContain(">Top up</button>");
+  expect(member).not.toContain("store-shop");
+  expect(member).not.toContain("Proxies by NobleProxy");
+});
+
+test("Local mode keeps the Proxies page as before: the tools and the NobleProxy link", () => {
+  const local = render(<ProxiesPage active groups={["", "Team"]} onChanged={noop} profilesWithoutProxy={3} />);
+  expect(local).toContain("PROXY TOOLS");
+  expect(local).toContain("Keep your profiles connected.");
+  expect(local).toContain('href="https://nobleproxy.com/t/aliasmode?src=proxies-no-proxy&amp;qty=3"');
+  expect(local).toContain("3 profiles have no proxy");
+  expect(local).not.toContain("store-wallet");
+  expect(local).not.toContain("Proxy tools<");
+});
+
+test("the sidebar has one Proxies item and no Wallet or Logs item; logs open from Settings", async () => {
+  const app = await Bun.file(new URL("./app.tsx", import.meta.url)).text();
+  const start = app.indexOf('<nav className="sidenav"');
+  const sidebar = app.slice(start, app.indexOf("</nav>", start));
+  expect(sidebar).toContain('<span className="navlabel">{t("Proxies")}</span>');
+  expect(sidebar).not.toContain('t("Wallet")');
+  expect(sidebar).not.toContain('t("Logs")');
+  expect(sidebar).not.toContain("fetchLogs");
+  expect(app).not.toContain('"store"');
+  expect(app).toContain('setView("proxies");\n    void cloudStore.reload();');
+  // Settings → Advanced keeps the detailed log, in Local and Cloud mode.
+  const advanced = app.slice(app.indexOf('settingsTab === "advanced"'));
+  expect(advanced).toContain('{t("View detailed logs")}</button>');
+  expect(advanced).toContain("fetchLogs().then(setLogView)");
 });

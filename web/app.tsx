@@ -5,7 +5,7 @@ import "./styles.css";
 import "./proxies.css";
 import { ProxiesPage } from "./proxies.tsx";
 import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl } from "./proxy-offer.tsx";
-import { StorePage, formatUsd, useCloudStore } from "./store.tsx";
+import { StorePage, useCloudStore } from "./store.tsx";
 import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
 import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
@@ -152,9 +152,8 @@ const REFRESH_MS = 3000;
 const PROFILE_PAGE_SIZE = 50;
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "store", string> = {
+const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash", string> = {
   profiles: "Profiles",
-  store: "Wallet & proxies",
   scripts: "Scripts",
   settings: "Settings",
   extensions: "Extensions",
@@ -364,7 +363,6 @@ const ICONS = {
   warning: <><path d="M10.3 4.2L2.8 17a2 2 0 001.7 3h15a2 2 0 001.7-3L13.7 4.2a2 2 0 00-3.4 0z" /><path d="M12 9.5v4M12 17v.3" /></>,
   check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
   activity: <path d="M3 12h4l3 8 4-16 3 8h4" />,
-  wallet: <><path d="M4 7a2 2 0 012-2h11v4" /><path d="M4 7v10a2 2 0 002 2h13a1 1 0 001-1V10a1 1 0 00-1-1H6a2 2 0 01-2-2z" /><circle cx="16" cy="14" r="1.2" /></>,
   lock: <><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 118 0v3" /></>,
   cloud: <path d="M7.5 19a4.5 4.5 0 01-.4-9 6 6 0 0111.4 1.6A3.9 3.9 0 0117.5 19z" />,
   laptop: <><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2 20h20" /></>,
@@ -1228,7 +1226,7 @@ function App() {
   // "profiles" is the roster; "settings" replaces it in the same content area
   // rather than opening a dialog — Settings outgrew a modal. New profile and
   // Edit stay dialogs: short forms, and a page felt like too much ceremony.
-  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "store">("profiles");
+  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash">("profiles");
   const [scriptRunOpen, setScriptRunOpen] = useState(false);
   const [scriptRunProfiles, setScriptRunProfiles] = useState<UiProfile[]>([]);
   const [showCreate, setShowCreate] = useState(false);
@@ -1409,15 +1407,13 @@ function App() {
   // the offers stay links to NobleProxy.
   const cloudStore = useCloudStore(isCloudMode && workspaceReady && !restartRequired, `${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`);
   const storeSnapshot = cloudStore.state?.available === true ? cloudStore.state : null;
-  const [storeQuantity, setStoreQuantity] = useState(0);
+  // Offers open the shop on the Proxies page: the quantity is preselected and the shop scrolls into view.
+  const [storeRequest, setStoreRequest] = useState({ quantity: 0, key: 0 });
   const openStore = useCallback((quantity: number) => {
-    setStoreQuantity(quantity);
-    setView("store");
+    setStoreRequest((current) => ({ quantity, key: current.key + 1 }));
+    setView("proxies");
     void cloudStore.reload();
   }, [cloudStore.reload]);
-  useEffect(() => {
-    if (view === "store" && !storeSnapshot) setView("profiles");
-  }, [view, storeSnapshot]);
 
   // The app resolves "system" itself and stamps the result on <html>, so the
   // stylesheet carries exactly one dark palette instead of a duplicated media query.
@@ -3487,7 +3483,7 @@ function App() {
           </button>}
           {!appMode?.legacyRemote && <>
             <div className="navrow">
-              <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip={t("Proxies")} title={t("Proxies")} onClick={() => setView("proxies")}>
+              <button type="button" className={`navitem${view === "proxies" ? " active" : ""}`} data-tip={t("Proxies")} title={t("Proxies")} onClick={() => { setView("proxies"); if (storeSnapshot) void cloudStore.reload(); }}>
                 <Icon name="activity" /><span className="navlabel">{t("Proxies")}</span>
               </button>
               {storeSnapshot ? (
@@ -3503,10 +3499,6 @@ function App() {
                 ><CartIcon /></a>
               )}
             </div>
-            {storeSnapshot && <button type="button" className={`navitem${view === "store" ? " active" : ""}`} data-tip={t("Wallet")} title={t("Wallet")} onClick={() => openStore(0)}>
-              <Icon name="wallet" /><span className="navlabel">{t("Wallet")}</span>
-              <span className="cnt">{formatUsd(storeSnapshot.wallet.balanceCents, language)}</span>
-            </button>}
             <button type="button" className={`navitem${view === "trash" ? " active" : ""}`} data-tip={t("Trash")} title={t("Trash")} onClick={() => setView("trash")}>
               <Icon name="trash" /><span className="navlabel">{t("Trash")}</span>
             </button>
@@ -3530,16 +3522,6 @@ function App() {
             <Icon name="puzzle" /><span className="navlabel">{t("Manage extensions")}</span>
             {extensions.length > 0 && <span className="cnt">{extensions.length}</span>}
           </button>
-          <button
-            type="button"
-            className="navitem"
-            title={t("View detailed logs")}
-            onClick={() => {
-              setLogErr(null);
-              setLogView(null);
-              fetchLogs().then(setLogView).catch((e) => setLogErr(e instanceof Error ? e.message : String(e)));
-            }}
-          ><Icon name="logs" /><span className="navlabel">{t("Logs")}</span></button>
         </nav>
 
         <div className="sidesection">
@@ -3813,14 +3795,13 @@ function App() {
 
       {!appMode?.legacyRemote && <>
         <ProxiesPage profilesWithoutProxy={profilesWithoutProxy} key={`proxies:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
-          active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} folders={folders} onChanged={load} />
+          active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} folders={folders} onChanged={load}
+          store={storeSnapshot && <StorePage state={storeSnapshot} role={cloudAuth?.workspace?.role}
+            selectedProfileIds={profiles.filter((profile) => selected.has(profile.id)).map((profile) => profile.id)}
+            requestedQuantity={storeRequest.quantity} focusKey={storeRequest.key} onReload={cloudStore.reload} onProfilesChanged={load} />} />
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
-      {storeSnapshot && <StorePage key={`store:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
-        active={view === "store"} state={storeSnapshot} role={cloudAuth?.workspace?.role}
-        selectedProfileIds={profiles.filter((profile) => selected.has(profile.id)).map((profile) => profile.id)}
-        requestedQuantity={storeQuantity} onReload={cloudStore.reload} onProfilesChanged={load} />}
       {view === "profiles" ? (
       <div className="workspace">
         {(breadcrumb || sharedOnly) && <nav className="folder-breadcrumb" aria-label={t("Folder path")}>
