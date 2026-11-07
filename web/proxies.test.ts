@@ -15,7 +15,7 @@ import {
   retryProxyProfileIds,
 } from "./proxies.tsx";
 import type { ProxyCheckView, ProxyProgressEvent, ProxyReplacementView } from "../proxy-tools-types.ts";
-import { proxyOfferUrl } from "./proxy-offer.tsx";
+import { PROXY_SRC, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
 import { catalogs } from "./locales/registry.ts";
 
 const realFetch = globalThis.fetch;
@@ -161,12 +161,13 @@ test("the desktop shell accepts every proxy offer link the dashboard can build",
   const sources = await Promise.all(
     ["app.tsx", "proxies.tsx", "proxy-offer.tsx"].map((file) => Bun.file(new URL(`./${file}`, import.meta.url)).text()),
   );
-  const placements = new Set<string>();
+  const placements = new Set<ProxySrc>();
   for (const match of sources.join("\n").matchAll(/placement=("[^"]+"|\{[^}]+\})|proxyOfferUrl\(("[^"]+")/g)) {
-    for (const literal of (match[1] ?? match[2])!.matchAll(/"([^"]+)"/g)) placements.add(literal[1]!);
+    for (const literal of (match[1] ?? match[2])!.matchAll(/"([^"]+)"/g)) placements.add(literal[1] as ProxySrc);
   }
   expect(placements.size).toBeGreaterThan(4);
   for (const placement of placements) {
+    expect(PROXY_SRC).toContain(placement);
     for (const language of Object.keys(catalogs)) {
       for (const quantity of [0, 1, 1000]) expect(proxyOfferUrl(placement, language, quantity)).toMatch(accepted);
     }
