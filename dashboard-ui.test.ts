@@ -62,7 +62,10 @@ test("dashboard shows curated desktop update notes and live progress", () => {
   expect(app).toContain("Verifying update…");
   expect(app).toContain("Saving and closing browsers…");
   expect(app).toContain("Installing and restarting…");
-  expect(app).toContain('{desktopUpdateErr && <span className="modal-err" role="alert">{desktopUpdateErr}</span>}');
+  expect(app).toContain('{desktopUpdateErr && <span className="modal-err" role="alert">{t(desktopUpdateErr)}</span>}');
+  expect(app).toContain('progress.phase === "reconnecting"');
+  expect(app).toContain("Connection lost. Reconnecting…");
+  expect(app).toContain('t("{downloaded} of {total} MB"');
   expect(app).toContain('disabled={modeBusy || desktopUpdateInstalling}');
   expect(app).toContain('className="update-banner"');
   expect(styles).toContain(".update-banner");

@@ -887,5 +887,20 @@
   "No proxies yet": "还没有代理",
   "Proxies you buy appear here, ready to assign to your profiles.": "购买的代理会显示在这里，可直接分配给你的配置文件。",
   "My proxies ({count})": "我的代理（{count}）",
-  "Tools": "工具"
+  "Tools": "工具",
+  "An update operation is already running.": "更新操作已在进行中。",
+  "AliasMode could not check for updates. Try again.": "AliasMode 无法检查更新。请重试。",
+  "The update download was interrupted. Your browsers are still open. Try again.": "更新下载已中断。浏览器仍保持打开。请重试。",
+  "The update download stopped because no data arrived for 1 minute. Your browsers are still open. Check your connection and try again.": "更新下载已停止，因为 1 分钟内没有收到数据。浏览器仍保持打开。请检查网络连接后重试。",
+  "AliasMode could not verify the downloaded update. Your browsers are still open. Try again.": "AliasMode 无法验证已下载的更新。浏览器仍保持打开。请重试。",
+  "AliasMode cannot safely update this installation. Close AliasMode and run the full offline installer from the release page. Do not uninstall.": "AliasMode 无法安全地更新此安装。请关闭 AliasMode，然后运行发布页面上的完整离线安装程序。请勿卸载。",
+  "AliasMode cannot update this copy. Move AliasMode to the Applications folder and open it again, or run the install command again.": "AliasMode 无法更新此副本。请将 AliasMode 移到“应用程序”文件夹后重新打开，或再次运行安装命令。",
+  "AliasMode cannot update this copy. Close AliasMode and run the install command from aliasmode.com/download again.": "AliasMode 无法更新此副本。请关闭 AliasMode，然后再次运行 aliasmode.com/download 上的安装命令。",
+  "The update was not installed because AliasMode could not safely close browser services. The current version remains installed.": "更新未安装，因为 AliasMode 无法安全关闭浏览器服务。当前版本仍保持安装。",
+  "AliasMode could not start the verified update. The current version will restart.": "AliasMode 无法启动已验证的更新。当前版本将重新启动。",
+  "AliasMode updates are not available on this system.": "此系统不支持 AliasMode 更新。",
+  "AliasMode is already up to date.": "AliasMode 已是最新版本。",
+  "AliasMode could not read the last update result.": "AliasMode 无法读取上次更新的结果。",
+  "Connection lost. Reconnecting…": "连接中断。正在重新连接…",
+  "{downloaded} of {total} MB": "{downloaded} / {total} MB"
 }
