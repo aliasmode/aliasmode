@@ -250,10 +250,10 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(styles).toContain(".proxy-referral {");
   expect(styles).toContain(".proxy-referral:focus-visible");
-  // Both Proxies tools (check and replace) show the offer, and the page names
-  // how many profiles have no proxy. That count is Local-mode only.
+  // Local mode shows one offer above both Proxies tools: it names how many
+  // profiles have no proxy, or offers proxies (replacements after failed checks).
   const proxiesPage = readFileSync(join(import.meta.dir, "web", "proxies.tsx"), "utf8");
-  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(3);
+  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(2);
   expect(proxiesPage).toContain('<ProxyProviderOffer placement="proxies-no-proxy" missing={profilesWithoutProxy} />');
   expect(app).toContain("const profilesWithoutProxy = isCloudMode ? 0 : profiles.filter((p) => !p.proxy?.trim()).length;");
   expect(app).toContain('<ProxyProviderOffer placement="import-no-proxy" missing={profilesWithoutProxy} />');
