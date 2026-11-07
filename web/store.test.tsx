@@ -12,7 +12,12 @@ import {
   PurchaseAttempts,
   QUANTITY_STEPS,
   WalletPanel,
+  buyAfterDeposit,
   catalogSavingPercent,
+  loadPendingOrder,
+  payPlan,
+  resumePendingOrder,
+  savePendingOrder,
   clampQuantity,
   quantityStep,
   shopProducts,
@@ -30,6 +35,7 @@ import {
   quoteProxyPrice,
   watchDeposit,
   type ActiveDeposit,
+  type PendingOrder,
   type StoreSnapshot,
 } from "./store.tsx";
 import { qrMatrix } from "./qr.ts";
@@ -53,7 +59,13 @@ import ruRU from "./locales/ru-RU.json";
 import zhCN from "./locales/zh-CN.json";
 
 const realFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = realFetch; });
+/* A memory localStorage, so the pending order survives "restarts" inside one test. */
+const memory = new Map<string, string>();
+Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+  getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => void memory.set(key, value),
+  removeItem: (key: string) => void memory.delete(key), clear: () => memory.clear(), key: () => null, length: 0,
+} satisfies Storage });
+afterEach(() => { globalThis.fetch = realFetch; memory.clear(); });
 
 const render = (element: ReactElement) => renderToStaticMarkup(<I18nProvider>{element}</I18nProvider>);
 const t = (key: string) => key;
@@ -189,9 +201,12 @@ test("the live Cloud bodies reach the page unchanged: balance, owned proxies and
   expect(page).toContain("1.2.3.4:8000:u:p");
   expect(page).toContain("United States");
   expect(page).toContain(`Expires ${new Date(cloudOrder.expiresAt).toLocaleDateString("en-US")}`);
-  expect(page).toContain(">Reopen checkout</button>");
-  expect(page).toContain("2 isp proxies (US)");
-  expect(page).toContain("+$18.50");
+  // Pending top-ups and the history sit behind the balance link.
+  expect(page).not.toContain("2 isp proxies (US)");
+  const funds = render(<WalletPanel wallet={cloudWallet} owner onClose={() => {}} onReload={noop} />);
+  expect(funds).toContain(">Reopen checkout</button>");
+  expect(funds).toContain("2 isp proxies (US)");
+  expect(funds).toContain("+$18.50");
 });
 
 test("a NobleProxy outage hides only the shop: the wallet and owned proxies still show", async () => {
@@ -204,9 +219,9 @@ test("a NobleProxy outage hides only the shop: the wallet and owned proxies stil
   expect(page).toContain("Store temporarily unavailable.");
   expect(page).toContain(">Try again</button>");
   expect(page).toContain("$12.50");
-  expect(page).toContain(">Top up</button>");
+  expect(page).toContain(">Add funds</button>");
   expect(page).toContain("1.2.3.4:8000:u:p");
-  expect(page).not.toContain(">Buy</button>");
+  expect(page).not.toContain("store-cta");
 
   // A wallet that cannot be read still keeps the outside offer instead of an empty page.
   liveCloud((_, path) => path === "/wallet" ? cloudError(500, "internal_error") : undefined);
@@ -241,22 +256,134 @@ test("renewal states each get their own text; only a short balance asks for fund
   expect(page({ renewalStatus: "renewal_failed", renewalFailure: "insufficient_balance" })).toContain(addFunds);
 });
 
-test("the live total follows catalog tiers and Buy is disabled with a Top up offer when the balance is short", () => {
+test("the live total follows catalog tiers; one button buys from the balance or pays the shortfall", () => {
   const product = cloudCatalog.products[0]!;
   expect(quoteProxyPrice(product, 1)).toEqual({ unitPriceCents: 300, totalCents: 300 });
   expect(quoteProxyPrice(product, 12)).toEqual({ unitPriceCents: 250, totalCents: 3000 });
   expect(quoteProxyPrice({ ...product, tiers: [{ minQty: 5, unitPriceCents: 100 }] }, 4)).toBeNull();
 
-  const props = { catalog: cloudCatalog, selectedProfileIds: [], onTopUp: () => {}, onReload: noop, onProfilesChanged: noop };
-  const short = render(<ProxyShop {...props} balanceCents={1000} initialQuantity={12} />);
-  expect(short).toMatch(/<button type="button" class="btn primary store-buy-button" disabled="">Buy<\/button>/);
-  expect(short).toContain("$30.00");
-  expect(short).toContain("Add $20.00 to buy this order.");
-  expect(short).toContain(">Top up</button>");
-
+  const props = { catalog: cloudCatalog, selectedProfileIds: [], onReload: noop, onProfilesChanged: noop };
   const enough = render(<ProxyShop {...props} balanceCents={5000} initialQuantity={12} />);
-  expect(enough).toMatch(/<button type="button" class="btn primary store-buy-button">Buy<\/button>/);
-  expect(enough).not.toContain(">Top up</button>");
+  expect(enough).toMatch(/<button type="button" class="btn primary store-cta">Buy 12 proxies · \$30\.00<\/button>/);
+  expect(enough).toContain("Paid from your balance.");
+  expect(render(<ProxyShop {...props} balanceCents={5000} initialQuantity={1} />)).toContain(">Buy 1 proxy · $3.00</button>");
+
+  // Short by $20: the button pays exactly that, then the order is placed by itself.
+  const short = render(<ProxyShop {...props} balanceCents={1000} initialQuantity={12} />);
+  expect(short).toMatch(/<button type="button" class="btn primary store-cta">Pay \$20\.00<\/button>/);
+  expect(short).toContain("Your $10.00 balance is used first.");
+  expect(short).not.toContain("added to your balance");
+  expect(short).not.toContain("Paid from your balance.");
+
+  // Short by $0.50: the $5 top-up minimum applies, and the extra is named.
+  const minimum = render(<ProxyShop {...props} balanceCents={2950} initialQuantity={12} />);
+  expect(minimum).toContain(">Pay $5.00</button>");
+  expect(minimum).toContain("Includes $4.50 added to your balance.");
+  const empty = render(<ProxyShop {...props} balanceCents={0} initialQuantity={1} />);
+  expect(empty).toContain(">Pay $5.00</button>");
+  expect(empty).toContain("Card or crypto");
+  expect(empty).toContain("Includes $2.00 added to your balance.");
+});
+
+test("pay-to-buy pays the exact shortfall, at least $5 and at most $10,000", () => {
+  expect(payPlan(3000, 5000)).toEqual({ kind: "balance" });
+  expect(payPlan(3000, 3000)).toEqual({ kind: "balance" });
+  expect(payPlan(4975, 1850)).toEqual({ kind: "pay", payCents: 3125, extraCents: 0 });
+  expect(payPlan(1926, 1850)).toEqual({ kind: "pay", payCents: 500, extraCents: 424 });
+  expect(payPlan(500, 0)).toEqual({ kind: "pay", payCents: 500, extraCents: 0 });
+  expect(payPlan(214, 0)).toEqual({ kind: "pay", payCents: 500, extraCents: 286 });
+  // A negative balance is not counted as credit.
+  expect(payPlan(214, -300)).toEqual({ kind: "pay", payCents: 500, extraCents: 286 });
+  expect(payPlan(1_000_000, 0)).toEqual({ kind: "pay", payCents: 1_000_000, extraCents: 0 });
+  expect(payPlan(1_000_001, 0)).toEqual({ kind: "too-large" });
+  expect(payPlan(1_000_001, 1)).toEqual({ kind: "pay", payCents: 1_000_000, extraCents: 0 });
+});
+
+const pendingOrder: PendingOrder = { type: "isp", country: "US", quantity: 12, totalCents: 3000, idempotencyKey: "order-key-1", depositId: cryptoDeposit.deposit.id };
+const paidDeposit = (status: "pending" | "paid" = "paid") => {
+  const { crypto: _crypto, ...rest } = cryptoDeposit.deposit;
+  return status === "pending" ? cryptoDeposit.deposit : { ...rest, status, paidAt: CREATED_AT + 60_000 };
+};
+
+test("a paid top-up places its order once with the key made at Pay; repeated polls and a refresh never buy again", async () => {
+  const statuses = ["pending", "paid", "paid", "paid"] as const;
+  let polls = 0;
+  const requests = liveCloud((method, path) => {
+    if (path === `/wallet/deposits/${pendingOrder.depositId}`) return Response.json({ ok: true, deposit: paidDeposit(statuses[Math.min(polls++, statuses.length - 1)]) } satisfies DepositResponse);
+    if (method === "POST" && path === "/proxies/purchases") return Response.json(purchase("active"));
+    return undefined;
+  });
+  savePendingOrder(pendingOrder);
+  const placed = new Set<string>();
+  const outcomes: Array<Promise<unknown>> = [];
+  // The watcher stops at paid; the page also reacts to the same paid answer again (a re-render or a second poll).
+  const final = await watchDeposit(pendingOrder.depositId, (deposit) => {
+    outcomes.push(buyAfterDeposit(pendingOrder, deposit, placed));
+    outcomes.push(buyAfterDeposit(pendingOrder, deposit, placed));
+  }, new AbortController().signal, 0, 0);
+  expect(final?.status).toBe("paid");
+  const results = await Promise.all(outcomes);
+  expect(results.filter(Boolean)).toHaveLength(1);
+  expect(results.find(Boolean)).toMatchObject({ kind: "active" });
+  const purchases = () => requests.filter((request) => request.path === "/proxies/purchases");
+  expect(purchases()).toEqual([{ method: "POST", path: "/proxies/purchases", body: { type: "isp", country: "US", quantity: 12, idempotencyKey: "order-key-1" } }]);
+  // Settled: nothing is saved, so a refresh or restart finds no order to finish.
+  expect(loadPendingOrder()).toBeNull();
+  expect(await resumePendingOrder()).toBeNull();
+  // Another poll with the same paid deposit does nothing.
+  expect(await buyAfterDeposit(pendingOrder, paidDeposit(), placed)).toBeNull();
+  expect(purchases()).toHaveLength(1);
+  // A pending deposit never buys.
+  expect(await buyAfterDeposit(pendingOrder, paidDeposit("pending"), new Set())).toBeNull();
+  expect(purchases()).toHaveLength(1);
+});
+
+test("a lost purchase answer keeps the order; the retry sends the same key, so Cloud charges once", async () => {
+  let lose = true;
+  const requests = fakeCloud((method, path) => {
+    if (method === "POST" && path === "/proxies/purchases") { if (lose) throw new TypeError("connection reset"); return Response.json(purchase("active")); }
+    return noRoute();
+  });
+  savePendingOrder(pendingOrder);
+  const placed = new Set<string>();
+  expect(await buyAfterDeposit(pendingOrder, paidDeposit(), placed)).toMatchObject({ kind: "error", error: { kind: "network" } });
+  expect(loadPendingOrder()).toEqual(pendingOrder);
+  lose = false;
+  expect(await buyAfterDeposit(pendingOrder, paidDeposit(), placed)).toMatchObject({ kind: "active" });
+  expect(requests.map((request) => request.body.idempotencyKey)).toEqual(["order-key-1", "order-key-1"]);
+  expect(loadPendingOrder()).toBeNull();
+
+  // The same key also goes with the Buy click that finishes an order after a restart.
+  await buyProxies(new PurchaseAttempts(() => "fresh"), pendingOrder, pendingOrder.idempotencyKey);
+  expect(requests.at(-1)?.body).toEqual({ type: "isp", country: "US", quantity: 12, idempotencyKey: "order-key-1" });
+});
+
+test("after a restart a paid top-up asks to finish the order; an open one shows its payment; a dead one is dropped", async () => {
+  let deposit = () => Response.json({ ok: true, deposit: paidDeposit() });
+  liveCloud((_, path) => path === `/wallet/deposits/${pendingOrder.depositId}` ? deposit() : undefined);
+  expect(await resumePendingOrder()).toBeNull();
+
+  savePendingOrder(pendingOrder);
+  expect(await resumePendingOrder()).toEqual({ kind: "finish", order: pendingOrder });
+  expect(loadPendingOrder()).toEqual(pendingOrder);
+
+  deposit = () => Response.json({ ok: true, deposit: paidDeposit("pending") });
+  expect(await resumePendingOrder()).toEqual({ kind: "pay", order: pendingOrder, deposit: cryptoDeposit.deposit });
+
+  // Expired more than 24 hours ago: nothing can arrive any more.
+  deposit = () => Response.json({ ok: true, deposit: { ...paidDeposit(), status: "expired", paidAt: null, createdAt: Date.now() - 25 * 3_600_000 } });
+  expect(await resumePendingOrder()).toBeNull();
+  expect(loadPendingOrder()).toBeNull();
+
+  // Another workspace's deposit is not found: dropped. A network fault keeps it for later.
+  savePendingOrder(pendingOrder);
+  deposit = () => cloudError(404, "record_not_found");
+  expect(await resumePendingOrder()).toBeNull();
+  expect(loadPendingOrder()).toBeNull();
+  savePendingOrder(pendingOrder);
+  deposit = () => { throw new TypeError("offline"); };
+  expect(await resumePendingOrder()).toBeNull();
+  expect(loadPendingOrder()).toEqual(pendingOrder);
 });
 
 test("a card top-up reads the live deposit body and opens its Stripe checkout", async () => {
@@ -281,7 +408,8 @@ test("a crypto top-up shows the exact amount, copy buttons, a QR code, the fee n
   const html = render(<CryptoPaymentView deposit={created} now={cryptoDeposit.deposit.expiresAt - 595_000} />);
   expect(html).toContain("20.00 USDT");
   expect(html).toContain("TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf");
-  expect(html).toContain("USDT (TRC20)");
+  expect(html).toContain("Pay $20.00 in crypto");
+  expect(html).toContain("TRC20");
   expect(html).toContain('aria-label="Copy amount"');
   expect(html).toContain('aria-label="Copy address"');
   expect(html).toContain('class="store-qr"');
@@ -325,19 +453,18 @@ test("a crypto deposit is polled to paid, also after it expired, while it can st
 });
 
 test("top-ups accept $5 to $10,000, and Cloud refusals of a top-up get top-up text", async () => {
-  // The balance card keeps the form folded behind Top up; opened, it asks for $5 to $10,000.
+  // The balance in the corner keeps the form behind Add funds; opened, it asks for $5 to $10,000.
   const page = render(<StorePage state={snapshot(0)} role="owner" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
-  expect(page).toMatch(/<button type="button" class="btn primary">Top up<\/button>/);
+  expect(page).toContain('<button type="button" class="store-link" aria-expanded="false">Add funds</button>');
   expect(page).not.toContain('min="5" max="10000"');
-  const form = (amount: string) => render(<WalletPanel wallet={{ ...cloudWallet, pendingDeposits: [] }} owner amount={amount} setAmount={() => {}} amountRef={{ current: null }} open setOpen={() => {}} focusKey={0} onReload={noop} />);
+  const form = (amount: string) => render(<WalletPanel wallet={{ ...cloudWallet, pendingDeposits: [] }} owner initialAmount={amount} onClose={() => {}} onReload={noop} />);
   const html = form("20");
   expect(html).toContain('value="20"');
   expect(html).toContain('min="5" max="10000" step="0.01"');
   expect(html).toContain('role="radio" aria-checked="true" class="active">Card</button>');
-  expect(html).toMatch(/<button type="button" class="btn primary">Add \$20\.00<\/button>/);
-  expect(html).not.toContain(">Top up</button>");
+  expect(html).toMatch(/<button type="button" class="btn primary store-topup-go">Add \$20\.00<\/button>/);
   expect(html).not.toContain("Enter an amount from");
-  expect(form("4")).toMatch(/<button type="button" class="btn primary" disabled="">Add funds<\/button>/);
+  expect(form("4")).toMatch(/<button type="button" class="btn primary store-topup-go" disabled="">Add funds<\/button>/);
   expect(form("4")).toContain("Enter an amount from $5.00 to $10,000.00.");
 
   const cases: Array<[number, string, string]> = [
@@ -392,20 +519,22 @@ test("owners can top up, buy and manage on NobleProxy; members see balance and p
   const page = (role: string) => render(<StorePage state={snapshot(5000)} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
   const owner = page("owner");
   expect(owner).toContain("$50.00");
-  expect(owner).toContain(">Top up</button>");
-  expect(owner).toContain(">Buy</button>");
+  expect(owner).toContain(">Add funds</button>");
+  expect(owner).toContain(">Buy 1 proxy · $3.00</button>");
   expect(owner).toContain(">Manage on NobleProxy ↗</button>");
-  expect(owner).toContain('type="checkbox" checked=""');
+  expect(owner).toContain('type="checkbox" role="switch" checked=""');
 
   for (const role of ["member", "admin"]) {
     const member = page(role);
     expect(member).toContain("$50.00");
+    expect(member).toContain(">History</button>");
     expect(member).toContain("2 × ISP");
     expect(member).toContain("1.2.3.4:8000:u:p");
     expect(member).toContain("Only the workspace owner can add funds and buy proxies.");
     expect(member).toContain("Auto-renew is on");
-    expect(member).not.toContain(">Top up</button>");
-    expect(member).not.toContain(">Buy</button>");
+    expect(member).not.toContain(">Add funds</button>");
+    expect(member).not.toContain("store-cta");
+    expect(member).not.toContain("store-shop");
     expect(member).not.toContain("Manage on NobleProxy");
     expect(member).not.toContain('type="checkbox"');
     expect(member).not.toContain("Assign to");
@@ -416,7 +545,7 @@ test("purchases through the live Cloud bodies show ready proxies, a refund, or a
   let answer: Response = Response.json({});
   const requests = fakeCloud((method, path) => method === "POST" && path === "/proxies/purchases" ? answer : noRoute());
   const show = (outcome: Awaited<ReturnType<typeof buyProxies>>, orders?: CloudProxyOrder[]) =>
-    render(<PurchaseResult outcome={outcome} orders={orders} selectedProfileIds={["p1", "p2"]} onProfilesChanged={noop} onTopUp={() => {}} />);
+    render(<PurchaseResult outcome={outcome} orders={orders} selectedProfileIds={["p1", "p2"]} onProfilesChanged={noop} onViewOwned={() => {}} onDone={() => {}} />);
   const order = { type: "isp", country: "US", quantity: 2 };
 
   answer = Response.json(purchase("active"));
@@ -427,6 +556,8 @@ test("purchases through the live Cloud bodies show ready proxies, a refund, or a
   expect(activeHtml).toContain("Your 2 proxies are ready.");
   expect(activeHtml).toContain("1.2.3.5:8000:u:p");
   expect(activeHtml).toContain("Assign to 2 selected profiles");
+  expect(activeHtml.indexOf("Assign to 2 selected profiles")).toBeLessThan(activeHtml.indexOf(">View my proxies</button>"));
+  expect(activeHtml).toContain(">Buy more</button>");
 
   answer = Response.json(purchase("failed"));
   const failed = await buyProxies(new PurchaseAttempts(), order);
@@ -436,7 +567,8 @@ test("purchases through the live Cloud bodies show ready proxies, a refund, or a
   answer = Response.json(purchase("pending"), { status: 202 });
   const pending = await buyProxies(new PurchaseAttempts(), order);
   expect(pending.kind).toBe("pending");
-  expect(show(pending)).toContain("Your order is being prepared.");
+  expect(show(pending)).toContain("Your order is being prepared. The proxies appear under My proxies in a few minutes.");
+  expect(show(pending)).toContain(">View my proxies</button>");
 
   answer = Response.json(purchase("needs_review"));
   const review = await buyProxies(new PurchaseAttempts(), order);
@@ -451,7 +583,8 @@ test("purchases through the live Cloud bodies show ready proxies, a refund, or a
   answer = cloudError(402, "insufficient_balance");
   const short = await buyProxies(new PurchaseAttempts(), order);
   expect(short).toMatchObject({ kind: "error", error: { kind: "insufficient" } });
-  expect(show(short)).toContain(">Top up</button>");
+  expect(show(short)).toContain("Your balance is too low for this purchase.");
+  expect(show(short)).not.toContain("<button");
 
   answer = cloudError(403, "owner_only");
   expect(await buyProxies(new PurchaseAttempts(), order)).toMatchObject({ kind: "error", error: { kind: "forbidden" } });
@@ -639,7 +772,7 @@ const orderedCatalog = {
     tiers: [{ minQty: 1, unitPriceCents: 300, publicUnitPriceCents: 500 }, { minQty: 10, unitPriceCents: 250, publicUnitPriceCents: 417 }],
   })),
 } satisfies ProxyCatalogResponse;
-const shopProps = { selectedProfileIds: [], onTopUp: () => {}, onReload: noop, onProfilesChanged: noop };
+const shopProps = { selectedProfileIds: [], onReload: noop, onProfilesChanged: noop };
 
 test("quantity runs from 1 to 1,000 with a stepped slider, and the total follows the tier price", () => {
   expect(QUANTITY_STEPS[0]).toBe(1);
@@ -658,8 +791,7 @@ test("quantity runs from 1 to 1,000 with a stepped slider, and the total follows
   expect(html).toContain('aria-label="Fewer proxies"');
   expect(html).toContain('aria-label="More proxies"');
   expect(html).toContain('type="number" min="1" max="1000" step="1" aria-label="Number of proxies" value="12"');
-  expect(html).toContain("Price per proxy");
-  expect(html).toContain("$2.50");
+  expect(html).toContain("$2.50 per proxy");
   expect(html).toContain("$30.00");
   // No tier chips any more, and the select is named Purpose.
   expect(html).not.toContain("store-tiers");
@@ -678,15 +810,18 @@ test("the saving and the deal percent come from the public price; without it no 
   expect(catalogSavingPercent({ ...product, tiers: [{ minQty: 1, unitPriceCents: 300, publicUnitPriceCents: 300 }] })).toBeNull();
 
   const withPublic = render(<ProxyShop {...shopProps} catalog={orderedCatalog} balanceCents={5000} initialQuantity={12} />);
-  expect(withPublic).toContain("Proxies by NobleProxy — AliasMode users get 40% off the public price.");
+  expect(withPublic).toContain("Give every account its own IP");
+  expect(withPublic).toContain("40% off via NobleProxy");
   expect(withPublic).toContain("<s>$50.04</s>");
-  expect(withPublic).toContain("$20.04 (40%)");
+  expect(withPublic).toContain("Save $20.04");
+  expect(withPublic).toContain("Powered by NobleProxy");
 
   const without = render(<ProxyShop {...shopProps} catalog={cloudCatalog} balanceCents={5000} initialQuantity={12} />);
-  expect(without).toContain("Proxies by NobleProxy — AliasMode users pay less than the public price.");
+  expect(without).toContain("Static residential IPs");
+  expect(without).toContain("Powered by NobleProxy");
   expect(without).not.toMatch(/\d+% off/);
-  expect(without).not.toContain("You save");
-  expect(without).not.toContain("Public price");
+  expect(without).not.toContain("Save $");
+  expect(without).not.toContain("<s>");
 });
 
 test("purposes keep the server order and never show an Xreacher purpose", () => {
@@ -700,32 +835,56 @@ test("purposes keep the server order and never show an Xreacher purpose", () => 
   expect(render(<ProxyShop {...shopProps} catalog={only} balanceCents={5000} />)).toContain("Store temporarily unavailable.");
 });
 
-test("one Proxies page: balance, shop and owned proxies come first, the proxy tools follow", async () => {
+test("one Proxies page with tabs: Buy proxies (owners start here), My proxies (N) and Tools; the balance sits in the corner", async () => {
   liveCloud();
   const state = await loadStoreState() as StoreSnapshot;
   const page = (role: string) => render(<ProxiesPage active groups={["", "Team"]} onChanged={noop}
-    store={<StorePage state={state} role={role} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />} />);
+    store={(tools) => <StorePage state={state} role={role} tools={tools} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />} />);
+  const tabsOf = (html: string) => [...html.matchAll(/role="tab"[^>]*aria-selected="(true|false)"[^>]*>([^<]+)</g)].map((match) => [match[2], match[1]]);
   const owner = page("owner");
-  const order = ["store-wallet", "store-shop", "store-orders", "Proxy tools", "Check proxies", "Replace proxies"].map((marker) => owner.indexOf(marker));
-  expect(order.every((index) => index >= 0)).toBe(true);
-  expect([...order].sort((a, b) => a - b)).toEqual(order);
+  expect(tabsOf(owner)).toEqual([["Buy proxies", "true"], ["My proxies (2)", "false"], ["Tools", "false"]]);
   expect(owner).toContain('class="store-balance">$12.50</strong>');
-  expect(owner).toContain(">Top up</button>");
-  expect(owner).toContain(">Buy</button>");
-  expect(owner).toContain("Proxies by NobleProxy");
-  // The shop is on the page, so the tools show no extra buy cards and no outside link.
+  expect(owner).toContain(">Add funds</button>");
+  expect(owner).toContain('id="store-panel-buy" aria-labelledby="store-tab-buy" class="store-panel">');
+  expect(owner).toContain('id="store-panel-owned" aria-labelledby="store-tab-owned" class="store-panel" hidden=""');
+  // The tools live, unchanged, in the hidden Tools panel, after the shop and the owned proxies.
+  const tools = owner.indexOf('id="store-panel-tools"');
+  expect(owner.slice(tools, tools + 120)).toContain('hidden=""');
+  expect(owner.indexOf("Check proxies")).toBeGreaterThan(tools);
+  expect(owner.indexOf("Replace proxies")).toBeGreaterThan(tools);
+  expect(owner.indexOf("store-shop")).toBeLessThan(owner.indexOf("store-orders"));
+  // One purchase card and one primary purchase button: no balance card, no extra buy cards, no outside link.
+  expect(owner).not.toContain("store-funds");
   expect(owner).not.toContain("proxy-referral");
   expect(owner).not.toContain("nobleproxy.com/t/aliasmode");
   expect(owner).not.toContain("PROXY TOOLS");
+  expect(owner.match(/class="btn primary store-cta"/g)).toHaveLength(1);
+
+  // An offer elsewhere asks for a quantity: the Buy tab shows it.
+  const offered = render(<StorePage state={state} role="owner" requestedQuantity={7} focusKey={1} selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  expect(offered).toContain('aria-valuetext="7"');
 
   const member = page("member");
+  expect(tabsOf(member)).toEqual([["Buy proxies", "false"], ["My proxies (2)", "true"], ["Tools", "false"]]);
   expect(member).toContain('class="store-balance">$12.50</strong>');
+  expect(member).toContain(">History</button>");
   expect(member).toContain("Only the workspace owner can add funds and buy proxies.");
   expect(member).toContain("1.2.3.4:8000:u:p");
-  expect(member).toContain("Proxy tools");
-  expect(member).not.toContain(">Top up</button>");
+  expect(member).toContain("Check proxies");
+  expect(member).not.toContain(">Add funds</button>");
   expect(member).not.toContain("store-shop");
-  expect(member).not.toContain("Proxies by NobleProxy");
+  expect(member).not.toContain("Powered by NobleProxy");
+});
+
+test("My proxies without any order shows one calm empty state; owners get a Buy proxies button", () => {
+  const none = { ok: true, orders: [], pendingPurchases: [] } satisfies ListPurchasedProxiesResponse;
+  const owner = render(<StorePage state={snapshot(0, none)} role="owner" initialTab="owned" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  expect(owner).toContain(">My proxies</button>");
+  expect(owner).toContain("No proxies yet");
+  expect(owner).toContain('<button type="button" class="btn primary">Buy proxies</button>');
+  const member = render(<StorePage state={snapshot(0, none)} role="member" selectedProfileIds={[]} onReload={noop} onProfilesChanged={noop} />);
+  expect(member).toContain("No proxies yet");
+  expect(member).not.toContain('class="btn primary">Buy proxies</button>');
 });
 
 test("Local mode keeps the Proxies page as before: the tools and the NobleProxy link", () => {
@@ -734,8 +893,13 @@ test("Local mode keeps the Proxies page as before: the tools and the NobleProxy 
   expect(local).toContain("Keep your profiles connected.");
   expect(local).toContain('href="https://nobleproxy.com/t/aliasmode?src=proxies-no-proxy&amp;qty=3"');
   expect(local).toContain("3 profiles have no proxy");
-  expect(local).not.toContain("store-wallet");
+  expect(local).not.toContain("store-page");
   expect(local).not.toContain("Proxy tools<");
+  // One NobleProxy card, also with no profile missing a proxy.
+  expect(local.match(/class="proxy-referral"/g)).toHaveLength(1);
+  const allSet = render(<ProxiesPage active groups={[""]} onChanged={noop} profilesWithoutProxy={0} />);
+  expect(allSet.match(/class="proxy-referral"/g)).toHaveLength(1);
+  expect(allSet).toContain("src=proxies-check");
 });
 
 test("the sidebar has one Proxies item and no Wallet or Logs item; logs open from Settings", async () => {

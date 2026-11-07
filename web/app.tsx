@@ -3796,9 +3796,9 @@ function App() {
       {!appMode?.legacyRemote && <>
         <ProxiesPage profilesWithoutProxy={profilesWithoutProxy} key={`proxies:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "proxies"} groups={[...(isCloudMode ? [] : [""]), ...groups.slice(1)]} folders={folders} onChanged={load}
-          store={storeSnapshot && <StorePage state={storeSnapshot} role={cloudAuth?.workspace?.role}
+          store={storeSnapshot ? (tools) => <StorePage state={storeSnapshot} role={cloudAuth?.workspace?.role} tools={tools}
             selectedProfileIds={profiles.filter((profile) => selected.has(profile.id)).map((profile) => profile.id)}
-            requestedQuantity={storeRequest.quantity} focusKey={storeRequest.key} onReload={cloudStore.reload} onProfilesChanged={load} />} />
+            requestedQuantity={storeRequest.quantity} focusKey={storeRequest.key} onReload={cloudStore.reload} onProfilesChanged={load} /> : undefined} />
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
