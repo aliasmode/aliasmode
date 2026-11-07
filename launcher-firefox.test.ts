@@ -6,6 +6,7 @@ import { delimiter, join } from "node:path";
 import { firefoxLaunchConfig, firefoxStartupPrefs, graphicsIdentity } from "./firefox-config.ts";
 import { FIREFOX_FONT_PACKS, firefoxFontPackPrefs, type FirefoxFontPack } from "./firefox-fonts.ts";
 import { Launcher, BrowserLaunchError, decodeMozLz4, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
+import { FirefoxOwnerError } from "./firefox-runtime.ts";
 import { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
 
@@ -479,6 +480,55 @@ test("Mac reopens the latest native-close tabs instead of an older session", asy
   writeFileSync(join(root, "aliasmode-session-tabs.json"), JSON.stringify({ generation: `${launch.debugPort}:${launch.startedAt}`, tabs }));
   expect(f.launcher.closedFirefoxTabs(f.profile.id, launch)).toEqual(tabs);
   expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});
+
+test("a saved tab that does not load never closes the Firefox the user already sees", async () => {
+  const f = fixture("darwin", "arm64");
+  const root = f.launcher.userDataDir(f.profile.id);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "aliasmode-session-tabs.json"), JSON.stringify({ generation: "previous", tabs: ["https://slow.example/"] }));
+  const launcher = new Launcher({ ...f.options, navigate: async () => { throw new Error("page.goto: Timeout 30000ms exceeded"); } });
+  const opened = await launcher.start(f.profile.id);
+  expect(opened.nativeSessionRestored).toBe(true);
+  expect(f.store.getLaunch(f.profile.id)).not.toBeNull();
+  expect(f.killed).toEqual([]);
+  expect(await launcher.active(f.profile.id)).toBe(true);
+  expect(await launcher.stop(f.profile.id)).toBe(true);
+});
+
+test("a Firefox that does not start or answer says so instead of a bare preflight failure", async () => {
+  for (const [error, failure] of [
+    [new FirefoxOwnerError("runtime_unavailable", "Firefox owner failed before ready"), "process_spawn"],
+    [new FirefoxOwnerError("timeout", "Firefox owner readiness timed out"), "cdp_readiness"],
+  ] as const) {
+    const f = fixture();
+    const launcher = new Launcher({ ...f.options, firefoxRuntime: { ...f.options.firefoxRuntime!, start: async () => { throw error; } } });
+    const rejected = await launcher.start(f.profile.id).catch((caught) => caught);
+    expect(rejected).toBeInstanceOf(BrowserLaunchError);
+    expect(rejected).toMatchObject({ failure, message: `browser_launch/${failure} (failed)` });
+    expect(f.store.getLaunch(f.profile.id)).toBeNull();
+  }
+});
+
+test("a refused Firefox start names its reason", async () => {
+  const f = fixture();
+  // The profile changes after the browser started (another writer, not this launch).
+  const changing = new Launcher({ ...f.options, firefoxRuntime: { ...f.options.firefoxRuntime!, start: async (args, hooks) => {
+    const ready = await f.options.firefoxRuntime!.start(args, hooks);
+    f.store.upsertProfile({ ...f.store.getProfile(f.profile.id)!, name: "Renamed" });
+    return ready;
+  } } });
+  const changed = await changing.start(f.profile.id).catch((caught) => caught);
+  expect(changed).toMatchObject({ failure: "preflight", preflightReason: "profile_changed" });
+  expect(changed.guidance).toContain("changed while it was opening");
+  expect(f.store.getLaunch(f.profile.id)).toBeNull();
+
+  const g = fixture();
+  g.store.upsertProfile({ ...g.profile, cookies: [{ name: "a", value: "b", domain: ".x.com", path: "/" }] });
+  const broken = new Launcher({ ...g.options, ensureCookies: async () => { throw new Error("internal failure"); } });
+  const unexpected = await broken.start(g.profile.id).catch((caught) => caught);
+  expect(unexpected).toMatchObject({ failure: "preflight", preflightReason: "unexpected" });
+  expect(unexpected.guidance).toContain("rejected before launch");
 });
 
 test("Firefox enables native tab restore with session cookies in the owned profile before spawn", async () => {
