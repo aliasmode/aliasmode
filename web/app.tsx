@@ -896,8 +896,8 @@ type DesktopUpdateStatus =
   | { state: "upToDate"; currentVersion: string }
   | { state: "available"; currentVersion: string; version: string; highlights: string[] };
 type DesktopUpdateProgress =
-  | { phase: "preparing" | "verifying" | "closingBrowsers" | "installing" }
-  | { phase: "downloading"; percent: number | null };
+  | { phase: "preparing" | "reconnecting" | "verifying" | "closingBrowsers" | "installing" }
+  | { phase: "downloading"; percent: number | null; downloadedBytes: number; totalBytes: number | null };
 type DesktopUpdateMessage =
   | DesktopUpdateProgress
   | { phase: "ready"; version: string; highlights: string[] };
@@ -989,18 +989,28 @@ function parseDesktopUpdateMessage(value: unknown): DesktopUpdateMessage {
   }
   if (
     progress.phase === "preparing" ||
+    progress.phase === "reconnecting" ||
     progress.phase === "verifying" ||
     progress.phase === "closingBrowsers" ||
     progress.phase === "installing"
   ) {
     return { phase: progress.phase };
   }
+  const isByteCount = (value: unknown): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   if (
     progress.phase === "downloading" &&
     (progress.percent === null ||
-      (typeof progress.percent === "number" && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100))
+      (typeof progress.percent === "number" && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100)) &&
+    isByteCount(progress.downloadedBytes) &&
+    (progress.totalBytes === null || isByteCount(progress.totalBytes))
   ) {
-    return { phase: "downloading", percent: progress.percent as number | null };
+    return {
+      phase: "downloading",
+      percent: progress.percent as number | null,
+      downloadedBytes: progress.downloadedBytes,
+      totalBytes: progress.totalBytes as number | null,
+    };
   }
   throw new Error("AliasMode returned invalid update progress.");
 }
@@ -1026,14 +1036,25 @@ function DesktopUpdateProgressView({ progress }: { progress: DesktopUpdateProgre
     ? t("Preparing update…")
     : progress.phase === "downloading"
       ? percent === null ? t("Downloading update…") : t("Downloading update… {percent}%", { percent: String(percent) })
-      : progress.phase === "verifying"
-        ? t("Verifying update…")
-        : progress.phase === "closingBrowsers"
-          ? t("Saving and closing browsers…")
-          : t("Installing and restarting…");
+      : progress.phase === "reconnecting"
+        ? t("Connection lost. Reconnecting…")
+        : progress.phase === "verifying"
+          ? t("Verifying update…")
+          : progress.phase === "closingBrowsers"
+            ? t("Saving and closing browsers…")
+            : t("Installing and restarting…");
+  // Megabytes received, so a slow download still shows movement between percent steps.
+  const size = progress.phase !== "downloading"
+    ? null
+    : progress.totalBytes === null
+      ? t("{downloaded} MB", { downloaded: String(Math.floor(progress.downloadedBytes / 1e6)) })
+      : t("{downloaded} of {total} MB", {
+        downloaded: String(Math.floor(progress.downloadedBytes / 1e6)),
+        total: String(Math.ceil(progress.totalBytes / 1e6)),
+      });
   return (
     <div className="update-progress" role="status">
-      <span>{label}</span>
+      <span>{size ? `${label} ${size}` : label}</span>
       <progress max={100} value={percent ?? undefined} aria-label="Update progress" />
     </div>
   );
@@ -3795,7 +3816,7 @@ function App() {
             <span role="status"><strong>{t("AliasMode {version} is available.", { version: desktopUpdate.version })}</strong> {t("The update will save active browsers and restart the app.")}</span>
             <UpdateHighlights version={desktopUpdate.version} highlights={desktopUpdate.highlights} />
             {desktopUpdateProgress && <DesktopUpdateProgressView progress={desktopUpdateProgress} />}
-            {desktopUpdateErr && <span className="modal-err" role="alert">{desktopUpdateErr}</span>}
+            {desktopUpdateErr && <span className="modal-err" role="alert">{t(desktopUpdateErr)}</span>}
           </div>
           <button className="btn primary" type="button" disabled={desktopUpdateChecking || desktopUpdateInstalling} onClick={() => void installDesktopUpdate()}>
             {desktopUpdateInstalling ? t("Updating…") : t("Update now")}

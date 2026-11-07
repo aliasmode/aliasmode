@@ -5,6 +5,7 @@ mod runtime_descriptor;
 mod shutdown;
 mod sidecar;
 mod update_attempt;
+mod update_download;
 
 use credentials::{credential_delete, credential_get, credential_set, CredentialOrigin};
 use rand::random;

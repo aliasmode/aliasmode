@@ -107,3 +107,21 @@ export function describeDesktopUpdateResult(result: DesktopUpdateResult, t: (key
     detail,
   };
 }
+
+// The native updater returns these texts as errors. They are listed here so each one has a
+// translation; the dashboard passes the received text through t().
+export const NATIVE_UPDATE_ERRORS = [
+  "An update operation is already running.",
+  "AliasMode could not check for updates. Try again.",
+  "The update download was interrupted. Your browsers are still open. Try again.",
+  "The update download stopped because no data arrived for 1 minute. Your browsers are still open. Check your connection and try again.",
+  "AliasMode could not verify the downloaded update. Your browsers are still open. Try again.",
+  "AliasMode cannot safely update this installation. Close AliasMode and run the full offline installer from the release page. Do not uninstall.",
+  "AliasMode cannot update this copy. Move AliasMode to the Applications folder and open it again, or run the install command again.",
+  "AliasMode cannot update this copy. Close AliasMode and run the install command from aliasmode.com/download again.",
+  "The update was not installed because AliasMode could not safely close browser services. The current version remains installed.",
+  "AliasMode could not start the verified update. The current version will restart.",
+  "AliasMode updates are not available on this system.",
+  "AliasMode is already up to date.",
+  "AliasMode could not read the last update result.",
+] as const;

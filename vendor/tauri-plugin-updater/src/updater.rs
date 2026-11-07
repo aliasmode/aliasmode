@@ -727,6 +727,12 @@ impl Update {
         Ok(buffer)
     }
 
+    /// Verifies bytes that the app downloaded itself, with the same key and check as
+    /// [`Update::download`].
+    pub fn verify(&self, bytes: &[u8]) -> Result<()> {
+        verify_signature(bytes, &self.signature, &self.config.pubkey).map(|_| ())
+    }
+
     /// Installs the updater package downloaded by [`Update::download`]
     pub fn install(&self, bytes: impl AsRef<[u8]>) -> Result<()> {
         self.install_inner(bytes.as_ref())
