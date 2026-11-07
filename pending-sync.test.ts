@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CloudApiError } from "./cloud-client.ts";
@@ -63,6 +63,25 @@ test("pending sync queue encrypts close payloads at rest and decrypts for the sa
   const databaseBytes = readFileSync(state.path).toString("utf8");
   expect(databaseBytes).not.toContain("very-secret-cookie");
   expect(databaseBytes).not.toContain("registration-secret");
+});
+
+// Windows refuses to delete or rename a database that a closed queue still
+// holds open. Linux shows the same leak as an open descriptor, so it fails here too.
+const linuxTest = process.platform === "linux" ? test : test.skip;
+linuxTest("pending sync queue close releases the database file after transactions ran", () => {
+  const state = queue();
+  state.queue.enqueue({
+    accountId: "account1",
+    profileId: "profile1",
+    registrationId: "registration1",
+    expectedVersion: 3,
+    payload: payload(),
+  });
+  state.queue.close();
+  const held = readdirSync("/proc/self/fd").filter((fd) => {
+    try { return readlinkSync(`/proc/self/fd/${fd}`).startsWith(state.path); } catch { return false; }
+  });
+  expect(held).toEqual([]);
 });
 
 test("pending sync queue keeps conflicts terminal until explicitly removed", () => {

@@ -214,6 +214,28 @@ export class PendingSyncQueue {
     this.key.fill(0);
   }
 
+  /**
+   * Use this in place of bun:sqlite's db.transaction(). That API prepares
+   * statements that close() never finalizes, so the database file stays open
+   * after close() and Windows refuses to delete or rename it. Nested calls
+   * become savepoints, as they do there.
+   */
+  private transaction<T>(fn: () => T): () => T {
+    return () => {
+      const nested = this.db.inTransaction;
+      this.db.exec(nested ? "SAVEPOINT pending_tx" : "BEGIN");
+      try {
+        const result = fn();
+        this.db.exec(nested ? "RELEASE pending_tx" : "COMMIT");
+        return result;
+      } catch (error) {
+        // SQLite has already ended the transaction after some errors.
+        if (this.db.inTransaction) this.db.exec(nested ? "ROLLBACK TO pending_tx; RELEASE pending_tx" : "ROLLBACK");
+        throw error;
+      }
+    };
+  }
+
   enqueue(input: PendingCloseInput): string {
     if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) {
       throw new Error("expectedVersion must be a non-negative safe integer");
@@ -231,7 +253,7 @@ export class PendingSyncQueue {
     const authTag = cipher.getAuthTag();
     const now = Date.now();
     const readyToSubmit = input.readyToSubmit !== false;
-    const write = this.db.transaction(() => {
+    const write = this.transaction(() => {
       this.db.query(`
         INSERT INTO pending_closes
           (id, account_id, profile_id, expected_version, ready_to_submit, status,
@@ -503,7 +525,7 @@ export class PendingSyncQueue {
     registrationId: string,
     nextRegistrationId: string,
   ): boolean {
-    const replace = this.db.transaction(() => {
+    const replace = this.transaction(() => {
       const current = this.getOpen(profileId, accountId);
       if (!current || current.registrationId !== registrationId || current.cleanupMode) return false;
       const checkpoint = this.list(accountId)
@@ -543,7 +565,7 @@ export class PendingSyncQueue {
     if (!Number.isSafeInteger(toVersion) || toVersion < fromVersion) {
       throw new Error("a checkpoint version must not move back");
     }
-    const advance = this.db.transaction(() => {
+    const advance = this.transaction(() => {
       const open = this.getOpen(profileId, accountId);
       if (!open || open.registrationId !== registrationId || open.expectedVersion !== fromVersion) return false;
       const checkpoint = this.list(accountId)
@@ -604,7 +626,7 @@ export class PendingSyncQueue {
     accountId: string,
     registrationId: string,
   ): boolean {
-    const finalize = this.db.transaction(() => {
+    const finalize = this.transaction(() => {
       const open = this.getOpen(profileId, accountId);
       if (!open || open.registrationId !== registrationId) return false;
       const rows = this.db.query<PendingRow, [string, string]>(`
