@@ -188,28 +188,270 @@ fn newest_release(current: &Version, releases: &[GithubRelease]) -> Option<Relea
         .max_by(|left, right| left.version.cmp(&right.version))
 }
 
-async fn fetch_releases() -> Result<Vec<GithubRelease>, String> {
-    let client = Client::builder()
-        .no_proxy()
+/// A proxy the operating system is configured to use, detected the same way
+/// the sidecar detects it for Cloud requests and engine downloads: the
+/// Windows per-user proxy settings first, then the conventional environment
+/// variables. Nothing detected (or a PAC-only configuration) means the
+/// update traffic connects directly, exactly as it did before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemProxy {
+    host: String,
+    port: u16,
+    bypass: Vec<String>,
+}
+
+impl SystemProxy {
+    fn url(&self) -> String {
+        format!("http://{}:{}", self.host, self.port)
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim().trim_matches(['[', ']']).to_lowercase();
+    normalized == "localhost" || normalized == "127.0.0.1" || normalized == "::1"
+}
+
+fn matches_bypass(host: &str, bypass: &[String]) -> bool {
+    let name = host.trim().trim_matches(['[', ']']).to_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    bypass.iter().any(|raw| {
+        let pattern = raw.trim().to_lowercase();
+        if pattern.is_empty() {
+            return false;
+        }
+        if pattern == "<local>" {
+            return !name.contains('.');
+        }
+        let normalized = pattern
+            .strip_prefix("*.")
+            .or_else(|| pattern.strip_prefix('*'))
+            .unwrap_or(&pattern);
+        if pattern.starts_with("*.") {
+            name == normalized || name.ends_with(&format!(".{normalized}"))
+        } else {
+            name == pattern
+        }
+    })
+}
+
+fn proxy_applies_to(host: &str, proxy: &SystemProxy) -> bool {
+    !is_loopback_host(host) && !matches_bypass(host, &proxy.bypass)
+}
+
+fn normalize_proxy_address(raw: &str) -> Option<(String, u16)> {
+    let mut value = raw.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    let entries: Vec<String> = value
+        .split(';')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.iter().any(|entry| entry.contains('=')) {
+        let pick = |scheme: &str| {
+            entries.iter().find_map(|entry| {
+                let (key, rest) = entry.split_once('=')?;
+                key.trim()
+                    .eq_ignore_ascii_case(scheme)
+                    .then(|| rest.trim().to_string())
+            })
+        };
+        value = pick("https").or_else(|| pick("http")).unwrap_or_default();
+    }
+    if value.is_empty() {
+        return None;
+    }
+    let has_scheme = value.contains("://");
+    let parsed = Url::parse(&if has_scheme {
+        value.clone()
+    } else {
+        format!("http://{value}")
+    })
+    .ok()?;
+    if !has_scheme && parsed.port().is_none() {
+        return None;
+    }
+    let host = parsed.host_str()?.trim_matches(['[', ']']).to_string();
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, parsed.port().unwrap_or(80)))
+}
+
+#[derive(Debug, Default)]
+struct WindowsProxySettings {
+    enabled: bool,
+    proxy: Option<String>,
+    bypass: Vec<String>,
+    pac: bool,
+}
+
+fn registry_value(output: &str, name: &str) -> Option<String> {
+    for line in output.lines() {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix(name) else {
+            continue;
+        };
+        if !rest.chars().next().is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let rest = rest.trim_start();
+        let Some(type_at) = rest.find("REG_") else {
+            continue;
+        };
+        let value = rest[type_at..]
+            .splitn(2, char::is_whitespace)
+            .nth(1)?
+            .trim()
+            .to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_windows_proxy_settings(output: &str) -> WindowsProxySettings {
+    let enable = registry_value(output, "ProxyEnable");
+    WindowsProxySettings {
+        enabled: enable.as_deref() == Some("0x1") || enable.as_deref() == Some("1"),
+        proxy: registry_value(output, "ProxyServer"),
+        bypass: registry_value(output, "ProxyOverride")
+            .map(|value| {
+                value
+                    .split(';')
+                    .map(|entry| entry.trim().to_string())
+                    .filter(|entry| !entry.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        pac: registry_value(output, "AutoConfigURL").is_some(),
+    }
+}
+
+enum WindowsProxy {
+    NotApplicable,
+    Pac,
+    Found(SystemProxy),
+    Missing,
+}
+
+fn read_windows_proxy() -> WindowsProxy {
+    if !cfg!(target_os = "windows") {
+        return WindowsProxy::NotApplicable;
+    }
+    let Ok(output) = std::process::Command::new("reg")
+        .args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+        ])
+        .output()
+    else {
+        return WindowsProxy::Missing;
+    };
+    if !output.status.success() {
+        return WindowsProxy::Missing;
+    }
+    let settings = parse_windows_proxy_settings(&String::from_utf8_lossy(&output.stdout));
+    if settings.pac {
+        return WindowsProxy::Pac;
+    }
+    if !settings.enabled {
+        return WindowsProxy::Missing;
+    }
+    let Some(raw) = settings.proxy else {
+        return WindowsProxy::Missing;
+    };
+    match normalize_proxy_address(&raw) {
+        Some((host, port)) => WindowsProxy::Found(SystemProxy {
+            host,
+            port,
+            bypass: settings.bypass,
+        }),
+        None => WindowsProxy::Missing,
+    }
+}
+
+fn detect_system_proxy() -> Option<SystemProxy> {
+    match read_windows_proxy() {
+        WindowsProxy::Pac => return None,
+        WindowsProxy::Found(proxy) => return Some(proxy),
+        WindowsProxy::NotApplicable | WindowsProxy::Missing => {}
+    }
+    let raw = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .unwrap_or_default();
+    let (host, port) = normalize_proxy_address(&raw)?;
+    let bypass = std::env::var("NO_PROXY")
+        .or_else(|_| std::env::var("no_proxy"))
+        .unwrap_or_default()
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    Some(SystemProxy { host, port, bypass })
+}
+
+fn releases_client(proxy: Option<&SystemProxy>) -> Result<Client, String> {
+    let builder = Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(5))
         .user_agent(format!(
             "AliasMode/{} release-updater",
             env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = client
+        ));
+    let builder = match proxy {
+        Some(proxy) => {
+            builder.proxy(reqwest::Proxy::all(proxy.url()).map_err(|error| error.to_string())?)
+        }
+        None => builder.no_proxy(),
+    };
+    builder.build().map_err(|error| error.to_string())
+}
+
+async fn send_releases_request(client: &Client) -> Result<reqwest::Response, reqwest::Error> {
+    client
         .get(RELEASES_API)
         .header(ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+}
+
+async fn read_releases(response: reqwest::Response) -> Result<Vec<GithubRelease>, String> {
     if !response.status().is_success() {
         return Err(format!("GitHub returned {}", response.status()));
     }
     let bytes = response.bytes().await.map_err(|error| error.to_string())?;
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
+/// Direct first, like the sidecar: a transport failure on the direct
+/// attempt is retried once through the detected system proxy, while any
+/// HTTP response — even an error status — proves the direct route works.
+/// When both routes fail, the direct error is the one reported.
+async fn fetch_releases() -> Result<Vec<GithubRelease>, String> {
+    let direct = releases_client(None)?;
+    let response = match send_releases_request(&direct).await {
+        Ok(response) => response,
+        Err(direct_error) => {
+            let Some(proxy) =
+                detect_system_proxy().filter(|proxy| proxy_applies_to("api.github.com", proxy))
+            else {
+                return Err(direct_error.to_string());
+            };
+            let proxied = releases_client(Some(&proxy))?;
+            match send_releases_request(&proxied).await {
+                Ok(response) => response,
+                Err(_) => return Err(direct_error.to_string()),
+            }
+        }
+    };
+    read_releases(response).await
 }
 
 fn update_artifact_name(version: &Version) -> String {
@@ -279,20 +521,21 @@ fn validate_manifest_result(
     Ok(())
 }
 
-async fn discover_update(
+/// Build an updater on one route and ask it for the update. The HTTP client
+/// is baked into the returned Update, so the route that wins the check is
+/// also the route the installer download uses.
+async fn check_update_on_route(
     app: &AppHandle,
     handoff: Option<&InstallerHandoff>,
-) -> Result<Option<DiscoveredUpdate>, String> {
-    let current = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
-    let releases = fetch_releases().await?;
-    let Some(candidate) = newest_release(&current, &releases) else {
-        return Ok(None);
+    candidate: &ReleaseCandidate,
+    proxy_url: Option<Url>,
+) -> Result<Update, String> {
+    let builder = app.updater_builder().target(UPDATE_TARGET);
+    let builder = match proxy_url {
+        Some(proxy_url) => builder.proxy(proxy_url),
+        None => builder.no_proxy(),
     };
-
-    let builder = app
-        .updater_builder()
-        .target(UPDATE_TARGET)
-        .no_proxy()
+    let builder = builder
         .configure_client(|client| {
             client
                 .connect_timeout(Duration::from_secs(10))
@@ -318,11 +561,45 @@ async fn discover_update(
         .map_err(|error| error.to_string())?
         .build()
         .map_err(|error| error.to_string())?;
-    let update = updater
+    updater
         .check()
         .await
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "selected GitHub release returned no update".to_owned())?;
+        .ok_or_else(|| "selected GitHub release returned no update".to_owned())
+}
+
+async fn discover_update(
+    app: &AppHandle,
+    handoff: Option<&InstallerHandoff>,
+) -> Result<Option<DiscoveredUpdate>, String> {
+    let current = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
+    let releases = fetch_releases().await?;
+    let Some(candidate) = newest_release(&current, &releases) else {
+        return Ok(None);
+    };
+
+    // Direct first, like the rest of the app: only a failed check is retried
+    // once through the detected system proxy, and when both routes fail the
+    // direct error is the one reported.
+    let update = match check_update_on_route(app, handoff, &candidate, None).await {
+        Ok(update) => update,
+        Err(direct_error) => {
+            let proxy_url = detect_system_proxy()
+                .filter(|proxy| {
+                    candidate
+                        .manifest_url
+                        .host_str()
+                        .is_some_and(|host| proxy_applies_to(host, proxy))
+                })
+                .and_then(|proxy| Url::parse(&proxy.url()).ok());
+            match proxy_url {
+                Some(proxy_url) => check_update_on_route(app, handoff, &candidate, Some(proxy_url))
+                    .await
+                    .map_err(|_| direct_error)?,
+                None => return Err(direct_error),
+            }
+        }
+    };
     validate_manifest_result(
         &candidate,
         &update.version,
@@ -630,14 +907,65 @@ pub async fn update_now(
 mod tests {
     use super::{
         download_percent, is_release_asset_url, log_install_failure, newest_release,
+        normalize_proxy_address, parse_windows_proxy_settings, proxy_applies_to,
         release_highlights, run_verified_update, update_artifact_name, validate_manifest_result,
-        GithubAsset, GithubRelease, ReleaseCandidate, UpdateCoordinator, UpdatePreparationError,
-        UpdateProgress, UpdateStatus, UPDATE_MANIFEST, UPDATE_TARGET,
+        GithubAsset, GithubRelease, ReleaseCandidate, SystemProxy, UpdateCoordinator,
+        UpdatePreparationError, UpdateProgress, UpdateStatus, UPDATE_MANIFEST, UPDATE_TARGET,
     };
     use semver::Version;
     use serde_json::json;
     use std::cell::Cell;
     use url::Url;
+
+    #[test]
+    fn windows_proxy_output_is_parsed_without_interpreting_pac_settings() {
+        let parsed = parse_windows_proxy_settings(
+            "\n    ProxyEnable    REG_DWORD    0x1\n    ProxyServer    REG_SZ       http=proxy.example:80;https=secure.example:443\n    ProxyOverride  REG_SZ       <local>;*.example.test\n",
+        );
+        assert!(parsed.enabled);
+        assert_eq!(
+            parsed.proxy.as_deref(),
+            Some("http=proxy.example:80;https=secure.example:443")
+        );
+        assert_eq!(
+            parsed.bypass,
+            vec!["<local>".to_string(), "*.example.test".to_string()]
+        );
+        assert!(!parsed.pac);
+        assert!(
+            parse_windows_proxy_settings("    AutoConfigURL    REG_SZ    http://proxy/pac.js\n")
+                .pac
+        );
+        assert!(!parse_windows_proxy_settings("    ProxyEnable    REG_DWORD    0x0\n").enabled);
+    }
+
+    #[test]
+    fn system_proxy_addresses_normalize_like_the_sidecar() {
+        assert_eq!(
+            normalize_proxy_address(" http://proxy.example:8080 "),
+            Some(("proxy.example".to_string(), 8080))
+        );
+        assert_eq!(
+            normalize_proxy_address("http=old.example:80; https=new.example:443"),
+            Some(("new.example".to_string(), 443))
+        );
+        assert_eq!(normalize_proxy_address("broken"), None);
+        assert_eq!(normalize_proxy_address(""), None);
+    }
+
+    #[test]
+    fn system_proxy_applies_unless_bypassed_or_loopback() {
+        let proxy = SystemProxy {
+            host: "proxy.example".to_string(),
+            port: 20122,
+            bypass: vec!["*.example.test".to_string(), "<local>".to_string()],
+        };
+        assert!(proxy_applies_to("api.github.com", &proxy));
+        assert!(!proxy_applies_to("service.example.test", &proxy));
+        assert!(!proxy_applies_to("printer", &proxy));
+        assert!(!proxy_applies_to("localhost", &proxy));
+        assert!(!proxy_applies_to("127.0.0.1", &proxy));
+    }
 
     fn manifest_url(tag: &str) -> String {
         format!("https://github.com/aliasmode/aliasmode/releases/download/{tag}/{UPDATE_MANIFEST}")
