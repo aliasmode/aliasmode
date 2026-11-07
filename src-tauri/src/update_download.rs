@@ -483,7 +483,12 @@ mod tests {
             url,
             ranges: Arc::default(),
         };
-        let (result, _) = run(&server, &NO_RETRY);
+        // Windows answers a closed port only after its SYN retries (about 2 s), so wait longer than that.
+        let policy = DownloadPolicy {
+            stall: Duration::from_secs(10),
+            retry_delays: &[],
+        };
+        let (result, _) = run(&server, &policy);
         assert_eq!(result, Err(DownloadFailure::Interrupted));
     }
 }
