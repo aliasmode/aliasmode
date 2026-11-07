@@ -67,6 +67,7 @@ import { encodePortableProfile } from "./portable-profile.ts";
 import { createFirefoxProfileConfig } from "./firefox-config.ts";
 import type { Profile, ProfileEngine } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
+import { systemProxyFetch } from "./system-proxy.ts";
 import { runDiagnostics } from "./diagnose.ts";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -2620,6 +2621,7 @@ async function main() {
         new SupabaseAuthClient({
           baseUrl: cloudConfig.authUrl,
           anonKey: cloudConfig.anonKey,
+          fetchFn: systemProxyFetch,
         }),
         undefined,
         desktopCredentials
@@ -2641,6 +2643,7 @@ async function main() {
     ? new CloudConnectionRuntime({
         baseUrl: cloudConfig.apiUrl,
         accessToken: () => cloudAuth.accessTokenOrRefresh(),
+        fetchFn: systemProxyFetch,
         installation: {
           installationId: defaultOperatorName(identityDbPath),
           label: hostname(),
@@ -2736,7 +2739,7 @@ async function main() {
         await launcher.reconcileOrphans();
         prefetchBrowserRuntimes(launcher, store);
         const coord = new RemoteCoordinator({
-          hub: new HubClient(hubUrl, password, owner),
+          hub: new HubClient(hubUrl, password, owner, systemProxyFetch),
           launcher,
           store,
           readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
