@@ -866,11 +866,12 @@ async function shownPageUrls(context, pages, isFirefox) {
 // In Firefox a new page from Playwright is a new window. A page can open a tab in its own window,
 // and "noopener" leaves that tab with no link to the page.
 async function openTabBeside(context, page) {
+  const opened = context.waitForEvent("page", { timeout: 5_000 });
   try {
-    const opened = context.waitForEvent("page", { timeout: 5_000 });
     await page.evaluate(() => { globalThis.open("about:blank", "_blank", "noopener"); });
     return await opened;
   } catch {
+    opened.catch(() => {});
     return undefined;
   }
 }
@@ -917,10 +918,11 @@ async function navigatePages(context, urls, replacePages = false, tabsInOneWindo
 
   // The tabs open in the window of the empty page, before that page gets its own address. Each
   // tab opens from the tab before it, because Firefox puts a new tab directly after its opener.
+  // With no empty page, the first tab opens beside an open user page and the open pages stay.
   const tabs = [];
-  if (tabsInOneWindow && blank) {
-    let opener = blank;
-    for (let index = 1; index < targets.length; index++) {
+  if (tabsInOneWindow) {
+    let opener = blank ?? existing.findLast((page) => canonicalUserPageUrl(urlOf(page)) !== undefined);
+    for (let index = blank ? 1 : 0; opener && index < targets.length; index++) {
       tabs[index] = await openTabBeside(context, opener);
       opener = tabs[index] ?? opener;
     }
@@ -943,7 +945,7 @@ async function navigatePages(context, urls, replacePages = false, tabsInOneWindo
     }
   });
   for (const error of await Promise.all(loads)) if (error) firstError ??= error;
-  if (tabs.some(Boolean)) await blank.bringToFront?.().catch(() => {});
+  if (tabs.some(Boolean)) await (blank ?? pages[0])?.bringToFront?.().catch(() => {});
   if (firstError) throw firstError;
 }
 
