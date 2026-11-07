@@ -759,8 +759,9 @@ export interface CloudProxyProduct {
   type: string;
   label: string;
   countries: Array<{ code: string; name: string }>;
-  /** Unit price for quantities from minQty up to the next tier. */
-  tiers: Array<{ minQty: number; unitPriceCents: number }>;
+  /** Unit price for quantities from minQty up to the next tier. `publicUnitPriceCents` is NobleProxy's
+      public price for the same tier; optional, the app shows the saving only when it is sent. */
+  tiers: Array<{ minQty: number; unitPriceCents: number; publicUnitPriceCents?: number }>;
 }
 
 export interface ProxyCatalogResponse {

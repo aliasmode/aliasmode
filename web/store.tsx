@@ -131,10 +131,54 @@ export function useCloudStore(enabled: boolean, key: string) {
   return { state: enabled ? state : null, reload };
 }
 
-export function quoteProxyPrice(product: CloudProxyProduct | undefined, quantity: number): { unitPriceCents: number; totalCents: number } | null {
+export interface ProxyQuote {
+  unitPriceCents: number;
+  totalCents: number;
+  /** Only when the catalog sends NobleProxy's public price for this tier and it is higher. */
+  publicTotalCents?: number;
+  savingPercent?: number;
+}
+
+/** Display only: Cloud prices the order itself from the same catalog tiers. */
+export function quoteProxyPrice(product: CloudProxyProduct | undefined, quantity: number): ProxyQuote | null {
   if (!product || !Number.isSafeInteger(quantity) || quantity < 1) return null;
   const tier = [...product.tiers].sort((a, b) => b.minQty - a.minQty).find((candidate) => quantity >= candidate.minQty);
-  return tier ? { unitPriceCents: tier.unitPriceCents, totalCents: tier.unitPriceCents * quantity } : null;
+  if (!tier) return null;
+  const quote: ProxyQuote = { unitPriceCents: tier.unitPriceCents, totalCents: tier.unitPriceCents * quantity };
+  const percent = savingPercent(tier);
+  if (percent) { quote.publicTotalCents = tier.publicUnitPriceCents! * quantity; quote.savingPercent = percent; }
+  return quote;
+}
+
+function savingPercent(tier: CloudProxyProduct["tiers"][number] | undefined): number | null {
+  const publicPrice = tier?.publicUnitPriceCents;
+  if (!tier || typeof publicPrice !== "number" || !(publicPrice > tier.unitPriceCents)) return null;
+  return Math.round((1 - tier.unitPriceCents / publicPrice) * 100) || null;
+}
+
+/** The discount on the smallest order, for the provider line. null when the catalog has no public price. */
+export function catalogSavingPercent(product: CloudProxyProduct | undefined): number | null {
+  return savingPercent(product && [...product.tiers].sort((a, b) => a.minQty - b.minQty)[0]);
+}
+
+/** Purposes in the order NobleProxy sends them, without any Xreacher purpose an older server may still list. */
+export function shopProducts(catalog: ProxyCatalogResponse): CloudProxyProduct[] {
+  return catalog.products.filter((product) => !/xreacher/i.test(product.label));
+}
+
+export const MAX_QUANTITY = 1000;
+/** Slider stops from 1 to 1,000: single steps first, then wider ones. The number field takes any value. */
+export const QUANTITY_STEPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 750, 1000];
+
+export function clampQuantity(value: number): number {
+  return Math.min(MAX_QUANTITY, Math.max(1, Math.floor(value) || 1));
+}
+
+/** The slider stop closest to a quantity. */
+export function quantityStep(quantity: number): number {
+  let best = 0;
+  QUANTITY_STEPS.forEach((step, index) => { if (Math.abs(step - quantity) < Math.abs(QUANTITY_STEPS[best]! - quantity)) best = index; });
+  return best;
 }
 
 /**
@@ -361,12 +405,17 @@ const ENTRY_LABELS: Record<CloudWalletEntry["kind"], string> = {
   deposit: "Top-up", purchase: "Proxy purchase", renewal: "Proxy renewal", refund: "Refund", adjustment: "Adjustment",
 };
 
-function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: {
+export function WalletPanel({ wallet, owner, amount, setAmount, amountRef, open, setOpen, focusKey, onReload }: {
   wallet: GetWalletResponse;
   owner: boolean;
   amount: string;
   setAmount: (value: string) => void;
   amountRef: React.RefObject<HTMLInputElement | null>;
+  /** The top-up form stays folded behind the Top up button until it is needed. */
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  /** Changes when a short balance asks for a top-up: the amount field gets focus. */
+  focusKey: number;
   onReload: () => Promise<void>;
 }) {
   const { t, language } = useTranslation();
@@ -388,6 +437,11 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
     }, controller.signal);
     return () => controller.abort();
   }, [deposit?.id, watching]);
+  useEffect(() => {
+    if (!focusKey) return;
+    amountRef.current?.scrollIntoView?.({ block: "center" });
+    amountRef.current?.focus();
+  }, [focusKey]);
 
   const start = async () => {
     if (!validAmount || busy) return;
@@ -395,6 +449,7 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
     try {
       const created = await createDeposit(amountCents, method);
       setDeposit(created);
+      setOpen(false);
       if (created.method === "card" && !isStripeCheckoutUrl(created.card?.checkoutUrl)) setError(t("The checkout link is not valid. Try again."));
     } catch (failure) {
       setError(t(failure instanceof StoreError ? failure.message : "The request failed. Try again."));
@@ -405,48 +460,66 @@ function WalletPanel({ wallet, owner, amount, setAmount, amountRef, onReload }: 
     setError(null);
     try {
       setDeposit({ ...await depositStatus(depositId), resumed: true });
+      setOpen(false);
     } catch (failure) {
       setError(t(failure instanceof StoreError ? failure.message : "The request failed. Try again."));
     }
   };
 
+  const showForm = owner && open && (!deposit || deposit.status !== "pending");
   return <section className="tools-panel store-wallet" aria-labelledby="store-wallet-title">
-    <div className="tools-panel-head"><div><h3 id="store-wallet-title">{t("Wallet")}</h3><p>{t("Your workspace balance pays for proxies and renewals.")}</p></div>
-      <div className="tools-count"><strong className="store-balance">{formatUsd(wallet.balanceCents, language)}</strong>{t("Balance")}</div></div>
-    <div className="tools-panel-body">
-      {owner ? <>
-        {(!deposit || deposit.status !== "pending") && <div className="store-topup">
-          <label className="fld"><span>{t("Amount (USD)")}</span>
+    <div className="store-balance-row">
+      <div className="store-balance-main">
+        <span id="store-wallet-title" className="store-label">{t("Balance")}</span>
+        <strong className="store-balance">{formatUsd(wallet.balanceCents, language)}</strong>
+      </div>
+      <p className="store-balance-note">{owner ? t("Pays for proxies and renewals in this workspace.") : t("Only the workspace owner can add funds and buy proxies.")}</p>
+      {owner && <div className="store-balance-actions">
+        <ManageOnNobleProxy />
+        {!showForm && !deposit && <button type="button" className="btn primary" onClick={() => setOpen(true)}>{t("Top up")}</button>}
+      </div>}
+    </div>
+    {owner && (showForm || deposit || wallet.pendingDeposits.length > 0 || error) && <div className="store-wallet-body">
+      {showForm && <div className="store-topup">
+        <label className="fld store-amount-field"><span>{t("Amount (USD)")}</span>
+          <span className="store-money"><span aria-hidden="true">$</span>
             <input ref={amountRef} type="number" min={MIN_DEPOSIT_CENTS / 100} max={MAX_DEPOSIT_CENTS / 100} step="0.01" inputMode="decimal" aria-label={t("Top-up amount in US dollars")} value={amount} onChange={(event) => setAmount(event.target.value)} />
-          </label>
+          </span>
+        </label>
+        <div className="fld"><span>{t("Payment method")}</span>
           <div className="segmented" role="radiogroup" aria-label={t("Payment method")}>
             {(["card", "crypto"] as const).map((value) => <button key={value} type="button" role="radio" aria-checked={method === value} className={method === value ? "active" : ""} onClick={() => setMethod(value)}>{value === "card" ? t("Card") : t("Crypto")}</button>)}
           </div>
-          <button type="button" className="btn primary" disabled={!validAmount || busy} onClick={() => void start()}>{busy ? t("Preparing…") : t("Top up")}</button>
-        </div>}
-        {(!deposit || deposit.status !== "pending") && !validAmount && <p className="tools-hint">{t("Enter an amount from {min} to {max}.", { min: formatUsd(MIN_DEPOSIT_CENTS, language), max: formatUsd(MAX_DEPOSIT_CENTS, language) })}</p>}
-        {deposit && (deposit.method === "card" ? <CardPaymentView deposit={deposit} /> : <CryptoPaymentView deposit={deposit} now={now} />)}
-        {deposit && deposit.status !== "pending" && <button type="button" className="btn ghost" onClick={() => setDeposit(null)}>{t("Close")}</button>}
-        {wallet.pendingDeposits.length > 0 && !deposit && <div className="store-pending">
-          <h4>{t("Waiting for payment")}</h4>
-          {wallet.pendingDeposits.map((pending) => <div className="store-row" key={pending.depositId}>
-            <span>{formatUsd(pending.amountCents, language)} · {pending.method === "card" ? t("Card") : t("Crypto")}</span>
-            <button type="button" className="btn xs" onClick={() => void resume(pending.depositId)}>{pending.method === "card" ? t("Reopen checkout") : t("Show payment")}</button>
-          </div>)}
-        </div>}
-      </> : <p className="tools-hint">{t("Only the workspace owner can add funds and buy proxies.")}</p>}
+        </div>
+        <div className="store-topup-actions">
+          <button type="button" className="btn ghost" onClick={() => setOpen(false)}>{t("Cancel")}</button>
+          <button type="button" className="btn primary" disabled={!validAmount || busy} onClick={() => void start()}>
+            {busy ? t("Preparing…") : validAmount ? t("Add {amount}", { amount: formatUsd(amountCents, language) }) : t("Add funds")}
+          </button>
+        </div>
+      </div>}
+      {showForm && !validAmount && <p className="tools-hint">{t("Enter an amount from {min} to {max}.", { min: formatUsd(MIN_DEPOSIT_CENTS, language), max: formatUsd(MAX_DEPOSIT_CENTS, language) })}</p>}
+      {deposit && (deposit.method === "card" ? <CardPaymentView deposit={deposit} /> : <CryptoPaymentView deposit={deposit} now={now} />)}
+      {deposit && deposit.status !== "pending" && <button type="button" className="btn ghost store-close" onClick={() => setDeposit(null)}>{t("Close")}</button>}
+      {wallet.pendingDeposits.length > 0 && !deposit && <div className="store-pending">
+        <h4>{t("Waiting for payment")}</h4>
+        {wallet.pendingDeposits.map((pending) => <div className="store-row" key={pending.depositId}>
+          <span>{formatUsd(pending.amountCents, language)} · {pending.method === "card" ? t("Card") : t("Crypto")}</span>
+          <button type="button" className="btn xs" onClick={() => void resume(pending.depositId)}>{pending.method === "card" ? t("Reopen checkout") : t("Show payment")}</button>
+        </div>)}
+      </div>}
       {error && <div className="tools-alert" role="alert">{error}</div>}
-      <details className="store-history">
-        <summary>{t("History")}</summary>
-        {wallet.entries.length ? <table className="profile-table proxy-table"><tbody>
-          {wallet.entries.map((entry) => <tr key={entry.id}>
-            <td>{new Date(entry.createdAt).toLocaleDateString(language)}</td>
-            <td>{t(ENTRY_LABELS[entry.kind] ?? "Adjustment")}{entry.description && <small>{entry.description}</small>}</td>
-            <td className={`tools-mono store-entry ${entry.amountCents < 0 ? "minus" : "plus"}`}>{entry.amountCents > 0 ? "+" : ""}{formatUsd(entry.amountCents, language)}</td>
-          </tr>)}
-        </tbody></table> : <p className="tools-hint">{t("No transactions yet.")}</p>}
-      </details>
-    </div>
+    </div>}
+    <details className="store-history">
+      <summary>{t("History")}</summary>
+      {wallet.entries.length ? <table className="profile-table proxy-table"><tbody>
+        {wallet.entries.map((entry) => <tr key={entry.id}>
+          <td>{new Date(entry.createdAt).toLocaleDateString(language)}</td>
+          <td>{t(ENTRY_LABELS[entry.kind] ?? "Adjustment")}{entry.description && <small>{entry.description}</small>}</td>
+          <td className={`tools-mono store-entry ${entry.amountCents < 0 ? "minus" : "plus"}`}>{entry.amountCents > 0 ? "+" : ""}{formatUsd(entry.amountCents, language)}</td>
+        </tr>)}
+      </tbody></table> : <p className="tools-hint">{t("No transactions yet.")}</p>}
+    </details>
   </section>;
 }
 
@@ -521,30 +594,62 @@ export function PurchaseResult({ outcome, orders = [], countryLabel = (code) => 
   </div>;
 }
 
-export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity = 1, selectedProfileIds, onTopUp, onReload, onProfilesChanged }: {
+/** −/+ buttons, a number field and a slider for 1 to 1,000 proxies. */
+export function QuantityPicker({ value, disabled, onChange }: { value: number; disabled?: boolean; onChange: (value: number) => void }) {
+  const { t, language } = useTranslation();
+  return <div className="fld store-quantity">
+    <span>{t("Quantity")}</span>
+    <div className="store-stepper">
+      <button type="button" className="btn" aria-label={t("Fewer proxies")} disabled={disabled || value <= 1} onClick={() => onChange(clampQuantity(value - 1))}>−</button>
+      <input type="number" min={1} max={MAX_QUANTITY} step={1} value={value} disabled={disabled} aria-label={t("Number of proxies")} onChange={(event) => onChange(clampQuantity(Number(event.target.value)))} />
+      <button type="button" className="btn" aria-label={t("More proxies")} disabled={disabled || value >= MAX_QUANTITY} onClick={() => onChange(clampQuantity(value + 1))}>+</button>
+    </div>
+    <input type="range" className="store-slider" min={0} max={QUANTITY_STEPS.length - 1} step={1} value={quantityStep(value)} disabled={disabled}
+      aria-label={t("Number of proxies")} aria-valuetext={String(value)} onChange={(event) => onChange(QUANTITY_STEPS[Number(event.target.value)] ?? 1)} />
+    <div className="store-slider-scale" aria-hidden="true"><span>1</span><span>{MAX_QUANTITY.toLocaleString(language)}</span></div>
+  </div>;
+}
+
+/** Names the proxy provider and the AliasMode deal. The number shows only when the catalog sends the public price. */
+export function ProviderLine({ percent }: { percent: number | null }) {
+  const { t } = useTranslation();
+  return <p className="store-provider">{percent
+    ? t("Proxies by NobleProxy — AliasMode users get {percent}% off the public price.", { percent })
+    : t("Proxies by NobleProxy — AliasMode users pay less than the public price.")}</p>;
+}
+
+export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity = 1, focusKey = 0, selectedProfileIds, onTopUp, onReload, onProfilesChanged }: {
   catalog: ProxyCatalogResponse;
   orders?: CloudProxyOrder[];
   balanceCents: number;
   initialQuantity?: number;
+  /** Changes when an offer elsewhere opens the shop: it scrolls into view with the asked quantity. */
+  focusKey?: number;
   selectedProfileIds: string[];
   onTopUp: (shortfallCents: number) => void;
   onReload: () => Promise<void>;
   onProfilesChanged: () => Promise<void>;
 }) {
   const { t, language } = useTranslation();
-  const [type, setType] = useState(catalog.products[0]?.type ?? "");
-  const product = catalog.products.find((candidate) => candidate.type === type) ?? catalog.products[0];
+  const products = shopProducts(catalog);
+  const [type, setType] = useState(products[0]?.type ?? "");
+  const product = products.find((candidate) => candidate.type === type) ?? products[0];
   const [country, setCountry] = useState(product?.countries[0]?.code ?? "");
-  const [quantity, setQuantity] = useState(Math.max(1, initialQuantity));
+  const [quantity, setQuantity] = useState(clampQuantity(initialQuantity));
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<PurchaseOutcome | null>(null);
   const attempts = useRef(new PurchaseAttempts());
-  useEffect(() => { if (initialQuantity > 0) setQuantity(initialQuantity); }, [initialQuantity]);
-  if (!product) return null;
+  const ref = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (initialQuantity > 0) setQuantity(clampQuantity(initialQuantity));
+    if (focusKey) ref.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [initialQuantity, focusKey]);
+  if (!product) return <ShopUnavailable onReload={onReload} />;
   const countryCode = product.countries.some((candidate) => candidate.code === country) ? country : product.countries[0]?.code ?? "";
   const quote = quoteProxyPrice(product, quantity);
   const minimum = Math.min(...product.tiers.map((tier) => tier.minQty));
   const shortfall = quote ? quote.totalCents - balanceCents : 0;
+  const change = (next: number) => { setQuantity(next); setOutcome(null); };
   const buy = async () => {
     if (!quote || shortfall > 0 || busy) return;
     setBusy(true); setOutcome(null);
@@ -552,32 +657,36 @@ export function ProxyShop({ catalog, orders = [], balanceCents, initialQuantity 
     setOutcome(next); setBusy(false);
     if (next.kind !== "error" || next.error.kind === "insufficient") await onReload();
   };
-  return <section className="tools-panel store-shop" aria-labelledby="store-shop-title">
+  return <section ref={ref} className="tools-panel store-shop" aria-labelledby="store-shop-title">
     <div className="tools-panel-head"><div><h3 id="store-shop-title">{t("Buy proxies")}</h3><p>{t("Static residential IPs that stay the same, so every account keeps its own location.")}</p></div></div>
     <div className="tools-panel-body">
-      <div className="store-form">
-        <label className="fld"><span>{t("Proxy type")}</span>
-          <select value={product.type} disabled={busy} onChange={(event) => { setType(event.target.value); setOutcome(null); }}>
-            {catalog.products.map((candidate) => <option key={candidate.type} value={candidate.type}>{candidate.label}</option>)}
-          </select>
-        </label>
-        <label className="fld"><span>{t("Country")}</span>
-          <select value={countryCode} disabled={busy} onChange={(event) => { setCountry(event.target.value); setOutcome(null); }}>
-            {product.countries.map((candidate) => <option key={candidate.code} value={candidate.code}>{countryName(candidate.code, candidate.name, t, language)}</option>)}
-          </select>
-        </label>
-        <label className="fld"><span>{t("Quantity")}</span>
-          <input type="number" min={1} step={1} value={quantity} disabled={busy} aria-label={t("Number of proxies")} onChange={(event) => { setQuantity(Math.max(1, Math.floor(Number(event.target.value)) || 1)); setOutcome(null); }} />
-        </label>
-      </div>
-      <div className="store-tiers">{[...product.tiers].sort((a, b) => a.minQty - b.minQty).map((tier) => <span key={tier.minQty} className={quote?.unitPriceCents === tier.unitPriceCents ? "active" : ""}>
-        {t("{count}+: {price} each", { count: tier.minQty, price: formatUsd(tier.unitPriceCents, language) })}
-      </span>)}</div>
-      <div className="tools-result-bar">
-        <div className="store-total">{quote
-          ? <><span>{t("Total")}</span><strong>{formatUsd(quote.totalCents, language)}</strong><small>{t("{price} each", { price: formatUsd(quote.unitPriceCents, language) })}</small></>
-          : <span>{t("Order at least {count} proxies.", { count: minimum })}</span>}</div>
-        <button type="button" className="btn primary" disabled={!quote || shortfall > 0 || busy} onClick={() => void buy()}>{busy ? t("Buying…") : t("Buy")}</button>
+      <ProviderLine percent={catalogSavingPercent(product)} />
+      <div className="store-buy">
+        <div className="store-form">
+          <label className="fld"><span>{t("Purpose")}</span>
+            <select value={product.type} disabled={busy} onChange={(event) => { setType(event.target.value); setOutcome(null); }}>
+              {products.map((candidate) => <option key={candidate.type} value={candidate.type}>{candidate.label}</option>)}
+            </select>
+          </label>
+          <label className="fld"><span>{t("Country")}</span>
+            <select value={countryCode} disabled={busy} onChange={(event) => { setCountry(event.target.value); setOutcome(null); }}>
+              {product.countries.map((candidate) => <option key={candidate.code} value={candidate.code}>{countryName(candidate.code, candidate.name, t, language)}</option>)}
+            </select>
+          </label>
+          <QuantityPicker value={quantity} disabled={busy} onChange={change} />
+        </div>
+        <div className="store-summary" aria-live="polite">
+          {quote ? <>
+            <div className="store-summary-row"><span>{t("Price per proxy")}</span><strong>{formatUsd(quote.unitPriceCents, language)}</strong></div>
+            {quote.publicTotalCents !== undefined && <>
+              <div className="store-summary-row"><span>{t("Public price")}</span><s>{formatUsd(quote.publicTotalCents, language)}</s></div>
+              <div className="store-summary-row store-saving"><span>{t("You save")}</span><strong>{t("{amount} ({percent}%)", { amount: formatUsd(quote.publicTotalCents - quote.totalCents, language), percent: quote.savingPercent ?? 0 })}</strong></div>
+            </>}
+            <div className="store-summary-total"><span>{t("Total")}</span><strong>{formatUsd(quote.totalCents, language)}</strong></div>
+          </> : <p className="tools-hint">{t("Order at least {count} proxies.", { count: minimum })}</p>}
+          <button type="button" className="btn primary store-buy-button" disabled={!quote || shortfall > 0 || busy} onClick={() => void buy()}>{busy ? t("Buying…") : t("Buy")}</button>
+          <small className="store-summary-note">{t("Paid from your balance.")}</small>
+        </div>
       </div>
       {quote && shortfall > 0 && !outcome && <div className="tools-alert store-short" role="status">
         {t("Your balance is {balance}. Add {amount} to buy this order.", { balance: formatUsd(balanceCents, language), amount: formatUsd(shortfall, language) })}
@@ -605,7 +714,7 @@ function RenewalStatus({ order }: { order: CloudProxyOrder }) {
   if (order.renewalStatus !== "renewal_failed") return null;
   return <div className="tools-alert" role="alert">{order.renewalFailure === "partner_failed"
     ? t("Renewal could not be completed. You were not charged. It is tried again before these proxies expire.")
-    : t("Renewal failed. Add funds to your wallet to keep these proxies.")}</div>;
+    : t("Renewal failed. Top up your balance to keep these proxies.")}</div>;
 }
 
 function OwnedProxies({ orders, pendingPurchases, catalog, owner, selectedProfileIds, onReload, onProfilesChanged }: {
@@ -633,7 +742,7 @@ function OwnedProxies({ orders, pendingPurchases, catalog, owner, selectedProfil
     } finally { setBusy(null); }
   };
   return <section className="tools-panel store-orders" aria-labelledby="store-orders-title">
-    <div className="tools-panel-head"><div><h3 id="store-orders-title">{t("Your proxies")}</h3><p>{t("Proxies bought for this workspace. Renewals are paid from the wallet.")}</p></div>
+    <div className="tools-panel-head"><div><h3 id="store-orders-title">{t("Your proxies")}</h3><p>{t("Proxies bought for this workspace. Renewals are paid from your balance.")}</p></div>
       <button type="button" className="btn" onClick={() => void onReload()}>{t("Refresh")}</button></div>
     <div className="tools-panel-body">
       {error && <div className="tools-alert" role="alert">{error}</div>}
@@ -721,31 +830,30 @@ function ManageOnNobleProxy() {
   return <div ref={ref}><NobleProxyButton outcome={outcome} busy={busy} onClick={() => void open()} /></div>;
 }
 
-export function StorePage({ active, state, role, selectedProfileIds, requestedQuantity = 0, onReload, onProfilesChanged }: {
-  active: boolean;
+/** The Cloud part of the Proxies page: balance, the shop (owners) and the workspace's proxies. */
+export function StorePage({ state, role, selectedProfileIds, requestedQuantity = 0, focusKey = 0, onReload, onProfilesChanged }: {
   state: StoreSnapshot;
   role?: string;
   selectedProfileIds: string[];
   requestedQuantity?: number;
+  focusKey?: number;
   onReload: () => Promise<void>;
   onProfilesChanged: () => Promise<void>;
 }) {
-  const { t } = useTranslation();
   const owner = role === "owner";
   const [amount, setAmount] = useState("20");
+  const [topUpOpen, setTopUpOpen] = useState(false);
+  const [topUpFocus, setTopUpFocus] = useState(0);
   const amountRef = useRef<HTMLInputElement | null>(null);
   const topUp = (shortfallCents: number) => {
     setAmount(String(Math.min(MAX_DEPOSIT_CENTS, Math.max(MIN_DEPOSIT_CENTS, Math.ceil(shortfallCents / 100) * 100)) / 100));
-    amountRef.current?.scrollIntoView?.({ block: "center" });
-    amountRef.current?.focus();
+    setTopUpOpen(true);
+    setTopUpFocus((value) => value + 1);
   };
-  return <div className="workspace proxy-page store-page" hidden={!active}>
-    <div className="tools-intro"><div><span className="tools-eyebrow">{t("WALLET & PROXIES")}</span><h2>{t("Give every account its own IP.")}</h2>
-      <p>{t("Add funds once, then buy static residential proxies and assign them to your profiles in a few clicks.")}</p></div>
-      {owner && <ManageOnNobleProxy />}</div>
-    <WalletPanel wallet={state.wallet} owner={owner} amount={amount} setAmount={setAmount} amountRef={amountRef} onReload={onReload} />
+  return <div className="store-page">
+    <WalletPanel wallet={state.wallet} owner={owner} amount={amount} setAmount={setAmount} amountRef={amountRef} open={topUpOpen} setOpen={setTopUpOpen} focusKey={topUpFocus} onReload={onReload} />
     {owner && (state.catalog
-      ? <ProxyShop catalog={state.catalog} orders={state.proxies.orders} balanceCents={state.wallet.balanceCents} initialQuantity={requestedQuantity} selectedProfileIds={selectedProfileIds} onTopUp={topUp} onReload={onReload} onProfilesChanged={onProfilesChanged} />
+      ? <ProxyShop catalog={state.catalog} orders={state.proxies.orders} balanceCents={state.wallet.balanceCents} initialQuantity={requestedQuantity} focusKey={focusKey} selectedProfileIds={selectedProfileIds} onTopUp={topUp} onReload={onReload} onProfilesChanged={onProfilesChanged} />
       : <ShopUnavailable onReload={onReload} />)}
     <OwnedProxies orders={state.proxies.orders} pendingPurchases={state.proxies.pendingPurchases} catalog={state.catalog} owner={owner} selectedProfileIds={selectedProfileIds} onReload={onReload} onProfilesChanged={onProfilesChanged} />
   </div>;
