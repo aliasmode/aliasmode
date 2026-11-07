@@ -2442,3 +2442,31 @@ test("Firefox opens saved tabs in the window of the empty first page, not in new
   expect(visits).toEqual(["first https://one.example/", "tab1 https://two.example/", "tab2 https://one.example/"]);
   expect(front).toBe("first");
 });
+
+test("Firefox opens a page beside the open tabs and shows it, leaving them untouched", async () => {
+  const visits: string[] = [];
+  const openers: string[] = [];
+  const closed: string[] = [];
+  let windowsOpened = 0;
+  let front = "";
+  let resolveTab: ((page: unknown) => void) | undefined;
+  const makePage = (name: string, url: string) => ({
+    url: () => url,
+    async goto(target: string) { url = target; visits.push(`${name} ${target}`); },
+    async evaluate() { openers.push(name); resolveTab?.(makePage(`tab${openers.length}`, "about:blank")); },
+    async bringToFront() { front = name; },
+    async close() { closed.push(name); },
+  });
+  const open = [makePage("first", "https://example.com/"), makePage("second", "https://example.org/")];
+  const context = {
+    pages: () => open,
+    async newPage() { windowsOpened++; return makePage("window", "about:blank"); },
+    waitForEvent: () => new Promise((resolve) => { resolveTab = resolve; }),
+  };
+  await operatePersistentContext({}, context, "navigate", { urls: ["https://aliasmode.com/check/"], replacePages: false });
+  expect(windowsOpened).toBe(0);
+  expect(closed).toEqual([]);
+  expect(openers).toEqual(["second"]);
+  expect(visits).toEqual(["tab1 https://aliasmode.com/check/"]);
+  expect(front).toBe("tab1");
+});
