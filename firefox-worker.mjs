@@ -204,6 +204,20 @@ export function firefoxLaunchOptions(input) {
   };
 }
 
+/**
+ * Whether the browser may still show a page. The engine drops a tab from the page list when its
+ * content process crashes, yet the tab stays in its window (the crashed-tab page) and nothing adds it
+ * back. After a crash an empty list is no proof that the user closed the last window, and the app
+ * would close a browser the user still sees.
+ */
+export function trackFirefoxPages(context) {
+  let crashed = false;
+  const watch = (page) => page.once?.("crash", () => { crashed = true; });
+  for (const page of context.pages()) watch(page);
+  context.on?.("page", watch);
+  return () => crashed || context.pages().length > 0;
+}
+
 async function launchOwner(input) {
   if (await sha256File(input.executablePath) !== input.executableSha256) throw typed("operation_failed");
   camouEnvironment(input.config, input.prefs);
@@ -252,6 +266,7 @@ async function run() {
   };
   for (const page of context.pages()) observePage(page);
   context.on?.("page", observePage);
+  const hasPages = trackFirefoxPages(context);
   let official;
   let closed = false;
   let closing = false;
@@ -368,7 +383,7 @@ async function run() {
       browserPid,
       profileId: input.profileId,
       pageTargets: pageTargets(),
-      hasPages: context.pages().length > 0,
+      hasPages: hasPages(),
     };
     if (name === "bring-to-front") {
       const targets = pageTargets();

@@ -53,7 +53,7 @@ import type { FingerprintSample } from "./diagnose.ts";
 import { claimedScreenArea, watchWindowFit } from "./window-fit.ts";
 import { applySessionToEndpoint, bundleTabUrls, canonicalUserPageUrl, parseCapturedSessionBundle, readSessionInSubprocess, sessionCaptureSeed, SessionRestoreError, telegramHomeClient } from "./session.ts";
 import { resolvePlaywrightRuntime, runPlaywrightWorker } from "./playwright-runtime.ts";
-import { callFirefoxOwner, closeFirefoxOwner, firefoxEndpoint, forgetFirefoxOwner, reserveFirefoxOwner, startFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
+import { callFirefoxOwner, closeFirefoxOwner, firefoxEndpoint, FirefoxOwnerError, forgetFirefoxOwner, reserveFirefoxOwner, startFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { matchFirefoxProcesses } from "./firefox-lifecycle.ts";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -271,17 +271,31 @@ const PREFLIGHT_GUIDANCE = {
   chromium_sandbox: "This Linux computer blocks the Chrome sandbox. Run the AliasMode install command again. It asks for your password once to allow Chrome.",
   chromium155_download: "AliasMode Chromium could not be downloaded. Check your internet connection, then open the profile again.",
   stored_identity: "The saved browser launch does not match this profile's current identity. Close the existing browser, then reopen the profile.",
+  profile_missing: "This profile is not on this computer. Refresh the profile list, then open it again.",
+  profile_changed: "This profile's settings changed while it was opening. Open it again.",
+  browser_unresponsive: "This profile's browser is still running but does not answer. Close the profile in AliasMode, then open it again.",
+  firefox_unresponsive: "The Firefox browser stopped answering while the profile was opening. Open the profile again.",
+  unexpected: "AliasMode could not open this profile because of an unexpected error. The app log names it in the line \"rejected before launch\".",
   cookie_key_unreadable: "AliasMode did not open this profile. This Windows account cannot read its saved cookies " +
     "(they were saved on another computer or Windows account, or before a Windows password reset), and opening it would delete them. " +
     "A copy is in the cookie-backups folder inside the profile's folder. Open the profile on the computer and Windows account that saved it, " +
     "or delete the Local State file in the profile's folder to open it here and log in again.",
 } as const;
 
+type PreflightReason = keyof typeof PREFLIGHT_GUIDANCE;
+
+/** A refusal inside start() whose reason the user sees; start() turns it into a BrowserLaunchError. */
+class LaunchRefusal extends Error {
+  constructor(readonly reason: PreflightReason, message: string) {
+    super(message);
+  }
+}
+
 /** Closed, public-safe browser launch failure. Never attach a raw cause. */
 export class BrowserLaunchError extends Error {
   override readonly name = "BrowserLaunchError";
 
-  constructor(readonly failure: BrowserLaunchFailure, readonly preflightReason?: keyof typeof PREFLIGHT_GUIDANCE) {
+  constructor(readonly failure: BrowserLaunchFailure, readonly preflightReason?: PreflightReason) {
     super(`browser_launch/${failure} (failed)`);
   }
 
@@ -1675,9 +1689,9 @@ export class Launcher {
 
   private requireUnchangedProfile(profileId: string, snapshot: string, stage: string): Profile {
     const current = this.store.getProfile(profileId);
-    if (!current) throw new Error(`profile ${profileId} was deleted during ${stage}; launch aborted`);
+    if (!current) throw new LaunchRefusal("profile_missing", `profile ${profileId} was deleted during ${stage}; launch aborted`);
     if (JSON.stringify(current) !== snapshot) {
-      throw new Error(`profile ${profileId} changed during ${stage}; launch aborted—retry with the current identity`);
+      throw new LaunchRefusal("profile_changed", `profile ${profileId} changed during ${stage}; launch aborted—retry with the current identity`);
     }
     return current;
   }
@@ -1756,10 +1770,11 @@ export class Launcher {
     let failure: unknown;
     if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) {
       failure = error;
-    } else if (stopped) {
-      failure = new Error(`${detail}; unsafe existing browser was stopped during ${stage} and process/CDP death was confirmed`);
     } else {
-      failure = new Error(`${detail}; unsafe existing browser could not be confirmed stopped during ${stage}; launch ownership was retained`);
+      const message = stopped
+        ? `${detail}; unsafe existing browser was stopped during ${stage} and process/CDP death was confirmed`
+        : `${detail}; unsafe existing browser could not be confirmed stopped during ${stage}; launch ownership was retained`;
+      failure = error instanceof LaunchRefusal ? new LaunchRefusal(error.reason, message) : new Error(message);
     }
     if (!stopped && existing) this.rememberFailedStartGeneration(failure, existing);
     throw failure;
@@ -1814,7 +1829,10 @@ export class Launcher {
           throw error;
         }
         this.log(`start ${profileId} rejected before launch: ${error instanceof Error ? error.message : String(error)}`);
-        const normalized = new BrowserLaunchError("preflight");
+        // The message stays in the log; the user sees which kind of refusal it was.
+        const normalized = new BrowserLaunchError("preflight", error instanceof LaunchRefusal
+          ? error.reason
+          : error instanceof FirefoxOwnerError ? "firefox_unresponsive" : "unexpected");
         const retained = this.failedStartGeneration(error);
         if (retained) this.rememberFailedStartGeneration(normalized, retained);
         throw normalized;
@@ -1845,7 +1863,7 @@ export class Launcher {
     assertSafeProfileId(profileId);
     validateForwardedLaunchArgs(chromeArgs);
     let profile = this.store.getProfile(profileId);
-    if (!profile) throw new Error(`Unknown profile: ${profileId}`);
+    if (!profile) throw new LaunchRefusal("profile_missing", `Unknown profile: ${profileId}`);
     if (profile.proxyError) {
       throw new BrowserLaunchError("preflight", "proxy_invalid");
     }
@@ -1897,7 +1915,7 @@ export class Launcher {
         this.log(`profile ${profileId} changed while open; restarting it with the change`);
         if (!await this.doStop(profileId, existing)) {
           throw this.rememberFailedStartGeneration(
-            new Error(`profile ${profileId} could not be safely restarted with its changed settings`),
+            new LaunchRefusal("browser_unresponsive", `profile ${profileId} could not be safely restarted with its changed settings`),
             existing,
           );
         }
@@ -1915,14 +1933,14 @@ export class Launcher {
           if (!await this.confirmPersistedLaunchStopped(profileId, existing)) {
             this.liveReserved.add(existing.debugPort);
             throw this.rememberFailedStartGeneration(
-              new Error(`profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`),
+              new LaunchRefusal("browser_unresponsive", `profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`),
               existing,
             );
           }
           this.log(`profile ${profileId} CDP port is occupied but no owned browser process matches; launching fresh`);
           if (!this.forgetLaunch(profileId, existing)) {
             throw this.rememberFailedStartGeneration(
-              new Error(`profile ${profileId} launch changed while stale ownership was being cleared; retry`),
+              new LaunchRefusal("browser_unresponsive", `profile ${profileId} launch changed while stale ownership was being cleared; retry`),
               existing,
             );
           }
@@ -1931,7 +1949,7 @@ export class Launcher {
           this.liveReserved.add(existing.debugPort);
           const message = `profile ${profileId} CDP responds on port ${existing.debugPort} but browser ownership is inconclusive; stop and retry`;
           this.log(`${message} (kept the tracked launch)`);
-          throw this.rememberFailedStartGeneration(new Error(message), existing);
+          throw this.rememberFailedStartGeneration(new LaunchRefusal("browser_unresponsive", message), existing);
         }
         if (!existing) {
           // Exact scan proved the recorded launch is gone; continue to a fresh
@@ -1945,7 +1963,7 @@ export class Launcher {
           this.log(`profile ${profileId} predates safe search setup; restarting it once before reattach`);
           if (!await this.doStop(profileId, existing)) {
             throw this.rememberFailedStartGeneration(
-              new Error(`profile ${profileId} could not be safely restarted for search setup`),
+              new LaunchRefusal("browser_unresponsive", `profile ${profileId} could not be safely restarted for search setup`),
               existing,
             );
           }
@@ -1989,9 +2007,12 @@ export class Launcher {
             }
           }
           let nativeSessionRestored = false;
-          if (profile.engine === "firefox" && !await this.hasPageTargets(profileId)) {
+          // Tracked pages, not hasPages: a browser whose only tabs crashed still gets its tabs back on Open.
+          if (profile.engine === "firefox" && !await this.firefoxStatus(existing).then((status) => status.pageTargets.length > 0, () => true)) {
             const tabs = opts.restoreLastSession === false ? [] : this.closedFirefoxTabs(profileId, existing) ?? [];
-            await this.navigate(currentWs, startupUrls.length ? startupUrls : tabs, true);
+            await this.navigate(currentWs, startupUrls.length ? startupUrls : tabs, true).catch((error) => {
+              this.log(`${profileId}: not every page loaded (continuing): ${error instanceof Error ? error.message : error}`);
+            });
             nativeSessionRestored = !startupUrls.length && tabs.length > 0;
           }
           this.log(
@@ -2018,7 +2039,7 @@ export class Launcher {
             : "browser process ownership scan is inconclusive";
         const message = `profile ${profileId} ${processDetail} but CDP is not responding on port ${existing.debugPort}; stop and retry`;
         this.log(`${message} (kept the tracked launch)`);
-        throw this.rememberFailedStartGeneration(new Error(message), existing);
+        throw this.rememberFailedStartGeneration(new LaunchRefusal("browser_unresponsive", message), existing);
       }
       // CDP is unreachable and an exact executable/port/user-data-dir process
       // scan found no owner. Only this authoritative "none" permits reuse.
@@ -2026,14 +2047,14 @@ export class Launcher {
         if (!await this.confirmPersistedLaunchStopped(profileId, existing)) {
           this.liveReserved.add(existing.debugPort);
           throw this.rememberFailedStartGeneration(
-            new Error(`profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`),
+            new LaunchRefusal("browser_unresponsive", `profile ${profileId} exact Linux tree disappearance is unproven; stop and retry`),
             existing,
           );
         }
         this.log(`profile ${profileId} has no owned browser process; launching fresh`);
         if (!this.forgetLaunch(profileId, existing)) {
           throw this.rememberFailedStartGeneration(
-            new Error(`profile ${profileId} launch changed while stale ownership was being cleared; retry`),
+            new LaunchRefusal("browser_unresponsive", `profile ${profileId} launch changed while stale ownership was being cleared; retry`),
             existing,
           );
         }
@@ -2045,7 +2066,7 @@ export class Launcher {
       // Clearing a stopped legacy launch completes its saved locale and fonts.
       const current = this.store.getProfile(profileId);
       if (!isDeepStrictEqual(current, completeProfileFingerprint(profile))) {
-        throw new Error(`profile ${profileId} changed during closed-profile migration; launch aborted`);
+        throw new LaunchRefusal("profile_changed", `profile ${profileId} changed during closed-profile migration; launch aborted`);
       }
       profile = current!;
       profileSnapshot = JSON.stringify(profile);
@@ -2694,6 +2715,10 @@ export class Launcher {
           launch.ws = firefoxEndpoint(ready);
           this.store.recordLaunch(launch);
         },
+      }).catch((error) => {
+        // Firefox itself did not start or answer: say so, not "preflight".
+        this.log(`start ${profileId}: Firefox did not start (${error instanceof Error ? error.message : error})`);
+        throw new BrowserLaunchError(error instanceof FirefoxOwnerError && error.code === "timeout" ? "cdp_readiness" : "process_spawn");
       });
       launch.firefoxOwner = running;
       launch.pid = running.browserPid;
@@ -2729,7 +2754,10 @@ export class Launcher {
       }
       if (!pendingSession) await this.applyPendingCookies(profileId, launch.ws);
       if (!nativeSessionRestored && closedTabs !== undefined) {
-        await this.navigate(launch.ws, closedTabs, true);
+        // A saved tab that loads slowly, fails, or is already in use must not close the browser the user sees.
+        await this.navigate(launch.ws, closedTabs, true).catch((error) => {
+          this.log(`${profileId}: not every saved tab loaded (continuing): ${error instanceof Error ? error.message : error}`);
+        });
         nativeSessionRestored = closedTabs.length > 0;
       }
       if (pendingSession) {

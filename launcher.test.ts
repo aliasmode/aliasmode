@@ -1131,7 +1131,7 @@ test("legacy search bootstrap never spawns while safe teardown is unconfirmed", 
   });
 
   await expect(launcher.start("k1d0cd11")).rejects.toEqual(
-    new BrowserLaunchError("preflight"),
+    new BrowserLaunchError("preflight", "browser_unresponsive"),
   );
   expect(spawned).toBe(0);
   expect(prepared).toBe(0);
@@ -2019,7 +2019,7 @@ test("start reports a live-but-CDP-unresponsive browser as retryable failure wit
   f.aliveByPort.set(first.port, false);
   const retained = store.getLaunch("k1d0cd11")!;
   const failure = await launcher.start("k1d0cd11").catch((error) => error);
-  expect(failure).toEqual(new BrowserLaunchError("preflight"));
+  expect(failure).toEqual(new BrowserLaunchError("preflight", "browser_unresponsive"));
   expect(launcher.failedStartGeneration(failure)).toEqual({
     debugPort: retained.debugPort,
     startedAt: retained.startedAt,
@@ -3490,7 +3490,7 @@ test("failed start retains launch ownership when its exact process scan is incon
     new BrowserLaunchError("cdp_readiness"),
   );
   expect(store.getLaunch("k1d0cd11")).not.toBeNull();
-  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight"));
+  await expect(launcher.start("k1d0cd11")).rejects.toEqual(new BrowserLaunchError("preflight", "browser_unresponsive"));
   expect(spawns).toBe(1);
   store.close();
 });
