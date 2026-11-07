@@ -10,7 +10,7 @@ use tauri::{AppHandle, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[derive(Default)]
-struct CloseState {
+pub(crate) struct CloseState {
     in_progress: AtomicBool,
 }
 
@@ -140,6 +140,8 @@ fn ask_to_close(
     state: Arc<CloseState>,
     active: Result<usize, String>,
 ) {
+    let _ = window.show();
+    let _ = window.set_focus();
     let message = match active {
         Ok(count) => format!(
             "{count} browser session{} active. AliasMode will save session state and close the browser{} before exiting.",
@@ -162,32 +164,50 @@ fn ask_to_close(
         });
 }
 
+pub(crate) fn request_quit(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: SidecarSupervisor,
+    origin: String,
+    state: Arc<CloseState>,
+) {
+    if state.in_progress.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let active = active_browser_count(&origin).await;
+        if matches!(active, Ok(0)) {
+            finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
+        } else {
+            ask_to_close(app, window, sidecar, state, active);
+        }
+    });
+}
+
 pub fn install_close_handler(
     app: AppHandle,
     window: WebviewWindow,
     sidecar: SidecarSupervisor,
     origin: String,
+    state: Arc<CloseState>,
+    tray_enabled: bool,
 ) {
-    let state = Arc::new(CloseState::default());
     window.clone().on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
-            if state.in_progress.swap(true, Ordering::AcqRel) {
+            if state.in_progress.load(Ordering::Acquire) {
                 return;
             }
-            let app = app.clone();
-            let window = window.clone();
-            let sidecar = sidecar.clone();
-            let state = state.clone();
-            let origin = origin.clone();
-            tauri::async_runtime::spawn(async move {
-                let active = active_browser_count(&origin).await;
-                if matches!(active, Ok(0)) {
-                    finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
-                } else {
-                    ask_to_close(app, window, sidecar, state, active);
-                }
-            });
+            if tray_enabled && window.hide().is_ok() {
+                return;
+            }
+            request_quit(
+                app.clone(),
+                window.clone(),
+                sidecar.clone(),
+                origin.clone(),
+                state.clone(),
+            );
         }
     });
 }

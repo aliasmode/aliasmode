@@ -26,6 +26,49 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::ShellExt;
 
+#[cfg(target_os = "linux")]
+fn install_tray(
+    app: &tauri::App,
+    window: &tauri::WebviewWindow,
+    sidecar: sidecar::SidecarSupervisor,
+    origin: String,
+    close_state: Arc<shutdown::CloseState>,
+) -> Result<(), Box<dyn Error>> {
+    use tauri::{
+        menu::{Menu, MenuItem},
+        tray::TrayIconBuilder,
+    };
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| boxed("AliasMode tray icon is unavailable"))?;
+    let open = MenuItem::with_id(app, "tray-open", "Open AliasMode", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit AliasMode", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let window = window.clone();
+    TrayIconBuilder::new()
+        .icon(icon)
+        .menu(&menu)
+        .on_menu_event(move |app, event| {
+            if event.id() == "tray-open" {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            } else if event.id() == "tray-quit" {
+                shutdown::request_quit(
+                    app.clone(),
+                    window.clone(),
+                    sidecar.clone(),
+                    origin.clone(),
+                    close_state.clone(),
+                );
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 const IMPORT_RESTRICTION: &str = "Windows DPAPI protects persisted browser secrets, so this import works only for the same Windows machine and account. Persisted persona fields are preserved, but runtime or browser differences can change the account-visible fingerprint.";
 
 const ALLOWED_EXTERNAL_URLS: [&str; 9] = [
@@ -705,7 +748,31 @@ pub fn run() {
                 Err(error) => return Err(error.into()),
             };
 
-            shutdown::install_close_handler(app.handle().clone(), window.clone(), sidecar, origin);
+            let close_state = Arc::new(shutdown::CloseState::default());
+            #[cfg(target_os = "linux")]
+            let tray_enabled = match install_tray(
+                app,
+                &window,
+                sidecar.clone(),
+                origin.clone(),
+                close_state.clone(),
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("AliasMode tray is unavailable: {error}");
+                    false
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let tray_enabled = false;
+            shutdown::install_close_handler(
+                app.handle().clone(),
+                window.clone(),
+                sidecar,
+                origin,
+                close_state,
+                tray_enabled,
+            );
             if app.state::<RevealRequested>().0.load(Ordering::Acquire) {
                 let _ = window.show();
                 let _ = window.set_focus();
