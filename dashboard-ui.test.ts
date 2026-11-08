@@ -718,7 +718,7 @@ test("the dashboard typeface is bundled, never fetched at runtime", () => {
 });
 
 test("New profile and Edit are instant dialogs; Scripts, Settings and Extensions are pages", () => {
-  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash">("profiles")');
+  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services">("profiles")');
   expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
   expect(app).toContain('aria-labelledby="create-profile-title"');
   expect(app).toContain('aria-labelledby="edit-profile-title"');
@@ -1058,4 +1058,21 @@ test("Firefox shows its screen, editable at creation and when editing", () => {
   expect(app).not.toContain("screenReadOnly");
   expect(app).toContain("screen: form.screen,");
   expect(app).toContain('t("Leave a field blank to keep it automatic. A timezone you type stays when the proxy changes.")');
+});
+
+test("Services page sits in the sidebar, can be hidden, and links only through aliasmode.com/go/", () => {
+  const services = readFileSync(join(import.meta.dir, "web", "services.tsx"), "utf8");
+  const shell = readFileSync(join(import.meta.dir, "src-tauri", "src", "lib.rs"), "utf8");
+  expect(app).toContain('{!appMode?.servicesHidden && <button type="button" className={`navitem${view === "services" ? " active" : ""}`}');
+  expect(app).toContain('<ServicesPage active={view === "services"} />');
+  expect(app).toContain('checked={!appMode.servicesHidden} onChange={(event) => void showServices(event.target.checked)}');
+  // The page loads its list only when it is open.
+  expect(services).toContain("if (!active) return;\n    let current = true;\n    fetchServices()");
+  // Visit buttons open the counted redirect; the desktop shell allows exactly that address form.
+  expect(services).toContain("export const serviceVisitUrl = (slug: string) => `https://aliasmode.com/go/${slug}`;");
+  expect(services).toContain('href={serviceVisitUrl(service.slug)} target="_blank" rel="noreferrer"');
+  expect(shell).toContain('url.strip_prefix("https://aliasmode.com/go/")');
+  expect(services).toContain('t("Our pick")');
+  expect(services).toContain('t("Sponsored")');
+  expect(services).toContain('className="tools-footnote"');
 });

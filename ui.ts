@@ -63,6 +63,7 @@ import { validAgentAuthorization } from "./agent-control.ts";
 import { ScriptError, prefetchPythonFor, type ScriptLibrary, type ScriptSupervisor } from "./scripts.ts";
 import type { PythonRuntime } from "./python-runtime.ts";
 import { runtimeDownloads } from "./runtime-download.ts";
+import { loadServices } from "./services-directory.ts";
 
 /** Readiness metadata supplied by the desktop parent process. */
 export interface UiHealthMetadata {
@@ -614,6 +615,7 @@ export interface UiRuntimeOptions {
   timezoneFetch?: FetchLike;
   proxyCheck?: (proxy: ProxySpec) => Promise<ProxyCheckResult>;
   extensionFetch?: ExtensionFetch;
+  servicesFetch?: typeof fetch;
   /** Sets cookies in an open browser. Defaults to Playwright's addCookies. */
   setCookies?: (ws: string, cookies: CookieRecord[]) => Promise<void>;
   /** Mode whose runtimes were wired when this process started. */
@@ -785,6 +787,21 @@ export async function handleUiRequest(
       return noStoreJson({ ok: false, error: "Could not save language preference" }, 500);
     }
     return noStoreJson({ ok: true, language });
+  }
+
+  // The Services page asks for its list only when it opens.
+  if (pathname === "/ui/api/services" && req.method === "GET") {
+    return noStoreJson(await loadServices(options.servicesFetch));
+  }
+
+  if (pathname === "/ui/api/services/visibility" && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    if (!options.appConfig) return noStoreJson({ ok: false, error: "app configuration is unavailable" }, 503);
+    const body = (await req.json().catch(() => ({}))) as { hidden?: unknown };
+    if (typeof body.hidden !== "boolean") return noStoreJson({ ok: false, error: "hidden must be true or false" }, 400);
+    const config = options.appConfig.write({ ...options.appConfig.read(), servicesHidden: body.hidden });
+    return noStoreJson({ ok: true, hidden: config.servicesHidden === true });
   }
 
   if (pathname === "/ui/api/cloud-events" && req.method === "GET") {

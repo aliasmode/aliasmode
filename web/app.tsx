@@ -3,7 +3,9 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./proxies.css";
+import "./services.css";
 import { ProxiesPage } from "./proxies.tsx";
+import { ServicesPage } from "./services.tsx";
 import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
 import { StorePage, useCloudStore } from "./store.tsx";
 import { trackStoreEvent, useStoreEvents } from "./store-events.ts";
@@ -55,6 +57,7 @@ import {
   resendCloudSignUp,
   verifyCloudSignUp,
   selectAppMode,
+  saveServicesHidden,
   fetchProfiles,
   serialLoader,
   fetchHealth,
@@ -153,13 +156,14 @@ const REFRESH_MS = 3000;
 const PROFILE_PAGE_SIZE = 50;
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash", string> = {
+const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services", string> = {
   profiles: "Profiles",
   scripts: "Scripts",
   settings: "Settings",
   extensions: "Extensions",
   proxies: "Proxies",
   trash: "Trash",
+  services: "Services",
 };
 
 const SETTINGS_TABS = [
@@ -374,6 +378,7 @@ const ICONS = {
   filter: <path d="M4 5h16l-6 7v6l-4 2v-8z" />,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
   moon: <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />,
+  services: <><rect x="4" y="4" width="7" height="7" rx="1.5" /><rect x="13" y="4" width="7" height="7" rx="1.5" /><rect x="4" y="13" width="7" height="7" rx="1.5" /><rect x="13" y="13" width="7" height="7" rx="1.5" /></>,
   help: <><circle cx="12" cy="12" r="9" /><path d="M9.4 9.1a2.7 2.7 0 015.3.7c0 1.8-2.7 2.2-2.7 3.7" /><path d="M12 16.8v.3" /></>,
 } as const;
 
@@ -1248,7 +1253,7 @@ function App() {
   // "profiles" is the roster; "settings" replaces it in the same content area
   // rather than opening a dialog — Settings outgrew a modal. New profile and
   // Edit stay dialogs: short forms, and a page felt like too much ceremony.
-  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash">("profiles");
+  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services">("profiles");
   const [scriptRunOpen, setScriptRunOpen] = useState(false);
   const [scriptRunProfiles, setScriptRunProfiles] = useState<UiProfile[]>([]);
   const [showCreate, setShowCreate] = useState(false);
@@ -2367,6 +2372,17 @@ function App() {
     setTheme(choice);
     writeSetting(THEME_KEY, choice);
     try { document.cookie = themeCookie(choice); } catch {}
+  };
+  const [servicesSettingErr, setServicesSettingErr] = useState("");
+  const showServices = async (shown: boolean) => {
+    setServicesSettingErr("");
+    setAppMode((current) => current ? { ...current, servicesHidden: !shown } : current);
+    try {
+      await saveServicesHidden(!shown);
+    } catch (error) {
+      setAppMode((current) => current ? { ...current, servicesHidden: shown } : current);
+      setServicesSettingErr(error instanceof Error ? error.message : String(error));
+    }
   };
   const toggleSidebar = () =>
     setSidebarCollapsed((collapsed) => {
@@ -3553,6 +3569,9 @@ function App() {
             <Icon name="puzzle" /><span className="navlabel">{t("Manage extensions")}</span>
             {extensions.length > 0 && <span className="cnt">{extensions.length}</span>}
           </button>
+          {!appMode?.servicesHidden && <button type="button" className={`navitem${view === "services" ? " active" : ""}`} data-tip={t("Services")} title={t("Services")} onClick={() => setView("services")}>
+            <Icon name="services" /><span className="navlabel">{t("Services")}</span>
+          </button>}
         </nav>
 
         <div className="sidesection">
@@ -3834,6 +3853,7 @@ function App() {
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
+      <ServicesPage active={view === "services"} />
       {view === "profiles" ? (
       <div className="workspace">
         {(breadcrumb || sharedOnly) && <nav className="folder-breadcrumb" aria-label={t("Folder path")}>
@@ -4501,6 +4521,11 @@ function App() {
                   </button>
                 ))}
               </div>
+              {appMode && <label className="extchk">
+                <input type="checkbox" checked={!appMode.servicesHidden} onChange={(event) => void showServices(event.target.checked)} />
+                <span>{t("Show Services in the sidebar")}</span>
+              </label>}
+              {servicesSettingErr && <p className="modal-err" role="alert">{t(servicesSettingErr)}</p>}
             </div>
           </section>
           <section className="settings-card">

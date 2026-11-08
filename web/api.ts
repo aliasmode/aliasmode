@@ -10,6 +10,7 @@ import type {
 } from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
 import type { PythonRuntimeStatus } from "../python-runtime.ts";
+import type { ServicesResult } from "../services-directory.ts";
 import type { RuntimeDownload } from "../runtime-download.ts";
 import type { FolderInfo } from "../folders.ts";
 import {
@@ -114,6 +115,8 @@ export interface AppModeConfig {
   mode: "unconfigured" | "local" | "cloud";
   cloudUrl?: string;
   localAnalytics: boolean;
+  /** The user hid the Services page from the sidebar. */
+  servicesHidden?: boolean;
   restartRequired?: boolean;
   legacyRemote?: boolean;
   /** Set when this host runs every Chromium profile on one runtime, so there is no version to choose. */
@@ -153,6 +156,25 @@ export async function saveShellLanguage(language: string): Promise<void> {
   });
   const body = await apiJson(response, path);
   if (!response.ok || body.ok !== true) throw new Error(body.error || "Could not save language preference");
+}
+
+export async function fetchServices(): Promise<ServicesResult> {
+  const path = "/ui/api/services";
+  const response = await fetch(path, { cache: "no-store" });
+  const body = await apiJson(response, path);
+  if (!Array.isArray(body.services)) throw new Error(body.error || "The services list could not be loaded");
+  return body as ServicesResult;
+}
+
+export async function saveServicesHidden(hidden: boolean): Promise<void> {
+  const path = "/ui/api/services/visibility";
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ hidden }),
+  });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Could not save the Services setting");
 }
 
 export async function selectAppMode(mode: "local" | "cloud"): Promise<any> {

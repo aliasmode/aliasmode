@@ -59,6 +59,20 @@ fn allowed_external_url(url: &str) -> bool {
         || proxy_offer_url(url)
         || stripe_checkout_url(url)
         || nobleproxy_handoff_url(url)
+        || services_go_url(url)
+}
+
+/// A Visit button on the Services page opens aliasmode.com/go/<slug>, which counts the click and redirects.
+/// Only lowercase letters, digits and hyphens in the slug, with no query and no fragment.
+fn services_go_url(url: &str) -> bool {
+    let Some(slug) = url.strip_prefix("https://aliasmode.com/go/") else {
+        return false;
+    };
+    (1..=64).contains(&slug.len())
+        && !slug.starts_with('-')
+        && slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// "Manage on NobleProxy" opens the short-lived sign-in link that AliasMode Cloud got from NobleProxy.
@@ -330,6 +344,8 @@ mod tests {
             "https://checkout.stripe.com/g/pay/cs_live_a1jR9tbRvftQTDnmkkEdu4o1ARCgIj9J3DTTo8l00zJaV7fDtKOBAig94s#fidkIqPtHjp%2FJquzcfcZx1PosH%2Bk1gj53e5bB%2FYEU9Qeax5zomqD%2BbPa6YlsAE%2BmL8aLtkhyX%3DK4spAcpw7fMm%2Bbs9vYnQYSD%2FwifHdJs%2BCcwEWQ5Ke%2Bl41LGRZa0Bt1%3DgVgfpLfu%2FzO89tc6XiCHUD%3DS5R5GSWN12T3%2B3Aqr9O%2FIhWPKNwrb%3DiJ2AdzHwM%2FZMNWNVJgF%3Da3J29nmKI%2BWnnH9Xl4iUX5%2BS5tRschFC3YGY%2F6XLgHVx7O5pQeG%2FCB%3D%3D",
             "https://nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
             "https://nobleproxy.com/continue/aliasmode?h=hJ8kQ2mN5pR7sT9vW1xY3zA6bC8dE0fG",
+            "https://aliasmode.com/go/nobleproxy",
+            "https://aliasmode.com/go/sms-activate-2",
         ] {
             assert!(allowed_external_url(url));
         }
@@ -374,6 +390,18 @@ mod tests {
             "https://nobleproxy.com.example.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
             "https://nobleproxy.com@example.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
             "https://app.nobleproxy.com/continue/aliasmode?h=Ab3_x-Yz09Ab3_x-Yz09",
+            "https://aliasmode.com/go/",
+            "https://aliasmode.com/go/-nobleproxy",
+            "https://aliasmode.com/go/NobleProxy",
+            "https://aliasmode.com/go/nobleproxy/",
+            "https://aliasmode.com/go/nobleproxy?next=https://example.com",
+            "https://aliasmode.com/go/nobleproxy#fragment",
+            "https://aliasmode.com/go/a%2Fb",
+            "https://aliasmode.com/go/../terms/",
+            "http://aliasmode.com/go/nobleproxy",
+            "https://cloud.aliasmode.com/go/nobleproxy",
+            "https://aliasmode.com.example.com/go/nobleproxy",
+            "https://aliasmode.com@example.com/go/nobleproxy",
         ] {
             assert!(!allowed_external_url(url));
         }
