@@ -2,10 +2,22 @@ import { createContext, useContext } from "react";
 import { useTranslation } from "./i18n.tsx";
 
 /**
+ * The `src` slug of every place that sells proxies. Local mode sends it on the
+ * NobleProxy link; Cloud mode records it with the in-app store events.
+ */
+export const PROXY_SRC = [
+  "sidebar-cart", "profile-dialog", "profile-dialog-check-failed", "import-no-proxy",
+  "proxies-no-proxy", "proxies-check", "proxies-check-failed",
+  // In-app store only.
+  "proxies-tab", "my-proxies-buy-more", "success-buy-more", "direct",
+] as const;
+export type ProxySrc = (typeof PROXY_SRC)[number];
+
+/**
  * Set when AliasMode Cloud has the in-app proxy store. Offers then open the
  * store instead of the outside NobleProxy page; without it they stay links.
  */
-export const ProxyStoreContext = createContext<((quantity: number) => void) | null>(null);
+export const ProxyStoreContext = createContext<((quantity: number, src: ProxySrc) => void) | null>(null);
 
 const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";
 
@@ -13,7 +25,7 @@ const PROXY_PROVIDER_URL = "https://nobleproxy.com/t/aliasmode";
  * Offer link for one placement. `src` tells NobleProxy which button was
  * clicked, `qty` preselects a quantity, and `lang` lets it pick a translated page.
  */
-export function proxyOfferUrl(placement: string, language: string, quantity = 0): string {
+export function proxyOfferUrl(placement: ProxySrc, language: string, quantity = 0): string {
   const url = new URL(PROXY_PROVIDER_URL);
   url.searchParams.set("src", placement);
   if (quantity > 0) url.searchParams.set("qty", String(quantity));
@@ -39,7 +51,7 @@ export function ProxyProviderOffer({
   replacement = false,
   missing = 0,
 }: {
-  placement: string;
+  placement: ProxySrc;
   replacement?: boolean;
   missing?: number;
 }) {
@@ -52,7 +64,7 @@ export function ProxyProviderOffer({
       : replacement ? t("Buy Replacement Proxy") : t("Buy Static Residential Proxy");
   if (openStore) {
     return (
-      <button type="button" className="proxy-referral" onClick={() => openStore(missing)}>
+      <button type="button" className="proxy-referral" onClick={() => openStore(missing, placement)}>
         <span className="proxy-referral-icon"><CartIcon /></span>
         <span className="proxy-referral-text">
           <strong>{title}</strong>

@@ -9,6 +9,8 @@ export interface AppConfig {
   mode: AppMode;
   cloudUrl?: string;
   localAnalytics: boolean;
+  /** Set when the user hid the Services page from the sidebar. */
+  servicesHidden?: boolean;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -43,6 +45,7 @@ export function parseAppConfig(value: unknown): AppConfig {
     mode: raw.mode,
     ...(cloudUrl ? { cloudUrl } : {}),
     localAnalytics: raw.localAnalytics === true,
+    ...(raw.servicesHidden === true ? { servicesHidden: true } : {}),
   };
 }
 

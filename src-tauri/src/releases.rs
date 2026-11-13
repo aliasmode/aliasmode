@@ -2,6 +2,7 @@ use crate::{
     shutdown,
     sidecar::SidecarSupervisor,
     update_attempt::{self, InstallerHandoff, LastUpdateResult, UpdateFailureReason},
+    update_download::{self, DownloadEvent, DownloadFailure, UPDATE_DOWNLOAD_POLICY},
 };
 use reqwest::{header::ACCEPT, redirect::Policy, Client};
 use semver::Version;
@@ -36,7 +37,15 @@ const UPDATE_TARGET: &str = "linux-x86_64";
 const MAX_RELEASE_HIGHLIGHTS: usize = 3;
 const UPDATE_BUSY: &str = "An update operation is already running.";
 const CHECK_FAILED: &str = "AliasMode could not check for updates. Try again.";
-const DOWNLOAD_FAILED: &str = "AliasMode could not download and verify the update. Try again.";
+const DOWNLOAD_INTERRUPTED: &str =
+    "The update download was interrupted. Your browsers are still open. Try again.";
+const DOWNLOAD_STALLED: &str = "The update download stopped because no data arrived for 1 minute. Your browsers are still open. Check your connection and try again.";
+const VERIFY_FAILED: &str =
+    "AliasMode could not verify the downloaded update. Your browsers are still open. Try again.";
+// The release list is about 400 KB without compression. These limits let a slow link finish it.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CHECK_RETRY_DELAY: Duration = Duration::from_secs(2);
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const INSTALLATION_UNSAFE: &str = "AliasMode cannot safely update this installation. Close AliasMode and run the full offline installer from the release page. Do not uninstall.";
 #[cfg(target_os = "macos")]
@@ -103,7 +112,13 @@ pub enum UpdateProgress {
     },
     Downloading {
         percent: Option<u8>,
+        #[serde(rename = "downloadedBytes")]
+        downloaded_bytes: u64,
+        #[serde(rename = "totalBytes")]
+        total_bytes: Option<u64>,
     },
+    /// The download failed and starts again where it stopped.
+    Reconnecting,
     Verifying,
     ClosingBrowsers,
     Installing,
@@ -132,6 +147,25 @@ fn release_highlights(body: Option<&str>) -> Vec<String> {
 fn download_percent(downloaded: u64, total: Option<u64>) -> Option<u8> {
     let total = total.filter(|total| *total > 0)?;
     Some((downloaded.saturating_mul(100) / total).min(100) as u8)
+}
+
+fn download_failure_message(failure: DownloadFailure) -> &'static str {
+    match failure {
+        DownloadFailure::Stalled => DOWNLOAD_STALLED,
+        DownloadFailure::Interrupted => DOWNLOAD_INTERRUPTED,
+    }
+}
+
+/// No total time limit: the download policy ends only a transfer that stops receiving bytes.
+/// Compression stays off so a resumed range matches the bytes already received.
+fn download_client() -> Result<Client, String> {
+    Client::builder()
+        .no_proxy()
+        .no_gzip()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(user_agent())
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 fn parse_canonical_tag(tag: &str) -> Option<Version> {
@@ -188,19 +222,38 @@ fn newest_release(current: &Version, releases: &[GithubRelease]) -> Option<Relea
         .max_by(|left, right| left.version.cmp(&right.version))
 }
 
-async fn fetch_releases() -> Result<Vec<GithubRelease>, String> {
+fn user_agent() -> String {
+    format!("AliasMode/{} release-updater", env!("CARGO_PKG_VERSION"))
+}
+
+/// Runs a short update request again once after a failure.
+async fn retry_once<T, Operation, Attempt>(mut operation: Operation) -> Result<T, String>
+where
+    Operation: FnMut() -> Attempt,
+    Attempt: std::future::Future<Output = Result<T, String>>,
+{
+    match operation().await {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            eprintln!("AliasMode update request failed, retrying once: {error}");
+            tokio::time::sleep(CHECK_RETRY_DELAY).await;
+            operation().await
+        }
+    }
+}
+
+async fn fetch_releases(url: &str, timeout: Duration) -> Result<Vec<GithubRelease>, String> {
+    // The gzip feature asks GitHub to compress the list to about a tenth of its size.
     let client = Client::builder()
         .no_proxy()
         .redirect(Policy::none())
-        .timeout(Duration::from_secs(5))
-        .user_agent(format!(
-            "AliasMode/{} release-updater",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(timeout)
+        .user_agent(user_agent())
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
-        .get(RELEASES_API)
+        .get(url)
         .header(ACCEPT, "application/vnd.github+json")
         .send()
         .await
@@ -284,7 +337,7 @@ async fn discover_update(
     handoff: Option<&InstallerHandoff>,
 ) -> Result<Option<DiscoveredUpdate>, String> {
     let current = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|error| error.to_string())?;
-    let releases = fetch_releases().await?;
+    let releases = retry_once(|| fetch_releases(RELEASES_API, CHECK_TIMEOUT)).await?;
     let Some(candidate) = newest_release(&current, &releases) else {
         return Ok(None);
     };
@@ -295,8 +348,8 @@ async fn discover_update(
         .no_proxy()
         .configure_client(|client| {
             client
-                .connect_timeout(Duration::from_secs(10))
-                .read_timeout(Duration::from_secs(30))
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(CHECK_TIMEOUT)
         })
         .version_comparator(|_, _| true);
     let builder = if let Some(handoff) = handoff {
@@ -318,10 +371,8 @@ async fn discover_update(
         .map_err(|error| error.to_string())?
         .build()
         .map_err(|error| error.to_string())?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|error| error.to_string())?
+    let update = retry_once(|| async { updater.check().await.map_err(|error| error.to_string()) })
+        .await?
         .ok_or_else(|| "selected GitHub release returned no update".to_owned())?;
     validate_manifest_result(
         &candidate,
@@ -398,9 +449,9 @@ fn record_update_failure(
     }
 }
 
-/// Keeps the cause of a failed install step. The app writes its error text only to its
+/// Keeps the cause of a failed update step. The app writes its error text only to its
 /// standard error, and that is lost when the app starts from the desktop.
-fn log_install_failure(data_dir: &std::path::Path, version: &str, error: &str) {
+fn log_update_failure(data_dir: &std::path::Path, version: &str, step: &str, error: &str) {
     use std::io::Write;
     let logs = data_dir.join("logs");
     let seconds = std::time::SystemTime::now()
@@ -413,7 +464,7 @@ fn log_install_failure(data_dir: &std::path::Path, version: &str, error: &str) {
             .open(logs.join("desktop-update.log"))?;
         writeln!(
             file,
-            "{seconds} update from {} to {version} failed at the install step: {error}",
+            "{seconds} update from {} to {version} failed at the {step} step: {error}",
             env!("CARGO_PKG_VERSION")
         )
     });
@@ -522,6 +573,7 @@ pub async fn update_now(
         Ok(None) => return Err("AliasMode is already up to date.".to_owned()),
         Err(error) => {
             eprintln!("AliasMode update recheck failed: {error}");
+            log_update_failure(&data_dir, "the newest release", "check", &error);
             return Err(CHECK_FAILED.to_owned());
         }
     };
@@ -534,6 +586,7 @@ pub async fn update_now(
     let sidecar = sidecar.inner().clone();
     let download_progress = on_progress.clone();
     let verifying_progress = on_progress.clone();
+    let download_data_dir = data_dir.clone();
     let cleanup_progress = on_progress.clone();
     let install_progress = on_progress.clone();
     let install_window = window.clone();
@@ -544,24 +597,51 @@ pub async fn update_now(
     let preparation_version = expected_version.clone();
     match run_verified_update(
         async {
-            let mut downloaded = 0_u64;
+            let log = |step: &str, error: &str| {
+                eprintln!("AliasMode update {step} failed: {error}");
+                log_update_failure(&download_data_dir, &expected_version, step, error);
+            };
+            let client = download_client().map_err(|error| {
+                log("download", &error);
+                DOWNLOAD_INTERRUPTED.to_owned()
+            })?;
             let mut last_reported = None;
-            update
-                .download(
-                    move |chunk_length, content_length| {
-                        downloaded = downloaded.saturating_add(chunk_length as u64);
-                        let percent = download_percent(downloaded, content_length);
-                        if last_reported != Some(percent) {
-                            let _ = download_progress.send(UpdateProgress::Downloading { percent });
-                            last_reported = Some(percent);
+            let bytes = update_download::download(
+                &client,
+                &update.download_url,
+                &UPDATE_DOWNLOAD_POLICY,
+                |event| match event {
+                    DownloadEvent::Progress { downloaded, total } => {
+                        // Report each percent and each megabyte, so a slow link still moves.
+                        let percent = download_percent(downloaded, total);
+                        let shown = (percent, downloaded / 1_000_000);
+                        if last_reported != Some(shown) {
+                            let _ = download_progress.send(UpdateProgress::Downloading {
+                                percent,
+                                downloaded_bytes: downloaded,
+                                total_bytes: total,
+                            });
+                            last_reported = Some(shown);
                         }
-                    },
-                    move || {
-                        let _ = verifying_progress.send(UpdateProgress::Verifying);
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())
+                    }
+                    DownloadEvent::Retrying => {
+                        let _ = download_progress.send(UpdateProgress::Reconnecting);
+                        last_reported = None;
+                    }
+                },
+            )
+            .await
+            .map_err(|error| {
+                log("download", &error.to_string());
+                download_failure_message(error.failure).to_owned()
+            })?;
+            let _ = verifying_progress.send(UpdateProgress::Verifying);
+            // The same key and check as before; only the transfer is the app's own.
+            update.verify(&bytes).map_err(|error| {
+                log("signature check", &error.to_string());
+                VERIFY_FAILED.to_owned()
+            })?;
+            Ok(bytes)
         },
         async move {
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -601,10 +681,8 @@ pub async fn update_now(
             restart_after_install_failure(app, "the installer returned unexpectedly");
             Err(INSTALL_FAILED.to_owned())
         }
-        Err(UpdatePreparationError::Download(error)) => {
-            eprintln!("AliasMode update download or signature verification failed: {error}");
-            Err(DOWNLOAD_FAILED.to_owned())
-        }
+        // The download step already logged its cause and chose the message.
+        Err(UpdatePreparationError::Download(message)) => Err(message),
         Err(UpdatePreparationError::Prepare(error)) => {
             eprintln!("AliasMode update install-root validation failed: {error}");
             Err(INSTALLATION_UNSAFE.to_owned())
@@ -617,7 +695,7 @@ pub async fn update_now(
         }
         Err(UpdatePreparationError::Install(error)) => {
             record_update_failure(&data_dir, &handoff.id, UpdateFailureReason::InstallerLaunch);
-            log_install_failure(&data_dir, &expected_version, &error);
+            log_update_failure(&data_dir, &expected_version, "install", &error);
             let _ = window.show();
             let _ = window.set_focus();
             restart_after_install_failure(app, error);
@@ -629,10 +707,12 @@ pub async fn update_now(
 #[cfg(test)]
 mod tests {
     use super::{
-        download_percent, is_release_asset_url, log_install_failure, newest_release,
-        release_highlights, run_verified_update, update_artifact_name, validate_manifest_result,
-        GithubAsset, GithubRelease, ReleaseCandidate, UpdateCoordinator, UpdatePreparationError,
-        UpdateProgress, UpdateStatus, UPDATE_MANIFEST, UPDATE_TARGET,
+        download_failure_message, download_percent, fetch_releases, is_release_asset_url,
+        log_update_failure, newest_release, release_highlights, retry_once, run_verified_update,
+        update_artifact_name, validate_manifest_result, DownloadFailure, GithubAsset,
+        GithubRelease, ReleaseCandidate, UpdateCoordinator, UpdatePreparationError, UpdateProgress,
+        UpdateStatus, CHECK_FAILED, CHECK_TIMEOUT, DOWNLOAD_INTERRUPTED, DOWNLOAD_STALLED,
+        UPDATE_MANIFEST, UPDATE_TARGET,
     };
     use semver::Version;
     use serde_json::json;
@@ -989,12 +1069,26 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::to_value(UpdateProgress::Downloading { percent: Some(42) }).unwrap(),
-            json!({ "phase": "downloading", "percent": 42 })
+            serde_json::to_value(UpdateProgress::Downloading {
+                percent: Some(42),
+                downloaded_bytes: 42,
+                total_bytes: Some(100),
+            })
+            .unwrap(),
+            json!({ "phase": "downloading", "percent": 42, "downloadedBytes": 42, "totalBytes": 100 })
         );
         assert_eq!(
-            serde_json::to_value(UpdateProgress::Downloading { percent: None }).unwrap(),
-            json!({ "phase": "downloading", "percent": null })
+            serde_json::to_value(UpdateProgress::Downloading {
+                percent: None,
+                downloaded_bytes: 7,
+                total_bytes: None,
+            })
+            .unwrap(),
+            json!({ "phase": "downloading", "percent": null, "downloadedBytes": 7, "totalBytes": null })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateProgress::Reconnecting).unwrap(),
+            json!({ "phase": "reconnecting" })
         );
         assert_eq!(
             serde_json::to_value(UpdateProgress::Verifying).unwrap(),
@@ -1013,12 +1107,18 @@ mod tests {
     #[test]
     fn keeps_the_cause_of_a_failed_install() {
         let directory = tempfile::tempdir().unwrap();
-        log_install_failure(
+        log_update_failure(
             directory.path(),
             "0.1.0-beta.99",
+            "install",
             "Operation not permitted (os error 1)",
         );
-        log_install_failure(directory.path(), "0.1.0-beta.99", "second failure");
+        log_update_failure(
+            directory.path(),
+            "0.1.0-beta.99",
+            "download",
+            "second failure",
+        );
         let text =
             std::fs::read_to_string(directory.path().join("logs/desktop-update.log")).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -1026,7 +1126,7 @@ mod tests {
         assert!(lines[0].ends_with(
             "to 0.1.0-beta.99 failed at the install step: Operation not permitted (os error 1)"
         ));
-        assert!(lines[1].ends_with("second failure"));
+        assert!(lines[1].ends_with("to 0.1.0-beta.99 failed at the download step: second failure"));
     }
 
     #[test]
@@ -1052,5 +1152,96 @@ mod tests {
                 "highlights": ["Faster updates"],
             }),
         );
+    }
+
+    #[test]
+    fn download_failures_name_the_download_step_not_the_check() {
+        assert_eq!(
+            download_failure_message(DownloadFailure::Stalled),
+            DOWNLOAD_STALLED
+        );
+        assert_eq!(
+            download_failure_message(DownloadFailure::Interrupted),
+            DOWNLOAD_INTERRUPTED
+        );
+        for message in [DOWNLOAD_STALLED, DOWNLOAD_INTERRUPTED] {
+            assert_ne!(message, CHECK_FAILED);
+            assert!(message.contains("download"));
+            assert!(message.contains("Your browsers are still open."));
+        }
+    }
+
+    #[test]
+    fn retries_a_failed_update_request_once() {
+        let attempts = std::cell::Cell::new(0);
+        let result = tauri::async_runtime::block_on(retry_once(|| {
+            attempts.set(attempts.get() + 1);
+            let attempt = attempts.get();
+            async move {
+                if attempt == 1 {
+                    Err("timed out".to_owned())
+                } else {
+                    Ok(attempt)
+                }
+            }
+        }));
+        assert_eq!(result, Ok(2));
+
+        attempts.set(0);
+        let result = tauri::async_runtime::block_on(retry_once(|| {
+            attempts.set(attempts.get() + 1);
+            async { Err::<(), _>("still down".to_owned()) }
+        }));
+        assert_eq!(result, Err("still down".to_owned()));
+        assert_eq!(attempts.get(), 2);
+    }
+
+    /// Serves a release list of `size` bytes at about `bytes_per_second`, like a slow link.
+    fn serve_slow_release_list(size: usize, bytes_per_second: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !request.ends_with(b"\r\n\r\n")
+                        && stream.read(&mut byte).unwrap_or(0) == 1
+                    {
+                        request.push(byte[0]);
+                    }
+                    let release = r#"{"tag_name":"v0.1.0-beta.99","draft":false,"prerelease":true,"body":"","assets":[]}"#;
+                    let padding = size.saturating_sub(release.len() + 2);
+                    let body = format!("[{release}{}]", " ".repeat(padding));
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let step = bytes_per_second / 10;
+                    for chunk in body.as_bytes().chunks(step) {
+                        if stream.write_all(chunk).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn the_old_five_second_check_fails_on_a_slow_link_and_the_new_limit_finishes() {
+        // About 400 KB at 64 KB/s (512 kbit/s) takes about 6.5 s.
+        let url = serve_slow_release_list(416_000, 64_000);
+        let old =
+            tauri::async_runtime::block_on(fetch_releases(&url, std::time::Duration::from_secs(5)));
+        assert!(old.is_err(), "the old limit unexpectedly finished");
+        let new = tauri::async_runtime::block_on(fetch_releases(&url, CHECK_TIMEOUT)).unwrap();
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].tag_name, "v0.1.0-beta.99");
     }
 }

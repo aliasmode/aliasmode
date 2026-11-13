@@ -12,6 +12,7 @@ import { supportsChromium155Host } from "./aliasmode-chromium.ts";
 import { trackRuntimeDownload } from "./runtime-download.ts";
 import { readXlsx, writeXlsx } from "./xlsx.ts";
 import { AppConfigStore } from "./app-config.ts";
+import { resetServicesCache } from "./services-directory.ts";
 import { CloudAuthRuntime } from "./cloud-auth.ts";
 import { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
@@ -2948,6 +2949,39 @@ test("app mode API exposes unconfigured first launch and persists Local selectio
     restartRequired: true,
   });
   expect(appConfig.read().mode).toBe("local");
+  s.close();
+});
+
+test("Services API serves the list and remembers when the user hides the page", async () => {
+  const s = store();
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-ui-config-"));
+  const appConfig = new AppConfigStore(join(root, "config.json"));
+  appConfig.setMode("local");
+  resetServicesCache();
+  const servicesFetch = (async () => Response.json({ services: [
+    { slug: "smspool", name: "SMSPool", category: "sms", description: "Numbers.", badge: "sponsored" },
+  ] })) as unknown as typeof fetch;
+  const call = (request: Request) => handleUiRequest(request, {} as any, s, null, { appConfig, servicesFetch });
+
+  const listed = await call(new Request("http://x/ui/api/services"));
+  expect(listed!.headers.get("cache-control")).toBe("no-store");
+  expect(await listed!.json()).toEqual({
+    source: "live",
+    services: [{ slug: "smspool", name: "SMSPool", category: "sms", description: "Numbers.", badge: "sponsored" }],
+  });
+  resetServicesCache();
+
+  const hide = (body: unknown, headers: Record<string, string> = { "content-type": "application/json" }) => call(
+    new Request("http://x/ui/api/services/visibility", { method: "POST", headers, body: JSON.stringify(body) }),
+  );
+  expect((await hide({ hidden: true }, { "content-type": "text/plain" }))!.status).toBe(415);
+  expect((await hide({ hidden: "yes" }))!.status).toBe(400);
+  expect(await (await hide({ hidden: true }))!.json()).toEqual({ ok: true, hidden: true });
+  expect(appConfig.read()).toEqual({ version: 1, mode: "local", localAnalytics: false, servicesHidden: true });
+  const mode = await (await call(new Request("http://x/ui/api/app-mode")))!.json();
+  expect(mode.servicesHidden).toBe(true);
+  expect(await (await hide({ hidden: false }))!.json()).toEqual({ ok: true, hidden: false });
+  expect(appConfig.read().servicesHidden).toBeUndefined();
   s.close();
 });
 

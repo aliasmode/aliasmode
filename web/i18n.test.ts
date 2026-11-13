@@ -13,7 +13,7 @@ const tables = {
 // source, or the translation is dead.
 test("every zh-CN key is an English string used in the web source", async () => {
   const sources = await Promise.all(
-    ["app.tsx", "proxies.tsx", "scripts.tsx", "trash.tsx", "proxy-offer.tsx", "store.tsx", "desktop-update-result.ts"]
+    ["app.tsx", "proxies.tsx", "scripts.tsx", "trash.tsx", "proxy-offer.tsx", "store.tsx", "services.tsx", "desktop-update-result.ts"]
       .map((file) => Bun.file(new URL(`./${file}`, import.meta.url)).text()),
   );
   const source = sources.join("\n");

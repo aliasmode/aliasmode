@@ -9,7 +9,8 @@ import {
   type FirefoxOwner,
 } from "./firefox-runtime.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
-import { camouEnvironment, firefoxLaunchOptions, observedFirefoxCaptureUrl } from "./firefox-worker.mjs";
+import { camouEnvironment, firefoxLaunchOptions, observedFirefoxCaptureUrl, trackFirefoxPages } from "./firefox-worker.mjs";
+import { EventEmitter } from "node:events";
 
 async function ownerServer(handler: RequestListener) {
   const server = createServer(handler);
@@ -28,6 +29,30 @@ async function ownerServer(handler: RequestListener) {
   };
   return { server, owner };
 }
+
+test("a crashed Firefox tab never reads as a closed last window", () => {
+  // As Playwright does: a crashed page emits "crash", then leaves the context's page list.
+  const context = Object.assign(new EventEmitter(), { list: [] as EventEmitter[], pages() { return this.list; } });
+  const first = new EventEmitter();
+  context.list.push(first);
+  const hasPages = trackFirefoxPages(context);
+  expect(hasPages()).toBe(true);
+  const second = new EventEmitter();
+  context.list.push(second);
+  context.emit("page", second);
+  // The user closes a tab: one page is left.
+  context.list = [first];
+  expect(hasPages()).toBe(true);
+  // The last tab's content process crashes: the tab still shows in its window.
+  first.emit("crash");
+  context.list = [];
+  expect(hasPages()).toBe(true);
+
+  const closed = Object.assign(new EventEmitter(), { list: [new EventEmitter()], pages() { return this.list; } });
+  const closedHasPages = trackFirefoxPages(closed);
+  closed.list = [];
+  expect(closedHasPages()).toBe(false);
+});
 
 test("Firefox owner passes native proxy preferences", () => {
   const proxy = { server: "http://proxy.example:8080" };

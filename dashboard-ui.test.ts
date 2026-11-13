@@ -62,7 +62,10 @@ test("dashboard shows curated desktop update notes and live progress", () => {
   expect(app).toContain("Verifying update…");
   expect(app).toContain("Saving and closing browsers…");
   expect(app).toContain("Installing and restarting…");
-  expect(app).toContain('{desktopUpdateErr && <span className="modal-err" role="alert">{desktopUpdateErr}</span>}');
+  expect(app).toContain('{desktopUpdateErr && <span className="modal-err" role="alert">{t(desktopUpdateErr)}</span>}');
+  expect(app).toContain('progress.phase === "reconnecting"');
+  expect(app).toContain("Connection lost. Reconnecting…");
+  expect(app).toContain('t("{downloaded} of {total} MB"');
   expect(app).toContain('disabled={modeBusy || desktopUpdateInstalling}');
   expect(app).toContain('className="update-banner"');
   expect(styles).toContain(".update-banner");
@@ -250,10 +253,10 @@ test("New and Edit profile dialogs check proxies and show only relevant provider
   }
   expect(styles).toContain(".proxy-referral {");
   expect(styles).toContain(".proxy-referral:focus-visible");
-  // Both Proxies tools (check and replace) show the offer, and the page names
-  // how many profiles have no proxy. That count is Local-mode only.
+  // Local mode shows one offer above both Proxies tools: it names how many
+  // profiles have no proxy, or offers proxies (replacements after failed checks).
   const proxiesPage = readFileSync(join(import.meta.dir, "web", "proxies.tsx"), "utf8");
-  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(3);
+  expect(proxiesPage.match(/<ProxyProviderOffer /g)).toHaveLength(2);
   expect(proxiesPage).toContain('<ProxyProviderOffer placement="proxies-no-proxy" missing={profilesWithoutProxy} />');
   expect(app).toContain("const profilesWithoutProxy = isCloudMode ? 0 : profiles.filter((p) => !p.proxy?.trim()).length;");
   expect(app).toContain('<ProxyProviderOffer placement="import-no-proxy" missing={profilesWithoutProxy} />');
@@ -715,7 +718,7 @@ test("the dashboard typeface is bundled, never fetched at runtime", () => {
 });
 
 test("New profile and Edit are instant dialogs; Scripts, Settings and Extensions are pages", () => {
-  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "store">("profiles")');
+  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services">("profiles")');
   expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
   expect(app).toContain('aria-labelledby="create-profile-title"');
   expect(app).toContain('aria-labelledby="edit-profile-title"');
@@ -1055,4 +1058,21 @@ test("Firefox shows its screen, editable at creation and when editing", () => {
   expect(app).not.toContain("screenReadOnly");
   expect(app).toContain("screen: form.screen,");
   expect(app).toContain('t("Leave a field blank to keep it automatic. A timezone you type stays when the proxy changes.")');
+});
+
+test("Services page sits in the sidebar, can be hidden, and links only through aliasmode.com/go/", () => {
+  const services = readFileSync(join(import.meta.dir, "web", "services.tsx"), "utf8");
+  const shell = readFileSync(join(import.meta.dir, "src-tauri", "src", "lib.rs"), "utf8");
+  expect(app).toContain('{!appMode?.servicesHidden && <button type="button" className={`navitem${view === "services" ? " active" : ""}`}');
+  expect(app).toContain('<ServicesPage active={view === "services"} />');
+  expect(app).toContain('checked={!appMode.servicesHidden} onChange={(event) => void showServices(event.target.checked)}');
+  // The page loads its list only when it is open.
+  expect(services).toContain("if (!active) return;\n    let current = true;\n    fetchServices()");
+  // Visit buttons open the counted redirect; the desktop shell allows exactly that address form.
+  expect(services).toContain("export const serviceVisitUrl = (slug: string) => `https://aliasmode.com/go/${slug}`;");
+  expect(services).toContain('href={serviceVisitUrl(service.slug)} target="_blank" rel="noreferrer"');
+  expect(shell).toContain('url.strip_prefix("https://aliasmode.com/go/")');
+  expect(services).toContain('t("Our pick")');
+  expect(services).toContain('t("Sponsored")');
+  expect(services).toContain('className="tools-footnote"');
 });

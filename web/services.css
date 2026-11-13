@@ -1,0 +1,25 @@
+/* Services page. Shares the page frame, intro and footnote rules of proxies.css. */
+.service-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.service-filters button { padding: 7px 14px; border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
+.service-filters button:hover { color: var(--ink); border-color: var(--line-strong); }
+.service-filters button.selected { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
+.service-filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.service-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.service-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+.service-head { display: flex; align-items: center; gap: 12px; }
+.service-logo { flex-shrink: 0; width: 40px; height: 40px; border: 1px solid var(--line-soft); border-radius: var(--r-md); background: var(--surface-sunken); object-fit: contain; padding: 4px; }
+.service-monogram { display: inline-flex; align-items: center; justify-content: center; color: var(--accent-ink); background: var(--accent-soft); font-size: 17px; font-weight: 700; }
+.service-title { flex: 1; min-width: 0; }
+.service-title h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.service-title span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.service-badge { flex-shrink: 0; padding: 3px 8px; border-radius: var(--r-pill); font-size: 10px; font-weight: 700; letter-spacing: .03em; }
+.service-badge.pick { color: var(--accent-ink); background: var(--accent-soft); border: 1px solid var(--accent-line); }
+.service-badge.sponsored { color: var(--muted); background: var(--surface-sunken); border: 1px solid var(--line); }
+.proxy-page .service-description { flex: 1; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.service-deal { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border: 1px dashed var(--success-line); border-radius: var(--r-md); background: var(--success-soft); color: var(--success-ink); font-size: 12px; line-height: 1.5; }
+.service-deal > span { flex: 1; min-width: 120px; }
+.service-code { display: inline-flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--success-line); border-radius: var(--r-sm); background: var(--surface); color: var(--ink); font-size: 11px; cursor: pointer; }
+.service-code code { font: 600 12px var(--mono); letter-spacing: .04em; }
+.service-code span { padding: 2px 6px; border-radius: var(--r-xs); background: var(--surface-sunken); color: var(--muted); }
+.service-code:hover span { color: var(--ink); }
+.service-visit { align-self: flex-start; text-decoration: none; }

@@ -604,8 +604,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
           const response = await this.options.cloud.getProfile(summary.id);
           const { profile } = decodePortableProfile(response.payload);
           if (profile.id !== summary.id) continue;
-          // A locally open profile's live state owns the cached row.
-          if (this.options.store.getLaunch(summary.id)) continue;
+          // A locally open profile's live state owns the cached row. An open in progress has not
+          // recorded its launch yet: a write now would abort that launch as "profile changed".
+          if (this.options.store.getLaunch(summary.id) || this.transitions.has(summary.id)) continue;
           this.options.store.upsertProfile(profile);
           this.options.store.setTimezone(profile.id, profile.timezone);
           this.options.store.setHardware(profile.id, profile.hardware);

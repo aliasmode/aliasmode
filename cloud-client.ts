@@ -65,6 +65,8 @@ import {
   type ListPurchasedProxiesResponse,
   type SetAutoRenewResponse,
   type NobleProxyHandoffResponse,
+  type StoreEventsRequest,
+  type StoreEventsResponse,
 } from "./contracts/cloud-v1.ts";
 
 export type CloudFetch = (url: string, init?: RequestInit) => Promise<Response>;
@@ -492,6 +494,11 @@ export class CloudClient {
   /** A short-lived link that signs the workspace owner in to NobleProxy. Older Clouds answer 404. */
   createNobleProxyHandoff(): Promise<NobleProxyHandoffResponse> {
     return this.call("/nobleproxy/handoff", { method: "POST" });
+  }
+
+  /** Store placement events for the conversion report. Older Clouds answer 404. */
+  postStoreEvents(request: StoreEventsRequest): Promise<StoreEventsResponse> {
+    return this.call("/store/events", { method: "POST", body: JSON.stringify(request) });
   }
 
   listProfileProxies(signal?: AbortSignal): Promise<ListProfileProxiesResponse> {

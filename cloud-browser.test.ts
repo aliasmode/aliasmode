@@ -1754,6 +1754,24 @@ test("Cloud roster backfills the proxy cache for profiles this device never open
   state.store.close();
 });
 
+test("the roster's proxy cache never rewrites a profile while it opens or closes", async () => {
+  const state = setup({ proxy: { type: "http", host: "203.0.113.9", port: "8080", user: "u", pass: "p" } });
+  let release!: () => void;
+  const transition = (state.coordinator as any).withProfileTransition("profile1", () => new Promise<void>((resolve) => { release = resolve; }));
+  try {
+    await state.coordinator.listRoster();
+    await (state.coordinator as any).proxyBackfillTask;
+    expect(state.getProfileCalls()).toBe(1);
+    // The open owns the row until it records its launch; the next poll fills the cache.
+    expect(state.store.getProfile("profile1")).toBeNull();
+  } finally {
+    release();
+    await transition;
+    state.queue.close();
+    state.store.close();
+  }
+});
+
 test("a live profile edit forces the next checkpoint to re-encode the payload", async () => {
   const state = setup();
   expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
