@@ -234,7 +234,7 @@ export function AgentPage({ active, cloudMode, owner, wallet, draft, onReloadWal
           ? <span>{t("Your own model: {model}", { model: settings?.model || "—" })}</span>
           : usage && <>
             <span>{t("Free this month: {left} of {total} left", { left: formatMicroUsd(usage.freeLeftMicro, language), total: formatMicroUsd(usage.freeAllowanceMicro, language) })}</span>
-            <span className="agent-sep">{t("Workspace balance: {amount}", { amount: formatUsd(usage.balanceCents, language) })}</span>
+            <span className="agent-sep">{t("Workspace balance: {amount}", { amount: formatUsd(Math.max(0, usage.balanceCents - Math.ceil(usage.pendingMicro / 10_000)), language) })}</span>
             {canTopUp && <button type="button" className="store-link" onClick={openWallet}>{t("Add funds")}</button>}
           </>}
         <span className="spacer" />
