@@ -6,6 +6,7 @@ import { AgentControlSession, AGENT_CONTROL_PROTOCOL, type AgentControlDeps } fr
 import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudClient } from "./cloud-client.ts";
+import { systemProxyFetch } from "./system-proxy.ts";
 import type { ScriptInput, ScriptLanguage, ScriptRecord, ScriptSummary, PublishedScript, PublishScriptInput, PublishedScriptsQuery, ListPublishedScriptsResponse } from "./contracts/cloud-v1.ts";
 import { resolvePlaywrightRuntime, type PlaywrightRuntimeLayout } from "./playwright-runtime.ts";
 import { PYTHON_RUNTIME_FAILED, type PythonRuntime } from "./python-runtime.ts";
@@ -32,7 +33,7 @@ export class ScriptLibrary {
   private readonly catalog?: CloudClient;
   constructor(root: string, readonly cloudMode: boolean, private readonly cloud?: CloudConnectionRuntime, catalogUrl?: string) {
     this.directory = join(root, "custom-scripts");
-    this.catalog = cloud?.client ?? (catalogUrl ? new CloudClient({ baseUrl: catalogUrl, accessToken: () => undefined }) : undefined);
+    this.catalog = cloud?.client ?? (catalogUrl ? new CloudClient({ baseUrl: catalogUrl, accessToken: () => undefined, fetchFn: systemProxyFetch }) : undefined);
   }
 
   scope(): string {
