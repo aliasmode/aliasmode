@@ -53,6 +53,8 @@ export interface AgentTool {
 }
 
 export interface AgentToolSession {
+  /** The tool host stopped (crashed or closed); a new one is needed. */
+  readonly exited?: boolean;
   listTools(): Promise<AgentTool[]>;
   callTool(name: string, args: Record<string, unknown>): Promise<string>;
   close(): void;
@@ -218,8 +220,11 @@ export class AgentRunner {
     const path = this.conversationPath(id);
     if (!existsSync(path)) throw new AgentError("Unknown conversation", 404);
     const conversation = JSON.parse(readFileSync(path, "utf8")) as AgentConversation;
-    // A run that was cut by an app exit is no longer running.
-    if (conversation.status === "running" && !this.active.has(id)) conversation.status = "idle";
+    if (!this.active.has(id)) {
+      // A run that was cut by an app exit is no longer running, and models refuse tool calls without results.
+      if (conversation.status === "running") conversation.status = "idle";
+      answerOpenToolCalls(conversation.messages);
+    }
     return conversation;
   }
 
@@ -335,7 +340,8 @@ export class AgentRunner {
 
   private helper(id: string): AgentToolSession {
     const existing = this.helpers.get(id);
-    if (existing) {
+    if (existing?.session.exited) this.closeHelper(id);
+    else if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.timer = undefined;
       return existing.session;
@@ -419,6 +425,15 @@ export class AgentRunner {
   }
 }
 
+function answerOpenToolCalls(messages: AgentMessage[]): void {
+  const index = messages.findLastIndex((message) => message.role === "assistant" && message.tool_calls?.length);
+  if (index < 0) return;
+  const answered = new Set(messages.slice(index + 1).map((message) => message.tool_call_id));
+  for (const call of messages[index]!.tool_calls!) {
+    if (!answered.has(call.id)) messages.push({ role: "tool", tool_call_id: call.id, content: "Stopped before this tool finished." });
+  }
+}
+
 function cleanPrompt(prompt: unknown): string {
   const text = typeof prompt === "string" ? prompt.trim() : "";
   if (!text) throw new AgentError("Write what the agent should do");
@@ -458,7 +473,7 @@ export class McpHelperSession implements AgentToolSession {
   private readonly child: HelperChild;
   private readonly pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   private nextId = 1;
-  private exited = false;
+  exited = false;
   private readonly ready: Promise<void>;
 
   constructor(spawnChild: () => HelperChild) {

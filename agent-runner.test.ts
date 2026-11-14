@@ -141,6 +141,29 @@ describe("AgentRunner", () => {
     await agent.stop(started.id);
   });
 
+  test("a crashed tool host is replaced, and a cut transcript is repaired on load", async () => {
+    let opened = 0;
+    const dead = { exited: true, listTools: async () => { throw new Error("The AliasMode tool host stopped"); }, callTool: async () => "", close: () => {} };
+    const { agent, root } = runner(async () => ({ message: { role: "assistant", content: "ok" } }), {
+      openTools: () => (opened++ === 0 ? dead : fakeTools().session),
+    });
+    const first = agent.start("one");
+    expect((await settled(agent, first.id)).status).toBe("error");
+    agent.resume(first.id);
+    expect((await settled(agent, first.id)).status).toBe("idle");
+    expect(opened).toBe(2);
+
+    // An app exit after the model asked for tools but before their results.
+    const path = join(root, "agent", "local", "conversations", `${first.id}.json`);
+    const saved = JSON.parse(await Bun.file(path).text());
+    saved.status = "running";
+    saved.messages.push(toolCall("x1", "aliasmode_profiles_list"));
+    await Bun.write(path, JSON.stringify(saved));
+    const loaded = agent.get(first.id);
+    expect(loaded.status).toBe("idle");
+    expect(loaded.messages.at(-1)).toEqual({ role: "tool", tool_call_id: "x1", content: "Stopped before this tool finished." });
+  });
+
   test("own model settings are validated and the key is kept private", async () => {
     const { agent, root } = runner(async () => ({ message: { role: "assistant", content: "ok" } }));
     expect(() => agent.saveSettings({ source: "own", baseUrl: "localhost:11434", model: "qwen" })).toThrow("model server URL");
