@@ -718,7 +718,7 @@ test("the dashboard typeface is bundled, never fetched at runtime", () => {
 });
 
 test("New profile and Edit are instant dialogs; Scripts, Settings and Extensions are pages", () => {
-  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services">("profiles")');
+  expect(app).toContain('useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services" | "agent">("profiles")');
   expect(app).toContain("const [showCreate, setShowCreate] = useState(false);");
   expect(app).toContain('aria-labelledby="create-profile-title"');
   expect(app).toContain('aria-labelledby="edit-profile-title"');
@@ -1075,4 +1075,18 @@ test("Services page sits in the sidebar, can be hidden, and links only through a
   expect(services).toContain('t("Our pick")');
   expect(services).toContain('t("Sponsored")');
   expect(services).toContain('className="tools-footnote"');
+});
+
+test("Agent page sits under All profiles, takes selected profiles, and tops up through the wallet", () => {
+  const agent = readFileSync(join(import.meta.dir, "web", "agent.tsx"), "utf8");
+  expect(app).toContain('<button type="button" className={`navitem${view === "agent" ? " active" : ""}`} data-tip={t("Agent")} title={t("Agent")} onClick={() => setView("agent")}>');
+  expect(app).toContain('active={view === "agent"}');
+  expect(app).toContain("wallet={storeSnapshot?.wallet ?? null} draft={agentDraft}");
+  expect(app).toContain("onClick={() => askAgent(profiles.filter((profile) => selected.has(profile.id)))}");
+  expect(app).toContain("text: `Profiles: ${picked.map((profile) => `${profile.name} (${profile.id})`).join(\", \")}\\n\\n`");
+  // Paused for credits: owners top up in place, members are told who can.
+  expect(agent).toContain("<WalletPanel wallet={wallet} owner={owner}");
+  expect(agent).toContain('t("Ask the workspace owner to add funds.")');
+  expect(agent).toContain('conversation.pauseReason === "credits"');
+  expect(agent).toContain('t("Page content the agent reads is sent to the model you choose.")');
 });

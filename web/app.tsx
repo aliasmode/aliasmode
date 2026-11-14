@@ -4,6 +4,8 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./proxies.css";
 import "./services.css";
+import "./agent.css";
+import { AgentPage } from "./agent.tsx";
 import { ProxiesPage } from "./proxies.tsx";
 import { ServicesPage } from "./services.tsx";
 import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
@@ -156,7 +158,7 @@ const REFRESH_MS = 3000;
 const PROFILE_PAGE_SIZE = 50;
 const PAGE_SIZES = [25, 50, 100, 200];
 
-const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services", string> = {
+const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services" | "agent", string> = {
   profiles: "Profiles",
   scripts: "Scripts",
   settings: "Settings",
@@ -164,6 +166,7 @@ const PAGE_TITLES: Record<"profiles" | "scripts" | "settings" | "extensions" | "
   proxies: "Proxies",
   trash: "Trash",
   services: "Services",
+  agent: "Agent",
 };
 
 const SETTINGS_TABS = [
@@ -378,6 +381,7 @@ const ICONS = {
   filter: <path d="M4 5h16l-6 7v6l-4 2v-8z" />,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
   moon: <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />,
+  agent: <><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" /><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z" /></>,
   services: <><rect x="4" y="4" width="7" height="7" rx="1.5" /><rect x="13" y="4" width="7" height="7" rx="1.5" /><rect x="4" y="13" width="7" height="7" rx="1.5" /><rect x="13" y="13" width="7" height="7" rx="1.5" /></>,
   help: <><circle cx="12" cy="12" r="9" /><path d="M9.4 9.1a2.7 2.7 0 015.3.7c0 1.8-2.7 2.2-2.7 3.7" /><path d="M12 16.8v.3" /></>,
 } as const;
@@ -1253,7 +1257,7 @@ function App() {
   // "profiles" is the roster; "settings" replaces it in the same content area
   // rather than opening a dialog — Settings outgrew a modal. New profile and
   // Edit stay dialogs: short forms, and a page felt like too much ceremony.
-  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services">("profiles");
+  const [view, setView] = useState<"profiles" | "scripts" | "settings" | "extensions" | "proxies" | "trash" | "services" | "agent">("profiles");
   const [scriptRunOpen, setScriptRunOpen] = useState(false);
   const [scriptRunProfiles, setScriptRunProfiles] = useState<UiProfile[]>([]);
   const [showCreate, setShowCreate] = useState(false);
@@ -1444,6 +1448,12 @@ function App() {
   }, []);
   // Offers open the shop on the Proxies page: the quantity is preselected and the shop scrolls into view.
   const [storeRequest, setStoreRequest] = useState({ quantity: 0, key: 0 });
+  // "Ask agent" on the profile list opens the Agent page with these profiles in the composer.
+  const [agentDraft, setAgentDraft] = useState({ text: "", key: 0 });
+  const askAgent = (picked: UiProfile[]) => {
+    setAgentDraft((current) => ({ text: `Profiles: ${picked.map((profile) => `${profile.name} (${profile.id})`).join(", ")}\n\n`, key: current.key + 1 }));
+    setView("agent");
+  };
   const openStore = useCallback((quantity: number, src: ProxySrc) => {
     enterStore(src);
     setStoreRequest((current) => ({ quantity, key: current.key + 1 }));
@@ -3525,6 +3535,9 @@ function App() {
             <Icon name="profiles" /><span className="navlabel">{t("All profiles")}</span>
             <span className="cnt">{profiles.length}</span>
           </button>
+          <button type="button" className={`navitem${view === "agent" ? " active" : ""}`} data-tip={t("Agent")} title={t("Agent")} onClick={() => setView("agent")}>
+            <Icon name="agent" /><span className="navlabel">{t("Agent")}</span>
+          </button>
           {isCloudMode && sharedProfiles.length > 0 && <button type="button" className={`navitem${view === "profiles" && sharedOnly ? " active" : ""}`} title={t("Shared with me")} onClick={() => { setGroup("all"); setSharedOnly(true); setView("profiles"); }}>
             <Icon name="user" /><span className="navlabel">{t("Shared with me")}</span><span className="cnt">{sharedProfiles.length}</span>
           </button>}
@@ -3854,6 +3867,9 @@ function App() {
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
       <ServicesPage active={view === "services"} />
+      <AgentPage key={`agent:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`} active={view === "agent"}
+        cloudMode={isCloudMode} owner={cloudAuth?.workspace?.role === "owner"} wallet={storeSnapshot?.wallet ?? null} draft={agentDraft}
+        onReloadWallet={cloudStore.reload} onUseCloud={() => requestModeSwitch("cloud")} />
       {view === "profiles" ? (
       <div className="workspace">
         {(breadcrumb || sharedOnly) && <nav className="folder-breadcrumb" aria-label={t("Folder path")}>
@@ -3915,6 +3931,9 @@ function App() {
           </button>
           <button className="btn solid-danger tip" data-tip={t("Close selected browsers")} disabled={!selected.size} onClick={closeSelected}>
             <Icon name="power" className="sm" />{t("Close")}
+          </button>
+          <button className="btn" type="button" onClick={() => askAgent(profiles.filter((profile) => selected.has(profile.id)))}>
+            <Icon name="agent" className="sm" />{t("Ask agent")}
           </button>
           {(!isCloudMode || selectedEditable) && <>
           <button
