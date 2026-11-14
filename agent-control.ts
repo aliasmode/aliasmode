@@ -559,6 +559,10 @@ export class AgentControlSession {
         if (this.deps.store.getLaunch(profileId)) {
           throw agentError("profile_open", "close the profile before deleting it");
         }
+        // A Local profile goes to Trash like the dashboard's Delete; only the user empties Trash.
+        if (!this.deps.cloudBrowser && !this.deps.remote && !this.deps.store.listAgentTemporary().includes(profileId)) {
+          return { profileId, deleted: this.deps.store.trashProfile(profileId) };
+        }
         return { profileId, deleted: await this.deleteClosedProfile(profileId) };
       },
     );

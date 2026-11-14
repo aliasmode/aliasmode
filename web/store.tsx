@@ -517,7 +517,7 @@ export function CryptoPaymentView({ deposit, now = Date.now() }: { deposit: Acti
 }
 
 const ENTRY_LABELS: Record<CloudWalletEntry["kind"], string> = {
-  deposit: "Top-up", purchase: "Proxy purchase", renewal: "Proxy renewal", refund: "Refund", adjustment: "Adjustment",
+  deposit: "Top-up", purchase: "Proxy purchase", renewal: "Proxy renewal", refund: "Refund", adjustment: "Adjustment", ai_usage: "AI agent",
 };
 
 /** Balance, top-ups and history. Opens from the balance link at the top of the page. */

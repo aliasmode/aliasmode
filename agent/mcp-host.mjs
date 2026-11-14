@@ -187,7 +187,7 @@ const ALIAS_TOOLS = [
   },
   {
     name: "aliasmode_profile_delete",
-    description: "Delete a closed AliasMode profile.",
+    description: "Move a closed AliasMode profile to Trash. Only the user can empty Trash.",
     annotations: toolAnnotations("Delete an AliasMode profile", { destructive: true }),
     inputSchema: {
       type: "object",

@@ -1,6 +1,7 @@
 /** Typed client for the dashboard's /ui/api/* endpoints. */
 
 import type {
+  AiUsageResponse,
   PublishScriptInput,
   PublishedScript,
   PublishedScriptSummary,
@@ -9,6 +10,7 @@ import type {
   ScriptSummary,
 } from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
+import type { AgentConversation, AgentConversationSummary, AgentMessage, AgentSettingsView } from "../agent-runner.ts";
 import type { PythonRuntimeStatus } from "../python-runtime.ts";
 import type { ServicesResult } from "../services-directory.ts";
 import type { RuntimeDownload } from "../runtime-download.ts";
@@ -998,17 +1000,17 @@ export function scriptsDesktopAvailable(): boolean {
     typeof (window as any).__TAURI_INTERNALS__?.invoke === "function";
 }
 
-async function scriptRequest(path: string, init: RequestInit = {}): Promise<any> {
+async function scriptRequest(path: string, init: RequestInit = {}, feature = "Scripts"): Promise<any> {
   const invoke = (window as any).__TAURI_INTERNALS__?.invoke as ScriptInvoke | undefined;
-  if (!invoke) throw new Error("Scripts require the desktop app.");
+  if (!invoke) throw new Error(`${feature} require the desktop app.`);
   const capability = await invoke("script_capability");
-  if (typeof capability !== "string" || !capability) throw new Error("Scripts are unavailable in this desktop app.");
+  if (typeof capability !== "string" || !capability) throw new Error(`${feature} are unavailable in this desktop app.`);
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${capability}`);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   const response = await fetch(path, { ...init, headers });
   const body = await apiJson(response, path);
-  if (!response.ok || body.ok !== true) throw new Error(body.error || "Scripts request failed");
+  if (!response.ok || body.ok !== true) throw new Error(body.error || `${feature} request failed`);
   return body;
 }
 
@@ -1139,4 +1141,47 @@ export async function fetchScriptLog(runId: string, offset: number): Promise<{ t
   const body = await scriptRequest(`/ui/api/scripts/log?runId=${encodeURIComponent(runId)}&offset=${offset}`);
   if (typeof body.text !== "string" || !Number.isFinite(body.nextOffset)) throw new Error("Script log returned invalid data");
   return { text: body.text, nextOffset: body.nextOffset };
+}
+
+// ---- AI agent -------------------------------------------------------------------
+export type { AgentConversation, AgentConversationSummary, AgentMessage, AgentSettingsView };
+
+const agentRequest = (path: string, init: RequestInit = {}) => scriptRequest(path, init, "Agent features");
+
+export async function fetchAgent(): Promise<{ settings: AgentSettingsView; conversations: AgentConversationSummary[] }> {
+  const body = await agentRequest("/ui/api/agent");
+  return { settings: body.settings, conversations: body.conversations };
+}
+
+/** Free allowance and wallet for AliasMode credits; null in Local mode or on an older Cloud. */
+export async function fetchAgentUsage(): Promise<AiUsageResponse | null> {
+  return (await agentRequest("/ui/api/agent/usage")).usage ?? null;
+}
+
+export async function saveAgentSettings(input: { source: "aliasmode" | "own"; baseUrl?: string; model?: string; apiKey?: string }): Promise<AgentSettingsView> {
+  return (await agentRequest("/ui/api/agent/settings", { method: "POST", body: JSON.stringify(input) })).settings;
+}
+
+export async function startAgentConversation(prompt: string): Promise<AgentConversation> {
+  return (await agentRequest("/ui/api/agent/conversations", { method: "POST", body: JSON.stringify({ prompt }) })).conversation;
+}
+
+export async function fetchAgentConversation(id: string): Promise<AgentConversation> {
+  return (await agentRequest(`/ui/api/agent/conversations/${encodeURIComponent(id)}`)).conversation;
+}
+
+export async function sendAgentMessage(id: string, prompt: string): Promise<AgentConversation> {
+  return (await agentRequest(`/ui/api/agent/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify({ prompt }) })).conversation;
+}
+
+export async function resumeAgentConversation(id: string): Promise<AgentConversation> {
+  return (await agentRequest(`/ui/api/agent/conversations/${encodeURIComponent(id)}/resume`, { method: "POST", body: "{}" })).conversation;
+}
+
+export async function stopAgentConversation(id: string): Promise<AgentConversation> {
+  return (await agentRequest(`/ui/api/agent/conversations/${encodeURIComponent(id)}/stop`, { method: "POST", body: "{}" })).conversation;
+}
+
+export async function deleteAgentConversation(id: string): Promise<void> {
+  await agentRequest(`/ui/api/agent/conversations/${encodeURIComponent(id)}`, { method: "DELETE", body: "{}" });
 }

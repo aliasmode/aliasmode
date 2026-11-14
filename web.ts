@@ -6,7 +6,7 @@
  * server.ts / ui.ts) never trigger React bundling.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import index from "./web/index.html";
 import { profileDisplayNo, type Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
@@ -15,7 +15,7 @@ import type { AppConfigStore } from "./app-config.ts";
 import type { CloudAuthRuntime } from "./cloud-auth.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
-import type { McpTunnelLifecycle } from "./mcp-tunnel.ts";
+import { helperEnvironment, type McpTunnelLifecycle } from "./mcp-tunnel.ts";
 import type { PendingSyncRuntime } from "./pending-sync.ts";
 import type { StatePaths } from "./paths.ts";
 import {
@@ -29,6 +29,8 @@ import {
 } from "./server.ts";
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
 import { ScriptLibrary, ScriptSupervisor, prefetchPythonFor } from "./scripts.ts";
+import { AgentRunner, McpHelperSession, cloudChat, ownModelChat, spawnMcpHelper } from "./agent-runner.ts";
+import { handleTrashRequest } from "./trash.ts";
 import { PythonRuntime } from "./python-runtime.ts";
 import { resolvePlaywrightRuntime } from "./playwright-runtime.ts";
 
@@ -297,6 +299,31 @@ export function serveDashboard(opts: DashboardServerOptions) {
       remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
     }),
   } : undefined;
+  // Desktop only: the agent drives browsers through the packaged `aliasmode-mcp` helper.
+  const agent = scripts && resolvePlaywrightRuntime().kind === "packaged" ? new AgentRunner({
+    root: opts.paths!.root,
+    scope: () => runtimeMode === "cloud" ? opts.cloudConnection?.accountId() : "local",
+    openTools: () => new McpHelperSession(() => spawnMcpHelper(
+      join(dirname(process.execPath), process.platform === "win32" ? "aliasmode-mcp.exe" : "aliasmode-mcp"),
+      helperEnvironment(),
+    )),
+    cloudChat: () => {
+      const client = runtimeMode === "cloud" && opts.cloudConnection?.accountId() ? opts.cloudConnection.client : undefined;
+      return client ? cloudChat((body, signal) => client.aiChat(body, signal)) : undefined;
+    },
+    ownChat: (settings) => ownModelChat(settings),
+    trash: async (operation, profileIds) => {
+      const response = await handleTrashRequest(new Request(`http://127.0.0.1/ui/api/trash${operation === "restore" ? "/restore" : ""}`, {
+        method: operation === "restore" ? "POST" : "GET",
+        ...(operation === "restore" ? { body: JSON.stringify({ ids: profileIds ?? [] }) } : {}),
+      }), store, launcher, { cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, cloudAuth: opts.cloudAuth });
+      const body = await response.json() as Record<string, unknown>;
+      if (body.ok !== true) throw new Error(String(body.error ?? "Trash request failed"));
+      const { ok: _ok, ...result } = body;
+      return result;
+    },
+    log,
+  }) : undefined;
   if (library && python) {
     python.prune();
     // A user who already has a Python script gets the runtime before the first run.
@@ -326,7 +353,8 @@ export function serveDashboard(opts: DashboardServerOptions) {
     },
     fetch: async (req, server) => {
       const reqUrl = new URL(req.url);
-      if ((reqUrl.pathname === "/ui/api/scripts" || reqUrl.pathname.startsWith("/ui/api/scripts/"))
+      if ((reqUrl.pathname === "/ui/api/scripts" || reqUrl.pathname.startsWith("/ui/api/scripts/")
+        || reqUrl.pathname === "/ui/api/agent" || reqUrl.pathname.startsWith("/ui/api/agent/"))
         && !isLoopbackAddress(server.requestIP(req)?.address)) {
         return Response.json({ ok: false, error: "loopback access only" }, { status: 403 });
       }
@@ -375,6 +403,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
           mcpTunnel: opts.mcpTunnel,
           health: opts.health,
           scripts,
+          agent,
           runtimeMode,
         });
         if (ui) return ui;
@@ -389,5 +418,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
   });
   void agentHub?.cleanupTemporaryProfiles();
   log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AliasMode Local API under /api; AdsPower-compatible)`);
-  return Object.assign(server, { stopScripts: () => scripts?.runner.shutdown() ?? Promise.resolve() });
+  return Object.assign(server, {
+    stopScripts: () => Promise.all([scripts?.runner.shutdown(), agent?.shutdown()]).then(() => {}),
+  });
 }

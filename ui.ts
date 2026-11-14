@@ -61,6 +61,7 @@ import { join, resolve, dirname } from "node:path";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { validAgentAuthorization } from "./agent-control.ts";
 import { ScriptError, prefetchPythonFor, type ScriptLibrary, type ScriptSupervisor } from "./scripts.ts";
+import { AgentError, type AgentRunner } from "./agent-runner.ts";
 import type { PythonRuntime } from "./python-runtime.ts";
 import { runtimeDownloads } from "./runtime-download.ts";
 import { loadServices } from "./services-directory.ts";
@@ -603,6 +604,8 @@ function legalAcceptanceIsCurrent(legal: {
 
 export interface UiRuntimeOptions {
   scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; nonce: string; python?: PythonRuntime };
+  /** The in-app AI agent; desktop only, authorized like scripts. */
+  agent?: AgentRunner;
   appConfig?: AppConfigStore;
   paths?: StatePaths;
   defaultCloudUrl?: string;
@@ -726,6 +729,62 @@ export async function handleUiRequest(
       return noStoreJson({ ok: false, error: "Unknown script operation" }, 404);
     } catch (error) {
       const status = error instanceof ScriptError || error instanceof CloudApiError ? error.status
+        : error instanceof CloudRequestError ? 502 : error instanceof SyntaxError || error instanceof URIError ? 400 : 500;
+      return noStoreJson({ ok: false, error: error instanceof SyntaxError ? "Invalid JSON request" : msg(error) }, status);
+    }
+  }
+
+  if (pathname === "/ui/api/agent" || pathname.startsWith("/ui/api/agent/")) {
+    const agent = options.agent;
+    if (!agent || !options.scripts) return noStoreJson({ ok: false, error: "The agent requires the desktop app" }, 503);
+    if (!validAgentAuthorization(req.headers.get("authorization"), options.scripts.nonce)) {
+      return noStoreJson({ ok: false, error: "Agent authorization failed" }, 401);
+    }
+    const origin = req.headers.get("origin");
+    if (origin && origin !== new URL(req.url).origin) return noStoreJson({ ok: false, error: "Cross-origin requests are forbidden" }, 403);
+    if (req.method !== "GET") {
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+    }
+    try {
+      if (pathname === "/ui/api/agent" && req.method === "GET") {
+        return noStoreJson({ ok: true, settings: agent.settingsView(), conversations: agent.list() });
+      }
+      if (pathname === "/ui/api/agent/usage" && req.method === "GET") {
+        const cloud = options.cloudBrowser ? options.cloudConnection?.client : undefined;
+        if (!cloud) return noStoreJson({ ok: true, usage: null });
+        try {
+          return noStoreJson({ ok: true, usage: await cloud.aiUsage() });
+        } catch (error) {
+          // An older Cloud has no AI route yet.
+          if (error instanceof CloudApiError && error.status === 404) return noStoreJson({ ok: true, usage: null });
+          throw error;
+        }
+      }
+      if (pathname === "/ui/api/agent/settings" && req.method === "POST") {
+        return noStoreJson({ ok: true, settings: agent.saveSettings(await req.json()) });
+      }
+      if (pathname === "/ui/api/agent/conversations" && req.method === "POST") {
+        return noStoreJson({ ok: true, conversation: agent.start((await req.json())?.prompt) });
+      }
+      const match = pathname.match(/^\/ui\/api\/agent\/conversations\/([^/]+)(?:\/(messages|resume|stop))?$/);
+      if (match) {
+        const id = decodeURIComponent(match[1]!);
+        const action = match[2];
+        if (!action && req.method === "GET") return noStoreJson({ ok: true, conversation: agent.get(id) });
+        if (!action && req.method === "DELETE") {
+          await agent.remove(id);
+          return noStoreJson({ ok: true });
+        }
+        if (action === "messages" && req.method === "POST") {
+          return noStoreJson({ ok: true, conversation: agent.send(id, (await req.json())?.prompt) });
+        }
+        if (action === "resume" && req.method === "POST") return noStoreJson({ ok: true, conversation: agent.resume(id) });
+        if (action === "stop" && req.method === "POST") return noStoreJson({ ok: true, conversation: await agent.stop(id) });
+      }
+      return noStoreJson({ ok: false, error: "Unknown agent operation" }, 404);
+    } catch (error) {
+      const status = error instanceof AgentError || error instanceof CloudApiError ? error.status
         : error instanceof CloudRequestError ? 502 : error instanceof SyntaxError || error instanceof URIError ? 400 : 500;
       return noStoreJson({ ok: false, error: error instanceof SyntaxError ? "Invalid JSON request" : msg(error) }, status);
     }
@@ -897,6 +956,7 @@ export async function handleUiRequest(
       pathname === "/ui/api/cloud-auth/forget";
     const finishAccountExit = exitsAccount ? options.cloudAuth.beginExit() : undefined;
     const resumeScripts = exitsAccount ? options.scripts?.runner.pause() : undefined;
+    const resumeAgent = exitsAccount ? options.agent?.pause() : undefined;
     const authTransition = exitsAccount ? undefined : await options.cloudAuth.acquireTransition();
     const transitionCurrent = () => !authTransition || options.cloudAuth!.isTransitionCurrent(authTransition);
     try {
@@ -914,6 +974,7 @@ export async function handleUiRequest(
         code?: unknown;
       };
       if (exitsAccount) await options.scripts?.runner.stop();
+      if (exitsAccount) await options.agent?.stopAll();
       if (pathname === "/ui/api/cloud-auth/signup") {
         if (typeof body.email !== "string" || typeof body.password !== "string") {
           return Response.json({ ok: false, error: "email and password are required" }, { status: 400 });
@@ -1162,6 +1223,7 @@ export async function handleUiRequest(
       authTransition?.release();
       finishAccountExit?.();
       resumeScripts?.();
+      resumeAgent?.();
     }
   }
 

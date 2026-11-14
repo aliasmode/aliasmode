@@ -688,7 +688,7 @@ export interface ListPublishedScriptsResponse {
 /* Credits wallet and proxy purchases. Amounts are integer USD cents; times are epoch milliseconds.
    Owners deposit and buy; every active member sees the balance and the purchased proxies. */
 
-export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment";
+export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment" | "ai_usage";
 
 export interface CloudWalletEntry {
   id: string;
@@ -871,3 +871,26 @@ export interface StoreEventsResponse {
 }
 
 export type CloudResult<T> = T | CloudError;
+
+/* AI agent credits. The app runs the agent; Cloud forwards each model call, charging the account's
+   monthly free allowance first and then the workspace wallet. Amounts are micro-USD (1,000,000 = $1). */
+
+export interface AiUsageResponse {
+  period: string;
+  freeAllowanceMicro: number;
+  freeUsedMicro: number;
+  freeLeftMicro: number;
+  balanceCents: number;
+  /** Spent but not yet debited from the wallet (under one cent). */
+  pendingMicro: number;
+  markup: number;
+  model: string;
+}
+
+/** `POST /v1/ai/chat` answers with the model's chat-completions body plus this charge. */
+export interface AiChatCharge {
+  billedMicro: number;
+  freeLeftMicro: number;
+  balanceCents: number;
+  pendingMicro: number;
+}

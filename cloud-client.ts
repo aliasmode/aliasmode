@@ -56,6 +56,7 @@ import {
   type PublishScriptInput,
   type PublishedScriptsQuery,
   type ListPublishedScriptsResponse,
+  type AiUsageResponse,
   type GetWalletResponse,
   type CreateDepositRequest,
   type DepositResponse,
@@ -75,6 +76,7 @@ export type CloudCredentialProvider = () => string | undefined | Promise<string 
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 30_000;
 /** A profile with its saved session can be megabytes; it is read whole (see readResponseText). */
 const SESSION_BODY_TIMEOUT_MS = 120_000;
+const AI_CHAT_TIMEOUT_MS = 300_000;
 
 export type CloudRequestFailure =
   | { kind: "transport"; retryable: true }
@@ -135,6 +137,8 @@ interface CallResponseOptions<T> {
   progressive?: boolean;
   /** Time for a body read whole once its headers arrived (a large saved session on a slow link). */
   bodyTimeoutMs?: number;
+  /** Silence limit for a slow answer (an AI model call), instead of the default. */
+  timeoutMs?: number;
   notModified?: () => T;
   received?: (response: Response, body: T) => void;
 }
@@ -192,7 +196,7 @@ export class CloudClient {
       }, ms);
       if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     };
-    restartTimeout();
+    restartTimeout(responseOptions.timeoutMs);
 
     try {
       const request = Promise.resolve().then(async () => {
@@ -210,7 +214,7 @@ export class CloudClient {
             { cause: error },
           );
         }
-        restartTimeout(Math.max(this.requestTimeoutMs, responseOptions.bodyTimeoutMs ?? 0));
+        restartTimeout(Math.max(responseOptions.timeoutMs ?? this.requestTimeoutMs, responseOptions.bodyTimeoutMs ?? 0));
         if (response.status === 304) {
           if (!responseOptions.notModified) {
             throw new Error(`AliasMode Cloud ${path} returned an unexpected not-modified response`);
@@ -461,6 +465,15 @@ export class CloudClient {
   private forgetRoster(): void {
     this.profileRoster = undefined;
     this.rosterInFlight = undefined;
+  }
+
+  /** One agent model call, charged to the free AI allowance and then the wallet. */
+  aiChat(body: unknown, signal?: AbortSignal): Promise<any> {
+    return this.call("/ai/chat", { method: "POST", body: JSON.stringify(body), signal }, { timeoutMs: AI_CHAT_TIMEOUT_MS });
+  }
+
+  aiUsage(): Promise<AiUsageResponse> {
+    return this.call("/ai/usage", { cache: "no-store" });
   }
 
   getWallet(): Promise<GetWalletResponse> {

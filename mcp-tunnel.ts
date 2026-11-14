@@ -46,7 +46,7 @@ export interface McpTunnelOptions {
   log?: (message: string) => void;
 }
 
-function helperEnvironment(): NodeJS.ProcessEnv {
+export function helperEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of [
     "APPDATA", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH",
