@@ -1,0 +1,77 @@
+/* Agent page. Shares the page frame, panels and alerts of proxies.css; the chat fills the page instead of scrolling it. */
+.workspace.proxy-page.agent-page { flex-direction: row; padding: 0; gap: 0; overflow: hidden; }
+.workspace.proxy-page.agent-page > .agent-main { flex: 1 1 auto; }
+.workspace.proxy-page.agent-page > .agent-list { flex: 0 0 220px; }
+.agent-desktop-note { margin: auto; }
+
+.agent-list { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 16px 10px; border-right: 1px solid var(--line); background: var(--surface); }
+.agent-new { align-self: stretch; }
+.agent-list ul { flex: 1; margin: 0; padding: 0; list-style: none; overflow: auto; }
+.agent-list li { display: flex; align-items: center; border-radius: var(--r-sm); }
+.agent-list li:hover { background: var(--surface-hover); }
+.agent-list li.active { background: var(--accent-soft); }
+.agent-chat { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px; border: 0; background: none; color: var(--ink-soft); font-size: 12.5px; text-align: left; cursor: pointer; }
+.agent-list li.active .agent-chat { color: var(--accent-ink); font-weight: 600; }
+.agent-chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-chat-del { flex-shrink: 0; width: 24px; height: 24px; margin-right: 4px; border: 0; border-radius: var(--r-xs); background: none; color: var(--faint); font-size: 16px; line-height: 1; cursor: pointer; opacity: 0; }
+.agent-list li:hover .agent-chat-del, .agent-chat-del:focus-visible { opacity: 1; }
+.agent-chat-del:hover { color: var(--danger-ink); background: var(--danger-soft); }
+
+.agent-dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); }
+.agent-dot.running { background: var(--accent); animation: agent-pulse 1.2s ease-in-out infinite; }
+.agent-dot.paused { background: var(--warn); }
+.agent-dot.error { background: var(--danger); }
+@keyframes agent-pulse { 50% { opacity: .3; } }
+
+.agent-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.agent-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.agent-head .spacer { flex: 1; }
+.agent-sep { padding-left: 12px; border-left: 1px solid var(--line); }
+.agent-head .store-link { margin-left: 0; }
+.agent-muted { color: var(--muted); font-size: 12px; }
+
+.agent-settings, .agent-wallet { margin: 14px 20px 0; }
+.agent-settings { display: flex; flex-direction: column; gap: 12px; padding: 16px 18px; }
+.agent-sources { display: flex; flex-direction: column; gap: 8px; }
+.agent-sources label { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
+.agent-sources input { margin-top: 3px; accent-color: var(--accent); }
+.agent-sources span { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.agent-sources small { color: var(--muted); font-size: 12px; }
+.agent-own { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
+.agent-remove-key { grid-column: 1 / -1; justify-self: start; padding: 0; border: 0; }
+.agent-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+.agent-transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 14px; padding: 20px; }
+.agent-empty { margin: auto; max-width: 620px; text-align: center; }
+.agent-empty h2 { font-size: 22px; letter-spacing: -.03em; }
+.agent-page .agent-empty p { margin: 8px 0 18px; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+.agent-examples { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; text-align: left; }
+.agent-examples button { padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--ink-soft); font-size: 12.5px; line-height: 1.5; text-align: left; cursor: pointer; }
+.agent-examples button:hover { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-ink); }
+
+.agent-user { align-self: flex-end; max-width: 75%; padding: 10px 14px; border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg); background: var(--accent-fill); color: var(--on-fill); font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-reply { display: flex; flex-direction: column; gap: 8px; max-width: 85%; }
+.agent-text { color: var(--ink); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-steps { align-self: flex-start; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-sunken); color: var(--muted); font-size: 12px; }
+.agent-steps summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-steps[open] > summary { margin-bottom: 6px; }
+.agent-step { margin: 4px 0 0 12px; }
+.agent-step summary { color: var(--ink-soft); }
+.agent-step pre { max-height: 240px; margin: 6px 0; padding: 8px 10px; overflow: auto; border-radius: var(--r-sm); background: var(--surface); color: var(--ink-soft); font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-step pre.agent-result { color: var(--muted); }
+
+.agent-working { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12.5px; }
+.agent-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; font-size: 12.5px; line-height: 1.6; }
+.agent-page .agent-card p { color: var(--muted); }
+.agent-credits { border-color: var(--warn-line); background: var(--warn-soft); }
+.agent-credits strong { color: var(--warn-ink); }
+
+.agent-error { margin: 0 20px 10px; }
+.agent-composer { display: flex; align-items: flex-end; gap: 10px; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: var(--surface); }
+.agent-composer textarea { flex: 1; min-height: 44px; max-height: 200px; padding: 10px 12px; resize: vertical; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); font-size: 13px; line-height: 1.5; }
+.agent-composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+
+@media (max-width: 900px) {
+  .workspace.proxy-page.agent-page > .agent-list { flex-basis: 170px; }
+  .agent-own { grid-template-columns: 1fr; }
+}
