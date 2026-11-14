@@ -54,6 +54,10 @@ function harness(options: {
       temporary = false;
       return true;
     },
+    trashProfile: (id: string) => {
+      events.push(`trash:${id}`);
+      return true;
+    },
   };
   const launcher = {
     certifiedActive: async () => options.active ?? false,
@@ -276,6 +280,18 @@ test("temporary profiles delete only after confirmed browser close", async () =>
   ]);
   expect(h.temporary()).toBe(false);
   expect(h.profileExists()).toBe(false);
+});
+
+test("deleting a Local profile moves it to Trash; temporary profiles are removed", async () => {
+  const kept = harness();
+  expect(await kept.session.enqueue(wire("profiles.delete", { profileId: "profile1" })))
+    .toMatchObject({ ok: true, result: { profileId: "profile1", deleted: true } });
+  expect(kept.events).toEqual(["trash:profile1"]);
+  expect(kept.profileExists()).toBe(true);
+
+  const temporary = harness({ temporary: true });
+  await temporary.session.enqueue(wire("profiles.delete", { profileId: "profile1" }));
+  expect(temporary.events).toContain("delete:profile1");
 });
 
 test("an unconfirmed close retains the temporary profile marker", async () => {

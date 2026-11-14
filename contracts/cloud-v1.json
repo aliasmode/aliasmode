@@ -106,6 +106,7 @@
     "insufficient_balance",
     "insufficient_credits",
     "ai_unavailable",
+    "ai_upstream_error",
     "deposit_amount_out_of_range",
     "owner_only",
     "partner_unavailable",
