@@ -5,7 +5,7 @@ import "./styles.css";
 import "./proxies.css";
 import "./services.css";
 import "./agent.css";
-import { AgentPage } from "./agent.tsx";
+import { AgentHost } from "./agent.tsx";
 import { ProxiesPage } from "./proxies.tsx";
 import { ServicesPage } from "./services.tsx";
 import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
@@ -1448,11 +1448,10 @@ function App() {
   }, []);
   // Offers open the shop on the Proxies page: the quantity is preselected and the shop scrolls into view.
   const [storeRequest, setStoreRequest] = useState({ quantity: 0, key: 0 });
-  // "Ask agent" on the profile list opens the Agent page with these profiles in the composer.
+  // "Ask agent" on the profile list opens the agent panel with these profiles in the composer.
   const [agentDraft, setAgentDraft] = useState({ text: "", key: 0 });
   const askAgent = (picked: UiProfile[]) => {
     setAgentDraft((current) => ({ text: `Profiles: ${picked.map((profile) => `${profile.name} (${profile.id})`).join(", ")}\n\n`, key: current.key + 1 }));
-    setView("agent");
   };
   const openStore = useCallback((quantity: number, src: ProxySrc) => {
     enterStore(src);
@@ -3867,9 +3866,9 @@ function App() {
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
       <ServicesPage active={view === "services"} />
-      <AgentPage key={`agent:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`} active={view === "agent"}
+      <AgentHost key={`agent:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`} active={view === "agent"}
         cloudMode={isCloudMode} owner={cloudAuth?.workspace?.role === "owner"} wallet={storeSnapshot?.wallet ?? null} draft={agentDraft}
-        onReloadWallet={cloudStore.reload} onUseCloud={() => requestModeSwitch("cloud")} />
+        onReloadWallet={cloudStore.reload} onUseCloud={() => requestModeSwitch("cloud")} onOpenPage={() => setView("agent")} />
       {view === "profiles" ? (
       <div className="workspace">
         {(breadcrumb || sharedOnly) && <nav className="folder-breadcrumb" aria-label={t("Folder path")}>
