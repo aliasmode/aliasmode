@@ -1084,6 +1084,11 @@ test("Agent page sits under All profiles, takes selected profiles, and tops up t
   expect(app).toContain("wallet={storeSnapshot?.wallet ?? null} draft={agentDraft}");
   expect(app).toContain("onClick={() => askAgent(profiles.filter((profile) => selected.has(profile.id)))}");
   expect(app).toContain("text: `Profiles: ${picked.map((profile) => `${profile.name} (${profile.id})`).join(\", \")}\\n\\n`");
+  // Ask agent opens the side panel in place; the panel can expand to the full page with the same chat.
+  expect(app).toContain('onOpenPage={() => setView("agent")}');
+  expect(agent).toContain("if (!active) setPanelOpen(true);");
+  expect(agent).toContain('className="agent-launcher"');
+  expect(agent).toContain("onClick={() => { setPanelOpen(false); onOpenPage(); }}");
   // Paused for credits: owners top up in place, members are told who can.
   expect(agent).toContain("<WalletPanel wallet={wallet} owner={owner}");
   expect(agent).toContain('t("Ask the workspace owner to add funds.")');
