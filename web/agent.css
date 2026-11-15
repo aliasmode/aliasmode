@@ -2,7 +2,6 @@
 .workspace.proxy-page.agent-page { flex-direction: row; padding: 0; gap: 0; overflow: hidden; }
 .workspace.proxy-page.agent-page > .agent-main { flex: 1 1 auto; }
 .workspace.proxy-page.agent-page > .agent-list { flex: 0 0 220px; }
-.agent-desktop-note { margin: auto; }
 
 .agent-list { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 16px 10px; border-right: 1px solid var(--line); background: var(--surface); }
 .agent-new { align-self: stretch; }

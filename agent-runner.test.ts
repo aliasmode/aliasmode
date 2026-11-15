@@ -272,4 +272,15 @@ describe("agent UI routes", () => {
     const missing = await handleUiRequest(new Request("http://127.0.0.1/ui/api/agent/conversations/not-a-uuid", { headers: { authorization: `Bearer ${nonce}` } }), {} as any, {} as any, null, options);
     expect(missing?.status).toBe(404);
   });
+
+  test("a source checkout (no desktop capability) needs no nonce but still refuses other origins", async () => {
+    const { handleUiRequest } = await import("./ui.ts");
+    const { agent } = runner(async () => ({ message: { role: "assistant", content: "Hi." } }));
+    const listed = await handleUiRequest(new Request("http://127.0.0.1/ui/api/agent"), {} as any, {} as any, null, { agent });
+    expect(listed?.status).toBe(200);
+    const foreign = await handleUiRequest(new Request("http://127.0.0.1/ui/api/agent/conversations", {
+      method: "POST", headers: { origin: "https://foreign.test", "content-type": "application/json" }, body: JSON.stringify({ prompt: "x" }),
+    }), {} as any, {} as any, null, { agent });
+    expect(foreign?.status).toBe(403);
+  });
 });

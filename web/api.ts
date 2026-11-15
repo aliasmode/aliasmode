@@ -1146,7 +1146,16 @@ export async function fetchScriptLog(runId: string, offset: number): Promise<{ t
 // ---- AI agent -------------------------------------------------------------------
 export type { AgentConversation, AgentConversationSummary, AgentMessage, AgentSettingsView };
 
-const agentRequest = (path: string, init: RequestInit = {}) => scriptRequest(path, init, "Agent features");
+/** The desktop window sends its script capability; the dashboard in a browser (source checkout) needs none. */
+async function agentRequest(path: string, init: RequestInit = {}): Promise<any> {
+  if (scriptsDesktopAvailable()) return scriptRequest(path, init, "Agent features");
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  const response = await fetch(path, { ...init, headers });
+  const body = await apiJson(response, path);
+  if (!response.ok || body.ok !== true) throw new Error(body.error || "Agent request failed");
+  return body;
+}
 
 export async function fetchAgent(): Promise<{ settings: AgentSettingsView; conversations: AgentConversationSummary[] }> {
   const body = await agentRequest("/ui/api/agent");

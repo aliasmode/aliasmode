@@ -534,6 +534,31 @@ export class McpHelperSession implements AgentToolSession {
   }
 }
 
+/** The same MCP host run inside this process (source checkouts), reached through an in-memory MCP client. */
+export class InProcessToolSession implements AgentToolSession {
+  exited = false;
+  private readonly host: Promise<{ client: any; close(): Promise<void> }>;
+
+  constructor(connect: () => Promise<{ client: any; close(): Promise<void> }>) {
+    this.host = connect();
+    this.host.catch(() => { this.exited = true; });
+  }
+
+  async listTools(): Promise<AgentTool[]> {
+    return (await (await this.host).client.listTools()).tools ?? [];
+  }
+
+  async callTool(name: string, args: Record<string, unknown>): Promise<string> {
+    // Opening a profile can take minutes; the SDK default would give up after one.
+    return toolResultText(await (await this.host).client.callTool({ name, arguments: args }, undefined, { timeout: 30 * 60_000 }));
+  }
+
+  close(): void {
+    this.exited = true;
+    void this.host.then((host) => host.close(), () => {});
+  }
+}
+
 export function spawnMcpHelper(helperPath: string, env: NodeJS.ProcessEnv): HelperChild {
   return spawn(helperPath, ["serve"], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true, env });
 }

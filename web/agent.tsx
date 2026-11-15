@@ -8,7 +8,6 @@ import {
   fetchAgentUsage,
   resumeAgentConversation,
   saveAgentSettings,
-  scriptsDesktopAvailable,
   sendAgentMessage,
   startAgentConversation,
   stopAgentConversation,
@@ -89,7 +88,6 @@ export function AgentPage({ active, cloudMode, owner, wallet, draft, onReloadWal
   onUseCloud: () => void;
 }) {
   const { t, language } = useTranslation();
-  const desktop = scriptsDesktopAvailable();
   const [settings, setSettings] = useState<AgentSettingsView | null>(null);
   const [conversations, setConversations] = useState<AgentConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -124,10 +122,10 @@ export function AgentPage({ active, cloudMode, owner, wallet, draft, onReloadWal
   };
 
   useEffect(() => {
-    if (!active || !desktop) return;
+    if (!active) return;
     void loadList().catch((failure) => setError(failure instanceof Error ? failure.message : String(failure)));
     void loadUsage();
-  }, [active, desktop, loadList, loadUsage]);
+  }, [active, loadList, loadUsage]);
 
   useEffect(() => {
     if (!draft.key) return;
@@ -143,14 +141,14 @@ export function AgentPage({ active, cloudMode, owner, wallet, draft, onReloadWal
   // Runs continue in the background; poll while one is running and the page is open.
   const anyRunning = conversation?.status === "running" || conversations.some((item) => item.status === "running");
   useEffect(() => {
-    if (!active || !desktop || !anyRunning) return;
+    if (!active || !anyRunning) return;
     const timer = window.setInterval(() => {
       void loadList().catch(() => {});
       const id = selectedRef.current;
       if (id) void fetchAgentConversation(id).then((next) => { if (selectedRef.current === id) setConversation(next); }, () => {});
     }, POLL_MS);
     return () => window.clearInterval(timer);
-  }, [active, desktop, anyRunning, loadList]);
+  }, [active, anyRunning, loadList]);
 
   // A finished run changed the balance and the free allowance.
   const lastStatus = useRef(conversation?.status);
@@ -164,12 +162,6 @@ export function AgentPage({ active, cloudMode, owner, wallet, draft, onReloadWal
     const box = transcriptRef.current;
     if (box) box.scrollTop = box.scrollHeight;
   }, [messageCount, conversation?.status, selectedId]);
-
-  if (!desktop) {
-    return <div className="workspace proxy-page agent-page" hidden={!active}>
-      <div className="tools-empty agent-desktop-note"><h3>{t("The agent requires the desktop app.")}</h3><p>{t("Open AliasMode in the desktop app to use the agent.")}</p></div>
-    </div>;
-  }
 
   const open = (id: string) => {
     selectedRef.current = id;

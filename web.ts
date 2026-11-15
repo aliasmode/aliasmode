@@ -7,6 +7,7 @@
  */
 
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import index from "./web/index.html";
 import { profileDisplayNo, type Launcher } from "./launcher.ts";
 import type { ProfileStore } from "./store.ts";
@@ -29,7 +30,7 @@ import {
 } from "./server.ts";
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
 import { ScriptLibrary, ScriptSupervisor, prefetchPythonFor } from "./scripts.ts";
-import { AgentRunner, McpHelperSession, cloudChat, ownModelChat, spawnMcpHelper } from "./agent-runner.ts";
+import { AgentRunner, InProcessToolSession, McpHelperSession, cloudChat, ownModelChat, spawnMcpHelper } from "./agent-runner.ts";
 import { handleTrashRequest } from "./trash.ts";
 import { PythonRuntime } from "./python-runtime.ts";
 import { resolvePlaywrightRuntime } from "./playwright-runtime.ts";
@@ -276,17 +277,16 @@ export function serveDashboard(opts: DashboardServerOptions) {
   const admission = opts.lifecycleAdmission ?? new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
   const lifecycle = { admission };
   const agentNonce = opts.agentNonce;
-  const agentHub = agentNonce
-    ? new AgentControlHub({
-        launcher,
-        store,
-        admission,
-        remote: opts.remote,
-        cloudBrowser: opts.cloudBrowser,
-        cloudConnection: opts.cloudConnection,
-        log,
-      })
-    : undefined;
+  const agentControlDeps = {
+    launcher,
+    store,
+    admission,
+    remote: opts.remote,
+    cloudBrowser: opts.cloudBrowser,
+    cloudConnection: opts.cloudConnection,
+    log,
+  };
+  const agentHub = agentNonce ? new AgentControlHub(agentControlDeps) : undefined;
   const library = agentNonce && opts.paths ? new ScriptLibrary(opts.paths.root, runtimeMode === "cloud", opts.cloudConnection, opts.defaultCloudUrl) : undefined;
   // The desktop app downloads Python for Python scripts; a source checkout uses python3.
   const python = library && resolvePlaywrightRuntime().kind === "packaged"
@@ -299,14 +299,21 @@ export function serveDashboard(opts: DashboardServerOptions) {
       remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
     }),
   } : undefined;
-  // Desktop only: the agent drives browsers through the packaged `aliasmode-mcp` helper.
-  const agent = scripts && resolvePlaywrightRuntime().kind === "packaged" ? new AgentRunner({
-    root: opts.paths!.root,
+  // The desktop app drives browsers through its packaged `aliasmode-mcp` helper; a source checkout
+  // runs the same MCP host inside this server.
+  const packaged = resolvePlaywrightRuntime().kind === "packaged";
+  const agentControl = agentHub ?? new AgentControlHub(agentControlDeps);
+  const agent = opts.paths && (!packaged || scripts) ? new AgentRunner({
+    root: opts.paths.root,
     scope: () => runtimeMode === "cloud" ? opts.cloudConnection?.accountId() : "local",
-    openTools: () => new McpHelperSession(() => spawnMcpHelper(
-      join(dirname(process.execPath), process.platform === "win32" ? "aliasmode-mcp.exe" : "aliasmode-mcp"),
-      helperEnvironment(),
-    )),
+    openTools: packaged
+      ? () => new McpHelperSession(() => spawnMcpHelper(
+        join(dirname(process.execPath), process.platform === "win32" ? "aliasmode-mcp.exe" : "aliasmode-mcp"),
+        helperEnvironment(),
+      ))
+      // A computed path keeps the compiled sidecar from bundling the MCP host and Playwright.
+      : () => new InProcessToolSession(async () => (await import(pathToFileURL(join(import.meta.dir, "agent", "in-process-host.mjs")).href))
+        .connectInProcess(agentControl.connect())),
     cloudChat: () => {
       const client = runtimeMode === "cloud" && opts.cloudConnection?.accountId() ? opts.cloudConnection.client : undefined;
       return client ? cloudChat((body, signal) => client.aiChat(body, signal)) : undefined;

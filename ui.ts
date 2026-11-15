@@ -736,8 +736,9 @@ export async function handleUiRequest(
 
   if (pathname === "/ui/api/agent" || pathname.startsWith("/ui/api/agent/")) {
     const agent = options.agent;
-    if (!agent || !options.scripts) return noStoreJson({ ok: false, error: "The agent requires the desktop app" }, 503);
-    if (!validAgentAuthorization(req.headers.get("authorization"), options.scripts.nonce)) {
+    if (!agent) return noStoreJson({ ok: false, error: "The agent is unavailable" }, 503);
+    // The desktop window holds the script capability; a source checkout has none and relies on loopback and same-origin.
+    if (options.scripts && !validAgentAuthorization(req.headers.get("authorization"), options.scripts.nonce)) {
       return noStoreJson({ ok: false, error: "Agent authorization failed" }, 401);
     }
     const origin = req.headers.get("origin");
