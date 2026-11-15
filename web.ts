@@ -307,9 +307,10 @@ export function serveDashboard(opts: DashboardServerOptions) {
     root: opts.paths.root,
     scope: () => runtimeMode === "cloud" ? opts.cloudConnection?.accountId() : "local",
     openTools: packaged
-      ? () => new McpHelperSession(() => spawnMcpHelper(
+      ? (filesDir) => new McpHelperSession(() => spawnMcpHelper(
         join(dirname(process.execPath), process.platform === "win32" ? "aliasmode-mcp.exe" : "aliasmode-mcp"),
         helperEnvironment(),
+        filesDir,
       ))
       // A computed path keeps the compiled sidecar from bundling the MCP host and Playwright.
       : () => new InProcessToolSession(async () => (await import(pathToFileURL(join(import.meta.dir, "agent", "in-process-host.mjs")).href))

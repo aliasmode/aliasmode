@@ -1,15 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENT_MAX_CONVERSATIONS,
   AgentRunner,
   McpHelperSession,
   TOOL_RESULT_MAX_CHARS,
   cloudChat,
   compact,
   ownModelChat,
+  pruneFiles,
   type AgentChat,
   type AgentConversation,
   type AgentMessage,
@@ -162,6 +164,60 @@ describe("AgentRunner", () => {
     const loaded = agent.get(first.id);
     expect(loaded.status).toBe("idle");
     expect(loaded.messages.at(-1)).toEqual({ role: "tool", tool_call_id: "x1", content: "Stopped before this tool finished." });
+  });
+
+  test("hides code execution and only uploads files from the agent folder", async () => {
+    const requests: Parameters<AgentChat>[0][] = [];
+    let step = 0;
+    const calls: { name: string; args: Record<string, unknown> }[] = [];
+    const { agent } = runner(async (request) => {
+      requests.push(request);
+      const folder = agent.filesDir();
+      const answers: AgentMessage[] = [
+        toolCall("u1", "browser_file_upload", { paths: ["/etc/passwd"] }),
+        toolCall("u2", "browser_file_upload", { paths: [join(folder, "..", "settings.json")] }),
+        toolCall("u3", "browser_file_upload", { paths: [join(folder, "photo.png")] }),
+        { role: "assistant", content: "done" },
+      ];
+      return { message: answers[step++]! };
+    }, {
+      openTools: () => ({
+        listTools: async () => [{ name: "browser_run_code" }, { name: "browser_file_upload" }],
+        callTool: async (name, args) => { calls.push({ name, args }); return "uploaded"; },
+        close: () => {},
+      }),
+    });
+    const done = await settled(agent, agent.start("upload").id);
+    expect(requests[0]!.tools.map((tool) => tool.function.name)).not.toContain("browser_run_code");
+    const results = done.messages.filter((message) => message.role === "tool").map((message) => message.content);
+    expect(results[0]).toContain("must be inside");
+    expect(results[1]).toContain("must be inside");
+    expect(results[2]).toBe("uploaded");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("keeps the newest chats and prunes the files folder to its size cap", async () => {
+    const { agent, root } = runner(async () => ({ message: { role: "assistant", content: "ok" } }));
+    const dir = join(root, "agent", "local", "conversations");
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < AGENT_MAX_CONVERSATIONS + 5; i++) {
+      const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+      writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, title: "old", createdAt: "", updatedAt: new Date(2020, 0, 1, 0, i).toISOString(), status: "idle", billedMicro: 0, messages: [] }));
+    }
+    const fresh = agent.start("new");
+    await settled(agent, fresh.id);
+    const kept = agent.list();
+    expect(kept).toHaveLength(AGENT_MAX_CONVERSATIONS);
+    expect(kept[0]!.id).toBe(fresh.id);
+
+    const files = join(root, "files");
+    mkdirSync(join(files, "sub"), { recursive: true });
+    writeFileSync(join(files, "old.bin"), "a".repeat(600));
+    utimesSync(join(files, "old.bin"), new Date(2020, 0, 1), new Date(2020, 0, 1));
+    writeFileSync(join(files, "sub", "new.bin"), "b".repeat(600));
+    pruneFiles(files, 1000);
+    expect(existsSync(join(files, "old.bin"))).toBe(false);
+    expect(existsSync(join(files, "sub", "new.bin"))).toBe(true);
   });
 
   test("own model settings are validated and the key is kept private", async () => {

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { CloudApiError } from "./cloud-client.ts";
@@ -89,7 +89,13 @@ const KEEP_RECENT_TOOL_RESULTS = 2;
 const HELPER_IDLE_MS = 30 * 60_000;
 const COMPACTED = "[Older tool output removed to save space. Call the tool again if you need it.]";
 /** Tools that return files or images the agent cannot use. */
-const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install"]);
+/** Tools that return files or images the agent cannot use, and browser_run_code: it runs in a Node `vm`,
+    which is no sandbox, so a page that talks the agent into calling it could run code on this computer. */
+const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code"]);
+/** Downloads and upload files live in one folder; above this size the oldest files are deleted after a run. */
+export const AGENT_FILES_MAX_BYTES = 1024 ** 3;
+/** Older chats beyond this many are deleted when a new chat starts. */
+export const AGENT_MAX_CONVERSATIONS = 200;
 
 export const AGENT_SYSTEM_PROMPT = `You are the AliasMode agent. AliasMode is an antidetect browser manager: every profile is a separate browser identity with its own fingerprint, cookies and proxy. You work for the user inside their AliasMode app and act through tools.
 
@@ -125,8 +131,8 @@ export interface AgentRunnerOptions {
   root: string;
   /** Storage scope: the signed-in Cloud account, or "local". Undefined when signed out of Cloud. */
   scope: () => string | undefined;
-  /** Starts the MCP helper for one conversation. */
-  openTools: () => AgentToolSession;
+  /** Starts the MCP helper for one conversation; `filesDir` is its working folder (browser downloads land there). */
+  openTools: (filesDir: string) => AgentToolSession;
   /** Model provider: AliasMode credits (undefined without a Cloud account) or the user's own model. */
   cloudChat?: () => AgentChat | undefined;
   ownChat?: (settings: Required<Pick<AgentSettings, "baseUrl" | "model">> & { apiKey?: string }) => AgentChat;
@@ -156,6 +162,11 @@ export class AgentRunner {
   private conversationPath(id: string): string {
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new AgentError("Unknown conversation", 404);
     return join(this.dir(), "conversations", `${id}.json`);
+  }
+
+  /** The only folder the agent may upload files from; browser downloads are saved inside it too. */
+  filesDir(): string {
+    return join(this.options.root, "agent", "files");
   }
 
   private settingsPath(): string {
@@ -251,6 +262,9 @@ export class AgentRunner {
       messages: [{ role: "user", content: text }],
     };
     this.save(conversation);
+    for (const old of this.list().slice(AGENT_MAX_CONVERSATIONS)) {
+      if (!this.active.has(old.id)) rmSync(this.conversationPath(old.id), { force: true });
+    }
     return this.launch(conversation);
   }
 
@@ -322,6 +336,7 @@ export class AgentRunner {
         try { this.save(conversation); } catch {}
         this.active.delete(conversation.id);
         this.idleHelper(conversation.id);
+        try { pruneFiles(this.filesDir(), AGENT_FILES_MAX_BYTES); } catch {}
       });
     this.active.set(conversation.id, { controller, done });
     return structuredClone(conversation);
@@ -346,7 +361,8 @@ export class AgentRunner {
       existing.timer = undefined;
       return existing.session;
     }
-    const session = this.options.openTools();
+    mkdirSync(this.filesDir(), { recursive: true });
+    const session = this.options.openTools(this.filesDir());
     this.helpers.set(id, { session });
     return session;
   }
@@ -373,7 +389,7 @@ export class AgentRunner {
       const available = [...(await tools.listTools()).filter((tool) => !HIDDEN_TOOLS.has(tool.name)), ...LOCAL_TOOLS];
       compact(conversation.messages);
       const result = await chat({
-        messages: [{ role: "system", content: AGENT_SYSTEM_PROMPT }, ...conversation.messages],
+        messages: [{ role: "system", content: `${AGENT_SYSTEM_PROMPT}\n- Files you upload must be inside ${this.filesDir()}; files the browser downloads are saved there too.` }, ...conversation.messages],
         tools: available.map((tool) => ({
           type: "function",
           function: {
@@ -415,6 +431,8 @@ export class AgentRunner {
       else if (name === "aliasmode_trash_restore") {
         const ids = Array.isArray(args.profileIds) ? args.profileIds.filter((id): id is string => typeof id === "string") : [];
         text = JSON.stringify(await this.options.trash("restore", ids));
+      } else if (name === "browser_file_upload" && !uploadAllowed(args.paths, this.filesDir())) {
+        return `Error: files to upload must be inside ${this.filesDir()}.`;
       } else text = await tools.callTool(name, args);
       return text.length > TOOL_RESULT_MAX_CHARS
         ? `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n[Output cut at ${TOOL_RESULT_MAX_CHARS} characters.]`
@@ -431,6 +449,30 @@ function answerOpenToolCalls(messages: AgentMessage[]): void {
   const answered = new Set(messages.slice(index + 1).map((message) => message.tool_call_id));
   for (const call of messages[index]!.tool_calls!) {
     if (!answered.has(call.id)) messages.push({ role: "tool", tool_call_id: call.id, content: "Stopped before this tool finished." });
+  }
+}
+
+function uploadAllowed(paths: unknown, dir: string): boolean {
+  if (paths === undefined) return true;
+  const root = resolve(dir) + sep;
+  return Array.isArray(paths) && paths.every((path) => typeof path === "string" && isAbsolute(path) && resolve(path).startsWith(root));
+}
+
+/** Deletes the oldest files until the folder is under `maxBytes`. */
+export function pruneFiles(dir: string, maxBytes: number): void {
+  if (!existsSync(dir)) return;
+  const files = (readdirSync(dir, { recursive: true }) as string[])
+    .map((name) => join(dir, name))
+    .flatMap((path) => {
+      const stat = statSync(path);
+      return stat.isFile() ? [{ path, size: stat.size, mtime: stat.mtimeMs }] : [];
+    })
+    .sort((a, b) => a.mtime - b.mtime);
+  let total = files.reduce((sum, file) => sum + file.size, 0);
+  for (const file of files) {
+    if (total <= maxBytes) break;
+    rmSync(file.path, { force: true });
+    total -= file.size;
   }
 }
 
@@ -559,8 +601,9 @@ export class InProcessToolSession implements AgentToolSession {
   }
 }
 
-export function spawnMcpHelper(helperPath: string, env: NodeJS.ProcessEnv): HelperChild {
-  return spawn(helperPath, ["serve"], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true, env });
+export function spawnMcpHelper(helperPath: string, env: NodeJS.ProcessEnv, cwd: string): HelperChild {
+  // Playwright saves browser downloads under the working folder, so it is the agent's files folder.
+  return spawn(helperPath, ["serve"], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true, env, cwd });
 }
 
 /** OpenAI-compatible chat completions on the user's own server (Ollama, LM Studio, OpenRouter, OpenAI...). */

@@ -37,6 +37,7 @@ export type CloudErrorCode =
   | "insufficient_credits"
   | "ai_unavailable"
   | "ai_upstream_error"
+  | "payload_too_large"
   | "deposit_amount_out_of_range"
   | "owner_only"
   | "partner_unavailable"
