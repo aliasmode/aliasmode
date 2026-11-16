@@ -31,7 +31,7 @@ function fail(msg: string) {
   return Response.json({ code: -1, msg, data: {} });
 }
 
-const FIREFOX_CAPABILITIES = ["firefox-native", "cookies", "navigation", "sessions", "mcp", "scripts"] as const;
+const FIREFOX_CAPABILITIES = ["firefox-native", "cookies", "navigation", "sessions", "mcp", "scripts", "playwright"] as const;
 
 type FirefoxLaunch = { engine?: "chromium" | "firefox"; firefoxOwner?: FirefoxOwner };
 
@@ -45,6 +45,17 @@ function isFirefoxLaunch(launch: unknown): launch is FirefoxLaunch & { engine: "
 
 function firefoxPublicFields() {
   return { engine: "firefox" as const, capabilities: FIREFOX_CAPABILITIES };
+}
+
+/**
+ * Firefox has no CDP. Its owner serves a Playwright server on loopback with a secret path,
+ * which clients open with `firefox.connect(ws.playwright)` (Playwright 1.58).
+ */
+async function firefoxConnectFields(launch: unknown) {
+  const owner = isFirefoxLaunch(launch) ? launch.firefoxOwner : null;
+  const { endpoint } = owner ? await callFirefoxOwner<{ endpoint?: unknown }>(owner, "playwright-endpoint", {}) : {};
+  if (typeof endpoint !== "string" || !endpoint) throw new Error("Firefox browser endpoint is unavailable");
+  return { ...firefoxPublicFields(), ws: { playwright: endpoint } };
 }
 
 async function captureFirefoxSession(store: ProfileStore, profileId: string, owner: FirefoxOwner): Promise<void> {
@@ -97,7 +108,7 @@ async function activeResponse(
 
   const launch = store.getLaunch(profileId);
   if (alive && isFirefoxEngine(launch)) {
-    return ok({ status: "Active", lifecycle: "running", ...firefoxPublicFields() });
+    return ok({ status: "Active", lifecycle: "running", ...await firefoxConnectFields(launch) });
   }
   if (alive && launch?.ws) {
     return ok({ status: "Active", lifecycle: "running", ws: { puppeteer: launch.ws, selenium: "" } });
@@ -220,7 +231,7 @@ export async function handleRequest(
     try {
       const launchArgs = parseLaunchArgs(searchParams.get("launch_args"));
       const { ws, port } = await launcher.start(userId, launchArgs);
-      if (isFirefoxEngine(store.getLaunch(userId)) || ws.startsWith("firefox://")) return ok(firefoxPublicFields());
+      if (isFirefoxEngine(store.getLaunch(userId)) || ws.startsWith("firefox://")) return ok(await firefoxConnectFields(store.getLaunch(userId)));
       return ok({
         ws: { puppeteer: ws, selenium: "" },
         debug_port: String(port),
@@ -324,6 +335,9 @@ export async function handleRemoteBrowserControl(
   try {
     if (pathname === "/api/v1/browser/start") {
       const r = await coord.open(userId, parseLaunchArgs(searchParams.get("launch_args")));
+      if (r.ok && r.ws?.startsWith("firefox://")) {
+        return ok({ ...await firefoxConnectFields(store.getLaunch(userId)), ...(r.warning ? { warning: r.warning } : {}) });
+      }
       if (r.ok) {
         return ok({
           ws: { puppeteer: r.ws, selenium: "" },
@@ -365,6 +379,9 @@ export async function handleCloudBrowserControl(
       const result = await cloudBrowser.open(userId, parseLaunchArgs(searchParams.get("launch_args")));
       if (!result.ok) return fail(result.error ?? "open failed");
       if (!result.ws || result.port === undefined) return fail("open returned no browser connection");
+      if (result.ws.startsWith("firefox://")) {
+        return ok({ ...await firefoxConnectFields(store.getLaunch(userId)), ...(result.warning ? { warning: result.warning } : {}) });
+      }
       return ok({
         ws: { puppeteer: result.ws, selenium: "" },
         debug_port: String(result.port),

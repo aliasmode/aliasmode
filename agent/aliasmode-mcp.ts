@@ -226,14 +226,15 @@ async function playwright(args: string[]): Promise<unknown> {
       headless: has(rest, "headless"),
     });
     try {
-      if (opened.engine === "firefox") {
-        throw new Error("Firefox scripts run through the AliasMode script library");
-      }
+      // Firefox has no CDP; its owner serves a private Playwright endpoint instead.
+      const env = opened.engine === "firefox"
+        ? { ALIASMODE_PLAYWRIGHT_ENDPOINT: (await client.call("firefox.playwrightEndpoint", { profileId })).endpoint }
+        : { ALIASMODE_CDP_ENDPOINT: opened.ws };
       const output = await new Promise<string>((resolveOutput, reject) => {
         const child = spawn(node, [runner, resolve(file)], {
           windowsHide: true,
           stdio: ["pipe", "pipe", "pipe"],
-          env: childEnvironment({ ALIASMODE_CDP_ENDPOINT: opened.ws }),
+          env: childEnvironment(env),
         });
         let stdout = "";
         child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });

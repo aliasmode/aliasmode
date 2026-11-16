@@ -561,7 +561,9 @@ export const restoreParkedSession = (id: string) =>
 export const importInbox = () => post("/ui/api/import");
 
 // ---- Extensions registry ----------------------------------------------------
-export interface Extension { id: string; name: string; }
+export interface Extension { id: string; name: string; engine: "chromium" | "firefox"; }
+/** Firefox add-on IDs are `name@domain` or `{uuid}`; Chrome IDs never contain `@` or braces. */
+export const extensionEngine = (id: string): Extension["engine"] => /@|^\{.*\}$/.test(id) ? "firefox" : "chromium";
 export async function fetchExtensions(): Promise<Extension[]> {
   const path = "/ui/api/extensions";
   const r = await fetch(path);

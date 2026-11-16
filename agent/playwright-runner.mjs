@@ -1,10 +1,11 @@
 import { pathToFileURL } from "node:url";
-import { chromium } from "playwright-core";
+import { chromium, firefox } from "playwright-core";
 
 process.stdin.resume();
 process.stdin.once("end", () => process.exit(1));
 
-const endpoint = process.env.ALIASMODE_CDP_ENDPOINT;
+const playwrightEndpoint = process.env.ALIASMODE_PLAYWRIGHT_ENDPOINT;
+const endpoint = playwrightEndpoint || process.env.ALIASMODE_CDP_ENDPOINT;
 const scriptPath = process.argv[2];
 if (!endpoint || !scriptPath) {
   process.stdout.write(`${JSON.stringify({ ok: false, error: "runner input is missing" })}\n`);
@@ -17,7 +18,9 @@ if (endpoint.startsWith("firefox://")) {
 
 let browser;
 try {
-  browser = await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
+  browser = playwrightEndpoint
+    ? await firefox.connect(endpoint, { timeout: 30_000 })
+    : await chromium.connectOverCDP(endpoint, { timeout: 30_000 });
   const context = browser.contexts()[0];
   if (!context) throw new Error("AliasMode browser context is unavailable");
   const pages = context.pages();

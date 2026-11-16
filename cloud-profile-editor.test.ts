@@ -166,7 +166,7 @@ test("a Firefox Cloud screen edit saves the screen with its usable area and a wi
 });
 
 test("Firefox Cloud edits reject conversion and unsupported identity edits before moving", async () => {
-  for (const set of [{ engine: "chromium" }, { platformOs: "macos" }, { extensions: ["chrome-extension"] }]) {
+  for (const set of [{ engine: "chromium" }, { platformOs: "macos" }]) {
     const writes: string[] = [];
     const editor = new CloudProfileEditor({
       getProfile: async () => ({ ...response(), payload: firefoxPayload() }),

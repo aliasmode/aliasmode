@@ -1394,19 +1394,19 @@ test("single edits reject malformed resolutions without changing stored identity
   }
 });
 
-test("Firefox profiles reject Chrome extension changes", async () => {
+test("Firefox profiles save add-on assignments", async () => {
   const s = store();
   s.upsertProfile(firefoxProfile(s, "firefox-ext"));
   const res = await handleUiRequest(
     new Request("http://x/ui/api/profiles/firefox-ext/update", {
       method: "POST",
-      body: JSON.stringify({ set: { extensions: ["chrome-extension"] } }),
+      body: JSON.stringify({ set: { extensions: ["uBlock0@raymondhill.net"] } }),
     }),
     {} as any,
     s,
   );
-  expect(res!.status).toBe(500);
-  expect((await res!.json()).error).toMatch(/Firefox profiles/);
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("firefox-ext")!.extensions).toEqual(["uBlock0@raymondhill.net"]);
   s.close();
 });
 

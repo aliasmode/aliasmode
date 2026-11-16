@@ -250,6 +250,22 @@ test("Firefox MCP relays official schemas and calls through the authenticated ma
   ]);
 });
 
+test("Firefox gives the CLI script runner its private Playwright endpoint", async () => {
+  const h = harness({ active: true, firefox: true });
+  const operations: string[] = [];
+  const session = new AgentControlSession({
+    ...h.deps,
+    firefoxCall: async (_owner, operation) => {
+      operations.push(operation);
+      return { endpoint: "ws://127.0.0.1:41234/secret" };
+    },
+  });
+  expect(await session.enqueue(wire("firefox.playwrightEndpoint", { profileId: "profile1" }))).toMatchObject({
+    ok: true, result: { endpoint: "ws://127.0.0.1:41234/secret" },
+  });
+  expect(operations).toEqual(["playwright-endpoint"]);
+});
+
 test("an existing browser rejects a launch-mode change", async () => {
   const h = harness({ active: true });
   const response = await h.session.enqueue(wire("browser.open", {

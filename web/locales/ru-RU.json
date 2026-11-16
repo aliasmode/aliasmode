@@ -258,7 +258,7 @@
   "(comma-separated)": "(через запятую)",
   "(select type first · host:port:username:password)": "(сначала выберите тип · host:port:username:password)",
   "(ungrouped)": "(без группы)",
-  "AliasMode Firefox uses its native profile. CDP, PDF, and Chrome extensions are unavailable.": "AliasMode Firefox использует собственный профиль. CDP, PDF и расширения Chrome недоступны.",
+  "AliasMode Firefox uses its native profile. Automation connects through Playwright instead of CDP, and add-ons come from addons.mozilla.org.": "AliasMode Firefox использует собственный профиль. Автоматизация подключается через Playwright вместо CDP, а дополнения берутся с addons.mozilla.org.",
   "Authenticator": "Аутентификатор",
   "Autofill": "Автозаполнение",
   "Automatic": "Автоматически",
@@ -282,7 +282,7 @@
   "Leave blank to launch on a direct connection.": "Оставьте пустым, чтобы запускать без прокси, напрямую.",
   "Loading profile…": "Загрузка профиля…",
   "Looking up timezone and language…": "Определение часового пояса и языка…",
-  "Native Firefox profile · no CDP, PDF, or Chrome extensions.": "Собственный профиль Firefox · без CDP, PDF и расширений Chrome.",
+  "Native Firefox profile · Playwright, MCP, and Firefox add-ons.": "Собственный профиль Firefox · Playwright, MCP и дополнения Firefox.",
   "New profile": "Новый профиль",
   "Older AliasMode opened it as a desktop browser anyway: Android became Windows; iPhone/iPad became macOS. That looked usable, but it was not coherent mobile emulation.": "Прежние версии AliasMode всё равно открывали его как настольный браузер: Android превращался в Windows, а iPhone/iPad — в macOS. Это выглядело рабочим, но не было согласованной эмуляцией мобильного устройства.",
   "Operating system": "Операционная система",
@@ -719,5 +719,11 @@
   "Pressed {key}": "Нажал {key}",
   "Pressed a key": "Нажал клавишу",
   "Waited": "Подождал",
-  "Switched tabs": "Переключил вкладку"
+  "Switched tabs": "Переключил вкладку",
+  "Install from a store": "Установка из магазина",
+  "Paste a Chrome Web Store or addons.mozilla.org link, or a Chrome extension's 32-character ID.": "Вставьте ссылку из Chrome Web Store или addons.mozilla.org либо 32-символьный ID расширения Chrome.",
+  "Chrome Web Store or addons.mozilla.org link": "Ссылка из Chrome Web Store или addons.mozilla.org",
+  "Store buttons inside the browser do not install for all profiles. Paste the store link above, or upload a ZIP/CRX archive or a signed XPI file. Chrome extensions load in Chromium profiles, Firefox add-ons in Firefox profiles.": "Кнопки магазина внутри браузера не устанавливают расширение для всех профилей. Вставьте ссылку из магазина выше или загрузите архив ZIP/CRX либо подписанный файл XPI. Расширения Chrome загружаются в профилях Chromium, дополнения Firefox — в профилях Firefox.",
+  "Upload ZIP/CRX/XPI": "Загрузить ZIP/CRX/XPI",
+  "Paste a Chrome Web Store or addons.mozilla.org link": "Вставьте ссылку из Chrome Web Store или addons.mozilla.org"
 }
