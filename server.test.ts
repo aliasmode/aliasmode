@@ -433,22 +433,53 @@ test("active returns the live ws endpoint while running (AdsPower parity)", asyn
   expect(body.data.ws.puppeteer.startsWith("ws://")).toBe(true);
 });
 
-test("Firefox active status is usable without exposing an owner locator", async () => {
+test("Firefox active status gives a Playwright endpoint without exposing the owner locator", async () => {
+  const h = harness();
+  await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
+  const operations: string[] = [];
+  const owner = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      expect(request.headers.get("authorization")).toBe("Bearer private-token");
+      operations.push((await request.json()).operation);
+      return Response.json({ version: 1, ok: true, result: { endpoint: "ws://127.0.0.1:41234/secret" } });
+    },
+  });
+  try {
+    const launch = h.store.getLaunch("k1d0cd11")!;
+    h.store.recordLaunch({
+      ...launch,
+      engine: "firefox",
+      firefoxOwner: { endpoint: `http://127.0.0.1:${owner.port}/`, token: "private-token", pid: 12, browserPid: 13, generation: "generation" },
+    } as any);
+    h.launcher.certifiedActive = async () => true;
+
+    const body = await (await handleRequest(req("/api/v1/browser/active?user_id=k1d0cd11"), h.launcher, h.store)).json();
+    expect(body.data).toMatchObject({ status: "Active", lifecycle: "running", engine: "firefox", capabilities: expect.arrayContaining(["playwright"]) });
+    expect(body.data.ws).toEqual({ playwright: "ws://127.0.0.1:41234/secret" });
+    expect(operations).toEqual(["playwright-endpoint"]);
+    expect(JSON.stringify(body)).not.toContain(String(owner.port));
+    expect(JSON.stringify(body)).not.toContain("private-token");
+  } finally {
+    owner.stop(true);
+  }
+});
+
+test("Firefox active status stays Active without a URL when its owner does not answer", async () => {
   const h = harness();
   await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
   const launch = h.store.getLaunch("k1d0cd11")!;
   h.store.recordLaunch({
     ...launch,
     engine: "firefox",
-    firefoxOwner: { endpoint: "http://127.0.0.1:9444/", token: "private-token", pid: 12, browserPid: 13, generation: "generation" },
+    firefoxOwner: { endpoint: "http://127.0.0.1:1/", token: "private-token", pid: 12, browserPid: 13, generation: "generation" },
   } as any);
   h.launcher.certifiedActive = async () => true;
 
   const body = await (await handleRequest(req("/api/v1/browser/active?user_id=k1d0cd11"), h.launcher, h.store)).json();
-  expect(body.data).toMatchObject({ status: "Active", lifecycle: "running", engine: "firefox", capabilities: expect.any(Array) });
-  expect(JSON.stringify(body)).not.toContain("ws");
-  expect(JSON.stringify(body)).not.toContain("9444");
-  expect(JSON.stringify(body)).not.toContain("private-token");
+  expect(body).toMatchObject({ code: 0, data: { status: "Active", lifecycle: "running", engine: "firefox" } });
+  expect(body.data.ws).toBeUndefined();
 });
 
 test("active bypasses occupied admission and reports queued/admitted lifecycle conservatively", async () => {

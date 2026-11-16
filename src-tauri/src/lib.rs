@@ -265,6 +265,53 @@ fn present_import_result(app: &tauri::AppHandle, ok: bool, message: &str) {
         .blocking_show();
 }
 
+/// Brings the browser window of `pid` to the front on Windows. Firefox's own raise only restores
+/// a minimized window, and Windows lets only the active app move another app's window forward;
+/// this app is active while the user clicks "Bring to front".
+#[tauri::command]
+fn raise_window(pid: u32) {
+    #[cfg(windows)]
+    {
+        use windows::core::BOOL;
+        use windows::Win32::Foundation::{HWND, LPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+            SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
+        };
+        struct Search {
+            pid: u32,
+            found: Option<HWND>,
+        }
+        // Windows lists top-level windows front to back, so the first match is the one last used.
+        unsafe extern "system" fn visit(window: HWND, data: LPARAM) -> BOOL {
+            // SAFETY: `data` points at the Search below for the whole EnumWindows call.
+            let search = unsafe { &mut *(data.0 as *mut Search) };
+            let mut owner = 0;
+            unsafe { GetWindowThreadProcessId(window, Some(&mut owner as *mut u32)) };
+            let owned = unsafe { GetWindow(window, GW_OWNER) }.is_ok();
+            if owner == search.pid && unsafe { IsWindowVisible(window) }.as_bool() && !owned {
+                search.found = Some(window);
+                return false.into();
+            }
+            true.into()
+        }
+        let mut search = Search { pid, found: None };
+        // SAFETY: the callback reads `search` only during this call.
+        let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize)) };
+        if let Some(window) = search.found {
+            // SAFETY: plain Win32 calls on a window handle that EnumWindows returned.
+            unsafe {
+                if IsIconic(window).as_bool() {
+                    let _ = ShowWindow(window, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(window);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -499,6 +546,7 @@ pub fn run() {
             credential_get,
             credential_set,
             credential_delete,
+            raise_window,
             runtime_descriptor::agent_runtime_ready,
             runtime_descriptor::script_capability,
             shutdown::restart_after_mode_change,
@@ -650,7 +698,8 @@ pub fn run() {
                     .permission("allow-credential-bridge")
                     .permission("allow-runtime-ready")
                     .permission("allow-script-capability")
-                    .permission("allow-update-bridge"),
+                    .permission("allow-update-bridge")
+                    .permission("allow-raise-window"),
             ) {
                 return Err(error.into());
             }

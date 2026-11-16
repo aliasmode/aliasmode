@@ -17,7 +17,7 @@ test("profile identity cards do not fetch egress IP automatically", () => {
   expect(webSource).not.toContain("ip-api.com/json");
   expect(webSource).not.toContain("checking egress IP");
   expect(webSource).toContain("AliasMode Firefox");
-  expect(webSource).toContain("no CDP, PDF, or Chrome extensions");
+  expect(webSource).toContain("Playwright, MCP, and Firefox add-ons");
 });
 
 test("identity cards load stored Chromium and Firefox metadata without egress lookup", async () => {

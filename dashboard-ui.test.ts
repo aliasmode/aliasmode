@@ -327,9 +327,9 @@ test("dashboard selects browser for new profiles", () => {
     expect(catalog[note]).toContain("AliasMode Chromium");
     for (const hint of hints) expect(catalog[hint]).toBeTruthy();
   }
-  expect(app).toContain('Native Firefox profile · no CDP, PDF, or Chrome extensions');
-  expect(app).toContain('{p.engine === "chromium" && <>');
-  expect(app).toContain('selectedProfilesSupportChromeExtensions');
+  expect(app).toContain('Native Firefox profile · Playwright, MCP, and Firefox add-ons');
+  expect(app).toContain("onClick={() => act(p.id, bringToFront)}");
+  expect(app).toContain('selectedEngines.has(item.engine)');
 });
 
 test("both engines offer OS choices at creation and only Chromium allows later OS edits", () => {
@@ -360,7 +360,7 @@ test("Edit shows the profile language and flags one that does not match the time
 test("running profile rows expose Bring to front in Local and Cloud mode", () => {
   expect(app).toContain('data-tip={t("Bring to front")}');
   expect(app).toContain('aria-label={t("Bring this browser window to the front")}');
-  expect(app).toContain('onClick={() => act(p.id, raiseProfile)}');
+  expect(app).toContain('onClick={() => act(p.id, bringToFront)}');
   // The running-row branch must stay mode-agnostic: raising a window is a local
   // action on a browser this machine already opened, in Cloud mode too.
   const runningBranch = app.slice(app.indexOf("{p.running ? ("), app.indexOf(") : p.mobilePersona ? ("));
@@ -997,14 +997,14 @@ test("file update results retain partial counts and per-profile failures before 
   expect(modal).toMatch(/\{!isCloudMode && <li>[^\n]*<code>custom_no<\/code>/);
 });
 
-test("the existing Extensions page installs from a Web Store URL and keeps archive upload", () => {
-  expect(app).toContain("Install from Chrome Web Store");
-  expect(app).toContain('aria-label={t("Chrome Web Store URL or extension ID")}');
+test("the existing Extensions page installs from a Chrome Web Store or addons.mozilla.org link and keeps archive upload", () => {
+  expect(app).toContain("Install from a store");
+  expect(app).toContain('aria-label={t("Chrome Web Store or addons.mozilla.org link")}');
   expect(app).toContain("installWebStoreExtension(source)");
-  expect(app).toContain("The in-browser Store button does not work in CloakBrowser");
+  expect(app).toContain("Chrome extensions load in Chromium profiles, Firefox add-ons in Firefox profiles.");
   expect(app).toContain('t("Edit > Extensions")');
-  expect(app).toContain("Upload ZIP/CRX");
-  expect(app).toContain('accept=".zip,.crx,application/zip,application/x-chrome-extension"');
+  expect(app).toContain("Upload ZIP/CRX/XPI");
+  expect(app).toContain('accept=".zip,.crx,.xpi,application/zip,application/x-chrome-extension,application/x-xpinstall"');
   expect(app).not.toContain("Chrome Web Store installs are not supported in AliasMode");
   expect(app.match(/setView\("extensions"\)/g)).toHaveLength(1);
 });
@@ -1016,7 +1016,8 @@ test("extensions can be assigned to Cloud profiles and groups without losing mis
   expect(app).toContain("new Set([...editInitialExts, ...editExts])");
   expect(app).toContain("new Set([...storedGroupDefaultExts, ...groupDefaultExts])");
   expect(app).toContain("Cloud assignments remain and will show as not installed here.");
-  expect(app).toContain("{editEngine === \"chromium\" && editExtensionChoices.length > 0 && (");
+  expect(app).toContain("{editExtensionChoices.length > 0 && (");
+  expect(app).toContain("extensionEngine(id) === editEngine");
   expect(app).toContain("Group defaults");
   expect(app).toContain("fetchGroupExtensionDefaults()");
   expect(app).toContain("setGroupExtensionDefaults(groupDefaultName, groupDefaultExts)");

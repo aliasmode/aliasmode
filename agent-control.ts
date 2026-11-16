@@ -53,7 +53,7 @@ export interface AgentControlDeps {
   log?: (message: string) => void;
 }
 
-const FIREFOX_CAPABILITIES = ["firefox-native", "cookies", "navigation", "sessions", "mcp", "scripts"] as const;
+const FIREFOX_CAPABILITIES = ["firefox-native", "cookies", "navigation", "sessions", "mcp", "scripts", "playwright"] as const;
 
 type FirefoxLaunch = { engine?: "chromium" | "firefox"; firefoxOwner?: FirefoxOwner };
 
@@ -246,6 +246,8 @@ export class AgentControlSession {
           name: stringParam(params, "name"),
           ...(params.arguments === undefined ? {} : { arguments: object(params.arguments) }),
         });
+      case "firefox.playwrightEndpoint":
+        return await this.firefoxCall(stringParam(params, "profileId"), "playwright-endpoint", {});
       case "browser.detach":
         return this.detachProfile(stringParam(params, "profileId"));
       case "browser.close":

@@ -877,3 +877,28 @@ test("the first background fetch removes font packs that are no longer pinned", 
   f.launcher.prefetchFirefoxFontPacks([]);
   expect(existsSync(join(packs, "macos-0000000000000000"))).toBe(false);
 });
+
+test("Firefox copies assigned add-ons into its profile and removes only the ones AliasMode placed", async () => {
+  const f = fixture();
+  const addonDir = join(f.options.dataRoot!, "addons");
+  mkdirSync(addonDir, { recursive: true });
+  for (const id of ["uBlock0@raymondhill.net", "addon@darkreader.org"]) {
+    writeFileSync(join(addonDir, `${id}.xpi`), id);
+    f.store.addExtension({ id, name: id, loadDir: join(addonDir, `${id}.xpi`) });
+  }
+  const placed = join(f.options.dataRoot!, f.profile.id, "extensions");
+  f.store.upsertProfile({ ...f.profile, extensions: ["uBlock0@raymondhill.net", "addon@darkreader.org", "chromeextensionid", "missing@example.com"] });
+  await f.launcher.start(f.profile.id);
+  expect(readFileSync(join(placed, "uBlock0@raymondhill.net.xpi"), "utf8")).toBe("uBlock0@raymondhill.net");
+  expect(existsSync(join(placed, "addon@darkreader.org.xpi"))).toBe(true);
+  expect(existsSync(join(placed, "chromeextensionid.xpi"))).toBe(false);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+
+  writeFileSync(join(placed, "own@user.example.xpi"), "installed in the browser");
+  f.store.upsertProfile({ ...f.store.getProfile(f.profile.id)!, extensions: ["addon@darkreader.org"] });
+  await f.launcher.start(f.profile.id);
+  expect(existsSync(join(placed, "uBlock0@raymondhill.net.xpi"))).toBe(false);
+  expect(existsSync(join(placed, "addon@darkreader.org.xpi"))).toBe(true);
+  expect(existsSync(join(placed, "own@user.example.xpi"))).toBe(true);
+  expect(await f.launcher.stop(f.profile.id)).toBe(true);
+});

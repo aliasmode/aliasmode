@@ -158,11 +158,7 @@ export function applyProfileEdits(profile: Profile, set: Record<string, unknown>
     if (proxyChanged && profile.engine !== "firefox" && !("timezone" in set) && !profile.timezoneManual) profile.timezone = "";
   }
   if ("extensions" in set) {
-    const extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
-    if (profile.engine === "firefox" && extensions.length) {
-      throw new CloudProfileEditorError("Chrome extensions are not supported by Firefox profiles", 400);
-    }
-    profile.extensions = extensions;
+    profile.extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
   }
   if ("tags" in set) {
     profile.tags = Array.isArray(set.tags)

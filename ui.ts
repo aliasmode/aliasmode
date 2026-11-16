@@ -46,8 +46,13 @@ import type { ProfileExport } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
 import { generateTotp } from "./totp.ts";
 import {
+  installAmoAddon,
   installExtension,
+  installFirefoxAddon,
   installWebStoreExtension,
+  isAmoSource,
+  isFirefoxAddonId,
+  parseAmoSlug,
   parseWebStoreExtensionId,
   removeExtensionFiles,
   type ExtensionFetch,
@@ -577,11 +582,7 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
     delete p.proxyError;
   }
   if ("extensions" in set) {
-    const extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
-    if (profileEngine(p) === "firefox" && extensions.length > 0) {
-      throw new Error("Chrome extensions are unavailable for Firefox profiles");
-    }
-    p.extensions = extensions;
+    p.extensions = Array.isArray(set.extensions) ? set.extensions.map(String) : [];
   }
   if ("tags" in set) {
     p.tags = Array.isArray(set.tags)
@@ -2042,7 +2043,10 @@ export async function handleUiRequest(
 
   // --- Extensions registry (upload / list / delete) ---
   if (pathname === "/ui/api/extensions" && req.method === "GET") {
-    return Response.json({ ok: true, extensions: store.listExtensions().map((e) => ({ id: e.id, name: e.name })) });
+    return Response.json({
+      ok: true,
+      extensions: store.listExtensions().map((e) => ({ id: e.id, name: e.name, engine: isFirefoxAddonId(e.id) ? "firefox" : "chromium" })),
+    });
   }
 
   if (pathname === "/ui/api/extensions/web-store" && req.method === "POST") {
@@ -2054,11 +2058,12 @@ export async function handleUiRequest(
     try {
       const body = (await req.json()) as { source?: unknown };
       source = String(body.source ?? "").trim();
-      id = parseWebStoreExtensionId(source);
+      id = isAmoSource(source) ? "" : parseWebStoreExtensionId(source);
+      if (!id) parseAmoSlug(source);
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 400 });
     }
-    const existing = store.getExtension(id);
+    const existing = id ? store.getExtension(id) : null;
     if (existing) {
       return Response.json({
         ok: true,
@@ -2067,11 +2072,12 @@ export async function handleUiRequest(
       });
     }
     try {
-      const installed = await installWebStoreExtension(
-        source,
-        options.paths?.extensions,
-        options.extensionFetch,
-      );
+      // An addons.mozilla.org link names a slug; its add-on ID is known only after the lookup.
+      const installed = id
+        ? await installWebStoreExtension(source, options.paths?.extensions, options.extensionFetch)
+        : await installAmoAddon(source, options.paths?.extensions, options.extensionFetch);
+      const alreadyInstalled = !id && !!store.getExtension(installed.id);
+      id = installed.id;
       try {
         store.addExtension({ id, name: installed.name, loadDir: installed.loadDir });
       } catch (error) {
@@ -2081,7 +2087,7 @@ export async function handleUiRequest(
       return Response.json({
         ok: true,
         installed: { id, name: installed.name },
-        alreadyInstalled: false,
+        alreadyInstalled,
       });
     } catch (error) {
       return Response.json({ ok: false, error: msg(error) }, { status: 500 });
@@ -2089,16 +2095,23 @@ export async function handleUiRequest(
   }
 
   if (pathname === "/ui/api/extensions/upload" && req.method === "POST") {
+    // A page on another site can post a form here without a preflight; an add-on names its own ID.
+    const origin = req.headers.get("origin");
+    if (origin && origin !== new URL(req.url).origin) {
+      return Response.json({ ok: false, error: "cross-origin requests are forbidden" }, { status: 403 });
+    }
     if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
     try {
       const form = await req.formData();
       const installed: Array<{ id: string; name: string }> = [];
       for (const [, value] of form) {
         if (!(value instanceof File)) continue;
-        const id = "ext" + crypto.randomUUID().replace(/-/g, "").slice(0, 12);
         const bytes = new Uint8Array(await value.arrayBuffer());
-        const fallback = value.name.replace(/\.(zip|crx)$/i, "");
-        const { loadDir, name } = await installExtension(bytes, id, fallback, options.paths?.extensions);
+        const fallback = value.name.replace(/\.(zip|crx|xpi)$/i, "");
+        const chromeId = "ext" + crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+        const { id, loadDir, name } = /\.xpi$/i.test(value.name)
+          ? await installFirefoxAddon(bytes, fallback, options.paths?.extensions)
+          : { id: chromeId, ...await installExtension(bytes, chromeId, fallback, options.paths?.extensions) };
         store.addExtension({ id, name, loadDir });
         installed.push({ id, name });
       }
@@ -2135,6 +2148,8 @@ export async function handleUiRequest(
 
   // Bulk assign / unassign one extension across many selected profiles.
   if (pathname === "/ui/api/profiles/extensions" && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
     if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
     try {
       const body = (await req.json()) as { ids?: unknown; extensionId?: unknown; op?: unknown };
@@ -2142,13 +2157,12 @@ export async function handleUiRequest(
       const extId = String(body.extensionId ?? "").trim();
       const add = body.op !== "remove";
       if (!ids.length || !extId) return Response.json({ ok: false, error: "ids and extensionId required" }, { status: 400 });
-      const firefoxIds = ids.filter((id) => profileEngine(store.getProfile(id)) === "firefox");
-      if (firefoxIds.length > 0) {
-        return Response.json({ ok: false, error: "Chrome extensions are unavailable for Firefox profiles" }, { status: 400 });
-      }
       if (add && !store.getExtension(extId)) return Response.json({ ok: false, error: "unknown extension" }, { status: 404 });
+      // A Chrome extension goes only to Chromium profiles and a Firefox add-on only to Firefox profiles.
+      const engine = isFirefoxAddonId(extId) ? "firefox" : "chromium";
+      const targets = add ? ids.filter((id) => profileEngine(store.getProfile(id)) === engine) : ids;
       // An open browser loads the change at its next start.
-      return Response.json({ ok: true, updated: store.assignExtension(ids, extId, add) });
+      return Response.json({ ok: true, updated: store.assignExtension(targets, extId, add) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }
@@ -2335,12 +2349,7 @@ export async function handleUiRequest(
     // Raising the window is a purely LOCAL operation (the browser runs on this operator in both
     // modes; bringToFront uses the local launch record + CDP), so it works in remote mode too.
     try {
-      const id = decodeURIComponent(raise[1]!);
-      if (profileEngine(store.getProfile(id)) === "firefox") {
-        return Response.json({ ok: false, error: "bringing a Firefox profile to the front is unavailable" }, { status: 400 });
-      }
-      await launcher.bringToFront(id);
-      return Response.json({ ok: true });
+      return Response.json({ ok: true, ...await launcher.bringToFront(decodeURIComponent(raise[1]!)) });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
     }

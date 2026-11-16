@@ -38,6 +38,7 @@ import type { ProfileStore } from "./store.ts";
 import { lookupProxyExitLocation, type ExitLocation } from "./geoip.ts";
 import type { AutofillBridge } from "./autofill-bridge.ts";
 import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-extension.ts";
+import { isFirefoxAddonId } from "./extensions.ts";
 import { allocatePort } from "./ports.ts";
 import {
   DEFAULT_WINDOW_HEIGHT_SCALE, DEFAULT_WINDOW_WIDTH_SCALE, deriveFingerprintFlags, isMobileUserAgent, launchWindowSize,
@@ -261,7 +262,6 @@ const PREFLIGHT_GUIDANCE = {
   persona_mobile: "This profile has a mobile user agent. Use a desktop browser profile.",
   persona_unsupported: "This profile's user agent has no recognized desktop platform. Check its saved browser identity.",
   firefox_configuration: "The saved Firefox configuration is missing or incompatible with this runtime. Use a matching AliasMode runtime and profile export.",
-  firefox_extensions: "This Firefox profile contains Chrome extensions. Remove them before opening it.",
   firefox_host: "Firefox requires macOS, Linux x64, or Windows x64.",
   firefox_arguments: "Firefox profiles cannot use Chromium launch arguments.",
   firefox_fonts_download: "The fonts for this profile's operating system could not be downloaded. Check your internet connection, then open the profile again.",
@@ -1381,12 +1381,42 @@ export class Launcher {
     }
   }
 
+  /**
+   * Firefox enables a signed `<id>.xpi` in the profile's extensions folder at its next start
+   * (the engine sets autoDisableScopes 0). A list file records which files AliasMode placed,
+   * so unassigning removes only those and never an add-on the user installed in the browser.
+   */
+  private syncFirefoxAddons(profile: Profile, userDataDir: string): void {
+    const dir = join(userDataDir, "extensions");
+    const listPath = join(userDataDir, "aliasmode-addons.json");
+    let placed: string[] = [];
+    try { placed = JSON.parse(readFileSync(listPath, "utf8")); } catch {}
+    const assigned: string[] = [];
+    const missing: string[] = [];
+    for (const id of profile.extensions ?? []) {
+      if (!isFirefoxAddonId(id)) continue;
+      const addon = this.store.getExtension(id);
+      if (!addon || !existsSync(addon.loadDir)) { missing.push(id); continue; }
+      mkdirSync(dir, { recursive: true });
+      const target = join(dir, `${id}.xpi`);
+      // Copy only on change: a new file time makes Firefox reinstall the add-on.
+      if (!existsSync(target) || !readFileSync(target).equals(readFileSync(addon.loadDir))) copyFileSync(addon.loadDir, target);
+      assigned.push(id);
+    }
+    for (const id of Array.isArray(placed) ? placed : []) {
+      if (typeof id === "string" && isFirefoxAddonId(id) && !assigned.includes(id)) rmSync(join(dir, `${id}.xpi`), { force: true });
+    }
+    if (assigned.length || placed.length) writeFileSync(listPath, JSON.stringify(assigned));
+    if (missing.length) {
+      this.log(`profile ${profile.id}: assigned add-on${missing.length > 1 ? "s" : ""} ${missing.join(", ")} not installed on this device; skipped`);
+    }
+  }
+
   private assertHostCompatibility(profile: Profile): void {
     if (profile.engine === "firefox") {
       if (!profile.firefox || profile.firefox.version !== 1 || profile.firefox.runtimeVersion !== FIREFOX_RUNTIME_VERSION) {
         throw new BrowserLaunchError("preflight", "firefox_configuration");
       }
-      if (profile.extensions?.length) throw new BrowserLaunchError("preflight", "firefox_extensions");
       if (this.enforceHostCompatibility && !supportsFirefoxHost(this.hostPlatform, this.hostArch)) {
         throw new BrowserLaunchError("preflight", "firefox_host");
       }
@@ -1531,6 +1561,7 @@ export class Launcher {
     const extDirs: string[] = [];
     const missingExtensionIds: string[] = [];
     for (const id of profile.extensions ?? []) {
+      if (isFirefoxAddonId(id)) continue;
       const extension = this.store.getExtension(id);
       if (extension) extDirs.push(extension.loadDir);
       else missingExtensionIds.push(id);
@@ -2660,6 +2691,7 @@ export class Launcher {
     // Read before spawn: Firefox replaces its session files soon after it starts.
     const sessionCookies = nativeSessionLoaded && !restoreLastSession ? firefoxSessionCookies(userDataDir) : [];
     writeFirefoxStartupPage(userDataDir, restoreLastSession);
+    this.syncFirefoxAddons(profile, userDataDir);
     // A macOS profile on an Intel Mac shows a card of that Mac's GPU vendor (firefoxLaunchConfig).
     const intelMac = this.hostPlatform === "darwin" && this.hostArch === "x64" && firefoxPersonaOs(profile) === "macos"
       ? { vendor: await this.macGraphicsVendorFn() }
@@ -4115,15 +4147,17 @@ export class Launcher {
    * window among many open profiles. Uses CDP Browser.setWindowBounds: a
    * minimize→normal cycle which forces the window manager to re-raise + focus.
    */
-  async bringToFront(profileId: string): Promise<void> {
+  async bringToFront(profileId: string): Promise<{ browserPid?: number }> {
     const launch = this.store.getLaunch(profileId);
     if (!launch) throw new Error("profile is not running");
     if (launch.engine === "firefox" && launch.firefoxOwner) {
       await this.firefoxStatus(launch);
       await this.firefoxRuntime.call(launch.firefoxOwner, "bring-to-front", {});
-      return;
+      // The desktop app raises the window by this process on Windows (see raise_window).
+      return this.hostPlatform === "win32" ? { browserPid: launch.firefoxOwner.browserPid } : {};
     }
     await raiseWindow(launch.ws);
+    return {};
   }
 
   /**

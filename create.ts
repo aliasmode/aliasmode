@@ -15,6 +15,7 @@ import { completeProfileFingerprint, createFirefoxProfileConfig, normalizeChromi
 import { chromiumDeviceScale, defaultChromiumRuntime, hostDisplayScale, hostDisplaySize } from "./aliasmode-chromium.ts";
 import { deterministicSeed, generateProfileHardware, hostPlatformOs } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
+import { isFirefoxAddonId } from "./extensions.ts";
 import { parseStrictCustomNo, parseStrictResolution, parsePlatformOs } from "./parse.ts";
 
 export interface NewProfileInput {
@@ -166,7 +167,7 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
  * timezone. Chrome extensions need Chromium.
  */
 export function withDefaultBrowser(profile: Profile): Profile {
-  const engine = profile.engine ?? (profile.extensions?.length ? "chromium" : defaultProfileEngine());
+  const engine = profile.engine ?? (profile.extensions?.some((id) => !isFirefoxAddonId(id)) ? "chromium" : defaultProfileEngine());
   if (engine === "chromium") {
     const chromiumRuntime = defaultChromiumRuntime();
     return { ...profile, engine, ...(chromiumRuntime ? { chromiumRuntime } : {}) };

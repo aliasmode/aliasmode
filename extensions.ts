@@ -6,8 +6,9 @@
  */
 
 import { join, resolve } from "node:path";
-import { existsSync, readdirSync, statSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { extractZipTo, parseArchive } from "./unzip.ts";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, statSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { extractZipTo, parseArchive, zipEntries } from "./unzip.ts";
 
 export const DEFAULT_EXTENSIONS_ROOT = "extensions";
 
@@ -142,6 +143,93 @@ export async function installWebStoreExtension(
   if (archive.extensionId !== id) throw new Error("downloaded extension identity does not match the requested Chrome Web Store ID");
   const installed = await installExtension(bytes, id, id, root);
   return { id, ...installed };
+}
+
+// Firefox add-on IDs are `name@domain` or `{uuid}`. Chrome IDs never contain `@` or braces,
+// so an assignment's engine follows from the ID alone, also on devices without the add-on.
+const FIREFOX_ADDON_ID = /^(?:[a-z0-9._+-]*@[a-z0-9._-]+|\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\})$/i;
+const AMO_API = "https://addons.mozilla.org/api/v5/addons/addon/";
+
+export function isFirefoxAddonId(id: string): boolean {
+  return FIREFOX_ADDON_ID.test(id);
+}
+
+/** Extract the add-on slug from an addons.mozilla.org detail URL. */
+export function parseAmoSlug(source: string): string {
+  try {
+    const url = new URL(source.trim());
+    const parts = url.pathname.split("/").filter(Boolean);
+    const at = parts.indexOf("addon");
+    const slug = at >= 0 ? parts[at + 1] ?? "" : "";
+    if (url.protocol === "https:" && url.hostname === "addons.mozilla.org" && parts.includes("firefox") && /^[\w.@{}%-]+$/.test(slug)) {
+      return decodeURIComponent(slug);
+    }
+  } catch {}
+  throw new Error("enter an addons.mozilla.org add-on URL");
+}
+
+export function isAmoSource(source: string): boolean {
+  try { return new URL(source.trim()).hostname === "addons.mozilla.org"; } catch { return false; }
+}
+
+/**
+ * Store a signed Firefox add-on as `<root>/<id>/<id>.xpi`; the launcher copies it into each
+ * assigned profile's extensions folder. `knownId` comes from addons.mozilla.org, whose signed
+ * files may carry the ID only in their signature. Uploads must name their ID in manifest.json.
+ */
+export async function installFirefoxAddon(
+  bytes: Uint8Array,
+  fallbackName: string,
+  root = DEFAULT_EXTENSIONS_ROOT,
+  knownId?: string,
+): Promise<InstalledExtension & { id: string }> {
+  let manifest: any = null;
+  let signed = false;
+  for await (const entry of zipEntries(bytes)) {
+    if (entry.name === "manifest.json") manifest = JSON.parse(new TextDecoder().decode(await entry.bytes()));
+    if (/^META-INF\/mozilla\.rsa$/i.test(entry.name)) signed = true;
+  }
+  if (!manifest) throw new Error("no manifest.json found in the add-on");
+  if (!signed) throw new Error("this add-on is not signed by Mozilla; install it from its addons.mozilla.org link");
+  const gecko = manifest.browser_specific_settings?.gecko ?? manifest.applications?.gecko;
+  const id = knownId ?? (typeof gecko?.id === "string" ? gecko.id : "");
+  if (!id) throw new Error("this add-on file has no ID; install it from its addons.mozilla.org link");
+  if (!isFirefoxAddonId(id)) throw new Error("this add-on has an invalid ID");
+  const dir = resolve(root, id);
+  const loadDir = join(dir, `${id}.xpi`);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(loadDir, bytes);
+  const name = typeof manifest.name === "string" && manifest.name.trim() && !manifest.name.startsWith("__MSG_")
+    ? manifest.name.trim()
+    : fallbackName;
+  return { id, loadDir, name };
+}
+
+/** Download and store the current signed version of an addons.mozilla.org add-on. */
+export async function installAmoAddon(
+  source: string,
+  root = DEFAULT_EXTENSIONS_ROOT,
+  fetcher: ExtensionFetch = fetch,
+): Promise<InstalledExtension & { id: string }> {
+  const slug = parseAmoSlug(source);
+  const response = await fetcher(`${AMO_API}${encodeURIComponent(slug)}/`);
+  if (!response.ok) throw new Error(`addons.mozilla.org lookup failed (${response.status})`);
+  const addon = await response.json() as any;
+  const file = addon?.current_version?.file;
+  if (addon?.type !== "extension" || typeof addon.guid !== "string" || typeof file?.url !== "string") {
+    throw new Error("addons.mozilla.org has no installable extension at this link");
+  }
+  const download = await fetcher(file.url, { redirect: "follow" });
+  if (!download.ok) throw new Error(`addons.mozilla.org download failed (${download.status})`);
+  const bytes = new Uint8Array(await download.arrayBuffer());
+  const expected = typeof file.hash === "string" && file.hash.startsWith("sha256:") ? file.hash.slice(7) : "";
+  if (!expected || createHash("sha256").update(bytes).digest("hex") !== expected) {
+    throw new Error("the downloaded add-on does not match addons.mozilla.org");
+  }
+  const names = addon.name && typeof addon.name === "object" ? addon.name : {};
+  const name = names["en-US"] ?? names[addon.default_locale] ?? Object.values(names)[0] ?? slug;
+  return installFirefoxAddon(bytes, String(name), root, addon.guid);
 }
 
 /** Remove an installed extension's files. `id` must be the install id (a path segment). */

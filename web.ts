@@ -100,7 +100,7 @@ function renderProfileCard(store: ProfileStore, id: string): Response {
   // Named as in the dashboard.
   const browser = engine === "firefox" ? "AliasMode Firefox" : p.chromiumRuntime ? "AliasMode Chromium" : "CloakBrowser";
   const capabilities = engine === "firefox"
-    ? "Native Firefox profile · no CDP, PDF, or Chrome extensions"
+    ? "Native Firefox profile · Playwright, MCP, and Firefox add-ons"
     : "CDP, PDF, and Chrome extensions";
   // Same number the browser window title and identity bookmark show: the
   // operator's custom NO. first, the store serial as fallback.

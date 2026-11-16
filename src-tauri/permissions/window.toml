@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-raise-window"
+description = "Allows the AliasMode UI to bring a running browser window to the front."
+commands.allow = ["raise_window"]

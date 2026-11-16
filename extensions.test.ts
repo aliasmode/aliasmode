@@ -4,7 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  installAmoAddon,
+  installFirefoxAddon,
   installWebStoreExtension,
+  isFirefoxAddonId,
+  parseAmoSlug,
   parseWebStoreExtensionId,
   readManifestName,
 } from "./extensions.ts";
@@ -153,4 +157,54 @@ test("does not read localized names outside the extension directory", () => {
   }));
 
   expect(readManifestName(dir, "Fallback Name")).toBe("Fallback Name");
+});
+
+test("reads add-on slugs from addons.mozilla.org links and tells Firefox IDs from Chrome IDs", () => {
+  expect(parseAmoSlug("https://addons.mozilla.org/en-US/firefox/addon/ublock-origin/")).toBe("ublock-origin");
+  expect(parseAmoSlug("https://addons.mozilla.org/firefox/addon/darkreader/?utm_source=x")).toBe("darkreader");
+  expect(() => parseAmoSlug("https://example.com/firefox/addon/ublock-origin/")).toThrow();
+  expect(() => parseAmoSlug("https://addons.mozilla.org/en-US/firefox/")).toThrow();
+  expect(isFirefoxAddonId("uBlock0@raymondhill.net")).toBe(true);
+  expect(isFirefoxAddonId("{d10d0bf8-f5b5-c8b4-a8b2-2b9879e08c5d}")).toBe(true);
+  expect(isFirefoxAddonId("cjpalhdlnbpafiamejdnhcphjbkeiagm")).toBe(false);
+  expect(isFirefoxAddonId("ext0123456789ab")).toBe(false);
+  expect(isFirefoxAddonId("../x@y")).toBe(false);
+});
+
+test("installs the signed addons.mozilla.org file under the add-on ID the site names", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-amo-"));
+  // A signed AMO file may name no ID in its manifest; the ID lives in its signature.
+  const xpi = storedZip({ "manifest.json": JSON.stringify({ name: "Dark Reader" }), "META-INF/mozilla.rsa": "sig" });
+  const hash = createHash("sha256").update(xpi).digest("hex");
+  const requested: string[] = [];
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    requested.push(url);
+    if (url.includes("/api/v5/")) {
+      return Response.json({
+        guid: "addon@darkreader.org", type: "extension", name: { "en-US": "Dark Reader" },
+        current_version: { file: { url: "https://addons.mozilla.org/firefox/downloads/file/1/darkreader.xpi", hash: `sha256:${hash}` } },
+      });
+    }
+    return new Response(Buffer.from(xpi));
+  };
+  const installed = await installAmoAddon("https://addons.mozilla.org/en-US/firefox/addon/darkreader/", root, fetcher);
+  expect(requested[0]).toBe("https://addons.mozilla.org/api/v5/addons/addon/darkreader/");
+  expect(installed).toEqual({ id: "addon@darkreader.org", name: "Dark Reader", loadDir: join(root, "addon@darkreader.org", "addon@darkreader.org.xpi") });
+  expect(readFileSync(installed.loadDir).equals(Buffer.from(xpi))).toBe(true);
+
+  const tampered = async (input: string | URL | Request) =>
+    String(input).includes("/api/v5/") ? fetcher(input) : new Response(Buffer.from(storedZip({ "manifest.json": "{}", "META-INF/mozilla.rsa": "x" })));
+  await expect(installAmoAddon("https://addons.mozilla.org/firefox/addon/darkreader/", root, tampered)).rejects.toThrow(/does not match/);
+});
+
+test("an uploaded add-on needs a Mozilla signature and an ID in its manifest", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aliasmode-xpi-"));
+  const manifest = JSON.stringify({ name: "uBlock Origin", browser_specific_settings: { gecko: { id: "uBlock0@raymondhill.net" } } });
+  const installed = await installFirefoxAddon(storedZip({ "manifest.json": manifest, "META-INF/mozilla.rsa": "sig" }), "ublock", root);
+  expect(installed.id).toBe("uBlock0@raymondhill.net");
+  expect(installed.name).toBe("uBlock Origin");
+  expect(existsSync(installed.loadDir)).toBe(true);
+  await expect(installFirefoxAddon(storedZip({ "manifest.json": manifest }), "x", root)).rejects.toThrow(/not signed/);
+  await expect(installFirefoxAddon(storedZip({ "manifest.json": "{}", "META-INF/mozilla.rsa": "sig" }), "x", root)).rejects.toThrow(/no ID/);
 });
