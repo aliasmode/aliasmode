@@ -52,10 +52,16 @@ function firefoxPublicFields() {
  * which clients open with `firefox.connect(ws.playwright)` (Playwright 1.58).
  */
 async function firefoxConnectFields(launch: unknown) {
+  // The owner runs one operation at a time, so a long session capture can hold this call;
+  // the browser still runs, and the answer then simply carries no URL.
   const owner = isFirefoxLaunch(launch) ? launch.firefoxOwner : null;
-  const { endpoint } = owner ? await callFirefoxOwner<{ endpoint?: unknown }>(owner, "playwright-endpoint", {}) : {};
-  if (typeof endpoint !== "string" || !endpoint) throw new Error("Firefox browser endpoint is unavailable");
-  return { ...firefoxPublicFields(), ws: { playwright: endpoint } };
+  const result = owner
+    ? await callFirefoxOwner<{ endpoint?: unknown }>(owner, "playwright-endpoint", {}, { timeoutMs: 15_000 }).catch(() => null)
+    : null;
+  const endpoint = result?.endpoint;
+  return typeof endpoint === "string" && endpoint
+    ? { ...firefoxPublicFields(), ws: { playwright: endpoint } }
+    : firefoxPublicFields();
 }
 
 async function captureFirefoxSession(store: ProfileStore, profileId: string, owner: FirefoxOwner): Promise<void> {

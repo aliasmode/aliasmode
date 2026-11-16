@@ -466,6 +466,22 @@ test("Firefox active status gives a Playwright endpoint without exposing the own
   }
 });
 
+test("Firefox active status stays Active without a URL when its owner does not answer", async () => {
+  const h = harness();
+  await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store);
+  const launch = h.store.getLaunch("k1d0cd11")!;
+  h.store.recordLaunch({
+    ...launch,
+    engine: "firefox",
+    firefoxOwner: { endpoint: "http://127.0.0.1:1/", token: "private-token", pid: 12, browserPid: 13, generation: "generation" },
+  } as any);
+  h.launcher.certifiedActive = async () => true;
+
+  const body = await (await handleRequest(req("/api/v1/browser/active?user_id=k1d0cd11"), h.launcher, h.store)).json();
+  expect(body).toMatchObject({ code: 0, data: { status: "Active", lifecycle: "running", engine: "firefox" } });
+  expect(body.data.ws).toBeUndefined();
+});
+
 test("active bypasses occupied admission and reports queued/admitted lifecycle conservatively", async () => {
   const h = harness();
   const admission = new LifecycleAdmissionController({ limit: 1 });

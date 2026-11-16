@@ -1394,6 +1394,23 @@ test("single edits reject malformed resolutions without changing stored identity
   }
 });
 
+test("another site cannot upload or assign extensions", async () => {
+  const s = store();
+  const form = new FormData();
+  form.append("files", new File(["x"], "evil.xpi"));
+  for (const request of [
+    new Request("http://x/ui/api/extensions/upload", { method: "POST", headers: { origin: "https://evil.example" }, body: form }),
+    new Request("http://x/ui/api/profiles/extensions", {
+      method: "POST", headers: { origin: "https://evil.example", "content-type": "application/json" },
+      body: JSON.stringify({ ids: ["k1d0cd11"], extensionId: "evil@attacker", op: "add" }),
+    }),
+  ]) {
+    expect((await handleUiRequest(request, {} as any, s))!.status).toBe(403);
+  }
+  expect(s.listExtensions()).toEqual([]);
+  s.close();
+});
+
 test("Firefox profiles save add-on assignments", async () => {
   const s = store();
   s.upsertProfile(firefoxProfile(s, "firefox-ext"));
@@ -1936,6 +1953,7 @@ test("extension assignment also saves open profiles for their next start", async
   const res = await handleUiRequest(
     new Request("http://x/ui/api/profiles/extensions", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ ids: ["k1d0cd11", "k1d0cd22"], extensionId: "ext-one", op: "add" }),
     }),
     {} as any,

@@ -2095,6 +2095,11 @@ export async function handleUiRequest(
   }
 
   if (pathname === "/ui/api/extensions/upload" && req.method === "POST") {
+    // A page on another site can post a form here without a preflight; an add-on names its own ID.
+    const origin = req.headers.get("origin");
+    if (origin && origin !== new URL(req.url).origin) {
+      return Response.json({ ok: false, error: "cross-origin requests are forbidden" }, { status: 403 });
+    }
     if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
     try {
       const form = await req.formData();
@@ -2143,6 +2148,8 @@ export async function handleUiRequest(
 
   // Bulk assign / unassign one extension across many selected profiles.
   if (pathname === "/ui/api/profiles/extensions" && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
     if (remote) return Response.json({ ok: false, error: "remote mode: not supported" }, { status: 400 });
     try {
       const body = (await req.json()) as { ids?: unknown; extensionId?: unknown; op?: unknown };

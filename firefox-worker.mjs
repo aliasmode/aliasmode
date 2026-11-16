@@ -280,9 +280,12 @@ async function run() {
   });
   let playwrightServer;
   let playwrightEndpoint;
+  // Clients connected to the Playwright server. The Local API hands its URL out on every start,
+  // so full network detail follows connected clients, not the server's existence.
+  let playwrightClients = 0;
   // An engine before the lean network build does not know the method; it keeps full detail.
   const updateNetworkDetail = () => context?._connection?.toImpl?.(context)?._browser?.session
-    ?.send("Browser.setNetworkDetail", { enabled: !!(official || playwrightServer) })
+    ?.send("Browser.setNetworkDetail", { enabled: !!(official || playwrightClients) })
     .catch(() => {});
   const closeOfficial = async () => {
     const current = official;
@@ -295,6 +298,7 @@ async function run() {
     const current = playwrightServer;
     playwrightServer = undefined;
     playwrightEndpoint = undefined;
+    playwrightClients = 0;
     try {
       await current?.close();
     } finally {
@@ -318,7 +322,15 @@ async function run() {
     try {
       playwrightEndpoint = await bridge.listen(0, "127.0.0.1");
       playwrightServer = bridge;
-      await updateNetworkDetail();
+      bridge._wsServer?._wsServer?.on("connection", (ws) => {
+        playwrightClients++;
+        void updateNetworkDetail();
+        ws.once("close", () => {
+          if (playwrightServer !== bridge) return;
+          playwrightClients--;
+          void updateNetworkDetail();
+        });
+      });
       return playwrightEndpoint;
     } catch (error) {
       await bridge.close().catch(() => {});
@@ -386,11 +398,17 @@ async function run() {
       hasPages: hasPages(),
     };
     if (name === "bring-to-front") {
+      const pageFor = (target) => target && context.pages().find((item) => pageIds.get(item) === target.id);
       const targets = pageTargets();
-      const target = payload.targetId
-        ? targets.find((item) => item.id === payload.targetId)
-        : targets[0];
-      const page = target && context.pages().find((item) => pageIds.get(item) === target.id);
+      const pages = targets.map(pageFor).filter(Boolean);
+      // Raising a page also selects its tab, so without a target raise the tab already shown.
+      let page = payload.targetId ? pageFor(targets.find((item) => item.id === payload.targetId)) : undefined;
+      if (!payload.targetId) {
+        for (const candidate of pages) {
+          if (await candidate.evaluate(() => document.visibilityState === "visible").catch(() => false)) { page = candidate; break; }
+        }
+        page ??= pages[0];
+      }
       if (!page) throw typed("operation_failed");
       await page.bringToFront();
       return null;
