@@ -214,10 +214,11 @@ test("MCP profile update forwards versioned edits without returning credentials"
   const tool = (await client.listTools()).tools.find((tool) => tool.name === "aliasmode_profile_update");
   expect(tool?.annotations?.destructiveHint).toBe(true);
   expect(tool?.inputSchema).toMatchObject({
-    required: ["profileId", "expectedVersion", "set"], additionalProperties: false,
+    required: ["profileId"], additionalProperties: false,
     properties: {
       expectedVersion: { type: "integer", minimum: 0 },
-      set: { type: "object", minProperties: 1, additionalProperties: false, properties: { password: { type: "string" }, extensions: { type: "array" } } },
+      proxyFrom: { type: "string" },
+      set: { type: "object", additionalProperties: false, properties: { password: { type: "string" }, extensions: { type: "array" } } },
     },
   });
   const args = { profileId: "profile1", expectedVersion: 7, set: { username: "matched-user", password: "private-password", twofa: "private-totp" } };

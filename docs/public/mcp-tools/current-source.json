@@ -20,7 +20,7 @@
   "aliasModeTools": [
     {
       "name": "aliasmode_profiles_list",
-      "description": "List AliasMode profiles and their current browser state. Cloud profiles include expectedVersion and permission for editing.",
+      "description": "List AliasMode profiles, their proxy host:port (never credentials) and current browser state. Cloud profiles include expectedVersion and permission for editing.",
       "annotations": {
         "title": "List AliasMode profiles",
         "readOnlyHint": false,
@@ -232,6 +232,11 @@
               }
             ]
           },
+          "proxyFrom": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Copy the proxy of this profile ID (credentials included) instead of passing proxy"
+          },
           "temporary": {
             "type": "boolean",
             "default": false
@@ -242,9 +247,9 @@
     },
     {
       "name": "aliasmode_profile_update",
-      "description": "Edit a closed AliasMode Cloud profile by ID using expectedVersion from aliasmode_profiles_list. Only supplied fields change; empty strings clear fields. Sessions and cookies are preserved. Returns confirmation, not credentials.",
+      "description": "Edit a closed AliasMode profile by ID. Cloud profiles need expectedVersion from aliasmode_profiles_list. Only supplied fields change; empty strings clear fields. Sessions and cookies are preserved. Returns confirmation, not credentials.",
       "annotations": {
-        "title": "Edit an AliasMode Cloud profile",
+        "title": "Edit an AliasMode profile",
         "readOnlyHint": false,
         "destructiveHint": true,
         "openWorldHint": false
@@ -255,6 +260,11 @@
           "profileId": {
             "type": "string",
             "minLength": 1
+          },
+          "proxyFrom": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Copy the proxy of this profile ID (credentials included) instead of set.proxy"
           },
           "expectedVersion": {
             "type": "integer",
@@ -318,14 +328,11 @@
                 ]
               }
             },
-            "minProperties": 1,
             "additionalProperties": false
           }
         },
         "required": [
-          "profileId",
-          "expectedVersion",
-          "set"
+          "profileId"
         ],
         "additionalProperties": false
       }

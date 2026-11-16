@@ -87,7 +87,7 @@ function toolAnnotations(title, { readOnly = false, destructive = false, openWor
 const ALIAS_TOOLS = [
   {
     name: "aliasmode_profiles_list",
-    description: "List AliasMode profiles and their current browser state. Cloud profiles include expectedVersion and permission for editing.",
+    description: "List AliasMode profiles, their proxy host:port (never credentials) and current browser state. Cloud profiles include expectedVersion and permission for editing.",
     annotations: toolAnnotations("List AliasMode profiles"),
     inputSchema: EMPTY_SCHEMA,
   },
@@ -146,6 +146,7 @@ const ALIAS_TOOLS = [
             },
           ],
         },
+        proxyFrom: { ...PROFILE_ID, description: "Copy the proxy of this profile ID (credentials included) instead of passing proxy" },
         temporary: { type: "boolean", default: false },
       },
       additionalProperties: false,
@@ -153,12 +154,13 @@ const ALIAS_TOOLS = [
   },
   {
     name: "aliasmode_profile_update",
-    description: "Edit a closed AliasMode Cloud profile by ID using expectedVersion from aliasmode_profiles_list. Only supplied fields change; empty strings clear fields. Sessions and cookies are preserved. Returns confirmation, not credentials.",
-    annotations: toolAnnotations("Edit an AliasMode Cloud profile", { destructive: true }),
+    description: "Edit a closed AliasMode profile by ID. Cloud profiles need expectedVersion from aliasmode_profiles_list. Only supplied fields change; empty strings clear fields. Sessions and cookies are preserved. Returns confirmation, not credentials.",
+    annotations: toolAnnotations("Edit an AliasMode profile", { destructive: true }),
     inputSchema: {
       type: "object",
       properties: {
         profileId: PROFILE_ID,
+        proxyFrom: { ...PROFILE_ID, description: "Copy the proxy of this profile ID (credentials included) instead of set.proxy" },
         expectedVersion: { type: "integer", minimum: 0 },
         set: {
           type: "object",
@@ -177,11 +179,10 @@ const ALIAS_TOOLS = [
             extensions: { type: "array", items: { type: "string" } },
             tags: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
           },
-          minProperties: 1,
           additionalProperties: false,
         },
       },
-      required: ["profileId", "expectedVersion", "set"],
+      required: ["profileId"],
       additionalProperties: false,
     },
   },
@@ -274,8 +275,8 @@ function errorResult(error) {
 }
 
 function profileInput(args) {
-  const { temporary = false, ...input } = args;
-  return { input, temporary };
+  const { temporary = false, proxyFrom, ...input } = args;
+  return { input, temporary, ...(proxyFrom === undefined ? {} : { proxyFrom }) };
 }
 
 export async function createAliasModeMcp(options = {}) {

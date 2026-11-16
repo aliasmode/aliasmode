@@ -2,11 +2,15 @@ import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { attachTimezones } from "./geoip.ts";
+import { decodePortableProfile } from "./portable-profile.ts";
+import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
+import type { ProxySpec } from "./types.ts";
 import type { CloudConnectionRuntime } from "./cloud-connection.ts";
 import { CloudApiError } from "./cloud-client.ts";
 import {
   CloudProfileEditor,
   CloudProfileEditorError,
+  applyProfileEdits,
 } from "./cloud-profile-editor.ts";
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import {
@@ -71,6 +75,8 @@ type SafeProfile = {
   group: string;
   platform: string;
   tags: string[];
+  /** "host:port" only, never the user or password. */
+  proxy?: string | null;
   running: boolean;
   engine?: "firefox";
   capabilities?: readonly string[];
@@ -125,7 +131,8 @@ function errorResponse(id: number, error: unknown): AgentControlResponse {
       ok: false,
       error: {
         code: error.failure === "mode_conflict" ? "mode_conflict" : "browser_launch_failed",
-        message: error.message,
+        // The guidance says what to fix, so an AI client can tell the user instead of guessing.
+        message: error.guidance ? `${error.message}: ${error.guidance}` : error.message,
       },
     };
   }
@@ -300,12 +307,16 @@ export class AgentControlSession {
   }
 
   private async updateProfile(params: Record<string, unknown>) {
-    if (!this.deps.cloudBrowser) {
+    if (!this.deps.cloudBrowser && this.deps.remote) {
       throw agentError("cloud_unavailable", "Switch to AliasMode Cloud and sign in on this device first");
     }
-    const { connection } = this.cloudMcpConnection();
     const profileId = stringParam(params, "profileId");
-    const set = object(params.set);
+    const set = { ...object(params.set ?? {}) };
+    if (params.proxyFrom !== undefined) {
+      const proxy = await this.proxyOf(stringParam(params, "proxyFrom"));
+      set.proxy = proxy ? proxyLegacyString(proxy) : "";
+      if (proxy) set.proxyType = proxy.type;
+    }
     const stringFields = ["name", "group", "platform", "username", "password", "email", "emailPassword", "twofa", "proxy", "proxyType", "resolution"];
     if (!Object.keys(set).length) throw agentError("invalid_request", "set must contain an editable field");
     for (const [field, value] of Object.entries(set)) {
@@ -315,6 +326,8 @@ export class AgentControlSession {
           : false;
       if (!valid) throw agentError("invalid_request", `invalid editable field: ${field}`);
     }
+    if (!this.deps.cloudBrowser) return this.updateLocalProfile(profileId, set);
+    const { connection } = this.cloudMcpConnection();
     try {
       const editor = new CloudProfileEditor(connection.client, this.deps.store);
       await editor.save(profileId, params.expectedVersion as number, set);
@@ -326,6 +339,26 @@ export class AgentControlSession {
       }
       throw error;
     }
+  }
+
+  private async updateLocalProfile(profileId: string, set: Record<string, unknown>) {
+    return await this.deps.admission.run({ kind: "cleanup", profileIds: [profileId] }, async () => {
+      const profile = this.deps.store.getProfile(profileId);
+      if (!profile) throw agentError("profile_not_found", `profile ${profileId} was not found`);
+      if (this.deps.store.getLaunch(profileId)) throw agentError("profile_open", "close the profile before editing it");
+      let proxyChanged: boolean;
+      try {
+        proxyChanged = applyProfileEdits(profile, set);
+      } catch (error) {
+        throw agentError("invalid_request", error instanceof Error ? error.message : String(error));
+      }
+      if (proxyChanged && profile.proxy && !("timezone" in set) && !profile.timezoneManual) {
+        await attachTimezones([profile], undefined, !("locale" in set)).catch(() => {});
+        syncFirefoxTimezone(profile);
+      }
+      this.deps.store.upsertProfile(profile);
+      return { profileId, updated: true as const };
+    });
   }
 
   private async firefoxCall(profileId: string, operation: string, payload: Record<string, unknown>): Promise<unknown> {
@@ -349,6 +382,7 @@ export class AgentControlSession {
           group: profile.group,
           platform: profile.platform ?? "",
           tags: profile.tags,
+          proxy: profile.proxy,
           expectedVersion: profile.version,
           permission: profile.permission,
           running: !!launch,
@@ -379,15 +413,33 @@ export class AgentControlSession {
         group: profile.group,
         platform: profile.platform ?? "",
         tags: profile.tags ?? [],
+        proxy: profile.proxy ? proxyHostPort(profile.proxy) : null,
         running: !!launch,
         ...(launch ? { ...(isFirefoxEngine(launch) ? firefoxPublicFields() : { debugPort: launch.debugPort }), headless: launch.headless } : {}),
       };
     });
   }
 
+  /** The full proxy of another profile, so the agent can reuse it without ever seeing the credentials. */
+  private async proxyOf(profileId: string): Promise<ProxySpec | null> {
+    if (this.deps.cloudBrowser) {
+      const { connection } = this.cloudMcpConnection();
+      const authoritative = await connection.client.getProfile(profileId);
+      return decodePortableProfile(authoritative.payload).profile.proxy;
+    }
+    if (this.deps.remote) throw agentError("invalid_request", "proxyFrom is unavailable in legacy Remote mode");
+    const profile = this.deps.store.getProfile(profileId);
+    if (!profile) throw agentError("profile_not_found", `profile ${profileId} was not found`);
+    return profile.proxy;
+  }
+
   private async createProfile(params: Record<string, unknown>): Promise<{ id: string; temporary: boolean }> {
-    const input = object(params.input ?? {});
+    const input = { ...object(params.input ?? {}) };
     const temporary = params.temporary === true;
+    if (params.proxyFrom !== undefined) {
+      const proxy = await this.proxyOf(stringParam(params, "proxyFrom"));
+      input.proxy = proxy ? { type: proxy.type, host: proxy.host, port: String(proxy.port), user: proxy.user ?? "", pass: proxy.pass ?? "" } : null;
+    }
     let id: string;
     if (this.deps.remote && input.chromiumRuntime) throw new Error("AliasMode Chromium is unavailable in legacy Remote mode");
     if (this.deps.remote) {

@@ -102,7 +102,7 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
   };
 }
 
-function applyEdits(profile: Profile, set: Record<string, unknown>): boolean {
+export function applyProfileEdits(profile: Profile, set: Record<string, unknown>): boolean {
   if ("engine" in set && set.engine !== (profile.engine ?? "chromium")) {
     throw new CloudProfileEditorError("profile engine cannot be changed", 400);
   }
@@ -218,7 +218,7 @@ export class CloudProfileEditor {
     let updateVersion = expectedVersion;
     if (destination !== profile.group) {
       // Validate all supplied fields before the move commits independently.
-      applyEdits({ ...profile }, set);
+      applyProfileEdits({ ...profile }, set);
       const moved = await this.cloud.moveProfile(profileId, { destination, expectedVersion });
       updateVersion = moved.profile.version;
       authoritative = await this.cloud.getProfile(profileId);
@@ -229,7 +229,7 @@ export class CloudProfileEditor {
       profile = decodePortableProfile(authoritative.payload).profile;
       if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
     }
-    const proxyChanged = applyEdits(profile, set);
+    const proxyChanged = applyProfileEdits(profile, set);
     if (proxyChanged && profile.proxy && !("timezone" in set) && !profile.timezoneManual) {
       await attachTimezones([profile], this.timezoneFetch, !("locale" in set)).catch(() => {});
       syncFirefoxTimezone(profile);

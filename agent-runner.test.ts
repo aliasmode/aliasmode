@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   AGENT_MAX_CONVERSATIONS,
   AgentRunner,
@@ -170,6 +170,10 @@ describe("AgentRunner", () => {
     const requests: Parameters<AgentChat>[0][] = [];
     let step = 0;
     const calls: { name: string; args: Record<string, unknown> }[] = [];
+    const userDir = mkdtempSync(join(tmpdir(), "aliasmode-upload-"));
+    roots.push(userDir);
+    const userFile = join(userDir, "photo.jpg");
+    writeFileSync(userFile, "jpg");
     const { agent } = runner(async (request) => {
       requests.push(request);
       const folder = agent.filesDir();
@@ -177,6 +181,7 @@ describe("AgentRunner", () => {
         toolCall("u1", "browser_file_upload", { paths: ["/etc/passwd"] }),
         toolCall("u2", "browser_file_upload", { paths: [join(folder, "..", "settings.json")] }),
         toolCall("u3", "browser_file_upload", { paths: [join(folder, "photo.png")] }),
+        toolCall("u4", "browser_file_upload", { paths: [userFile] }),
         { role: "assistant", content: "done" },
       ];
       return { message: answers[step++]! };
@@ -187,13 +192,19 @@ describe("AgentRunner", () => {
         close: () => {},
       }),
     });
-    const done = await settled(agent, agent.start("upload").id);
+    const done = await settled(agent, agent.start(`upload ${userFile}`).id);
     expect(requests[0]!.tools.map((tool) => tool.function.name)).not.toContain("browser_run_code");
     const results = done.messages.filter((message) => message.role === "tool").map((message) => message.content);
-    expect(results[0]).toContain("must be inside");
-    expect(results[1]).toContain("must be inside");
+    expect(results[0]).toContain("upload only files");
+    expect(results[1]).toContain("upload only files");
     expect(results[2]).toBe("uploaded");
-    expect(calls).toHaveLength(1);
+    expect(results[3]).toBe("uploaded");
+    expect(calls).toHaveLength(2);
+    // The user's own file is uploaded from a copy inside the agent folder.
+    const copied = (calls[1]!.args.paths as string[])[0]!;
+    expect(copied.startsWith(join(agent.filesDir(), "uploads"))).toBe(true);
+    expect(basename(copied)).toBe("photo.jpg");
+    expect(readFileSync(copied, "utf8")).toBe("jpg");
   });
 
   test("keeps the newest chats and prunes the files folder to its size cap", async () => {

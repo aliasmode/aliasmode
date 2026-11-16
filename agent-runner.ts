@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { CloudApiError } from "./cloud-client.ts";
@@ -101,13 +101,13 @@ export const AGENT_SYSTEM_PROMPT = `You are the AliasMode agent. AliasMode is an
 
 How to work:
 - Do the whole task yourself. Do not ask for confirmation; ask a question only when the task cannot be done without the answer.
-- To act on a website in a profile: call aliasmode_browser_open (it opens the profile and selects it), then use the browser_* tools. Only one browser is selected at a time; use aliasmode_browser_select to switch between open browsers.
+- To act on a website in a profile: call aliasmode_browser_open without startupUrls (it opens the profile and selects it), then browser_navigate in the current tab. Profiles restore their saved tabs, so do not pile up new ones. Only one browser is selected at a time; use aliasmode_browser_select to switch between open browsers.
 - Read pages with browser_snapshot and act with the element refs it returns. Prefer browser_navigate to a known URL over clicking through menus.
 - Use aliasmode_profiles_list to find profiles by name, group, or proxy. When you create profiles that reuse proxies from other profiles, copy those proxy settings.
 - Deleting a profile moves it to Trash. You can list Trash and restore profiles from it. You cannot empty Trash; only the user can.
 - Close browsers you opened when the task no longer needs them, unless the user wants them open.
 - When you write posts or messages, write natural text that fits the site and the account. Follow any SOP the user gives step by step.
-- Finish with a short, clear report: what you did, what you found, and anything that failed.`;
+- Finish with a brief report: the result first, then only what matters (findings, failures). Use a few short lines or a compact table; skip filler, step-by-step narration, side notes that do not change the result, and offers of further help.`;
 
 const LOCAL_TOOLS: AgentTool[] = [
   {
@@ -389,7 +389,7 @@ export class AgentRunner {
       const available = [...(await tools.listTools()).filter((tool) => !HIDDEN_TOOLS.has(tool.name)), ...LOCAL_TOOLS];
       compact(conversation.messages);
       const result = await chat({
-        messages: [{ role: "system", content: `${AGENT_SYSTEM_PROMPT}\n- Files you upload must be inside ${this.filesDir()}; files the browser downloads are saved there too.` }, ...conversation.messages],
+        messages: [{ role: "system", content: `${AGENT_SYSTEM_PROMPT}\n- You can upload files the user names in this chat, or files inside ${this.filesDir()}; files the browser downloads are saved there too.` }, ...conversation.messages],
         tools: available.map((tool) => ({
           type: "function",
           function: {
@@ -409,14 +409,14 @@ export class AgentRunner {
       this.save(conversation);
       if (!calls.length) return;
       for (const call of calls) {
-        const content = signal.aborted ? "Stopped by the user." : await this.callTool(tools, call.function.name, call.function.arguments);
+        const content = signal.aborted ? "Stopped by the user." : await this.callTool(tools, call.function.name, call.function.arguments, conversation.messages);
         conversation.messages.push({ role: "tool", tool_call_id: call.id, content });
         this.save(conversation);
       }
     }
   }
 
-  private async callTool(tools: AgentToolSession, name: string, rawArgs: string | undefined): Promise<string> {
+  private async callTool(tools: AgentToolSession, name: string, rawArgs: string | undefined, messages: AgentMessage[]): Promise<string> {
     let args: Record<string, unknown>;
     try {
       const parsed = JSON.parse(rawArgs || "{}");
@@ -431,8 +431,10 @@ export class AgentRunner {
       else if (name === "aliasmode_trash_restore") {
         const ids = Array.isArray(args.profileIds) ? args.profileIds.filter((id): id is string => typeof id === "string") : [];
         text = JSON.stringify(await this.options.trash("restore", ids));
-      } else if (name === "browser_file_upload" && !uploadAllowed(args.paths, this.filesDir())) {
-        return `Error: files to upload must be inside ${this.filesDir()}.`;
+      } else if (name === "browser_file_upload" && args.paths !== undefined) {
+        const paths = uploadPaths(args.paths, this.filesDir(), messages);
+        if (!paths) return `Error: upload only files the user named in this chat, or files inside ${this.filesDir()}.`;
+        text = await tools.callTool(name, { ...args, paths });
       } else text = await tools.callTool(name, args);
       return text.length > TOOL_RESULT_MAX_CHARS
         ? `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n[Output cut at ${TOOL_RESULT_MAX_CHARS} characters.]`
@@ -452,10 +454,28 @@ function answerOpenToolCalls(messages: AgentMessage[]): void {
   }
 }
 
-function uploadAllowed(paths: unknown, dir: string): boolean {
-  if (paths === undefined) return true;
+/**
+ * Files inside the agent folder upload as they are. A web page cannot add to the user's own messages, so a
+ * path the user typed is theirs to upload: it is copied into the agent folder, the only folder the browser
+ * tools may read. Anything else is refused (null).
+ */
+function uploadPaths(paths: unknown, dir: string, messages: AgentMessage[]): string[] | null {
   const root = resolve(dir) + sep;
-  return Array.isArray(paths) && paths.every((path) => typeof path === "string" && isAbsolute(path) && resolve(path).startsWith(root));
+  const typed = messages.filter((message) => message.role === "user").map((message) => message.content ?? "").join("\n");
+  if (!Array.isArray(paths)) return null;
+  const result: string[] = [];
+  for (const path of paths) {
+    if (typeof path !== "string" || !isAbsolute(path)) return null;
+    if (resolve(path).startsWith(root)) result.push(resolve(path));
+    else if (typed.includes(path) && existsSync(path) && statSync(path).isFile()) {
+      // Its own folder keeps the original file name, which the site sees.
+      const copy = join(dir, "uploads", randomUUID().slice(0, 8), basename(path));
+      mkdirSync(dirname(copy), { recursive: true });
+      copyFileSync(path, copy);
+      result.push(copy);
+    } else return null;
+  }
+  return result;
 }
 
 /** Deletes the oldest files until the folder is under `maxBytes`. */

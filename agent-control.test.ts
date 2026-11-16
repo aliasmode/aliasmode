@@ -454,7 +454,23 @@ test("Cloud profile edits reject open, stale, unsupported and malformed updates 
   h.authoritative.profile.activeOpens = [{}];
   expect((await h.session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { password: "new-password" } }))).ok).toBe(false);
   expect(h.updates).toEqual([]);
-  expect((await harness().session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { password: "new-password" } })))).toMatchObject({ ok: false, error: { code: "cloud_unavailable" } });
+});
+
+test("Local profile edits apply to closed profiles and can copy another profile's proxy", async () => {
+  const saved: any[] = [];
+  const profiles: Record<string, any> = {
+    profile1: { id: "profile1", name: "One", group: "", tags: [], proxy: null, timezoneManual: true },
+    source: { id: "source", name: "Source", group: "", tags: [], proxy: { type: "socks5", host: "10.0.0.9", port: "1080", user: "u", pass: "p" } },
+  };
+  const h = harness();
+  const session = new AgentControlSession({
+    ...h.deps,
+    store: { ...h.deps.store, getProfile: (id: string) => profiles[id] ?? null, upsertProfile: (profile: any) => saved.push(structuredClone(profile)) } as any,
+  });
+  expect(await session.enqueue(wire("profiles.update", { profileId: "profile1", proxyFrom: "source", set: { name: "Renamed", tags: "a, b" } })))
+    .toMatchObject({ ok: true, result: { profileId: "profile1", updated: true } });
+  expect(saved[0]).toMatchObject({ name: "Renamed", tags: ["a", "b"], proxy: { type: "socks5", host: "10.0.0.9", port: "1080", user: "u", pass: "p" } });
+  expect((await session.enqueue(wire("profiles.update", { profileId: "missing", set: { name: "x" } }))).ok).toBe(false);
 });
 
 test("Cloud profile edits preserve Cloud error codes without retrying", async () => {
