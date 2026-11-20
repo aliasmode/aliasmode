@@ -391,6 +391,8 @@ function makeLauncher(
   chromiumRuntimeRoot?: string,
 ): Launcher {
   const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
+  // Chrome will not start as root with its sandbox on, and Docker runs as root by default.
+  const noSandbox = has(rest, "no-sandbox") || (process.platform === "linux" && process.getuid?.() === 0);
   const autofill = new AutofillBridge(store);
   autofill.listen();
   return new Launcher({
@@ -411,9 +413,9 @@ function makeLauncher(
     // sandbox explicitly; normal hosts keep the sandbox enabled by default.
     baseArgs: [
       `--aliasmode-launcher-pid=${process.pid}`,
-      ...(has(rest, "no-sandbox") ? ["--no-sandbox"] : []),
+      ...(noSandbox ? ["--no-sandbox"] : []),
     ],
-    ...(process.platform === "linux" && !has(rest, "no-sandbox") ? { chromiumSandboxBlocked: () => linuxChromiumSandboxBlocked() } : {}),
+    ...(process.platform === "linux" && !noSandbox ? { chromiumSandboxBlocked: () => linuxChromiumSandboxBlocked() } : {}),
     ...(unsafeCanary ? {} : { ensureSearchProvider }),
     // In remote mode the coordinator injects the roamed session over CDP, so the launcher's own
     // bootstrap cookie injection is turned off — and because the login is re-injected from the hub,
