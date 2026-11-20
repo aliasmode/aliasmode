@@ -160,7 +160,7 @@ test("a Firefox Cloud screen edit saves the screen with its usable area and a wi
   expect([updated.payload.profile.screenWidth, updated.payload.profile.screenHeight]).toEqual([1536, 864]);
   expect(updated.payload.profile.firefox.config).toMatchObject({
     "screen.width": 1536, "screen.height": 864, "screen.availWidth": 1536, "screen.availHeight": 816,
-    "window.outerWidth": 998, "window.outerHeight": 778,
+    "window.outerWidth": 1024, "window.outerHeight": 778,
   });
   expect(updated.payload.session).toEqual(authoritative.payload.session);
 });

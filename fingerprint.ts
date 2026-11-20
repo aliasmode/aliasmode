@@ -69,7 +69,9 @@ export const DEFAULT_WINDOW_HEIGHT_SCALE = 0.9;
 
 /**
  * The OS window size for a screen. The floors stop a small screen (e.g. 1024 -> 666px)
- * from opening as an unusable sliver. The window is never larger than the screen, which
+ * from opening as an unusable sliver. The width floor is 1024: below about 960 CSS px of page,
+ * fingerprint checks such as iphey.com read a Chrome window that narrow as a different
+ * Chromium browser (Naver Whale) and report the profile as inconsistent. The window is never larger than the screen, which
  * Chromium 155 refuses; a scaled display can make the screen smaller than the floors.
  */
 export function launchWindowSize(
@@ -79,7 +81,7 @@ export function launchWindowSize(
   heightScale = DEFAULT_WINDOW_HEIGHT_SCALE,
 ): [number, number] {
   return [
-    Math.min(screenWidth, Math.max(800, Math.round(screenWidth * widthScale))),
+    Math.min(screenWidth, Math.max(1024, Math.round(screenWidth * widthScale))),
     Math.min(screenHeight, Math.max(480, Math.round(screenHeight * heightScale))),
   ];
 }

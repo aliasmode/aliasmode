@@ -349,7 +349,7 @@ test("a Firefox profile's new screen brings its usable area and a window inside 
   expect([windows.screenWidth, windows.screenHeight]).toEqual([1536, 864]);
   expect(windows.firefox!.config).toMatchObject({
     "screen.width": 1536, "screen.height": 864, "screen.availLeft": 0, "screen.availTop": 0, "screen.availWidth": 1536, "screen.availHeight": 816,
-    "window.outerWidth": 998, "window.outerHeight": 778, "window.innerWidth": 982, "window.innerHeight": 672,
+    "window.outerWidth": 1024, "window.outerHeight": 778, "window.innerWidth": 1008, "window.innerHeight": 672,
     "window.screenX": 448, "window.screenY": 38, "navigator.hardwareConcurrency": 8,
   });
   const mac = profile(9, {
@@ -359,7 +359,7 @@ test("a Firefox profile's new screen brings its usable area and a window inside 
   setFirefoxScreen(mac, 1440, 900);
   expect(mac.firefox!.config).toMatchObject({
     "screen.width": 1440, "screen.height": 900, "screen.availTop": 25, "screen.availWidth": 1440, "screen.availHeight": 824,
-    "window.outerWidth": 936, "window.outerHeight": 810, "window.innerWidth": 936, "window.innerHeight": 718,
+    "window.outerWidth": 1024, "window.outerHeight": 810, "window.innerWidth": 1024, "window.innerHeight": 718,
   });
 });
 
