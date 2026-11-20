@@ -1456,7 +1456,7 @@ test("a Firefox screen edit saves the screen with its usable area and a window i
   expect([saved.screenWidth, saved.screenHeight]).toEqual([1366, 768]);
   expect(saved.firefox!.config).toMatchObject({
     "screen.width": 1366, "screen.height": 768, "screen.availWidth": 1366, "screen.availHeight": 720,
-    "window.outerWidth": 888, "window.outerHeight": 691, "window.innerWidth": 872, "window.innerHeight": 585, timezone: "UTC",
+    "window.outerWidth": 1024, "window.outerHeight": 691, "window.innerWidth": 1008, "window.innerHeight": 585, timezone: "UTC",
   });
   s.close();
 });

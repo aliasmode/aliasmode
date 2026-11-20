@@ -4856,12 +4856,12 @@ test("windowWidthScale / windowHeightScale control the launched window size", as
     labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
-    windowWidthScale: 0.6,
+    windowWidthScale: 0.7,
     windowHeightScale: 1.0,
     cdpReadyTimeoutMs: 1000,
   });
   await launcher.start("k1d0cd11");
-  expect(spawnedArgs[0]).toContain("--window-size=1008,1050"); // 1680*0.6, 1050*1.0 (above the 800 width floor)
+  expect(spawnedArgs[0]).toContain("--window-size=1176,1050"); // 1680*0.7, 1050*1.0 (above the 1024 width floor)
   store.close();
 });
 
@@ -4891,7 +4891,10 @@ test("buildArgs floors the window width so small-resolution profiles aren't an u
   const small = { ...store.getProfile("k1d0cd11")!, screenWidth: 1366, screenHeight: 768 };
   const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
   const args = launcher.buildArgs(small, 9333, "/data", []);
-  expect(args).toContain("--window-size=888,691"); // round(1366*0.65) x round(768*0.9)
+  // round(1366*0.65) = 888 is under the 1024 floor; height round(768*0.9).
+  expect(args).toContain("--window-size=1024,691");
+  const wide = { ...small, screenWidth: 1920, screenHeight: 1080 };
+  expect(launcher.buildArgs(wide, 9334, "/data", [])).toContain("--window-size=1248,972");
   store.close();
 });
 
@@ -5489,7 +5492,7 @@ test("Chromium 155 on a scaled Windows display reports the screen in CSS pixels,
   };
 
   expect(await launch("win32", "aliasmode", "1920x1080", 1.25)).toEqual({
-    args: ["--window-size=998,778", "--fingerprint-screen-width=1536", "--fingerprint-screen-height=864", "--force-device-scale-factor=1.25"],
+    args: ["--window-size=1024,778", "--fingerprint-screen-width=1536", "--fingerprint-screen-height=864", "--force-device-scale-factor=1.25"],
     areas: [{ left: 0, top: 0, width: 1536, height: 864 }],
     // The watcher reads window bounds rounded at that scale.
     scales: [1.25],
