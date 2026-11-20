@@ -127,6 +127,9 @@ jobs:
           node-version: 24.15.0
       - name: Install isolated AliasMode
         shell: pwsh
+        env:
+          # The candidate is signed when the owner turned on Authenticode signing for main.
+          WINDOWS_SIGNING: ${{ vars.WINDOWS_SIGNING == 'on' && 'on' || 'off' }}
         run: |
           $root = Join-Path $env:RUNNER_TEMP "aliasmode-client-compatibility"
           $testHome = Join-Path $root "home"
@@ -167,9 +170,7 @@ jobs:
           } finally {
             $stream.Dispose()
           }
-          if ((Get-AuthenticodeSignature $installer.FullName).Status -ne "NotSigned") {
-            throw "AliasMode compatibility artifact was expected to be unsigned"
-          }
+          & .\scripts\windows-authenticode-check.ps1 -Path $installer.FullName -Signing $env:WINDOWS_SIGNING
 
           $install = Start-Process -Wait -PassThru $installer.FullName -ArgumentList @(
             "/S",
