@@ -1,8 +1,8 @@
 # AliasMode
 
-AliasMode is a free, open-source antidetect browser and local-first profile manager, with its own open-source engine, [AliasMode Firefox](https://github.com/aliasmode/aliasmode-firefox), and optional cloud synchronization for teams.
+AliasMode is a free, open-source [antidetect browser](https://aliasmode.com/) and local-first profile manager, with its own open-source engine, [AliasMode Firefox](https://github.com/aliasmode/aliasmode-firefox), and optional cloud synchronization for teams.
 
-> **Status:** public Windows beta. Download the current installer from [aliasmode.com/download](https://aliasmode.com/download/).
+> **Status:** public beta for Windows, macOS, and Linux. Download the current version from [aliasmode.com/download](https://aliasmode.com/download/).
 
 ## Quick facts
 
