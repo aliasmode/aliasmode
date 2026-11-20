@@ -2224,6 +2224,19 @@ test("buildArgs keeps Chromium 155 Google logins off the TPM binding and merges 
   store.close();
 });
 
+test("buildArgs keeps Chromium 155 browser sign-in off so its account reconciler cannot sign Google out", () => {
+  const store = seeded();
+  const f = fleet();
+  const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn });
+  const cloak = store.getProfile("k1d0cd11")!;
+  const chromium155 = { ...cloak, chromiumRuntime: "aliasmode" as const };
+  const signin = (args: string[]) => args.filter((arg) => arg.startsWith("--allow-browser-signin"));
+
+  expect(signin(launcher.buildArgs(chromium155, 9333, "/data", []))).toEqual(["--allow-browser-signin=false"]);
+  expect(signin(launcher.buildArgs(cloak, 9333, "/data", []))).toEqual([]);
+  store.close();
+});
+
 test("buildArgs forwards any client-named launcher-pid ownership marker verbatim", () => {
   const store = seeded();
   const profile = store.getProfile("k1d0cd11")!;

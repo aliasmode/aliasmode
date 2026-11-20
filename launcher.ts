@@ -1594,6 +1594,11 @@ export class Launcher {
       const features = ["DeviceBoundSessions", "EnableBoundSessionCredentials"];
       for (const arg of forwardedArgs) if (arg.startsWith(disableFeatures)) features.push(arg.slice(disableFeatures.length));
       args.push(`${disableFeatures}${features.join(",")}`);
+      // A Google web login also signs Chromium 155 itself in (Dice). The build has no OAuth client,
+      // so Chromium keeps that account without a token, and on the next open its account reconciler
+      // calls accounts.google.com/Logout?source=ChromiumAccountReconcilorDice: Google ends the web
+      // session and every Google cookie is gone. Keep browser sign-in off so web logins stay web-only.
+      args.push("--allow-browser-signin=false");
     }
     args.push(...this.baseArgs, ...forwardedArgs.filter((arg) => !profile.chromiumRuntime || !arg.startsWith(disableFeatures)));
     return args;
