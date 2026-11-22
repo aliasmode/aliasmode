@@ -834,5 +834,6 @@
   "You already support monthly.": "Вы уже поддерживаете ежемесячно.",
   "Monthly support works with a card.": "Ежемесячная поддержка работает только с картой.",
   "Only the workspace owner can set up monthly support.": "Ежемесячную поддержку может включить только владелец рабочего пространства.",
-  "Support bonus": "Бонус за поддержку"
+  "Support bonus": "Бонус за поддержку",
+  "Bonus credits apply to card and crypto payments.": "Бонусные кредиты начисляются за оплату картой и криптовалютой."
 }

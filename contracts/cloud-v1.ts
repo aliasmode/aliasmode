@@ -875,9 +875,10 @@ export interface StoreEventsResponse {
   ok: true;
 }
 
-/* Support AliasMode. Amounts are integer USD cents; times are epoch milliseconds. Any active member may support.
-   Tiers come from the amount paid in the last 30 days, and their perks last 30 days. Every signed-in payment of at
-   least the first tier adds bonus credits to the workspace wallet (ledger kind support_bonus): floor(amount × bonusPct
+/* Support AliasMode. Amounts are integer USD cents; times are epoch milliseconds. Any active member may support by
+   card or crypto; only the workspace owner may pay from the balance. Tiers come from the amount paid in the last 30
+   days, and their perks last 30 days. Every signed-in card, crypto or monthly payment of at least the first tier (not a
+   balance payment) adds bonus credits to the workspace wallet (ledger kind support_bonus): floor(amount × bonusPct
    / 100) of the tier that the payment's amount reaches on its own. A card or crypto payment is a support deposit with
    the shape of a wallet deposit (poll GET /v1/wallet/deposits/:id); when it settles, Cloud credits it, spends it as
    support and adds the bonus. Monthly support is card only, for the workspace owner: Cloud charges the saved card
@@ -940,6 +941,8 @@ export interface GetSupportResponse {
   ok: true;
   tiers: SupportTier[];
   supporter: Supporter | null;
+  /** This account may set up monthly support (the workspace owner). */
+  canMonthly: boolean;
 }
 
 export interface SupportProfileFields {
@@ -954,8 +957,8 @@ export interface SupportProfileFields {
   logoUrl?: string;
 }
 
-/** POST /v1/support. `balance` spends wallet credits now (402 insufficient_balance when short);
-    `card` and `crypto` need at least 500 cents and create a support deposit. */
+/** POST /v1/support. `balance` (workspace owner only) spends wallet credits now (402 insufficient_balance when
+    short) and earns no bonus; `card` and `crypto` need at least 500 cents and create a support deposit. */
 export interface CreateSupportRequest extends SupportProfileFields {
   /** At least 100. */
   amountCents: number;

@@ -16,6 +16,7 @@ import {
   loadPromptState,
   monthlyAvailability,
   notePromptEvent,
+  paymentBonusCents,
   snoozePrompt,
   supportBonusCents,
   tierProgress,
@@ -40,7 +41,7 @@ const backer: Supporter = {
   tier: "backer", activeUntil: ACTIVE_UNTIL, last30Cents: 7500, lifetimeCents: 12000, totalCents: 12000,
   displayName: "Dana", public: true, telegram: "", linkUrl: "", logoUrl: "", logoApproved: false, since: 1, monthly: null, directory: null,
 };
-const cloudState = (supporter: Supporter | null) => ({ available: true as const, tiers: DEFAULT_TIERS, supporter });
+const cloudState = (supporter: Supporter | null) => ({ available: true as const, tiers: DEFAULT_TIERS, supporter, canMonthly: true });
 const panel = (props: Partial<ComponentProps<typeof SupportPanel>>) => render(<SupportPanel source="sidebar" mode="cloud" owner state={cloudState(null)}
   balanceCents={0} onClose={() => {}} onReload={noop} onUseCloud={() => {}} {...props} />);
 
@@ -156,13 +157,21 @@ test("an owner starts on $25 by card with Monthly on and the exact bonus on the 
   expect(html).not.toMatch(/\d+ ?%/);
 });
 
-test("a member pays once, from the balance when it covers the amount", () => {
-  const html = panel({ owner: false, balanceCents: 3000 });
-  expect(html).toContain(">Balance");
+test("a member pays once by card or crypto, never from the balance", () => {
+  const html = panel({ owner: false, balanceCents: 3000, state: { ...cloudState(null), canMonthly: false } });
+  expect(html).not.toContain(">Balance");
   expect(html).toMatch(/role="switch" disabled=""/);
-  expect(html).toContain("Monthly support works with a card.");
+  expect(html).toContain("Only the workspace owner can set up monthly support.");
   expect(html).toContain("Support with $25<");
-  expect(html).toContain("One-time payment from your workspace balance.");
+  expect(html).toContain("· +$7.50 bonus credits");
+  expect(html).toContain("One-time payment. AliasMode stays free for everyone.");
+});
+
+test("the owner can pay from the balance, which earns no bonus", () => {
+  expect(panel({ balanceCents: 3000 })).toContain(">Balance");
+  expect(paymentBonusCents(DEFAULT_TIERS, 2500, "balance")).toBe(0);
+  expect(paymentBonusCents(DEFAULT_TIERS, 2500, "card")).toBe(750);
+  expect(paymentBonusCents(DEFAULT_TIERS, 2500, "crypto")).toBe(750);
 });
 
 test("a supporter sees the tier with its end date, monthly status and, from Sponsor, the directory fields", () => {
@@ -188,6 +197,14 @@ test("the prompt card leads with the bonus and the badge shows the tier", () => 
   const card = render(<SupportPromptCard bonusCents={750} onSupport={() => {}} onSnooze={() => {}} />);
   expect(card).toContain("Support AliasMode and get +$7.50 bonus credits");
   expect(card).toContain("Not now");
+});
+
+test("only an explicit canMonthly from Cloud enables monthly support", async () => {
+  let canMonthly: unknown = true;
+  globalThis.fetch = (async () => Response.json({ ok: true, available: true, tiers: DEFAULT_TIERS, supporter: null, canMonthly })) as unknown as typeof fetch;
+  expect(await fetchSupport()).toEqual({ available: true, tiers: DEFAULT_TIERS, supporter: null, canMonthly: true });
+  canMonthly = undefined;
+  expect(await fetchSupport()).toMatchObject({ canMonthly: false });
 });
 
 test("support requests go to the sidecar routes and keep the Cloud error code", async () => {

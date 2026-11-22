@@ -73,11 +73,16 @@ export function tierProgress(tiers: SupportTier[], last30Cents: number): TierPro
 }
 
 /** Whether monthly support can be chosen, and the reason when it cannot. */
-export function monthlyAvailability(method: "balance" | "card" | "crypto", owner: boolean, supporter: Supporter | null): { allowed: boolean; reason: string | null } {
+export function monthlyAvailability(method: "balance" | "card" | "crypto", canMonthly: boolean, supporter: Supporter | null): { allowed: boolean; reason: string | null } {
   if (supporter?.monthly && supporter.monthly.status !== "canceled") return { allowed: false, reason: "You already support monthly." };
+  if (!canMonthly) return { allowed: false, reason: "Only the workspace owner can set up monthly support." };
   if (method !== "card") return { allowed: false, reason: "Monthly support works with a card." };
-  if (!owner) return { allowed: false, reason: "Only the workspace owner can set up monthly support." };
   return { allowed: true, reason: null };
+}
+
+/** Bonus credits for a payment: card, crypto and monthly earn them; a balance payment does not. */
+export function paymentBonusCents(tiers: SupportTier[], amountCents: number, method: "balance" | "card" | "crypto"): number {
+  return method === "balance" ? 0 : supportBonusCents(tiers, amountCents);
 }
 
 /* The prompt card: shown in Cloud mode right after a success moment (20+ profile opens, or a new version installed),
@@ -317,7 +322,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
   source: SupportSource;
   /** cloud: signed in to a Cloud workspace. local: Local mode. */
   mode: "cloud" | "local";
-  /** The workspace owner can set up monthly support. */
+  /** Only the workspace owner can pay from the balance. */
   owner: boolean;
   state: SupportState;
   /** The wallet balance when this Cloud has the wallet; null otherwise. */
@@ -335,11 +340,11 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
   const [preset, setPreset] = useState<number | "custom">(DEFAULT_SUPPORT_CENTS);
   const [custom, setCustom] = useState("");
   const amountCents = preset === "custom" ? Math.round(Number(custom) * 100) : preset;
-  const canUseBalance = balanceCents !== null && balanceCents >= Math.max(amountCents || 0, MIN_BALANCE_CENTS);
-  const [chosenMethod, setMethod] = useState<"balance" | "card" | "crypto">(owner ? "card" : "balance");
+  const canUseBalance = owner && balanceCents !== null && balanceCents >= Math.max(amountCents || 0, MIN_BALANCE_CENTS);
+  const [chosenMethod, setMethod] = useState<"balance" | "card" | "crypto">("card");
   const method = chosenMethod === "balance" && !canUseBalance ? "card" : chosenMethod;
   const [monthlyChosen, setMonthlyChosen] = useState(true);
-  const monthlyRule = monthlyAvailability(method, owner, supporter);
+  const monthlyRule = monthlyAvailability(method, state?.available === true && state.canMonthly, supporter);
   const monthly = monthlyRule.allowed && monthlyChosen;
   const [draft, setDraft] = useState<ProfileDraft>(() => draftOf(supporter));
   const [busy, setBusy] = useState(false);
@@ -357,7 +362,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
   const minCents = method === "balance" ? MIN_BALANCE_CENTS : MIN_PAYMENT_CENTS;
   const maxCents = method === "balance" ? balanceCents ?? 0 : MAX_PAYMENT_CENTS;
   const validAmount = Number.isSafeInteger(amountCents) && amountCents >= minCents && amountCents <= maxCents;
-  const bonusCents = validAmount ? supportBonusCents(tiers, amountCents) : 0;
+  const bonusCents = validAmount ? paymentBonusCents(tiers, amountCents, method) : 0;
   const after = tierProgress(tiers, (supporter?.last30Cents ?? 0) + (validAmount ? amountCents : 0)).current;
   const sponsorFields = SPONSOR_TIERS.has(supporter?.tier ?? null) || SPONSOR_TIERS.has(after?.id ?? null);
   const clean = trimDraft(draft);
@@ -393,7 +398,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
       // The directory listing is a profile field; it is saved next to the payment.
       if (sponsorFields && directoryChanged) await updateSupportProfile(directoryField()).catch(() => {});
       if ("supporter" in result) {
-        setPaid({ cents: amountCents, bonusCents: result.bonusCents ?? bonusCents, monthly: false });
+        setPaid({ cents: amountCents, bonusCents: result.bonusCents ?? 0, monthly: false });
         setThanks(result.supporter); void onReload(); return;
       }
       setPaid({ cents: amountCents, bonusCents, monthly });
@@ -468,6 +473,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
         <section className="support-form" aria-label={t("Your support")}>
           <div className="fld"><span className="support-amount-label">{t("Amount")}
             {bonusCents > 0 ? <b className="support-bonus">{bonusText(bonusCents)}</b>
+              : method === "balance" ? <small className="support-bonus-none">{t("Bonus credits apply to card and crypto payments.")}</small>
               : validAmount && <small className="support-bonus-none">{t("Bonus credits start at {amount}.", { amount: usd(tiers.length ? sortTiers(tiers)[0]!.minCents : 1000, language) })}</small>}
           </span>
             <div className="support-amounts" role="radiogroup" aria-label={t("Amount")}>

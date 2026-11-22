@@ -431,7 +431,7 @@ export async function cloudWorkspaceAction(action: string, input: Record<string,
 /** `available: false`: this AliasMode Cloud has no support yet. */
 export type SupportStatus =
   | { available: false }
-  | { available: true; tiers: SupportTier[]; supporter: Supporter | null };
+  | { available: true; tiers: SupportTier[]; supporter: Supporter | null; canMonthly: boolean };
 
 /** A failed support request: the Cloud error code (for example `insufficient_balance`) and the HTTP status. */
 export class SupportRequestError extends Error {
@@ -454,7 +454,7 @@ async function supportRequest(path: string, init?: RequestInit): Promise<any> {
 export async function fetchSupport(): Promise<SupportStatus> {
   const body = await supportRequest("/ui/api/cloud-support");
   if (body.available !== true || !Array.isArray(body.tiers)) return { available: false };
-  return { available: true, tiers: body.tiers, supporter: body.supporter ?? null };
+  return { available: true, tiers: body.tiers, supporter: body.supporter ?? null, canMonthly: body.canMonthly === true };
 }
 
 export async function createSupport(request: CreateSupportRequest): Promise<CreateSupportResponse> {

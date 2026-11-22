@@ -5180,7 +5180,7 @@ test("Cloud support API forwards reads, payments and profile edits with only kno
   const calls: unknown[] = [];
   const supporter = { tier: "backer", totalCents: 3500, displayName: "Dana", public: true, telegram: "", linkUrl: "", logoUrl: "", logoApproved: false, since: 1 };
   const client = {
-    async getSupport() { return { ok: true, tiers: [{ id: "supporter", minCents: 500, name: "Supporter" }], supporter }; },
+    async getSupport() { return { ok: true, tiers: [{ id: "supporter", minCents: 500, name: "Supporter" }], supporter, canMonthly: true }; },
     async createSupport(request: unknown) { calls.push(["create", request]); return { ok: true, supporter }; },
     async updateSupportProfile(request: unknown) { calls.push(["profile", request]); return { ok: true, supporter }; },
     async cancelSupportMonthly() { calls.push(["cancel"]); return { ok: true, supporter }; },
@@ -5192,7 +5192,7 @@ test("Cloud support API forwards reads, payments and profile edits with only kno
   try {
     const read = await handleUiRequest(new Request("http://x/ui/api/cloud-support"), {} as any, s, null, options);
     expect(read!.headers.get("cache-control")).toBe("no-store");
-    expect(await read!.json()).toMatchObject({ ok: true, available: true, supporter: { tier: "backer" } });
+    expect(await read!.json()).toMatchObject({ ok: true, available: true, supporter: { tier: "backer" }, canMonthly: true });
 
     const paid = await json("/ui/api/cloud-support", "POST", { amountCents: 1000, method: "balance", source: "prompt-card", displayName: "Dana", public: false, extra: "dropped", linkUrl: 5 });
     expect(paid!.status).toBe(200);
