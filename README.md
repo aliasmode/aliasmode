@@ -189,6 +189,12 @@ New profiles use AliasMode Chromium on Windows and AliasMode Firefox on macOS an
 
 CloakBrowser stays available for Chromium profiles that ask for it. CloakBrowser profiles on one computer can be linked to each other, so use AliasMode Chromium or AliasMode Firefox for separate identities. AliasMode downloads CloakBrowser from its official releases on first use and verifies the pinned archive and executable SHA-256 hashes. The runtime is included at no extra cost: no separate CloakBrowser purchase, subscription, or account is required. The CloakBrowser binary is a third-party component and is not part of this repository or the Apache-2.0 license.
 
+## Support AliasMode
+
+AliasMode is free and open source. Supporters pay for the servers and the engine builds: [become a supporter](https://aliasmode.com/supporters/).
+
+[![AliasMode partners](https://aliasmode.com/_am/supporters/logos.svg?tier=partner)](https://aliasmode.com/supporters/)
+
 ## Security
 
 For product help, email [support@aliasmode.com](mailto:support@aliasmode.com). Report vulnerabilities privately to [security@aliasmode.com](mailto:security@aliasmode.com) using the process in [SECURITY.md](SECURITY.md). Do not include cookies, passwords, proxy credentials, TOTP seeds, profile exports, or diagnostic archives in public issues.
