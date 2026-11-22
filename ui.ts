@@ -1389,6 +1389,39 @@ export async function handleUiRequest(
     }
   }
 
+  const supportProfileRoute = pathname === "/ui/api/cloud-support/profile" && req.method === "PATCH";
+  if (supportProfileRoute || (pathname === "/ui/api/cloud-support" && (req.method === "GET" || req.method === "POST"))) {
+    if (!options.cloudConnection) return noStoreJson({ ok: false, error: "AliasMode Cloud connection is unavailable" }, 503);
+    const cloud = options.cloudConnection.client;
+    try {
+      if (req.method === "GET") return noStoreJson({ ...await cloud.getSupport(), available: true });
+      const rejected = rejectUntrustedJsonMutation(req);
+      if (rejected) return rejected;
+      const body = await req.json() as Record<string, unknown>;
+      // Only the profile fields Cloud knows, with the right types, go on; Cloud checks their lengths and URLs.
+      const profile = {
+        ...(typeof body.displayName === "string" ? { displayName: body.displayName } : {}),
+        ...(typeof body.public === "boolean" ? { public: body.public } : {}),
+        ...(typeof body.telegram === "string" ? { telegram: body.telegram } : {}),
+        ...(typeof body.linkUrl === "string" ? { linkUrl: body.linkUrl } : {}),
+        ...(typeof body.logoUrl === "string" ? { logoUrl: body.logoUrl } : {}),
+      };
+      if (supportProfileRoute) return noStoreJson(await cloud.updateSupportProfile(profile));
+      const amountCents = Number.isSafeInteger(body.amountCents) && Number(body.amountCents) >= 100 ? Number(body.amountCents) : null;
+      const method = body.method === "balance" || body.method === "card" || body.method === "crypto" ? body.method : null;
+      const source = storeSrc(body.source);
+      if (!amountCents || !method || !source) return noStoreJson({ ok: false, error: "Enter an amount, a payment method and a source" }, 400);
+      return noStoreJson(await cloud.createSupport({ amountCents, method, source, ...profile }));
+    } catch (error) {
+      // An older Cloud has no support yet: the app links to aliasmode.com/supporters/ instead.
+      if (req.method === "GET" && error instanceof CloudApiError && error.status === 404) return noStoreJson({ ok: true, available: false });
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof CloudRequestError ? 502 : 400;
+      return noStoreJson({ ok: false, error: msg(error), ...(error instanceof CloudApiError ? { code: error.code } : {}) }, status);
+    }
+  }
+
   if (options.appConfig?.read().mode === "cloud" && !remote && !options.cloudBrowser) {
     return Response.json(
       { ok: false, error: "AliasMode Cloud authentication is required" },

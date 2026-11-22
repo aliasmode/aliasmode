@@ -5174,3 +5174,60 @@ test("fingerprint check route opens only the AliasMode test page in a running pr
   expect(opened).toHaveLength(2);
   s.close();
 });
+
+test("Cloud support API forwards reads, payments and profile edits with only known fields", async () => {
+  const s = store();
+  const calls: unknown[] = [];
+  const supporter = { tier: "backer", totalCents: 3500, displayName: "Dana", public: true, telegram: "", linkUrl: "", logoUrl: "", logoApproved: false, since: 1 };
+  const client = {
+    async getSupport() { return { ok: true, tiers: [{ id: "supporter", minCents: 500, name: "Supporter" }], supporter }; },
+    async createSupport(request: unknown) { calls.push(["create", request]); return { ok: true, supporter }; },
+    async updateSupportProfile(request: unknown) { calls.push(["profile", request]); return { ok: true, supporter }; },
+  };
+  const options = { cloudConnection: { client } as unknown as CloudConnectionRuntime };
+  const json = (path: string, method: string, body: unknown, headers: Record<string, string> = {}) => handleUiRequest(new Request(`http://x${path}`, {
+    method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body),
+  }), {} as any, s, null, options);
+  try {
+    const read = await handleUiRequest(new Request("http://x/ui/api/cloud-support"), {} as any, s, null, options);
+    expect(read!.headers.get("cache-control")).toBe("no-store");
+    expect(await read!.json()).toMatchObject({ ok: true, available: true, supporter: { tier: "backer" } });
+
+    const paid = await json("/ui/api/cloud-support", "POST", { amountCents: 1000, method: "balance", source: "prompt-card", displayName: "Dana", public: false, extra: "dropped", linkUrl: 5 });
+    expect(paid!.status).toBe(200);
+    const edited = await json("/ui/api/cloud-support/profile", "PATCH", { telegram: "@dana", logoUrl: "https://example.com/l.svg", tier: "partner" });
+    expect(edited!.status).toBe(200);
+    expect(calls).toEqual([
+      ["create", { amountCents: 1000, method: "balance", source: "prompt-card", displayName: "Dana", public: false }],
+      ["profile", { telegram: "@dana", logoUrl: "https://example.com/l.svg" }],
+    ]);
+
+    for (const body of [{ amountCents: 99, method: "card", source: "sidebar" }, { amountCents: 500, method: "paypal", source: "sidebar" }, { amountCents: 500, method: "card", source: "Bad Slug" }]) {
+      expect((await json("/ui/api/cloud-support", "POST", body))!.status).toBe(400);
+    }
+    expect((await json("/ui/api/cloud-support", "POST", { amountCents: 1000, method: "card", source: "sidebar" }, { origin: "https://evil.example" }))!.status).toBe(403);
+    const plain = await handleUiRequest(new Request("http://x/ui/api/cloud-support/profile", { method: "PATCH", body: "{}" }), {} as any, s, null, options);
+    expect(plain!.status).toBe(415);
+    expect(calls).toHaveLength(2);
+  } finally { s.close(); }
+});
+
+test("Cloud support API reports an older Cloud as unavailable and passes error codes on", async () => {
+  const s = store();
+  const client = {
+    async getSupport() { throw new CloudApiError("not found", "record_not_found", 404); },
+    async createSupport() { throw new CloudApiError("short", "insufficient_balance", 402); },
+  };
+  const options = { cloudConnection: { client } as unknown as CloudConnectionRuntime };
+  try {
+    const read = await handleUiRequest(new Request("http://x/ui/api/cloud-support"), {} as any, s, null, options);
+    expect(await read!.json()).toEqual({ ok: true, available: false });
+    const paid = await handleUiRequest(new Request("http://x/ui/api/cloud-support", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ amountCents: 5000, method: "balance", source: "wallet" }),
+    }), {} as any, s, null, options);
+    expect(paid!.status).toBe(402);
+    expect(await paid!.json()).toMatchObject({ ok: false, code: "insufficient_balance" });
+    const offline = await handleUiRequest(new Request("http://x/ui/api/cloud-support"), {} as any, s, null, {});
+    expect(offline!.status).toBe(503);
+  } finally { s.close(); }
+});

@@ -2,6 +2,11 @@
 
 import type {
   AiUsageResponse,
+  CreateSupportRequest,
+  CreateSupportResponse,
+  Supporter,
+  SupportProfileFields,
+  SupportTier,
   PublishScriptInput,
   PublishedScript,
   PublishedScriptSummary,
@@ -421,6 +426,48 @@ export async function cloudWorkspaceAction(action: string, input: Record<string,
   const body = await apiJson(response, path);
   if (!response.ok || body.ok !== true) throw new Error(body.error || "Cloud workspace action failed");
   return body;
+}
+
+/** `available: false`: this AliasMode Cloud has no support yet. */
+export type SupportStatus =
+  | { available: false }
+  | { available: true; tiers: SupportTier[]; supporter: Supporter | null };
+
+/** A failed support request: the Cloud error code (for example `insufficient_balance`) and the HTTP status. */
+export class SupportRequestError extends Error {
+  constructor(message: string, readonly code: string | undefined, readonly status: number) { super(message); }
+}
+
+async function supportRequest(path: string, init?: RequestInit): Promise<any> {
+  let response: Response;
+  try {
+    response = await fetch(path, init ?? { cache: "no-store" });
+  } catch {
+    throw new SupportRequestError("AliasMode Cloud could not be reached", "network", 0);
+  }
+  let body: any = null;
+  try { body = await response.json(); } catch {}
+  if (!response.ok || body?.ok !== true) throw new SupportRequestError(body?.error || "Support request failed", body?.code, response.status);
+  return body;
+}
+
+export async function fetchSupport(): Promise<SupportStatus> {
+  const body = await supportRequest("/ui/api/cloud-support");
+  if (body.available !== true || !Array.isArray(body.tiers)) return { available: false };
+  return { available: true, tiers: body.tiers, supporter: body.supporter ?? null };
+}
+
+export async function createSupport(request: CreateSupportRequest): Promise<CreateSupportResponse> {
+  return supportRequest("/ui/api/cloud-support", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
+  });
+}
+
+export async function updateSupportProfile(fields: SupportProfileFields): Promise<Supporter> {
+  const body = await supportRequest("/ui/api/cloud-support/profile", {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields),
+  });
+  return body.supporter;
 }
 
 export async function fetchLogs(): Promise<{ file: string; content: string }> {

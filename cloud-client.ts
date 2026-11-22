@@ -60,6 +60,11 @@ import {
   type GetWalletResponse,
   type CreateDepositRequest,
   type DepositResponse,
+  type GetSupportResponse,
+  type CreateSupportRequest,
+  type CreateSupportResponse,
+  type UpdateSupportProfileRequest,
+  type SupportProfileResponse,
   type ProxyCatalogResponse,
   type CreateProxyPurchaseRequest,
   type ProxyPurchaseResponse,
@@ -486,6 +491,19 @@ export class CloudClient {
 
   getDeposit(depositId: string): Promise<DepositResponse> {
     return this.call(`/wallet/deposits/${encodeURIComponent(depositId)}`, { cache: "no-store" });
+  }
+
+  /** Support tiers and this account's supporter record. Older Clouds answer 404. */
+  getSupport(): Promise<GetSupportResponse> {
+    return this.call("/support", { cache: "no-store" });
+  }
+
+  createSupport(request: CreateSupportRequest): Promise<CreateSupportResponse> {
+    return this.call("/support", { method: "POST", body: JSON.stringify(request) });
+  }
+
+  updateSupportProfile(request: UpdateSupportProfileRequest): Promise<SupportProfileResponse> {
+    return this.call("/support/profile", { method: "PATCH", body: JSON.stringify(request) });
   }
 
   getProxyCatalog(): Promise<ProxyCatalogResponse> {

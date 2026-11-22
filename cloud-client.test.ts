@@ -449,3 +449,19 @@ test("Cloud checkpoint saves an open session and surfaces an older service's 404
   await expect(cloud.checkpointOpen("registration/1", { expectedVersion: 4, payload }))
     .rejects.toMatchObject({ name: "CloudApiError", status: 404, code: "profile_not_found" });
 });
+
+test("Cloud client reads, creates and edits support with the contract shapes", async () => {
+  const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
+  const cloud = client(async (url, init) => {
+    calls.push({ url: String(url), method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Response.json({ ok: true, tiers: [], supporter: null });
+  });
+  await cloud.getSupport();
+  await cloud.createSupport({ amountCents: 1000, method: "balance", source: "sidebar", displayName: "Dana", public: true });
+  await cloud.updateSupportProfile({ telegram: "@dana", logoUrl: "https://example.com/logo.svg" });
+  expect(calls).toEqual([
+    { url: "https://cloud.aliasmode.test/v1/support", method: undefined, body: undefined },
+    { url: "https://cloud.aliasmode.test/v1/support", method: "POST", body: { amountCents: 1000, method: "balance", source: "sidebar", displayName: "Dana", public: true } },
+    { url: "https://cloud.aliasmode.test/v1/support/profile", method: "PATCH", body: { telegram: "@dana", logoUrl: "https://example.com/logo.svg" } },
+  ]);
+});

@@ -386,7 +386,7 @@ export function proxyLine(proxy: CloudPurchasedProxy): string {
   return proxy.protocol === "http" ? `${proxy.host}:${proxy.port}${auth}` : `${proxy.protocol}://${proxy.host}:${proxy.port}${auth}`;
 }
 
-function useNow(active: boolean): number {
+export function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -517,16 +517,18 @@ export function CryptoPaymentView({ deposit, now = Date.now() }: { deposit: Acti
 }
 
 const ENTRY_LABELS: Record<CloudWalletEntry["kind"], string> = {
-  deposit: "Top-up", purchase: "Proxy purchase", renewal: "Proxy renewal", refund: "Refund", adjustment: "Adjustment", ai_usage: "AI agent",
+  deposit: "Top-up", purchase: "Proxy purchase", renewal: "Proxy renewal", refund: "Refund", adjustment: "Adjustment", ai_usage: "AI agent", support: "Support AliasMode",
 };
 
 /** Balance, top-ups and history. Opens from the balance link at the top of the page. */
-export function WalletPanel({ wallet, owner, initialAmount = "20", onClose, onReload }: {
+export function WalletPanel({ wallet, owner, initialAmount = "20", onClose, onReload, onSupport }: {
   wallet: GetWalletResponse;
   owner: boolean;
   initialAmount?: string;
   onClose: () => void;
   onReload: () => Promise<void>;
+  /** Opens Support AliasMode, paid from this balance. */
+  onSupport?: () => void;
 }) {
   const { t, language } = useTranslation();
   const [amount, setAmount] = useState(initialAmount);
@@ -577,7 +579,13 @@ export function WalletPanel({ wallet, owner, initialAmount = "20", onClose, onRe
         <span id="store-funds-title" className="store-label">{t("Balance")}</span>
         <strong>{formatUsd(wallet.balanceCents, language)}</strong>
       </div>
-      <p className="store-funds-note">{owner ? t("Pays for proxies and renewals in this workspace.") : t("Only the workspace owner can add funds and buy proxies.")}</p>
+      <div className="store-funds-note">
+        <p>{owner ? t("Pays for proxies and renewals in this workspace.") : t("Only the workspace owner can add funds and buy proxies.")}</p>
+        {onSupport && <button type="button" className="store-link store-support-link" onClick={onSupport}>
+          <svg className="store-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0112 7a4.3 4.3 0 017.5 2.8C19.5 15.4 12 20 12 20z" /></svg>
+          {t("Support AliasMode from your balance")}
+        </button>}
+      </div>
       <button type="button" className="iconbtn store-close" aria-label={t("Close")} onClick={onClose}><Glyph name="close" /></button>
     </div>
     {owner && <div className="store-funds-body">
@@ -1106,7 +1114,7 @@ function ManageOnNobleProxy() {
 export type StoreTab = "buy" | "owned" | "tools";
 
 /** The Cloud Proxies page: Buy proxies, My proxies and the proxy tools as tabs, with the balance in the corner. */
-export function StorePage({ state, role, selectedProfileIds, requestedQuantity = 0, focusKey = 0, active = true, src = "direct", entryKey = 0, tools, initialTab, onReload, onProfilesChanged, onEnter }: {
+export function StorePage({ state, role, selectedProfileIds, requestedQuantity = 0, focusKey = 0, active = true, src = "direct", entryKey = 0, tools, initialTab, onReload, onProfilesChanged, onEnter, onSupport }: {
   state: StoreSnapshot;
   role?: string;
   selectedProfileIds: string[];
@@ -1124,6 +1132,8 @@ export function StorePage({ state, role, selectedProfileIds, requestedQuantity =
   onProfilesChanged: () => Promise<void>;
   /** A button on this page opens the shop: records the entry and makes `src` its placement. */
   onEnter?: (src: ProxySrc) => void;
+  /** Opens Support AliasMode from the wallet. */
+  onSupport?: () => void;
 }) {
   const { t, language } = useTranslation();
   const owner = role === "owner";
@@ -1147,7 +1157,7 @@ export function StorePage({ state, role, selectedProfileIds, requestedQuantity =
         <button type="button" className="store-link" aria-expanded={funds} onClick={() => setFunds((open) => !open)}>{owner ? t("Add funds") : t("History")}</button>
       </div>
     </div>
-    {funds && <WalletPanel wallet={state.wallet} owner={owner} onClose={() => setFunds(false)} onReload={onReload} />}
+    {funds && <WalletPanel wallet={state.wallet} owner={owner} onClose={() => setFunds(false)} onReload={onReload} onSupport={onSupport} />}
     <div role="tabpanel" id="store-panel-buy" aria-labelledby="store-tab-buy" className="store-panel" hidden={tab !== "buy"}>
       {owner
         ? state.catalog

@@ -5,7 +5,9 @@ import "./styles.css";
 import "./proxies.css";
 import "./services.css";
 import "./agent.css";
+import "./support.css";
 import { AgentHost } from "./agent.tsx";
+import { HeartIcon, SupportPanel, SupportPromptCard, SupporterBadge, supporterOf, useSupportPrompt, useSupportStatus, type SupportSource } from "./support.tsx";
 import { ProxiesPage } from "./proxies.tsx";
 import { ServicesPage } from "./services.tsx";
 import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
@@ -1451,6 +1453,16 @@ function App() {
   const storeSnapshot = cloudStore.state?.available === true ? cloudStore.state : null;
   // Store placement events go to Cloud only while the in-app store is available (never in Local mode).
   useStoreEvents(!!storeSnapshot);
+  // Support AliasMode: the supporter record in Cloud mode, the panel's placement while it is open, and the prompt card.
+  const support = useSupportStatus(isCloudMode && workspaceReady && !restartRequired, `${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`);
+  const supporter = supporterOf(support.state);
+  const [supportSource, setSupportSource] = useState<SupportSource | null>(null);
+  const supportPrompt = useSupportPrompt({ eligible: isCloudMode && support.state?.available === true, supporter: (supporter?.totalCents ?? 0) > 0 });
+  const openCountedProfile = async (id: string) => {
+    const result = await openProfile(id);
+    if (result?.ok !== false) supportPrompt.note({ kind: "open" });
+    return result;
+  };
   // Each way into the store records its placement; the Buy tab view, Pay and the purchase carry it.
   const [storeEntry, setStoreEntry] = useState<{ src: ProxySrc; key: number }>({ src: "direct", key: 0 });
   const enterStore = useCallback((src: ProxySrc) => {
@@ -2109,6 +2121,12 @@ function App() {
       });
     return () => { active = false; };
   }, []);
+
+  // A newly installed version is a success moment for the support prompt card, once the supporter record is known.
+  const supportLoaded = support.state !== null;
+  useEffect(() => {
+    if (supportLoaded && desktopUpdateResult?.state === "succeeded") supportPrompt.note({ kind: "update", version: desktopUpdateResult.version });
+  }, [supportLoaded, desktopUpdateResult]);
 
   useEffect(() => {
     fetchAppMode().then((config) => {
@@ -3133,7 +3151,7 @@ function App() {
     setBusy((b) => { const n = { ...b }; ids.forEach((id) => delete n[id]); return n; });
     if (issues.length > 0) setActionErr(issues.join("; "));
   };
-  const openSelected = () => bulkRun(openProfile, (p) => !p.running && !p.mobilePersona);
+  const openSelected = () => bulkRun(openCountedProfile, (p) => !p.running && !p.mobilePersona);
   const closeSelected = () => bulkRun(closeProfile, (p) => p.running);
   const convertSelectedMobile = async () => {
     const ids = [...selected].filter((id) => profiles.find((p) => p.id === id)?.mobilePersona);
@@ -3678,6 +3696,10 @@ function App() {
         </div>
 
         <div className="sidefoot">
+          <button type="button" className={`navitem support-nav${supporter?.tier ? ` tier-${supporter.tier}` : ""}`} data-tip={t("Support AliasMode")} title={t("Support AliasMode")}
+            onClick={() => setSupportSource("sidebar")}>
+            <HeartIcon filled={!!supporter?.tier} /><span className="navlabel">{t("Support AliasMode")}</span>
+          </button>
           <a
             className="navitem"
             href="https://aliasmode.com/support/"
@@ -3793,6 +3815,7 @@ function App() {
               <b>{isCloudMode ? cloudAuth?.user?.email ?? "Cloud account" : "Local workspace"}</b>
               <span>{isCloudMode ? cloudAuth?.workspace?.role ?? "member" : "No account"}</span>
             </span>
+            {supporter?.tier && <SupporterBadge tier={supporter.tier} className="account-badge" />}
             <Icon name="chevronRight" className="sm" />
           </button>
         </div>
@@ -3873,7 +3896,7 @@ function App() {
           store={storeSnapshot ? (tools) => <StorePage state={storeSnapshot} role={cloudAuth?.workspace?.role} tools={tools}
             selectedProfileIds={profiles.filter((profile) => selected.has(profile.id)).map((profile) => profile.id)}
             requestedQuantity={storeRequest.quantity} focusKey={storeRequest.key} active={view === "proxies"} src={storeEntry.src} entryKey={storeEntry.key}
-            onEnter={enterStore} onReload={cloudStore.reload} onProfilesChanged={load} /> : undefined} />
+            onEnter={enterStore} onReload={cloudStore.reload} onProfilesChanged={load} onSupport={() => setSupportSource("wallet")} /> : undefined} />
         <TrashPage key={`trash:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`}
           active={view === "trash"} onChanged={load} folderTree={folders} />
       </>}
@@ -3881,6 +3904,13 @@ function App() {
       <AgentHost key={`agent:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`} active={view === "agent"}
         cloudMode={isCloudMode} owner={cloudAuth?.workspace?.role === "owner"} wallet={storeSnapshot?.wallet ?? null} draft={agentDraft}
         onReloadWallet={cloudStore.reload} onUseCloud={() => requestModeSwitch("cloud")} onOpenPage={() => setView("agent")} />
+      {supportSource && <SupportPanel source={supportSource} mode={isCloudMode && workspaceReady ? "cloud" : "local"} state={support.state}
+        balanceCents={storeSnapshot?.wallet.balanceCents ?? null} onClose={() => setSupportSource(null)}
+        onReload={async () => { await Promise.all([support.reload(), cloudStore.reload()]); }}
+        onUseCloud={() => { setSupportSource(null); requestModeSwitch("cloud"); }} />}
+      {/* Never on the Agent page, where the credit notice lives. */}
+      {supportPrompt.visible && !supportSource && view !== "agent" && <SupportPromptCard
+        onSupport={() => { supportPrompt.hide(); setSupportSource("prompt-card"); }} onSnooze={supportPrompt.snooze} />}
       {view === "profiles" ? (
       <div className="workspace">
         {(breadcrumb || sharedOnly) && <nav className="folder-breadcrumb" aria-label={t("Folder path")}>
@@ -4203,7 +4233,7 @@ function App() {
                               className="btn sm primary"
                               aria-label={`Open ${p.name}`}
                               disabled={busy[p.id]}
-                              onClick={() => act(p.id, openProfile)}
+                              onClick={() => act(p.id, openCountedProfile)}
                             >
                               <Icon name="play" className="sm" />{openLabel(p)}
                             </button>
@@ -4214,7 +4244,7 @@ function App() {
                             aria-label={`Open ${p.name}`}
                             title={p.lockedBy ? `Open — session writer: ${p.lockedBy}; this browser will not save its session back` : undefined}
                             disabled={busy[p.id]}
-                            onClick={() => act(p.id, openProfile)}
+                            onClick={() => act(p.id, openCountedProfile)}
                           >
                             <Icon name="play" className="sm" />{openLabel(p)}
                           </button>
@@ -4463,6 +4493,16 @@ function App() {
               </button>
             )}
             {authErr && <p className="modal-err" role="alert">{authErr}</p>}
+            </div>
+          </section>
+
+          <section className="settings-card support-settings">
+            <header><HeartIcon filled className="sm" /><h2>{t("Support AliasMode")}</h2>{supporter?.tier && <SupporterBadge tier={supporter.tier} />}</header>
+            <div className="card-body">
+              <p>{t("AliasMode is free and open source. Supporters pay for servers and engine builds.")}</p>
+              <button className="btn" type="button" onClick={() => setSupportSource("settings")}>
+                <HeartIcon className="sm" />{supporter?.tier ? t("Support again or edit your profile") : t("Support AliasMode")}
+              </button>
             </div>
           </section>
 

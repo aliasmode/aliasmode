@@ -692,7 +692,7 @@ export interface ListPublishedScriptsResponse {
 /* Credits wallet and proxy purchases. Amounts are integer USD cents; times are epoch milliseconds.
    Owners deposit and buy; every active member sees the balance and the purchased proxies. */
 
-export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment" | "ai_usage";
+export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment" | "ai_usage" | "support";
 
 export interface CloudWalletEntry {
   id: string;
@@ -872,6 +872,77 @@ export interface StoreEventsRequest {
 
 export interface StoreEventsResponse {
   ok: true;
+}
+
+/* Support AliasMode: one-time support payments with lifetime tiers. Amounts are integer USD cents; times are
+   epoch milliseconds. Any active member may support. A card or crypto payment is a support deposit with the shape
+   of a wallet deposit (poll GET /v1/wallet/deposits/:id); when it settles, Cloud credits it and spends it as
+   support at once, so the wallet balance does not change. */
+
+export type SupportTierId = "supporter" | "backer" | "sponsor" | "partner";
+
+export interface SupportTier {
+  id: SupportTierId;
+  /** Lifetime total of non-revoked support needed for this tier. */
+  minCents: number;
+  name: string;
+}
+
+export interface Supporter {
+  /** null: less than the first tier given so far. */
+  tier: SupportTierId | null;
+  totalCents: number;
+  displayName: string;
+  /** Shown on aliasmode.com/supporters/. */
+  public: boolean;
+  /** Telegram @username for the Backer+ title, which the owner sets by hand. */
+  telegram: string;
+  /** Sponsor+: shown on the supporters page; the logo only after an admin approves it. */
+  linkUrl: string;
+  logoUrl: string;
+  logoApproved: boolean;
+  since: number;
+}
+
+/** GET /v1/support. Older Clouds answer 404. */
+export interface GetSupportResponse {
+  ok: true;
+  tiers: SupportTier[];
+  supporter: Supporter | null;
+}
+
+export interface SupportProfileFields {
+  /** At most 40 characters. */
+  displayName?: string;
+  /** Default true. */
+  public?: boolean;
+  /** At most 33 characters. */
+  telegram?: string;
+  /** https URLs. */
+  linkUrl?: string;
+  logoUrl?: string;
+}
+
+/** POST /v1/support. `balance` spends wallet credits now (402 insufficient_balance when short);
+    `card` and `crypto` need at least 500 cents and create a support deposit. */
+export interface CreateSupportRequest extends SupportProfileFields {
+  /** At least 100. */
+  amountCents: number;
+  method: "balance" | "card" | "crypto";
+  /** Placement slug, ^[a-z0-9-]{1,64}$: sidebar, wallet, prompt-card, settings. */
+  source: string;
+}
+
+export type CreateSupportResponse =
+  | { ok: true; supporter: Supporter }
+  | DepositResponse;
+
+/** PATCH /v1/support/profile. A logo change resets logoApproved. */
+export type UpdateSupportProfileRequest = SupportProfileFields;
+
+export interface SupportProfileResponse {
+  ok: true;
+  supporter: Supporter;
 }
 
 export type CloudResult<T> = T | CloudError;

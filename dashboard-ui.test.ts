@@ -974,6 +974,20 @@ test("the sidebar offers extension management in both modes and a support link",
   expect(styles).toContain("a.navitem");
 });
 
+test("Support AliasMode opens from the sidebar, Settings and the wallet, and the prompt card stays off the Agent page", () => {
+  const foot = app.slice(app.indexOf('<div className="sidefoot">'), app.indexOf('href="https://aliasmode.com/support/"'));
+  expect(foot).toContain('onClick={() => setSupportSource("sidebar")}');
+  expect(foot).toContain('{t("Support AliasMode")}');
+  expect(app).toContain('setSupportSource("settings")');
+  expect(app).toContain('onSupport={() => setSupportSource("wallet")}');
+  expect(app).toContain('setSupportSource("prompt-card")');
+  expect(app).toContain('supportPrompt.visible && !supportSource && view !== "agent"');
+  // Every successful open counts toward the prompt card's 20 opens.
+  expect(app).not.toContain("act(p.id, openProfile)");
+  expect(app).toContain("bulkRun(openCountedProfile");
+  expect(app).toContain('import "./support.css";');
+});
+
 test("editable Cloud selections expose exports and Edit from file", () => {
   const toolbar = app.slice(app.indexOf('className="toolbar active"'), app.indexOf("className={`tablewrap"));
   expect(toolbar).toContain("(!isCloudMode || selectedEditable) && <>");
