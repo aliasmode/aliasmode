@@ -458,10 +458,14 @@ test("Cloud client reads, creates and edits support with the contract shapes", a
   });
   await cloud.getSupport();
   await cloud.createSupport({ amountCents: 1000, method: "balance", source: "sidebar", displayName: "Dana", public: true });
-  await cloud.updateSupportProfile({ telegram: "@dana", logoUrl: "https://example.com/logo.svg" });
+  await cloud.updateSupportProfile({ telegram: "@dana", logoUrl: "https://example.com/logo.svg", directory: { name: "Acme", description: "Growth", url: "https://acme.example" } });
+  await cloud.createSupport({ amountCents: 2500, method: "card", source: "prompt-card", monthly: true });
+  await cloud.cancelSupportMonthly();
   expect(calls).toEqual([
     { url: "https://cloud.aliasmode.test/v1/support", method: undefined, body: undefined },
     { url: "https://cloud.aliasmode.test/v1/support", method: "POST", body: { amountCents: 1000, method: "balance", source: "sidebar", displayName: "Dana", public: true } },
-    { url: "https://cloud.aliasmode.test/v1/support/profile", method: "PATCH", body: { telegram: "@dana", logoUrl: "https://example.com/logo.svg" } },
+    { url: "https://cloud.aliasmode.test/v1/support/profile", method: "PATCH", body: { telegram: "@dana", logoUrl: "https://example.com/logo.svg", directory: { name: "Acme", description: "Growth", url: "https://acme.example" } } },
+    { url: "https://cloud.aliasmode.test/v1/support", method: "POST", body: { amountCents: 2500, method: "card", source: "prompt-card", monthly: true } },
+    { url: "https://cloud.aliasmode.test/v1/support/monthly", method: "DELETE", body: undefined },
   ]);
 });

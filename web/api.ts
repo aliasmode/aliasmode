@@ -5,8 +5,8 @@ import type {
   CreateSupportRequest,
   CreateSupportResponse,
   Supporter,
-  SupportProfileFields,
   SupportTier,
+  UpdateSupportProfileRequest,
   PublishScriptInput,
   PublishedScript,
   PublishedScriptSummary,
@@ -463,9 +463,17 @@ export async function createSupport(request: CreateSupportRequest): Promise<Crea
   });
 }
 
-export async function updateSupportProfile(fields: SupportProfileFields): Promise<Supporter> {
+export async function updateSupportProfile(fields: UpdateSupportProfileRequest): Promise<Supporter> {
   const body = await supportRequest("/ui/api/cloud-support/profile", {
     method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields),
+  });
+  return body.supporter;
+}
+
+/** Cancels monthly support; the perks stay until they lapse. */
+export async function cancelSupportMonthly(): Promise<Supporter> {
+  const body = await supportRequest("/ui/api/cloud-support/monthly", {
+    method: "DELETE", headers: { "Content-Type": "application/json" }, body: "{}",
   });
   return body.supporter;
 }

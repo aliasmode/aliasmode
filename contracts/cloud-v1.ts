@@ -43,6 +43,7 @@ export type CloudErrorCode =
   | "partner_unavailable"
   | "partner_rejected"
   | "record_not_found"
+  | "monthly_unavailable"
   | "internal_error";
 
 export interface CloudError {
@@ -692,7 +693,7 @@ export interface ListPublishedScriptsResponse {
 /* Credits wallet and proxy purchases. Amounts are integer USD cents; times are epoch milliseconds.
    Owners deposit and buy; every active member sees the balance and the purchased proxies. */
 
-export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment" | "ai_usage" | "support";
+export type WalletEntryKind = "deposit" | "purchase" | "renewal" | "refund" | "adjustment" | "ai_usage" | "support" | "support_bonus";
 
 export interface CloudWalletEntry {
   id: string;
@@ -874,23 +875,51 @@ export interface StoreEventsResponse {
   ok: true;
 }
 
-/* Support AliasMode: one-time support payments with lifetime tiers. Amounts are integer USD cents; times are
-   epoch milliseconds. Any active member may support. A card or crypto payment is a support deposit with the shape
-   of a wallet deposit (poll GET /v1/wallet/deposits/:id); when it settles, Cloud credits it and spends it as
-   support at once, so the wallet balance does not change. */
+/* Support AliasMode. Amounts are integer USD cents; times are epoch milliseconds. Any active member may support.
+   Tiers come from the amount paid in the last 30 days, and their perks last 30 days. Every signed-in payment of at
+   least the first tier adds bonus credits to the workspace wallet (ledger kind support_bonus): floor(amount × bonusPct
+   / 100) of the tier that the payment's amount reaches on its own. A card or crypto payment is a support deposit with
+   the shape of a wallet deposit (poll GET /v1/wallet/deposits/:id); when it settles, Cloud credits it, spends it as
+   support and adds the bonus. Monthly support is card only, for the workspace owner: Cloud charges the saved card
+   every 30 days. */
 
 export type SupportTierId = "supporter" | "backer" | "sponsor" | "partner";
 
 export interface SupportTier {
   id: SupportTierId;
-  /** Lifetime total of non-revoked support needed for this tier. */
+  /** Support paid in the last 30 days needed for this tier. */
   minCents: number;
   name: string;
+  /** Bonus credits for one payment that reaches this tier on its own, in percent (30 = 30%). */
+  bonusPct: number;
+}
+
+export interface SupportMonthly {
+  amountCents: number;
+  /** past_due: the last charge failed and is retried. */
+  status: "active" | "past_due" | "canceled";
+  nextChargeAt: number | null;
+}
+
+export interface SupportDirectoryListing {
+  /** At most 60 characters. */
+  name: string;
+  /** At most 280 characters. */
+  description: string;
+  /** https URL. */
+  url: string;
+  /** Listed in the agency directory only after review, and only while Sponsor+. */
+  approved: boolean;
 }
 
 export interface Supporter {
-  /** null: less than the first tier given so far. */
+  /** The active tier from the last 30 days; null below the first tier. */
   tier: SupportTierId | null;
+  /** When the current tier lapses unless more support arrives; null without a tier. */
+  activeUntil: number | null;
+  last30Cents: number;
+  lifetimeCents: number;
+  /** Same as lifetimeCents, for older clients. */
   totalCents: number;
   displayName: string;
   /** Shown on aliasmode.com/supporters/. */
@@ -902,6 +931,8 @@ export interface Supporter {
   logoUrl: string;
   logoApproved: boolean;
   since: number;
+  monthly: SupportMonthly | null;
+  directory: SupportDirectoryListing | null;
 }
 
 /** GET /v1/support. Older Clouds answer 404. */
@@ -931,15 +962,20 @@ export interface CreateSupportRequest extends SupportProfileFields {
   method: "balance" | "card" | "crypto";
   /** Placement slug, ^[a-z0-9-]{1,64}$: sidebar, wallet, prompt-card, settings. */
   source: string;
+  /** Card and workspace owner only, else 400 monthly_unavailable. */
+  monthly?: boolean;
 }
 
 export type CreateSupportResponse =
-  | { ok: true; supporter: Supporter }
+  | { ok: true; supporter: Supporter; bonusCents: number }
   | DepositResponse;
 
-/** PATCH /v1/support/profile. A logo change resets logoApproved. */
-export type UpdateSupportProfileRequest = SupportProfileFields;
+/** PATCH /v1/support/profile. A logo change resets logoApproved; a directory change resets its approval. */
+export interface UpdateSupportProfileRequest extends SupportProfileFields {
+  directory?: Omit<SupportDirectoryListing, "approved">;
+}
 
+/** PATCH /v1/support/profile and DELETE /v1/support/monthly (cancel; perks stay until activeUntil). */
 export interface SupportProfileResponse {
   ok: true;
   supporter: Supporter;

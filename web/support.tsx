@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "./i18n.tsx";
 import { CardPaymentView, CryptoPaymentView, formatUsd, isStripeCheckoutUrl, mayStillBeCredited, useNow, watchDeposit, type ActiveDeposit } from "./store.tsx";
-import { SupportRequestError, createSupport, fetchSupport, updateSupportProfile, type SupportStatus } from "./api.ts";
+import { SupportRequestError, cancelSupportMonthly, createSupport, fetchSupport, updateSupportProfile, type SupportStatus } from "./api.ts";
 import type { Supporter, SupportTier, SupportTierId } from "../contracts/cloud-v1.ts";
 
 type Translate = (key: string, values?: Record<string, string | number>) => string;
@@ -10,18 +10,18 @@ type Translate = (key: string, values?: Record<string, string | number>) => stri
 export type SupportSource = "sidebar" | "wallet" | "prompt-card" | "settings";
 
 export const SUPPORTERS_URL = "https://aliasmode.com/supporters/";
-export const SUPPORT_PRESETS = [500, 1000, 2500, 5000, 10000];
-export const DEFAULT_SUPPORT_CENTS = 1000;
+export const SUPPORT_PRESETS = [1000, 2500, 5000, 10000, 25000];
+export const DEFAULT_SUPPORT_CENTS = 2500;
 const MIN_BALANCE_CENTS = 100;
 const MIN_PAYMENT_CENTS = 500;
 const MAX_PAYMENT_CENTS = 1_000_000;
 
-/** The tiers of the v1 contract, shown before Cloud answers and in Local mode. */
+/** The tiers of the v2 contract, shown before Cloud answers and in Local mode. */
 export const DEFAULT_TIERS: SupportTier[] = [
-  { id: "supporter", minCents: 500, name: "Supporter" },
-  { id: "backer", minCents: 2500, name: "Backer" },
-  { id: "sponsor", minCents: 10000, name: "Sponsor" },
-  { id: "partner", minCents: 50000, name: "Partner" },
+  { id: "supporter", minCents: 1000, name: "Supporter", bonusPct: 30 },
+  { id: "backer", minCents: 5000, name: "Backer", bonusPct: 40 },
+  { id: "sponsor", minCents: 20000, name: "Sponsor", bonusPct: 50 },
+  { id: "partner", minCents: 100000, name: "Partner", bonusPct: 50 },
 ];
 
 const TIER_LABELS: Record<SupportTierId, string> = { supporter: "Supporter", backer: "Backer", sponsor: "Sponsor", partner: "Partner" };
@@ -29,9 +29,9 @@ const TIER_LABELS: Record<SupportTierId, string> = { supporter: "Supporter", bac
 /** Each tier adds these perks to the ones below it. */
 const TIER_PERKS: Record<SupportTierId, string[]> = {
   supporter: ["Supporter badge in the app and the forum", "Your name on the supporters page"],
-  backer: ["Everything in Supporter", "Backer title in the AliasMode Telegram group"],
-  sponsor: ["Everything in Backer", "Your logo and link on the supporters page", "Sponsor title in Telegram"],
-  partner: ["Everything in Sponsor", "Your logo in the GitHub README", "Partner title in Telegram"],
+  backer: ["Everything in Supporter", "Title in the AliasMode Telegram group", "Your feature votes count ×2"],
+  sponsor: ["Everything in Backer", "Your logo and link on the supporters page", "Listing in the agency directory with a backlink", "Your feature votes count ×3"],
+  partner: ["Everything in Sponsor", "Your logo in the GitHub README", "Your feature votes count ×5"],
 };
 
 const SPONSOR_TIERS = new Set<SupportTierId | null>(["sponsor", "partner"]);
@@ -45,8 +45,16 @@ export function tierLabel(id: SupportTierId, t: Translate): string {
   return t(TIER_LABELS[id] ?? "Supporter");
 }
 
+const sortTiers = (tiers: SupportTier[]) => [...tiers].sort((a, b) => a.minCents - b.minCents);
+
+/** Bonus credits for one payment: the bonus of the tier this amount reaches on its own; none below the first tier. */
+export function supportBonusCents(tiers: SupportTier[], amountCents: number): number {
+  const tier = sortTiers(tiers).filter((candidate) => amountCents >= candidate.minCents).at(-1);
+  return tier ? Math.floor(amountCents * tier.bonusPct / 100) : 0;
+}
+
 export interface TierProgress {
-  /** The highest tier the total reaches, or null below the first tier. */
+  /** The highest tier the 30-day amount reaches, or null below the first tier. */
   current: SupportTier | null;
   next: SupportTier | null;
   remainingCents: number;
@@ -54,18 +62,26 @@ export interface TierProgress {
   percent: number;
 }
 
-export function tierProgress(tiers: SupportTier[], totalCents: number): TierProgress {
-  const sorted = [...tiers].sort((a, b) => a.minCents - b.minCents);
-  const current = sorted.filter((tier) => totalCents >= tier.minCents).at(-1) ?? null;
-  const next = sorted.find((tier) => tier.minCents > totalCents) ?? null;
+export function tierProgress(tiers: SupportTier[], last30Cents: number): TierProgress {
+  const sorted = sortTiers(tiers);
+  const current = sorted.filter((tier) => last30Cents >= tier.minCents).at(-1) ?? null;
+  const next = sorted.find((tier) => tier.minCents > last30Cents) ?? null;
   if (!next) return { current, next, remainingCents: 0, percent: 100 };
   const floor = current?.minCents ?? 0;
-  const percent = Math.round(Math.min(1, Math.max(0, (totalCents - floor) / (next.minCents - floor))) * 100);
-  return { current, next, remainingCents: next.minCents - totalCents, percent };
+  const percent = Math.round(Math.min(1, Math.max(0, (last30Cents - floor) / (next.minCents - floor))) * 100);
+  return { current, next, remainingCents: next.minCents - last30Cents, percent };
+}
+
+/** Whether monthly support can be chosen, and the reason when it cannot. */
+export function monthlyAvailability(method: "balance" | "card" | "crypto", owner: boolean, supporter: Supporter | null): { allowed: boolean; reason: string | null } {
+  if (supporter?.monthly && supporter.monthly.status !== "canceled") return { allowed: false, reason: "You already support monthly." };
+  if (method !== "card") return { allowed: false, reason: "Monthly support works with a card." };
+  if (!owner) return { allowed: false, reason: "Only the workspace owner can set up monthly support." };
+  return { allowed: true, reason: null };
 }
 
 /* The prompt card: shown in Cloud mode right after a success moment (20+ profile opens, or a new version installed),
-   at most once in 30 days, hidden for 90 days by "Not now", never to someone who already supports. */
+   at most once in 30 days, hidden for 90 days by "Not now", never to an active supporter. */
 export const PROMPT_KEY = "aliasmode.support.prompt";
 export const PROMPT_MIN_OPENS = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -83,7 +99,7 @@ export interface PromptState {
 export interface PromptContext {
   /** Cloud mode, signed in, and this Cloud has support. */
   eligible: boolean;
-  /** The account already gave something. */
+  /** The account supports now (an active tier or monthly support). */
   supporter: boolean;
 }
 
@@ -168,17 +184,31 @@ export function supporterOf(state: SupportState): Supporter | null {
   return state?.available === true ? state.supporter : null;
 }
 
+export function tiersOf(state: SupportState): SupportTier[] {
+  return state?.available === true && state.tiers.length ? state.tiers : DEFAULT_TIERS;
+}
+
+/** The account supports now: an active tier, or monthly support that is not canceled. */
+export function isActiveSupporter(supporter: Supporter | null): boolean {
+  return !!supporter?.tier || (!!supporter?.monthly && supporter.monthly.status !== "canceled");
+}
+
 function supportErrorText(error: unknown, t: Translate): string {
   const code = error instanceof SupportRequestError ? error.code : undefined;
   const status = error instanceof SupportRequestError ? error.status : 0;
   if (code === "insufficient_balance" || status === 402) return t("Your balance is too low for this amount.");
   if (code === "deposit_amount_out_of_range") return t("Card and crypto payments must be between $5 and $10,000.");
+  if (code === "monthly_unavailable") return t("Monthly support is not available for this payment. Turn off Monthly and try again.");
   if (code === "validation_failed") return t("Check the amount and your profile, then try again.");
   if (code === "partner_unavailable" || code === "partner_rejected") return t("Card and crypto payments are not available right now. Try again in a few minutes.");
   if (code === "email_not_verified") return t("Verify your email in AliasMode first.");
   if (code === "network" || status === 502 || status === 503 || status === 504) return t("AliasMode Cloud could not be reached. Check your connection and try again.");
   if (status === 404) return t("Support is not available on your AliasMode Cloud yet.");
   return t("The request failed. Try again.");
+}
+
+function shortDate(ms: number, language: string): string {
+  try { return new Intl.DateTimeFormat(language, { month: "short", day: "numeric" }).format(ms); } catch { return new Date(ms).toLocaleDateString(); }
 }
 
 const HEART_PATH = "M12 20.5s-8-4.9-8-10.9A4.6 4.6 0 0112 6.6a4.6 4.6 0 018 3c0 6-8 10.9-8 10.9z";
@@ -197,7 +227,7 @@ export function SupporterBadge({ tier, className = "" }: { tier: SupportTierId; 
 function TierCards({ tiers, current }: { tiers: SupportTier[]; current: SupportTierId | null }) {
   const { t, language } = useTranslation();
   return <ol className="support-tiers" aria-label={t("Supporter tiers")}>
-    {[...tiers].sort((a, b) => a.minCents - b.minCents).map((tier) => <li key={tier.id} className={`support-tier tier-${tier.id}${tier.id === current ? " current" : ""}`}
+    {sortTiers(tiers).map((tier) => <li key={tier.id} className={`support-tier tier-${tier.id}${tier.id === current ? " current" : ""}`}
       aria-current={tier.id === current ? "true" : undefined}>
       <div className="support-tier-head">
         <span className="support-tier-mark"><HeartIcon filled /></span>
@@ -207,17 +237,52 @@ function TierCards({ tiers, current }: { tiers: SupportTier[]; current: SupportT
           : <span className="support-tier-min">{t("{amount}+", { amount: usd(tier.minCents, language) })}</span>}
       </div>
       <ul>{(TIER_PERKS[tier.id] ?? []).map((perk) => <li key={perk}>{t(perk)}</li>)}</ul>
+      <p className="support-tier-bonus">{t("e.g. {amount} → +{bonus} bonus credits", { amount: usd(tier.minCents, language), bonus: usd(supportBonusCents(tiers, tier.minCents), language) })}</p>
     </li>)}
   </ol>;
 }
 
-function SupporterStatus({ supporter, tiers }: { supporter: Supporter; tiers: SupportTier[] }) {
+function MonthlyStatus({ supporter, onChanged }: { supporter: Supporter; onChanged: (next: Supporter) => void }) {
   const { t, language } = useTranslation();
-  const progress = tierProgress(tiers, supporter.totalCents);
+  const monthly = supporter.monthly!;
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const cancel = async () => {
+    setBusy(true); setError(null);
+    try { onChanged(await cancelSupportMonthly()); setConfirming(false); } catch (failure) { setError(supportErrorText(failure, t)); } finally { setBusy(false); }
+  };
+  const until = supporter.activeUntil ? shortDate(supporter.activeUntil, language) : null;
+  return <div className={`support-monthly-status ${monthly.status}`}>
+    <div className="support-monthly-row">
+      <span><strong>{t("Monthly: {amount}", { amount: usd(monthly.amountCents, language) })}</strong>
+        {monthly.status !== "canceled" && monthly.nextChargeAt && <small>{t("Next charge {date}", { date: shortDate(monthly.nextChargeAt, language) })}</small>}
+        {monthly.status === "canceled" && <small>{t("Canceled")}</small>}
+      </span>
+      {monthly.status !== "canceled" && !confirming && <button type="button" className="btn ghost sm" onClick={() => setConfirming(true)}>{t("Cancel monthly")}</button>}
+    </div>
+    {monthly.status === "past_due" && <div className="tools-alert" role="alert">{t("The last monthly charge did not go through. AliasMode tries again automatically.")}</div>}
+    {confirming && <div className="support-confirm" role="alertdialog" aria-label={t("Cancel monthly support?")}>
+      <p>{until ? t("Cancel monthly support? Your perks stay until {date}.", { date: until }) : t("Cancel monthly support?")}</p>
+      <div>
+        <button type="button" className="btn sm" disabled={busy} onClick={() => setConfirming(false)}>{t("Keep monthly")}</button>
+        <button type="button" className="btn sm danger" disabled={busy} onClick={() => void cancel()}>{busy ? t("Canceling…") : t("Cancel monthly")}</button>
+      </div>
+    </div>}
+    {error && <div className="tools-alert" role="alert">{error}</div>}
+  </div>;
+}
+
+function SupporterStatus({ supporter, tiers, onChanged }: { supporter: Supporter; tiers: SupportTier[]; onChanged: (next: Supporter) => void }) {
+  const { t, language } = useTranslation();
+  const progress = tierProgress(tiers, supporter.last30Cents);
   return <section className="support-status" aria-label={t("Your support")}>
     <div className="support-status-row">
       {supporter.tier ? <SupporterBadge tier={supporter.tier} /> : <span className="support-badge tier-none"><HeartIcon />{t("Thank you")}</span>}
-      <span className="support-status-total">{t("{amount} given in total", { amount: usd(supporter.totalCents, language) })}</span>
+      {supporter.tier && supporter.activeUntil
+        ? <span className="support-status-until">{t("{tier} until {date}", { tier: tierLabel(supporter.tier, t), date: shortDate(supporter.activeUntil, language) })}</span>
+        : <span className="support-status-until">{t("No active tier")}</span>}
+      <span className="support-status-total">{t("{amount} in the last 30 days", { amount: usd(supporter.last30Cents, language) })}</span>
     </div>
     {progress.next && <>
       <div className="support-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent}
@@ -227,25 +292,33 @@ function SupporterStatus({ supporter, tiers }: { supporter: Supporter; tiers: Su
       <p className="support-status-next">{t("{amount} more to {tier}", { amount: usd(progress.remainingCents, language), tier: tierLabel(progress.next.id, t) })}</p>
     </>}
     {!progress.next && <p className="support-status-next">{t("You are at the top tier. Thank you for backing AliasMode.")}</p>}
+    {supporter.monthly && <MonthlyStatus supporter={supporter} onChanged={onChanged} />}
   </section>;
 }
 
 const validHttps = (value: string) => !value || /^https:\/\/[^\s/$.?#][^\s]*$/i.test(value);
 
-interface ProfileDraft { displayName: string; public: boolean; telegram: string; linkUrl: string; logoUrl: string }
+interface ProfileDraft { displayName: string; public: boolean; telegram: string; linkUrl: string; logoUrl: string; agency: string; agencyText: string; agencyUrl: string }
 
 function draftOf(supporter: Supporter | null): ProfileDraft {
   return {
     displayName: supporter?.displayName ?? "", public: supporter?.public ?? true, telegram: supporter?.telegram ?? "",
     linkUrl: supporter?.linkUrl ?? "", logoUrl: supporter?.logoUrl ?? "",
+    agency: supporter?.directory?.name ?? "", agencyText: supporter?.directory?.description ?? "", agencyUrl: supporter?.directory?.url ?? "",
   };
 }
 
-/** The panel: tiers, amount, method, the supporter profile, the card or crypto payment, and the thank-you. */
-export function SupportPanel({ source, mode, state, balanceCents, onClose, onReload, onUseCloud }: {
+const trimDraft = (draft: ProfileDraft): ProfileDraft => Object.fromEntries(
+  Object.entries(draft).map(([key, value]) => [key, typeof value === "string" ? value.trim() : value]),
+) as unknown as ProfileDraft;
+
+/** The panel: tiers, amount, method, monthly, the supporter profile, the card or crypto payment, and the thank-you. */
+export function SupportPanel({ source, mode, owner, state, balanceCents, onClose, onReload, onUseCloud }: {
   source: SupportSource;
   /** cloud: signed in to a Cloud workspace. local: Local mode. */
   mode: "cloud" | "local";
+  /** The workspace owner can set up monthly support. */
+  owner: boolean;
   state: SupportState;
   /** The wallet balance when this Cloud has the wallet; null otherwise. */
   balanceCents: number | null;
@@ -255,39 +328,50 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
   onUseCloud: () => void;
 }) {
   const { t, language } = useTranslation();
-  const tiers = state?.available === true && state.tiers.length ? state.tiers : DEFAULT_TIERS;
-  const supporter = supporterOf(state);
+  const tiers = tiersOf(state);
+  const [changed, setChanged] = useState<Supporter | null>(null);
+  const supporter = changed ?? supporterOf(state);
   const ready = mode === "cloud" && state?.available === true;
   const [preset, setPreset] = useState<number | "custom">(DEFAULT_SUPPORT_CENTS);
   const [custom, setCustom] = useState("");
   const amountCents = preset === "custom" ? Math.round(Number(custom) * 100) : preset;
   const canUseBalance = balanceCents !== null && balanceCents >= Math.max(amountCents || 0, MIN_BALANCE_CENTS);
-  const [chosenMethod, setMethod] = useState<"balance" | "card" | "crypto">("balance");
+  const [chosenMethod, setMethod] = useState<"balance" | "card" | "crypto">(owner ? "card" : "balance");
   const method = chosenMethod === "balance" && !canUseBalance ? "card" : chosenMethod;
+  const [monthlyChosen, setMonthlyChosen] = useState(true);
+  const monthlyRule = monthlyAvailability(method, owner, supporter);
+  const monthly = monthlyRule.allowed && monthlyChosen;
   const [draft, setDraft] = useState<ProfileDraft>(() => draftOf(supporter));
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deposit, setDeposit] = useState<ActiveDeposit | null>(null);
+  const [paid, setPaid] = useState<{ cents: number; bonusCents: number; monthly: boolean } | null>(null);
   const [thanks, setThanks] = useState<Supporter | null>(null);
   const now = useNow(deposit?.status === "pending" && deposit.method === "crypto");
   const closeRef = useRef<HTMLButtonElement>(null);
-  const supporterKey = supporter ? `${supporter.since}:${supporter.totalCents}` : "";
+  const supporterKey = supporter ? `${supporter.since}:${supporter.lifetimeCents}` : "";
   useEffect(() => { setDraft(draftOf(supporter)); }, [supporterKey]);
   useEffect(() => { closeRef.current?.focus(); }, []);
 
   const minCents = method === "balance" ? MIN_BALANCE_CENTS : MIN_PAYMENT_CENTS;
   const maxCents = method === "balance" ? balanceCents ?? 0 : MAX_PAYMENT_CENTS;
   const validAmount = Number.isSafeInteger(amountCents) && amountCents >= minCents && amountCents <= maxCents;
-  const after = tierProgress(tiers, (supporter?.totalCents ?? 0) + (validAmount ? amountCents : 0)).current;
+  const bonusCents = validAmount ? supportBonusCents(tiers, amountCents) : 0;
+  const after = tierProgress(tiers, (supporter?.last30Cents ?? 0) + (validAmount ? amountCents : 0)).current;
   const sponsorFields = SPONSOR_TIERS.has(supporter?.tier ?? null) || SPONSOR_TIERS.has(after?.id ?? null);
-  const urlsValid = validHttps(draft.linkUrl.trim()) && validHttps(draft.logoUrl.trim());
+  const clean = trimDraft(draft);
+  const urlsValid = validHttps(clean.linkUrl) && validHttps(clean.logoUrl) && validHttps(clean.agencyUrl);
+  const savedDraft = draftOf(supporter);
+  const directoryChanged = clean.agency !== savedDraft.agency || clean.agencyText !== savedDraft.agencyText || clean.agencyUrl !== savedDraft.agencyUrl;
+  const directoryField = () => directoryChanged && (clean.agency || supporter?.directory)
+    ? { directory: { name: clean.agency, description: clean.agencyText, url: clean.agencyUrl } } : {};
   const profileFields = () => ({
-    displayName: draft.displayName.trim(), public: draft.public, telegram: draft.telegram.trim(),
-    ...(sponsorFields || supporter?.linkUrl ? { linkUrl: draft.linkUrl.trim() } : {}),
-    ...(sponsorFields || supporter?.logoUrl ? { logoUrl: draft.logoUrl.trim() } : {}),
+    displayName: clean.displayName, public: clean.public, telegram: clean.telegram,
+    ...(sponsorFields || supporter?.linkUrl ? { linkUrl: clean.linkUrl } : {}),
+    ...(sponsorFields || supporter?.logoUrl ? { logoUrl: clean.logoUrl } : {}),
   });
-  const dirty = !!supporter && JSON.stringify(draftOf(supporter)) !== JSON.stringify({ ...draft, displayName: draft.displayName.trim(), telegram: draft.telegram.trim(), linkUrl: draft.linkUrl.trim(), logoUrl: draft.logoUrl.trim() });
+  const dirty = !!supporter && JSON.stringify(savedDraft) !== JSON.stringify(clean);
 
   const watching = !!deposit && (deposit.status === "pending" || mayStillBeCredited(deposit));
   useEffect(() => {
@@ -305,8 +389,14 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
     if (!validAmount || !urlsValid || busy) return;
     setBusy(true); setError(null); setSaved(false);
     try {
-      const result = await createSupport({ amountCents, method, source, ...profileFields() });
-      if ("supporter" in result) { setThanks(result.supporter); void onReload(); return; }
+      const result = await createSupport({ amountCents, method, source, ...profileFields(), ...(monthly ? { monthly: true } : {}) });
+      // The directory listing is a profile field; it is saved next to the payment.
+      if (sponsorFields && directoryChanged) await updateSupportProfile(directoryField()).catch(() => {});
+      if ("supporter" in result) {
+        setPaid({ cents: amountCents, bonusCents: result.bonusCents ?? bonusCents, monthly: false });
+        setThanks(result.supporter); void onReload(); return;
+      }
+      setPaid({ cents: amountCents, bonusCents, monthly });
       setDeposit(result.deposit);
       if (result.deposit.method === "card" && !isStripeCheckoutUrl(result.deposit.card?.checkoutUrl)) setError(t("The checkout link is not valid. Try again."));
     } catch (failure) {
@@ -318,7 +408,7 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
     if (!urlsValid || busy) return;
     setBusy(true); setError(null); setSaved(false);
     try {
-      await updateSupportProfile(profileFields());
+      setChanged(await updateSupportProfile({ ...profileFields(), ...directoryField() }));
       setSaved(true);
       await onReload();
     } catch (failure) {
@@ -327,7 +417,9 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
   };
 
   const set = <K extends keyof ProfileDraft>(key: K, value: ProfileDraft[K]) => { setDraft((current) => ({ ...current, [key]: value })); setSaved(false); };
+  const bonusText = (cents: number) => t("+{amount} bonus credits", { amount: usd(cents, language) });
   const websiteLink = <a className="btn support-site" href={SUPPORTERS_URL} target="_blank" rel="noreferrer">{t("Support on aliasmode.com ↗")}</a>;
+  const defaultBonus = usd(supportBonusCents(tiers, DEFAULT_SUPPORT_CENTS), language);
 
   let body;
   if (thanks) {
@@ -337,7 +429,9 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
       <h3>{t("Thank you!")}</h3>
       <p>{tier ? t("You are now an AliasMode {tier}.", { tier: tierLabel(tier, t) }) : t("Your support arrived.")} {t("It pays for servers and engine builds.")}</p>
       {tier && <SupporterBadge tier={tier} className="lg" />}
-      {tier && ["backer", "sponsor", "partner"].includes(tier) && !thanks.telegram && <p className="support-note">{t("Add your Telegram @username in your profile to get your title in the AliasMode group.")}</p>}
+      {tier && thanks.activeUntil && <p className="support-note">{t("Your perks last until {date}.", { date: shortDate(thanks.activeUntil, language) })} {paid?.monthly ? t("Monthly support keeps them on.") : ""}</p>}
+      {!!paid?.bonusCents && <p className="support-thanks-bonus">{t("{bonus} were added to your workspace balance.", { bonus: bonusText(paid.bonusCents) })}</p>}
+      {tier && tier !== "supporter" && !thanks.telegram && <p className="support-note">{t("Add your Telegram @username in your profile to get your title in the AliasMode group.")}</p>}
       <div className="support-thanks-actions">
         <a className="btn" href={SUPPORTERS_URL} target="_blank" rel="noreferrer">{t("See the supporters page ↗")}</a>
         <button type="button" className="btn primary" onClick={onClose}>{t("Done")}</button>
@@ -345,18 +439,20 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
     </div>;
   } else if (deposit) {
     body = <div className="support-pay">
+      {paid?.monthly && <p className="support-pay-note">{t("Your card is saved for monthly support. AliasMode charges it every 30 days until you cancel.")}</p>}
       {deposit.method === "card" ? <CardPaymentView deposit={deposit} /> : <CryptoPaymentView deposit={deposit} now={now} />}
       {error && <div className="tools-alert" role="alert">{error}</div>}
       <button type="button" className="btn ghost sm support-back" onClick={() => { setDeposit(null); setError(null); }}>{t("Back")}</button>
     </div>;
   } else {
     body = <>
-      {supporter && supporter.totalCents > 0 && <SupporterStatus supporter={supporter} tiers={tiers} />}
+      {supporter && (supporter.lifetimeCents > 0 || supporter.monthly) && <SupporterStatus supporter={supporter} tiers={tiers} onChanged={(next) => { setChanged(next); void onReload(); }} />}
       <TierCards tiers={tiers} current={supporter?.tier ?? null} />
+      <p className="support-duration"><HeartIcon filled />{t("Perks last 30 days. Monthly support keeps them on.")}</p>
       {!ready && <section className="support-callout">
         {mode === "local" ? <>
           <h3>{t("Support needs an AliasMode Cloud account")}</h3>
-          <p>{t("Your badge and perks belong to your account, so they follow you to every device.")}</p>
+          <p>{t("Sign in to get {bonus} bonus credits on {amount} and your badge.", { bonus: `+${defaultBonus}`, amount: usd(DEFAULT_SUPPORT_CENTS, language) })}</p>
           <button type="button" className="btn primary" onClick={onUseCloud}>{t("Switch to Cloud")}</button>
         </> : state === null ? <p className="support-loading" role="status">{t("Loading…")}</p>
           : "failed" in state ? <>
@@ -370,7 +466,10 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
       </section>}
       {ready && <>
         <section className="support-form" aria-label={t("Your support")}>
-          <div className="fld"><span>{t("Amount")}</span>
+          <div className="fld"><span className="support-amount-label">{t("Amount")}
+            {bonusCents > 0 ? <b className="support-bonus">{bonusText(bonusCents)}</b>
+              : validAmount && <small className="support-bonus-none">{t("Bonus credits start at {amount}.", { amount: usd(tiers.length ? sortTiers(tiers)[0]!.minCents : 1000, language) })}</small>}
+          </span>
             <div className="support-amounts" role="radiogroup" aria-label={t("Amount")}>
               {SUPPORT_PRESETS.map((cents) => <button key={cents} type="button" role="radio" aria-checked={preset === cents} className={preset === cents ? "active" : ""}
                 onClick={() => setPreset(cents)}>{usd(cents, language)}</button>)}
@@ -383,16 +482,24 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
             </span>
           </label>}
           {preset === "custom" && custom && !validAmount && <p className="support-hint">{t("Enter an amount from {min} to {max}.", { min: formatUsd(minCents, language), max: formatUsd(maxCents, language) })}</p>}
-          {validAmount && after && after.id !== supporter?.tier && <p className="support-unlock"><HeartIcon filled />{t("This makes you an AliasMode {tier}.", { tier: tierLabel(after.id, t) })}</p>}
+          {validAmount && after && after.id !== supporter?.tier && <p className="support-unlock"><HeartIcon filled />{t("This makes you an AliasMode {tier} for 30 days.", { tier: tierLabel(after.id, t) })}</p>}
           <div className="fld"><span>{t("Pay with")}</span>
             <div className="segmented support-methods" role="radiogroup" aria-label={t("Payment method")}>
-              {canUseBalance && <button type="button" role="radio" aria-checked={method === "balance"} className={method === "balance" ? "active" : ""} onClick={() => setMethod("balance")}>
-                {t("Balance")} <small>{formatUsd(balanceCents ?? 0, language)}</small>
-              </button>}
               <button type="button" role="radio" aria-checked={method === "card"} className={method === "card" ? "active" : ""} onClick={() => setMethod("card")}>{t("Card")}</button>
               <button type="button" role="radio" aria-checked={method === "crypto"} className={method === "crypto" ? "active" : ""} onClick={() => setMethod("crypto")}>{t("Crypto")}</button>
+              {canUseBalance && <button type="button" role="radio" aria-checked={method === "balance"} className={method === "balance" ? "active" : ""} onClick={() => setMethod("balance")}>
+                {t("Balance")} <small>{usd(balanceCents ?? 0, language)}</small>
+              </button>}
             </div>
           </div>
+          <label className={`support-monthly${monthlyRule.allowed ? "" : " off"}`}>
+            <input type="checkbox" role="switch" checked={monthly} disabled={!monthlyRule.allowed} onChange={(event) => setMonthlyChosen(event.target.checked)} />
+            <span className="support-switch" aria-hidden="true" />
+            <span className="support-monthly-copy">
+              <strong>{t("Monthly")}</strong>
+              <small>{monthlyRule.reason ? t(monthlyRule.reason) : t("Charged to your card every 30 days. Cancel any time.")}</small>
+            </span>
+          </label>
         </section>
         <section className="support-profile" aria-labelledby="support-profile-title">
           <h3 id="support-profile-title">{t("How you appear")}</h3>
@@ -415,6 +522,17 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
               <input value={draft.logoUrl} type="url" placeholder="https://…/logo.svg" onChange={(event) => set("logoUrl", event.target.value)} />
               <small>{supporter?.logoUrl && !supporter.logoApproved ? t("Waiting for review. Your logo shows after the team approves it.") : t("Your logo shows on the supporters page after a review.")}</small>
             </label>
+            <h4 className="support-subhead">{t("Agency directory")}</h4>
+            <label className="fld"><span>{t("Agency name")}</span>
+              <input value={draft.agency} maxLength={60} onChange={(event) => set("agency", event.target.value)} />
+            </label>
+            <label className="fld"><span>{t("One-line description")}</span>
+              <input value={draft.agencyText} maxLength={280} placeholder={t("What your agency does, in one line")} onChange={(event) => set("agencyText", event.target.value)} />
+            </label>
+            <label className="fld"><span>{t("Website")}</span>
+              <input value={draft.agencyUrl} type="url" placeholder="https://" onChange={(event) => set("agencyUrl", event.target.value)} />
+              <small>{supporter?.directory?.approved ? t("Listed in the agency directory.") : supporter?.directory ? t("Waiting for review. Listed in the agency directory after the team approves it.") : t("Listed in the agency directory after review.")}</small>
+            </label>
             {!urlsValid && <p className="support-hint">{t("Links must start with https://.")}</p>}
           </>}
           {dirty && <button type="button" className="btn sm support-save" disabled={busy || !urlsValid} onClick={() => void saveProfile()}>{t("Save profile")}</button>}
@@ -424,6 +542,7 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
     </>;
   }
 
+  const action = monthly ? t("Support with {amount} a month", { amount: usd(amountCents, language) }) : t("Support with {amount}", { amount: usd(amountCents, language) });
   return <div className="support-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
     onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
     <aside className="support-sheet proxy-page" role="dialog" aria-modal="true" aria-labelledby="support-title">
@@ -435,28 +554,34 @@ export function SupportPanel({ source, mode, state, balanceCents, onClose, onRel
         </button>
       </header>
       <div className="support-body">
-        {!thanks && !deposit && <p className="support-lead">{t("AliasMode is free and open source. Supporters pay for servers and engine builds.")}</p>}
+        {!thanks && !deposit && <div className="support-intro">
+          <p className="support-lead">{t("AliasMode is free and open source. Supporters pay for servers and engine builds.")}</p>
+          <p className="support-anchor">{t("Other antidetect browsers charge $10–$300 a month for what you run here free.")}</p>
+        </div>}
         {body}
       </div>
       {ready && !thanks && !deposit && <footer className="support-foot">
         {error && <div className="tools-alert" role="alert">{error}</div>}
         <button type="button" className="btn primary support-go" disabled={!validAmount || !urlsValid || busy} onClick={() => void pay()}>
           <HeartIcon filled />
-          {busy ? t("Preparing…") : validAmount ? t("Support with {amount}", { amount: usd(amountCents, language) }) : t("Support AliasMode")}
+          <span>{busy ? t("Preparing…") : validAmount ? action : t("Support AliasMode")}</span>
+          {!busy && bonusCents > 0 && <span className="support-go-bonus">· {bonusText(bonusCents)}</span>}
         </button>
-        <p className="support-fine">{method === "balance" ? t("One-time payment from your workspace balance.") : t("One-time payment. AliasMode stays free for everyone.")}</p>
+        <p className="support-fine">{method === "balance" ? t("One-time payment from your workspace balance.")
+          : monthly ? t("Charged every 30 days. Cancel any time. AliasMode stays free for everyone.")
+          : t("One-time payment. AliasMode stays free for everyone.")}</p>
       </footer>}
     </aside>
   </div>;
 }
 
-/** The small card after a success moment. */
-export function SupportPromptCard({ onSupport, onSnooze }: { onSupport: () => void; onSnooze: () => void }) {
-  const { t } = useTranslation();
+/** The small card after a success moment. Benefit first: the bonus for the default amount. */
+export function SupportPromptCard({ bonusCents, onSupport, onSnooze }: { bonusCents: number; onSupport: () => void; onSnooze: () => void }) {
+  const { t, language } = useTranslation();
   return <aside className="support-prompt" role="dialog" aria-labelledby="support-prompt-title">
     <span className="support-prompt-mark"><HeartIcon filled /></span>
     <div className="support-prompt-copy">
-      <strong id="support-prompt-title">{t("Enjoying AliasMode?")}</strong>
+      <strong id="support-prompt-title">{t("Support AliasMode and get {bonus} bonus credits", { bonus: `+${usd(bonusCents, language)}` })}</strong>
       <p>{t("AliasMode is free and open source. Supporters pay for servers and engine builds.")}</p>
       <div className="support-prompt-actions">
         <button type="button" className="btn primary sm" onClick={onSupport}>{t("Support AliasMode")}</button>

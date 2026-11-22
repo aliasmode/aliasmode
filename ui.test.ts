@@ -5183,6 +5183,7 @@ test("Cloud support API forwards reads, payments and profile edits with only kno
     async getSupport() { return { ok: true, tiers: [{ id: "supporter", minCents: 500, name: "Supporter" }], supporter }; },
     async createSupport(request: unknown) { calls.push(["create", request]); return { ok: true, supporter }; },
     async updateSupportProfile(request: unknown) { calls.push(["profile", request]); return { ok: true, supporter }; },
+    async cancelSupportMonthly() { calls.push(["cancel"]); return { ok: true, supporter }; },
   };
   const options = { cloudConnection: { client } as unknown as CloudConnectionRuntime };
   const json = (path: string, method: string, body: unknown, headers: Record<string, string> = {}) => handleUiRequest(new Request(`http://x${path}`, {
@@ -5197,10 +5198,24 @@ test("Cloud support API forwards reads, payments and profile edits with only kno
     expect(paid!.status).toBe(200);
     const edited = await json("/ui/api/cloud-support/profile", "PATCH", { telegram: "@dana", logoUrl: "https://example.com/l.svg", tier: "partner" });
     expect(edited!.status).toBe(200);
+    const monthly = await json("/ui/api/cloud-support", "POST", { amountCents: 2500, method: "card", source: "sidebar", monthly: true });
+    expect(monthly!.status).toBe(200);
+    const listed = await json("/ui/api/cloud-support/profile", "PATCH", { directory: { name: "Acme", description: "Growth", url: "https://acme.example", approved: true } });
+    expect(listed!.status).toBe(200);
+    expect((await json("/ui/api/cloud-support/profile", "PATCH", { directory: { name: 5 } }))!.status).toBe(200);
+    const canceled = await json("/ui/api/cloud-support/monthly", "DELETE", {});
+    expect(canceled!.status).toBe(200);
     expect(calls).toEqual([
       ["create", { amountCents: 1000, method: "balance", source: "prompt-card", displayName: "Dana", public: false }],
       ["profile", { telegram: "@dana", logoUrl: "https://example.com/l.svg" }],
+      ["create", { amountCents: 2500, method: "card", source: "sidebar", monthly: true }],
+      ["profile", { directory: { name: "Acme", description: "Growth", url: "https://acme.example" } }],
+      ["profile", {}],
+      ["cancel"],
     ]);
+    calls.length = 2;
+    const crossCancel = await json("/ui/api/cloud-support/monthly", "DELETE", {}, { origin: "https://evil.example" });
+    expect(crossCancel!.status).toBe(403);
 
     for (const body of [{ amountCents: 99, method: "card", source: "sidebar" }, { amountCents: 500, method: "paypal", source: "sidebar" }, { amountCents: 500, method: "card", source: "Bad Slug" }]) {
       expect((await json("/ui/api/cloud-support", "POST", body))!.status).toBe(400);

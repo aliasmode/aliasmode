@@ -7,7 +7,7 @@ import "./services.css";
 import "./agent.css";
 import "./support.css";
 import { AgentHost } from "./agent.tsx";
-import { HeartIcon, SupportPanel, SupportPromptCard, SupporterBadge, supporterOf, useSupportPrompt, useSupportStatus, type SupportSource } from "./support.tsx";
+import { HeartIcon, SupportPanel, SupportPromptCard, SupporterBadge, DEFAULT_SUPPORT_CENTS, isActiveSupporter, supportBonusCents, supporterOf, tiersOf, useSupportPrompt, useSupportStatus, type SupportSource } from "./support.tsx";
 import { ProxiesPage } from "./proxies.tsx";
 import { ServicesPage } from "./services.tsx";
 import { CartIcon, ProxyProviderOffer, ProxyStoreContext, proxyOfferUrl, type ProxySrc } from "./proxy-offer.tsx";
@@ -1457,7 +1457,7 @@ function App() {
   const support = useSupportStatus(isCloudMode && workspaceReady && !restartRequired, `${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`);
   const supporter = supporterOf(support.state);
   const [supportSource, setSupportSource] = useState<SupportSource | null>(null);
-  const supportPrompt = useSupportPrompt({ eligible: isCloudMode && support.state?.available === true, supporter: (supporter?.totalCents ?? 0) > 0 });
+  const supportPrompt = useSupportPrompt({ eligible: isCloudMode && support.state?.available === true, supporter: isActiveSupporter(supporter) });
   const openCountedProfile = async (id: string) => {
     const result = await openProfile(id);
     if (result?.ok !== false) supportPrompt.note({ kind: "open" });
@@ -3904,12 +3904,12 @@ function App() {
       <AgentHost key={`agent:${appMode?.mode}:${cloudAuth?.user?.id ?? ""}:${cloudAuth?.workspace?.id ?? ""}`} active={view === "agent"}
         cloudMode={isCloudMode} owner={cloudAuth?.workspace?.role === "owner"} wallet={storeSnapshot?.wallet ?? null} draft={agentDraft}
         onReloadWallet={cloudStore.reload} onUseCloud={() => requestModeSwitch("cloud")} onOpenPage={() => setView("agent")} />
-      {supportSource && <SupportPanel source={supportSource} mode={isCloudMode && workspaceReady ? "cloud" : "local"} state={support.state}
+      {supportSource && <SupportPanel source={supportSource} mode={isCloudMode && workspaceReady ? "cloud" : "local"} owner={cloudAuth?.workspace?.role === "owner"} state={support.state}
         balanceCents={storeSnapshot?.wallet.balanceCents ?? null} onClose={() => setSupportSource(null)}
         onReload={async () => { await Promise.all([support.reload(), cloudStore.reload()]); }}
         onUseCloud={() => { setSupportSource(null); requestModeSwitch("cloud"); }} />}
       {/* Never on the Agent page, where the credit notice lives. */}
-      {supportPrompt.visible && !supportSource && view !== "agent" && <SupportPromptCard
+      {supportPrompt.visible && !supportSource && view !== "agent" && <SupportPromptCard bonusCents={supportBonusCents(tiersOf(support.state), DEFAULT_SUPPORT_CENTS)}
         onSupport={() => { supportPrompt.hide(); setSupportSource("prompt-card"); }} onSnooze={supportPrompt.snooze} />}
       {view === "profiles" ? (
       <div className="workspace">

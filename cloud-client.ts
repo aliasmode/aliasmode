@@ -506,6 +506,11 @@ export class CloudClient {
     return this.call("/support/profile", { method: "PATCH", body: JSON.stringify(request) });
   }
 
+  /** Cancels monthly support; the perks stay until they lapse. */
+  cancelSupportMonthly(): Promise<SupportProfileResponse> {
+    return this.call("/support/monthly", { method: "DELETE" });
+  }
+
   getProxyCatalog(): Promise<ProxyCatalogResponse> {
     return this.call("/proxies/catalog", { cache: "no-store" });
   }
