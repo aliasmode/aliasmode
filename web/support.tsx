@@ -21,7 +21,7 @@ export const DEFAULT_TIERS: SupportTier[] = [
   { id: "supporter", minCents: 1000, name: "Supporter", bonusPct: 30 },
   { id: "backer", minCents: 5000, name: "Backer", bonusPct: 40 },
   { id: "sponsor", minCents: 20000, name: "Sponsor", bonusPct: 50 },
-  { id: "partner", minCents: 100000, name: "Partner", bonusPct: 50 },
+  { id: "partner", minCents: 50000, name: "Partner", bonusPct: 50 },
 ];
 
 const TIER_LABELS: Record<SupportTierId, string> = { supporter: "Supporter", backer: "Backer", sponsor: "Sponsor", partner: "Partner" };
@@ -74,9 +74,9 @@ export function tierProgress(tiers: SupportTier[], last30Cents: number): TierPro
 
 /** Whether monthly support can be chosen, and the reason when it cannot. */
 export function monthlyAvailability(method: "balance" | "card" | "crypto", canMonthly: boolean, supporter: Supporter | null): { allowed: boolean; reason: string | null } {
-  if (supporter?.monthly && supporter.monthly.status !== "canceled") return { allowed: false, reason: "You already support monthly." };
-  if (!canMonthly) return { allowed: false, reason: "Only the workspace owner can set up monthly support." };
-  if (method !== "card") return { allowed: false, reason: "Monthly support works with a card." };
+  if (supporter?.monthly && supporter.monthly.status !== "canceled") return { allowed: false, reason: "You already support quarterly." };
+  if (!canMonthly) return { allowed: false, reason: "Only the workspace owner can set up quarterly support." };
+  if (method !== "card") return { allowed: false, reason: "Quarterly support works with a card." };
   return { allowed: true, reason: null };
 }
 
@@ -203,7 +203,7 @@ function supportErrorText(error: unknown, t: Translate): string {
   const status = error instanceof SupportRequestError ? error.status : 0;
   if (code === "insufficient_balance" || status === 402) return t("Your balance is too low for this amount.");
   if (code === "deposit_amount_out_of_range") return t("Card and crypto payments must be between $5 and $10,000.");
-  if (code === "monthly_unavailable") return t("Monthly support is not available for this payment. Turn off Monthly and try again.");
+  if (code === "monthly_unavailable") return t("Quarterly support is not available for this payment. Turn off Quarterly and try again.");
   if (code === "validation_failed") return t("Check the amount and your profile, then try again.");
   if (code === "partner_unavailable" || code === "partner_rejected") return t("Card and crypto payments are not available right now. Try again in a few minutes.");
   if (code === "email_not_verified") return t("Verify your email in AliasMode first.");
@@ -239,7 +239,7 @@ function TierCards({ tiers, current }: { tiers: SupportTier[]; current: SupportT
         <strong>{tierLabel(tier.id, t)}</strong>
         {tier.id === current
           ? <span className="support-tier-you">{t("Your tier")}</span>
-          : <span className="support-tier-min">{t("{amount}+", { amount: usd(tier.minCents, language) })}</span>}
+          : <span className="support-tier-min">{t("{amount}+ per quarter", { amount: usd(tier.minCents, language) })}</span>}
       </div>
       <ul>{(TIER_PERKS[tier.id] ?? []).map((perk) => <li key={perk}>{t(perk)}</li>)}</ul>
       <p className="support-tier-bonus">{t("e.g. {amount} → +{bonus} bonus credits", { amount: usd(tier.minCents, language), bonus: usd(supportBonusCents(tiers, tier.minCents), language) })}</p>
@@ -260,18 +260,18 @@ function MonthlyStatus({ supporter, onChanged }: { supporter: Supporter; onChang
   const until = supporter.activeUntil ? shortDate(supporter.activeUntil, language) : null;
   return <div className={`support-monthly-status ${monthly.status}`}>
     <div className="support-monthly-row">
-      <span><strong>{t("Monthly: {amount}", { amount: usd(monthly.amountCents, language) })}</strong>
+      <span><strong>{t("Quarterly: {amount}", { amount: usd(monthly.amountCents, language) })}</strong>
         {monthly.status !== "canceled" && monthly.nextChargeAt && <small>{t("Next charge {date}", { date: shortDate(monthly.nextChargeAt, language) })}</small>}
         {monthly.status === "canceled" && <small>{t("Canceled")}</small>}
       </span>
-      {monthly.status !== "canceled" && !confirming && <button type="button" className="btn ghost sm" onClick={() => setConfirming(true)}>{t("Cancel monthly")}</button>}
+      {monthly.status !== "canceled" && !confirming && <button type="button" className="btn ghost sm" onClick={() => setConfirming(true)}>{t("Cancel quarterly")}</button>}
     </div>
-    {monthly.status === "past_due" && <div className="tools-alert" role="alert">{t("The last monthly charge did not go through. AliasMode tries again automatically.")}</div>}
-    {confirming && <div className="support-confirm" role="alertdialog" aria-label={t("Cancel monthly support?")}>
-      <p>{until ? t("Cancel monthly support? Your perks stay until {date}.", { date: until }) : t("Cancel monthly support?")}</p>
+    {monthly.status === "past_due" && <div className="tools-alert" role="alert">{t("The last quarterly charge did not go through. AliasMode tries again automatically.")}</div>}
+    {confirming && <div className="support-confirm" role="alertdialog" aria-label={t("Cancel quarterly support?")}>
+      <p>{until ? t("Cancel quarterly support? Your perks stay until {date}.", { date: until }) : t("Cancel quarterly support?")}</p>
       <div>
-        <button type="button" className="btn sm" disabled={busy} onClick={() => setConfirming(false)}>{t("Keep monthly")}</button>
-        <button type="button" className="btn sm danger" disabled={busy} onClick={() => void cancel()}>{busy ? t("Canceling…") : t("Cancel monthly")}</button>
+        <button type="button" className="btn sm" disabled={busy} onClick={() => setConfirming(false)}>{t("Keep quarterly")}</button>
+        <button type="button" className="btn sm danger" disabled={busy} onClick={() => void cancel()}>{busy ? t("Canceling…") : t("Cancel quarterly")}</button>
       </div>
     </div>}
     {error && <div className="tools-alert" role="alert">{error}</div>}
@@ -287,7 +287,7 @@ function SupporterStatus({ supporter, tiers, onChanged }: { supporter: Supporter
       {supporter.tier && supporter.activeUntil
         ? <span className="support-status-until">{t("{tier} until {date}", { tier: tierLabel(supporter.tier, t), date: shortDate(supporter.activeUntil, language) })}</span>
         : <span className="support-status-until">{t("No active tier")}</span>}
-      <span className="support-status-total">{t("{amount} in the last 30 days", { amount: usd(supporter.last30Cents, language) })}</span>
+      <span className="support-status-total">{t("{amount} in the last 3 months", { amount: usd(supporter.last30Cents, language) })}</span>
     </div>
     {progress.next && <>
       <div className="support-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.percent}
@@ -434,7 +434,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
       <h3>{t("Thank you!")}</h3>
       <p>{tier ? t("You are now an AliasMode {tier}.", { tier: tierLabel(tier, t) }) : t("Your support arrived.")} {t("It pays for servers and engine builds.")}</p>
       {tier && <SupporterBadge tier={tier} className="lg" />}
-      {tier && thanks.activeUntil && <p className="support-note">{t("Your perks last until {date}.", { date: shortDate(thanks.activeUntil, language) })} {paid?.monthly ? t("Monthly support keeps them on.") : ""}</p>}
+      {tier && thanks.activeUntil && <p className="support-note">{t("Your perks last until {date}.", { date: shortDate(thanks.activeUntil, language) })} {paid?.monthly ? t("Quarterly support keeps them on.") : ""}</p>}
       {!!paid?.bonusCents && <p className="support-thanks-bonus">{t("{bonus} were added to your workspace balance.", { bonus: bonusText(paid.bonusCents) })}</p>}
       {tier && tier !== "supporter" && !thanks.telegram && <p className="support-note">{t("Add your Telegram @username in your profile to get your title in the AliasMode group.")}</p>}
       <div className="support-thanks-actions">
@@ -444,7 +444,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
     </div>;
   } else if (deposit) {
     body = <div className="support-pay">
-      {paid?.monthly && <p className="support-pay-note">{t("Your card is saved for monthly support. AliasMode charges it every 30 days until you cancel.")}</p>}
+      {paid?.monthly && <p className="support-pay-note">{t("Your card is saved for quarterly support. AliasMode charges it every 3 months until you cancel.")}</p>}
       {deposit.method === "card" ? <CardPaymentView deposit={deposit} /> : <CryptoPaymentView deposit={deposit} now={now} />}
       {error && <div className="tools-alert" role="alert">{error}</div>}
       <button type="button" className="btn ghost sm support-back" onClick={() => { setDeposit(null); setError(null); }}>{t("Back")}</button>
@@ -453,7 +453,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
     body = <>
       {supporter && (supporter.lifetimeCents > 0 || supporter.monthly) && <SupporterStatus supporter={supporter} tiers={tiers} onChanged={(next) => { setChanged(next); void onReload(); }} />}
       <TierCards tiers={tiers} current={supporter?.tier ?? null} />
-      <p className="support-duration"><HeartIcon filled />{t("Perks last 30 days. Monthly support keeps them on.")}</p>
+      <p className="support-duration"><HeartIcon filled />{t("Perks last 3 months. Quarterly support keeps them on.")}</p>
       {!ready && <section className="support-callout">
         {mode === "local" ? <>
           <h3>{t("Support needs an AliasMode Cloud account")}</h3>
@@ -488,7 +488,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
             </span>
           </label>}
           {preset === "custom" && custom && !validAmount && <p className="support-hint">{t("Enter an amount from {min} to {max}.", { min: formatUsd(minCents, language), max: formatUsd(maxCents, language) })}</p>}
-          {validAmount && after && after.id !== supporter?.tier && <p className="support-unlock"><HeartIcon filled />{t("This makes you an AliasMode {tier} for 30 days.", { tier: tierLabel(after.id, t) })}</p>}
+          {validAmount && after && after.id !== supporter?.tier && <p className="support-unlock"><HeartIcon filled />{t("This makes you an AliasMode {tier} for 3 months.", { tier: tierLabel(after.id, t) })}</p>}
           <div className="fld"><span>{t("Pay with")}</span>
             <div className="segmented support-methods" role="radiogroup" aria-label={t("Payment method")}>
               <button type="button" role="radio" aria-checked={method === "card"} className={method === "card" ? "active" : ""} onClick={() => setMethod("card")}>{t("Card")}</button>
@@ -502,8 +502,8 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
             <input type="checkbox" role="switch" checked={monthly} disabled={!monthlyRule.allowed} onChange={(event) => setMonthlyChosen(event.target.checked)} />
             <span className="support-switch" aria-hidden="true" />
             <span className="support-monthly-copy">
-              <strong>{t("Monthly")}</strong>
-              <small>{monthlyRule.reason ? t(monthlyRule.reason) : t("Charged to your card every 30 days. Cancel any time.")}</small>
+              <strong>{t("Quarterly")}</strong>
+              <small>{monthlyRule.reason ? t(monthlyRule.reason) : t("Charged to your card every 3 months. Cancel any time.")}</small>
             </span>
           </label>
         </section>
@@ -548,7 +548,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
     </>;
   }
 
-  const action = monthly ? t("Support with {amount} a month", { amount: usd(amountCents, language) }) : t("Support with {amount}", { amount: usd(amountCents, language) });
+  const action = monthly ? t("Support with {amount} every 3 months", { amount: usd(amountCents, language) }) : t("Support with {amount}", { amount: usd(amountCents, language) });
   return <div className="support-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
     onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } }}>
     <aside className="support-sheet proxy-page" role="dialog" aria-modal="true" aria-labelledby="support-title">
@@ -574,7 +574,7 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
           {!busy && bonusCents > 0 && <span className="support-go-bonus">· {bonusText(bonusCents)}</span>}
         </button>
         <p className="support-fine">{method === "balance" ? t("One-time payment from your workspace balance.")
-          : monthly ? t("Charged every 30 days. Cancel any time. AliasMode stays free for everyone.")
+          : monthly ? t("Charged every 3 months. Cancel any time. AliasMode stays free for everyone.")
           : t("One-time payment. AliasMode stays free for everyone.")}</p>
       </footer>}
     </aside>

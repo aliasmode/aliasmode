@@ -51,22 +51,22 @@ test("bonus credits come from the tier the payment reaches on its own, in whole 
   expect(supportBonusCents(DEFAULT_TIERS, 2500)).toBe(750);
   expect(supportBonusCents(DEFAULT_TIERS, 5000)).toBe(2000);
   expect(supportBonusCents(DEFAULT_TIERS, 20000)).toBe(10000);
-  expect(supportBonusCents(DEFAULT_TIERS, 100000)).toBe(50000);
+  expect(supportBonusCents(DEFAULT_TIERS, 50000)).toBe(25000);
   expect(supportBonusCents(DEFAULT_TIERS, 1333)).toBe(399);
 });
 
-test("tier progress follows the last 30 days", () => {
+test("tier progress follows the last quarter", () => {
   expect(tierProgress(DEFAULT_TIERS, 0)).toEqual({ current: null, next: DEFAULT_TIERS[0]!, remainingCents: 1000, percent: 0 });
   expect(tierProgress(DEFAULT_TIERS, 7500)).toEqual({ current: DEFAULT_TIERS[1]!, next: DEFAULT_TIERS[2]!, remainingCents: 12500, percent: 17 });
   expect(tierProgress(DEFAULT_TIERS, 150000)).toMatchObject({ current: { id: "partner" }, next: null, percent: 100 });
   expect(tierProgress([...DEFAULT_TIERS].reverse(), 5000).current?.id).toBe("backer");
 });
 
-test("monthly support is card only, for the owner, and once at a time", () => {
+test("quarterly support is card only, for the owner, and once at a time", () => {
   expect(monthlyAvailability("card", true, null)).toEqual({ allowed: true, reason: null });
   expect(monthlyAvailability("crypto", true, null).allowed).toBe(false);
   expect(monthlyAvailability("balance", true, null).allowed).toBe(false);
-  expect(monthlyAvailability("card", false, null)).toEqual({ allowed: false, reason: "Only the workspace owner can set up monthly support." });
+  expect(monthlyAvailability("card", false, null)).toEqual({ allowed: false, reason: "Only the workspace owner can set up quarterly support." });
   const pledged = { ...backer, monthly: { amountCents: 2500, status: "active" as const, nextChargeAt: ACTIVE_UNTIL } };
   expect(monthlyAvailability("card", true, pledged).allowed).toBe(false);
   expect(monthlyAvailability("card", true, { ...pledged, monthly: { ...pledged.monthly, status: "canceled" } }).allowed).toBe(true);
@@ -134,7 +134,7 @@ test("Local mode explains the Cloud account with the bonus and links to the webs
 test("tier cards show perks, the 30-day rule and bonus examples in dollars, never percent", () => {
   const html = panel({ mode: "local", state: null });
   for (const text of ["Your feature votes count ×2", "Listing in the agency directory with a backlink", "Your feature votes count ×5",
-    "e.g. $50 → +$20 bonus credits", "e.g. $200 → +$100 bonus credits", "e.g. $1,000 → +$500 bonus credits", "Perks last 30 days. Monthly support keeps them on."]) {
+    "e.g. $50 → +$20 bonus credits", "e.g. $200 → +$100 bonus credits", "e.g. $500 → +$250 bonus credits", "$500+ per quarter", "Perks last 3 months. Quarterly support keeps them on."]) {
     expect(html).toContain(text);
   }
   expect(html).not.toMatch(/\d+ ?%/);
@@ -146,13 +146,13 @@ test("an older Cloud keeps the website link", () => {
   expect(html).toContain(`href="${SUPPORTERS_URL}"`);
 });
 
-test("an owner starts on $25 by card with Monthly on and the exact bonus on the button", () => {
+test("an owner starts on $25 by card with Quarterly on and the exact bonus on the button", () => {
   const html = panel({ balanceCents: 1250 });
   expect(html).toMatch(/aria-checked="true" class="active">\$25</);
   expect(html).toMatch(/role="switch" checked=""/);
-  expect(html).toContain("Support with $25 a month");
+  expect(html).toContain("Support with $25 every 3 months");
   expect(html).toContain("· +$7.50 bonus credits");
-  expect(html).toContain("Charged every 30 days. Cancel any time.");
+  expect(html).toContain("Charged every 3 months. Cancel any time.");
   expect(html).not.toContain(">Balance");
   expect(html).not.toMatch(/\d+ ?%/);
 });
@@ -161,7 +161,7 @@ test("a member pays once by card or crypto, never from the balance", () => {
   const html = panel({ owner: false, balanceCents: 3000, state: { ...cloudState(null), canMonthly: false } });
   expect(html).not.toContain(">Balance");
   expect(html).toMatch(/role="switch" disabled=""/);
-  expect(html).toContain("Only the workspace owner can set up monthly support.");
+  expect(html).toContain("Only the workspace owner can set up quarterly support.");
   expect(html).toContain("Support with $25<");
   expect(html).toContain("· +$7.50 bonus credits");
   expect(html).toContain("One-time payment. AliasMode stays free for everyone.");
@@ -174,17 +174,17 @@ test("the owner can pay from the balance, which earns no bonus", () => {
   expect(paymentBonusCents(DEFAULT_TIERS, 2500, "crypto")).toBe(750);
 });
 
-test("a supporter sees the tier with its end date, monthly status and, from Sponsor, the directory fields", () => {
+test("a supporter sees the tier with its end date, quarterly status and, from Sponsor, the directory fields", () => {
   const monthly = { amountCents: 2500, status: "past_due" as const, nextChargeAt: ACTIVE_UNTIL };
   const html = panel({ state: cloudState({ ...backer, monthly }) });
   expect(html).toContain("Backer until Dec 22");
-  expect(html).toContain("$75 in the last 30 days");
+  expect(html).toContain("$75 in the last 3 months");
   expect(html).toContain("$125 more to Sponsor");
-  expect(html).toContain("Monthly: $25");
+  expect(html).toContain("Quarterly: $25");
   expect(html).toContain("Next charge Dec 22");
-  expect(html).toContain("The last monthly charge did not go through.");
-  expect(html).toContain("Cancel monthly");
-  expect(html).toContain("You already support monthly.");
+  expect(html).toContain("The last quarterly charge did not go through.");
+  expect(html).toContain("Cancel quarterly");
+  expect(html).toContain("You already support quarterly.");
   expect(html).not.toContain("Agency name");
   const sponsor = panel({ state: cloudState({ ...backer, tier: "sponsor", last30Cents: 20000, directory: { name: "Acme", description: "Growth", url: "https://acme.example", approved: false } }) });
   expect(sponsor).toContain("Agency name");

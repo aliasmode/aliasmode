@@ -876,19 +876,19 @@ export interface StoreEventsResponse {
 }
 
 /* Support AliasMode. Amounts are integer USD cents; times are epoch milliseconds. Any active member may support by
-   card or crypto; only the workspace owner may pay from the balance. Tiers come from the amount paid in the last 30
-   days, and their perks last 30 days. Every signed-in card, crypto or monthly payment of at least the first tier (not a
+   card or crypto; only the workspace owner may pay from the balance. Tiers come from the amount paid in the last 90
+   days (a quarter), and their perks last 90 days. Every signed-in card, crypto or monthly payment of at least the first tier (not a
    balance payment) adds bonus credits to the workspace wallet (ledger kind support_bonus): floor(amount × bonusPct
    / 100) of the tier that the payment's amount reaches on its own. A card or crypto payment is a support deposit with
    the shape of a wallet deposit (poll GET /v1/wallet/deposits/:id); when it settles, Cloud credits it, spends it as
-   support and adds the bonus. Monthly support is card only, for the workspace owner: Cloud charges the saved card
-   every 30 days. */
+   support and adds the bonus. Recurring support (quarterly; the API keeps the name `monthly`) is card only, for the workspace owner: Cloud charges the saved card
+   every 90 days. */
 
 export type SupportTierId = "supporter" | "backer" | "sponsor" | "partner";
 
 export interface SupportTier {
   id: SupportTierId;
-  /** Support paid in the last 30 days needed for this tier. */
+  /** Support paid in the last 90 days needed for this tier. */
   minCents: number;
   name: string;
   /** Bonus credits for one payment that reaches this tier on its own, in percent (30 = 30%). */
@@ -914,7 +914,7 @@ export interface SupportDirectoryListing {
 }
 
 export interface Supporter {
-  /** The active tier from the last 30 days; null below the first tier. */
+  /** The active tier from the last 90 days; null below the first tier. */
   tier: SupportTierId | null;
   /** When the current tier lapses unless more support arrives; null without a tier. */
   activeUntil: number | null;
