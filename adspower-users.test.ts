@@ -3,6 +3,7 @@ import { ProfileStore } from "./store.ts";
 import type { Launcher } from "./launcher.ts";
 import { parseExport } from "./parse.ts";
 import { handleUserApi } from "./adspower-users.ts";
+import { syncFirefoxTimezone } from "./firefox-config.ts";
 
 const SAMPLE = `id=k1d0cd11
 name=acct
@@ -312,7 +313,7 @@ test("user/update removes the proxy with proxy_soft no_proxy", async () => {
 test("user/update keeps a typed timezone when the proxy changes", async () => {
   const { store, launcher } = setup();
   const profile = store.getProfile("k1d0cd11")!;
-  store.upsertProfile({ ...profile, timezone: "Europe/Paris", timezoneManual: true });
+  store.upsertProfile({ ...profile, timezone: "Europe/Paris", locale: "hi-IN", timezoneManual: true });
   let lookups = 0;
   const counting = async () => { lookups++; return geoip(); };
   const body = await (await handleUserApi(post("/api/v1/user/update", {
@@ -322,7 +323,46 @@ test("user/update keeps a typed timezone when the proxy changes", async () => {
 
   expect(body.code).toBe(0);
   expect(lookups).toBe(0);
-  expect(store.getProfile("k1d0cd11")).toMatchObject({ proxy: { host: "5.6.7.8", port: "8080" }, timezone: "Europe/Paris" });
+  expect(store.getProfile("k1d0cd11")).toMatchObject({ proxy: { host: "5.6.7.8", port: "8080" }, timezone: "Europe/Paris", locale: "hi-IN" });
+});
+
+const franceExit = async () => ({
+  json: async () => ({ timezone: "Europe/Paris", country_code: "FR", status: "success", countryCode: "FR" }),
+});
+const exitLookupDown = async () => { throw new Error("lookup down"); };
+const newProxyUpdate = { user_id: "k1d0cd11", user_proxy_config: { proxy_host: "5.6.7.8", proxy_port: "8080" } };
+
+/** A Chromium profile made on a computer in India, and a Firefox one, both without a proxy. */
+async function indiaProfile(store: ProfileStore, launcher: Launcher, engine: "chromium" | "firefox") {
+  if (engine === "chromium") {
+    const profile = store.getProfile("k1d0cd11")!;
+    store.upsertProfile({ ...profile, proxy: null, timezone: "Asia/Kolkata", locale: "hi-IN" });
+    return "k1d0cd11";
+  }
+  const created = await (await handleUserApi(post("/api/v1/user/create", { name: "ff", engine: "firefox" }), launcher, store))!.json();
+  const profile = store.getProfile(created.data.id)!;
+  const saved = { ...profile, timezone: "Asia/Kolkata", locale: "hi-IN" };
+  syncFirefoxTimezone(saved);
+  store.upsertProfile(saved);
+  return created.data.id as string;
+}
+
+test.each([
+  ["chromium", "exit found", franceExit, { timezone: "Europe/Paris", locale: "fr-FR" }],
+  ["firefox", "exit found", franceExit, { timezone: "Europe/Paris", locale: "fr-FR" }],
+  ["chromium", "lookup failed", exitLookupDown, { timezone: "Asia/Kolkata", locale: "hi-IN" }],
+  ["firefox", "lookup failed", exitLookupDown, { timezone: "Asia/Kolkata", locale: "hi-IN" }],
+] as const)("user/update saves a new proxy on a %s profile from India, %s", async (engine, _outcome, geoipFetch, expected) => {
+  const { store, launcher } = setup();
+  const id = await indiaProfile(store, launcher, engine);
+  const body = await (await handleUserApi(post("/api/v1/user/update", { ...newProxyUpdate, user_id: id }), launcher, store, null, geoipFetch))!.json();
+
+  expect(body.code).toBe(0);
+  const saved = store.getProfile(id)!;
+  expect(saved).toMatchObject({ proxy: { host: "5.6.7.8", port: "8080" }, ...expected });
+  if (engine === "firefox") {
+    expect(saved.firefox!.config).toMatchObject({ timezone: expected.timezone, "navigator.language": expected.locale });
+  }
 });
 
 test("user/update rejects a bad proxy and an empty update without changing the profile", async () => {

@@ -5752,6 +5752,40 @@ test("every proxied Chromium launch takes the proxy exit's timezone, and no answ
   }
 });
 
+test("a proxied Chromium launch moves the default language to the proxy exit's, and keeps a typed language or the saved one without an answer", async () => {
+  const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
+  const launch = async (locale: string, exit: ExitLocation | null) => {
+    const store = new ProfileStore(":memory:");
+    const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy, timezone: "Asia/Kolkata", locale };
+    store.upsertProfile(chromium155);
+    const spawnedArgs: string[][] = [];
+    const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
+      hostPlatform: "win32",
+      hostArch: "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
+      chromiumSandboxBlocked: () => false,
+      captureFingerprint: async () => null,
+      lookupExitLocation: async () => exit,
+    });
+    await launcher.start(chromium155.id);
+    await launcher.stop(chromium155.id);
+    const { timezone, locale: stored } = store.getProfile(chromium155.id)!;
+    store.close();
+    return { timezone, locale: stored, flags: spawnedArgs[0]!.filter((arg) => /^--fingerprint-(timezone|locale)=/.test(arg)) };
+  };
+  const paris = { timezone: "Europe/Paris", country: "FR", ip: "203.0.113.7" };
+  // A profile made in India has the language of its timezone, so behind a French proxy it reads French.
+  expect(await launch("hi-IN", paris))
+    .toEqual({ timezone: "Europe/Paris", locale: "fr-FR", flags: ["--fingerprint-timezone=Europe/Paris", "--fingerprint-locale=fr-FR"] });
+  expect((await launch("hi-IN", { timezone: "Europe/Paris", ip: "203.0.113.7" })).locale).toBe("fr-FR");
+  // A language the user typed stays, and so do both when the exit does not answer.
+  expect(await launch("en-GB", paris))
+    .toEqual({ timezone: "Europe/Paris", locale: "en-GB", flags: ["--fingerprint-timezone=Europe/Paris", "--fingerprint-locale=en-GB"] });
+  expect(await launch("hi-IN", null))
+    .toEqual({ timezone: "Asia/Kolkata", locale: "hi-IN", flags: ["--fingerprint-timezone=Asia/Kolkata", "--fingerprint-locale=hi-IN"] });
+});
+
 test("a headed Chromium 155 window is kept on the profile's available screen until the browser stops", async () => {
   const watched = async (engine: "aliasmode" | "cloakbrowser", headless: boolean) => {
     const store = new ProfileStore(":memory:");
