@@ -52,7 +52,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   });
   const options: LauncherOptions = {
     store, dataRoot: root, chromiumRuntimeRoot: join(root, "runtimes"), firefoxBinaryPath: "/fake/firefox.exe", unsafeDisableIdentityGates: true,
-    enforceHostCompatibility: true, hostPlatform, hostArch, captureFingerprint: async () => null,
+    enforceHostCompatibility: true, hostPlatform, hostArch, hostTimezone: "Antarctica/Troll", captureFingerprint: async () => null,
     navigate: async (_endpoint, urls) => { navigated.push([...urls]); }, ensureCookies: async () => ({ injected: false }),
     addNativeSessionCookies: async () => ({ injected: false }),
     labelWindow: async () => { labeled++; },
@@ -158,7 +158,7 @@ test("a proxied Firefox launch gives the engine the proxy exit IP for WebRTC, an
   for (const exitIp of ["203.0.113.7", null]) {
     const f = fixture();
     const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
-    f.store.upsertProfile({ ...f.profile, proxy });
+    f.store.upsertProfile({ ...f.profile, proxy, timezone: "Europe/London" });
     const profile = f.store.getProfile(f.profile.id)!;
     const asked: unknown[] = [];
     const launcher = new Launcher({
@@ -195,6 +195,24 @@ test("a proxied Firefox launch saves the proxy exit's timezone in its config, an
     expect(f.launches()).toBe(1);
     expect(await restarted.stop(f.profile.id)).toBe(true);
   }
+});
+
+test("a proxied Firefox profile whose timezone is this computer's is not opened without the proxy exit's answer", async () => {
+  const f = fixture();
+  const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
+  const firefox = { ...f.profile.firefox!, config: { ...f.profile.firefox!.config, timezone: "Antarctica/Troll" } };
+  f.store.upsertProfile({ ...f.profile, proxy, timezone: "Antarctica/Troll", firefox });
+  const before = f.store.getProfile(f.profile.id)!;
+  const asked: unknown[] = [];
+  const launcher = new Launcher({
+    ...f.options,
+    lookupExitLocation: async (spec) => { asked.push(spec); return null; },
+  });
+  await expect(launcher.start(f.profile.id)).rejects.toEqual(new BrowserLaunchError("preflight", "proxy_timezone"));
+  expect(asked).toEqual([proxy, proxy]);
+  expect(f.launches()).toBe(0);
+  expect(f.store.getProfile(f.profile.id)).toEqual(before);
+  expect(f.store.getLaunch(f.profile.id)).toBeNull();
 });
 
 test.each([false, true])("legacy Firefox keeps its old digest until confirmed close (stale=%s)", async (stale) => {
