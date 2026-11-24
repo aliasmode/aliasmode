@@ -1225,11 +1225,6 @@ export async function operatePersistentContext(browser, context, operation, payl
     if (payload.temporary) await page.close().catch(() => {});
     return { createdPageTargetIds: [] };
   }
-  if (operation === "label-window") {
-    await context.addInitScript({ content: payload.script }).catch(() => {});
-    for (const page of context.pages()) await page.evaluate(payload.script).catch(() => {});
-    return null;
-  }
   if (operation === "ensure-cookies") {
     const key = (cookie) => JSON.stringify([
       cookie.name, cookie.domain.toLowerCase(), cookie.path || "/",
@@ -1480,11 +1475,6 @@ async function operate(chromium, operation, payload) {
         createdPageTargetIds: [...createdPageTargetIds].sort(),
         ...(payload.temporary ? { destroyedPageTargetIds: [...destroyedPageTargetIds].sort() } : {}),
       };
-    }
-    if (operation === "label-window") {
-      await context.addInitScript({ content: payload.script }).catch(() => {});
-      for (const page of context.pages()) await page.evaluate(payload.script).catch(() => {});
-      return null;
     }
     if (operation === "ensure-cookies") {
       const key = (cookie) => JSON.stringify([

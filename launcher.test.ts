@@ -168,7 +168,6 @@ function newLauncher(
     findProfileDirHolderPids: async () => [],
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     killPid: async (pid) => {
       killedPids?.push(pid);
       f.killPid(pid);
@@ -1218,7 +1217,6 @@ test("restart config drift scans the survivor with its persisted binary and user
     ensureSearchProvider: async () => ({ status: "already-default", engine: "DuckDuckGo" }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     cdpReadyTimeoutMs: 1000,
   });
   await launcherA.start("k1d0cd11");
@@ -1666,7 +1664,6 @@ test("reconcileOrphans clears PID-0 launch once CDP is dead and exact ownership 
     findOwnedBrowserPids: async () => [],
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     pidRecoveryGraceMs: 30_000,
   });
 
@@ -1701,7 +1698,6 @@ test("successful start exact-scans and persists a PID when the session helper st
     },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
   });
 
   await launcher.start("k1d0cd11");
@@ -2339,7 +2335,6 @@ test("authenticated SOCKS5 uses the compatibility relay before browser setup", a
     },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
@@ -2401,7 +2396,6 @@ test("proxy relay failures do not expose upstream or target details through laun
     ensureSearchProvider: async () => ({ status: "configured", engine: "DuckDuckGo" }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
@@ -2448,7 +2442,6 @@ test("proxied launch preserves stored timezone and routes through the relay", as
     },
     ensureCookies: async () => { events.push("cookies"); return { injected: false }; },
     navigate: async () => { events.push("navigate"); },
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
@@ -2558,7 +2551,6 @@ test("a Windows persona launches on a Mac host (cross-OS spoofing allowed)", asy
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     cdpReadyTimeoutMs: 1000,
   });
 
@@ -2598,7 +2590,6 @@ test("fresh production launches require and verify the pinned CloakBrowser SHA-2
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     cdpReadyTimeoutMs: 1000,
   });
 
@@ -2750,7 +2741,6 @@ test("start injects cookies before navigating startup URLs", async () => {
     },
     ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     killPid: async () => {},
@@ -2793,7 +2783,6 @@ test("per-launch headless mode skips address-bar search provider setup", async (
     },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
@@ -2826,7 +2815,6 @@ test("search provider failure keeps launch healthy and retries next time", async
     ensureSearchProvider: async () => { attempts++; throw new Error("settings unavailable"); },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
@@ -2874,7 +2862,6 @@ test("start opens the platform home page (deferred) when the caller passes no UR
     fetch: f.fetchFn,
     ensureCookies: async () => { events.push("ensureCookies"); return { injected: true }; },
     navigate: async (_ws, urls) => { events.push(`navigate:${urls.join(",")}`); },
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     killPid: async () => {},
@@ -2902,7 +2889,6 @@ test("standalone Telegram launch preserves the historical Web K fallback", async
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: false }),
     navigate: async (_ws, urls) => { navigated.push(urls); },
-    labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -3034,7 +3020,6 @@ test("start persists provisional ownership before spawn and CDP readiness", asyn
     },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     findProfileDirHolderPids: async () => [],
     isPidAlive: () => true,
     cdpReadyTimeoutMs: 1000,
@@ -3105,7 +3090,6 @@ test("stop-start-stop preserves generation order and tears down the queued repla
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     browserClose: async () => false,
@@ -3332,7 +3316,6 @@ test("a replacement start waits for the full in-flight stop and keeps the new la
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     browserClose: async () => false,
     killPid: async (pid) => {
       killEntered();
@@ -3379,7 +3362,6 @@ test("concurrent stop calls share one destructive teardown", async () => {
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     browserClose: async () => false,
     killPid: async (pid) => {
       killCalls++;
@@ -3464,7 +3446,6 @@ test("failed start tree-kills only an exact owned process and never uses the raw
     fetch: async () => ({ ok: false, json: async () => ({}) }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: (pid) => pid === 8123 && ownedAlive,
     findOwnedBrowserPids: async () => ownedAlive ? [8123] : [],
     killPid: async (pid) => { treeKilled.push(pid); ownedAlive = false; },
@@ -3493,7 +3474,6 @@ test("failed start retains launch ownership when its exact process scan is incon
     fetch: async () => ({ ok: false, json: async () => ({}) }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: () => true,
     findOwnedBrowserPids: async () => null,
     killPid: async () => { throw new Error("must not kill without exact identity"); },
@@ -3521,7 +3501,6 @@ test("failed start retains launch ownership when an exact kill reports but the p
     fetch: async () => ({ ok: false, json: async () => ({}) }),
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: (pid) => pid === 8123,
     findOwnedBrowserPids: async () => [8123],
     killPid: async (pid) => { killed.push(pid); }, // simulated taskkill exit-0 without death
@@ -3685,7 +3664,6 @@ test("same-manager stop never kills a recycled SpawnedProcess PID when exact own
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
   });
   await launcher.start("k1d0cd11");
   cdpAlive = false;
@@ -3717,7 +3695,6 @@ test("same-manager stop kills a different exact owner, never the recycled Spawne
     browserClose: async () => false,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
   });
   await launcher.start("k1d0cd11");
   cdpAlive = false;
@@ -3749,7 +3726,6 @@ test("graceful CDP close still exact-kills an owned process that survived after 
     killPid: async (pid) => { killed.push(pid); ownedAlive = false; },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
   });
   await launcher.start("k1d0cd11");
 
@@ -3784,7 +3760,6 @@ test("a stop succeeds when a dashboard poll clears the same closed launch first"
     killPid: async () => { throw new Error("must not force-kill a closed browser"); },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
   });
   await launcher.start("k1d0cd11");
 
@@ -3822,7 +3797,6 @@ test("a forced stop succeeds when a dashboard poll clears the same dead launch f
     },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
   });
   await launcher.start("k1d0cd11");
 
@@ -4487,7 +4461,6 @@ test("start() repairs a corrupt Preferences but leaves a valid one (and the sess
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -4521,7 +4494,6 @@ test("start() repairs an array-root Preferences before persisting proxied WebRTC
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -4557,7 +4529,6 @@ test("start() maps an unknown preparation failure to a fixed safe category", asy
     },
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -4635,7 +4606,6 @@ test("start() clears an unclean-exit's stale Singleton lock and resets the Crash
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
     cdpReadyTimeoutMs: 1000,
@@ -4672,7 +4642,7 @@ test("start() resets a crash-corrupted profile's volatile storage after an uncle
   const launcher = new Launcher({
     store, binaryPath: "/fake/cloak", dataRoot, portProbe: () => true,
     spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {}, labelWindow: async () => {}, killPid: async () => {},
+    navigate: async () => {}, killPid: async () => {},
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     resetStorageOnUncleanExit: true,
   });
@@ -4698,7 +4668,7 @@ test("start() leaves volatile storage intact when resetStorageOnUncleanExit is o
   const launcher = new Launcher({
     store, binaryPath: "/fake/cloak", dataRoot, portProbe: () => true,
     spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {}, labelWindow: async () => {}, killPid: async () => {},
+    navigate: async () => {}, killPid: async () => {},
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     // resetStorageOnUncleanExit defaults to false → standalone mode never discards local session state
   });
@@ -4720,7 +4690,7 @@ test("start() does NOT reset storage on a CLEAN exit, even with resetStorageOnUn
   const launcher = new Launcher({
     store, binaryPath: "/fake/cloak", dataRoot, portProbe: () => true,
     spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {}, labelWindow: async () => {}, killPid: async () => {},
+    navigate: async () => {}, killPid: async () => {},
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     resetStorageOnUncleanExit: true,
   });
@@ -4753,7 +4723,7 @@ test("start() does NOT reset volatile storage on an unclean exit when the launch
   const launcher = new Launcher({
     store, binaryPath: "/fake/cloak", dataRoot, portProbe: () => true,
     spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {}, labelWindow: async () => {}, killPid: async () => {},
+    navigate: async () => {}, killPid: async () => {},
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     resetStorageOnUncleanExit: true, // mode is on...
   });
@@ -4783,54 +4753,6 @@ test("buildWindowLabel formats name + serial, with fallbacks", () => {
   expect(buildWindowLabel("acct", null)).toBe("acct — "); // serial unknown → no number
 });
 
-test("start() labels the window with '<name> · #<serial> — '", async () => {
-  const store = seeded(); // SAMPLE: id=k1d0cd11, name=acct
-  const f = fleet();
-  const spawnedArgs: string[][] = [];
-  let labeled: { ws: string; label: string } | null = null;
-  const launcher = new Launcher({
-    store,
-    binaryPath: "/fake/cloak",
-    dataRoot: testDataRoot(store),
-    portProbe: () => true,
-    spawn: (bin, args) => { spawnedArgs.push(args); return f.spawn(bin, args); },
-    fetch: f.fetchFn,
-    ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {},
-    labelWindow: async (ws, label) => { labeled = { ws, label }; },
-    killPid: async () => {},
-    browserClose: async () => false,
-    cdpReadyTimeoutMs: 1000,
-  });
-  await launcher.start("k1d0cd11");
-  const serial = store.getSerial("k1d0cd11");
-  expect(labeled).not.toBeNull();
-  expect(labeled!.label).toBe(`acct · #${serial} — `);
-  store.close();
-});
-
-test("a thrown window labeler never fails the launch (best-effort)", async () => {
-  const store = seeded();
-  const f = fleet();
-  const launcher = new Launcher({
-    store,
-    binaryPath: "/fake/cloak",
-    dataRoot: testDataRoot(store),
-    portProbe: () => true,
-    spawn: f.spawn,
-    fetch: f.fetchFn,
-    ensureCookies: async () => ({ injected: false }),
-    navigate: async () => {},
-    labelWindow: async () => { throw new Error("CDP down"); },
-    killPid: async () => {},
-    browserClose: async () => false,
-    cdpReadyTimeoutMs: 1000,
-  });
-  const r = await launcher.start("k1d0cd11"); // must resolve despite the labeler throwing
-  expect(typeof r.port).toBe("number");
-  store.close();
-});
-
 test("window opens at 65% width / 90% height by default (tall & narrow, not full-screen)", async () => {
   const store = seeded(); // SAMPLE resolution=1680*1050
   const f = fleet();
@@ -4853,7 +4775,6 @@ test("windowWidthScale / windowHeightScale control the launched window size", as
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: false }),
     navigate: async () => {},
-    labelWindow: async () => {},
     killPid: async () => {},
     browserClose: async () => false,
     windowWidthScale: 0.6,
@@ -4920,7 +4841,6 @@ test("a spawner that proves the browser never started fails immediately with a s
     fetch: async () => ({ ok: false, json: async () => ({}) }),
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: async () => [],
     findProfileDirHolderPids: async () => [],
@@ -4951,7 +4871,6 @@ test("a healthy CDP endpoint still wins over a late spawn-failure report", async
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
@@ -5003,7 +4922,6 @@ test("a fresh launch reaps a leaked holder of the profile dir before spawning", 
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     // A browser from an earlier run still holds this profile's user-data dir.
@@ -5046,7 +4964,6 @@ test("a fresh launch refuses to spawn while a leaked profile-dir holder survives
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [4242],
@@ -5083,7 +5000,6 @@ test("a first launch skips the holder scan for a new profile directory", async (
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => {
@@ -5120,7 +5036,6 @@ test("a fresh launch refuses to spawn after an inconclusive profile-dir scan", a
     fetch: f.fetchFn,
     ensureCookies: async () => ({ injected: true }),
     navigate: async () => {},
-    labelWindow: async () => {},
     isPidAlive: f.isPidAlive,
     findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => null,
@@ -5158,7 +5073,7 @@ test("a fingerprint probe that throws does not fail the launch", async () => {
     isPidAlive: f.isPidAlive, findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
     ensureCookies: async () => ({ injected: true }),
-    navigate: async () => {}, labelWindow: async () => {},
+    navigate: async () => {},
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     captureFingerprint: async () => {
@@ -5180,7 +5095,7 @@ test("a successful probe persists a sample on the profile", async () => {
     isPidAlive: f.isPidAlive, findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
     ensureCookies: async () => ({ injected: true }),
-    navigate: async () => {}, labelWindow: async () => {},
+    navigate: async () => {},
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     captureFingerprint: async () => ({ canvasHash: "a3f19c8e", hardwareConcurrency: 8 }),
@@ -5204,7 +5119,7 @@ test("a launch verifies the profile against an imported attestation", async () =
     isPidAlive: f.isPidAlive, findOwnedBrowserPids: f.findOwnedBrowserPids,
     findProfileDirHolderPids: async () => [],
     ensureCookies: async () => ({ injected: true }),
-    navigate: async () => {}, labelWindow: async () => {},
+    navigate: async () => {},
     killPid: async (pid) => f.killPid(pid),
     browserClose: async () => false, cdpReadyTimeoutMs: 1000,
     captureFingerprint: async () => ({ canvasHash: "deadbeef" }),
@@ -5514,14 +5429,12 @@ test("Chromium 155 on a scaled Windows display reports the screen in CSS pixels,
   ]);
 });
 
-test("Chromium 155 names its window with a launch switch instead of a page title script", async () => {
+test("only Chromium 155 gets a window label, through a launch switch", async () => {
   const launch = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
     const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), name: "sophie" };
     const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
-    const label = buildWindowLabel("sophie", profileDisplayNo(undefined, store.getSerial(chromium155.id)));
-    const scripted: string[] = [];
     const spawnedArgs: string[][] = [];
     const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
       hostPlatform,
@@ -5529,33 +5442,21 @@ test("Chromium 155 names its window with a launch switch instead of a page title
       chromiumRuntimeRoot: "/fake/runtimes",
       ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
       captureFingerprint: async () => null,
-      labelWindow: async (_ws, text) => { scripted.push(text); },
     });
     await launcher.start(chromium155.id);
     await launcher.stop(chromium155.id);
     store.close();
-    return { label, scripted, switches: spawnedArgs[0]!.filter((arg) => arg.startsWith("--aliasmode-window-label=")) };
+    return spawnedArgs[0]!.filter((arg) => arg.startsWith("--aliasmode-window-label="));
   };
 
-  const native = await launch("win32", "aliasmode");
-  expect(native.label).toBe("sophie · #1 — ");
   // The engine adds the trailing space itself; Windows would strip it from a switch value.
-  expect(native.switches).toEqual(["--aliasmode-window-label=sophie · #1 —"]);
-  expect(native.scripted).toEqual([]);
-  // AliasMode's own Linux and Mac builds take the same switch.
-  for (const host of ["linux", "darwin"] as const) {
-    const own = await launch(host, "aliasmode");
-    expect(own.switches).toEqual(["--aliasmode-window-label=sophie · #1 —"]);
-    expect(own.scripted).toEqual([]);
+  for (const host of ["win32", "linux", "darwin"] as const) {
+    expect(await launch(host, "aliasmode")).toEqual(["--aliasmode-window-label=sophie · #1 \u2014"]);
   }
-  // CloakBrowser on Windows has no such switch, so it keeps the page script.
-  const cloak = await launch("win32", "cloakbrowser");
-  expect(cloak.switches).toEqual([]);
-  expect(cloak.scripted).toEqual([cloak.label]);
-  // On Mac CloakBrowser has no switch, and pages could read a title script.
-  const mac = await launch("darwin", "cloakbrowser");
-  expect(mac.switches).toEqual([]);
-  expect(mac.scripted).toEqual([]);
+  // CloakBrowser has no such switch and a title script is visible to pages, so its windows go unlabeled.
+  for (const host of ["win32", "linux", "darwin"] as const) {
+    expect(await launch(host, "cloakbrowser")).toEqual([]);
+  }
 });
 
 test("a Cloud launch of Chromium 155 keeps the browser after its last window; other launches do not", async () => {

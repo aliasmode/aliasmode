@@ -344,13 +344,6 @@ export interface BrowserProcessIdentity {
 }
 /** Exact process scan: null means the OS scan itself was inconclusive. */
 export type OwnedBrowserProcessFinder = (identity: BrowserProcessIdentity) => Promise<number[] | null>;
-/**
- * Label the launched window so an operator can tell which account a browser
- * belongs to among many open profiles — the visible cue AdsPower's panel used
- * to give. Prefixes the window/tab title with `<name> · #<serial>`. Best-effort:
- * a failure here must never fail (or slow) the launch. Injectable for tests.
- */
-export type WindowLabeler = (ws: string, label: string) => Promise<void>;
 /** Best-effort omnibox-provider setup in the running managed browser. */
 export type SearchProviderEnsurer = (
   options: SearchProviderBootstrapOptions,
@@ -593,8 +586,6 @@ export interface LauncherOptions {
   hostScale?: number;
   /** Available area of the host's primary display as Firefox pages measure it. Defaults to hostDisplayAvail(). */
   hostAvail?: { width: number; height: number };
-  /** Label the window with the profile name + serial so operators can identify it. */
-  labelWindow?: WindowLabeler;
   /** Keep a Chromium 155 window no larger than the profile's screen. Injectable for tests. */
   watchWindowFit?: typeof watchWindowFit;
   /** Cross-platform kill-by-pid for the no-handle (post-restart) path. Injectable for tests. */
@@ -951,8 +942,6 @@ export class Launcher {
   private hostArch: string;
   private hostScale: number;
   private hostAvail: { width: number; height: number } | null;
-  private labelWindowFn: WindowLabeler;
-  private skipDefaultWindowLabel: boolean;
   private watchWindowFitFn?: typeof watchWindowFit;
   private windowFits = new Map<string, { stop(): void }>();
   private killPidFn: (pid: number) => Promise<void>;
@@ -1074,8 +1063,6 @@ export class Launcher {
     this.hostArch = opts.hostArch ?? process.arch;
     this.hostScale = opts.hostScale ?? hostDisplayScale();
     this.hostAvail = opts.hostAvail ?? hostDisplayAvail();
-    this.labelWindowFn = opts.labelWindow ?? defaultLabelWindow;
-    this.skipDefaultWindowLabel = this.unsafeDisableIdentityGates && opts.labelWindow === undefined;
     this.watchWindowFitFn = opts.watchWindowFit ?? (this.unsafeDisableIdentityGates ? undefined : watchWindowFit);
     this.killPidFn = opts.killPid ?? killByPid;
     this.killProcessGroupFn = opts.killProcessGroup ?? killProcessGroup;
@@ -1663,7 +1650,7 @@ export class Launcher {
     return !!profile.proxy && !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WEBRTC_IP;
   }
 
-  /** AliasMode's own Chromium 155 builds take the window label as a launch switch instead of a page script. */
+  /** AliasMode's own Chromium 155 builds take the window label as a launch switch. Pages can read a title script, so CloakBrowser gets no label. */
   private nativeWindowLabel(profile: Profile): boolean {
     return !!profile.chromiumRuntime && ALIASMODE_CHROMIUM_WINDOW_LABEL;
   }
@@ -2400,22 +2387,6 @@ export class Launcher {
       }
       profile = this.requireUnchangedProfile(profileId, profileSnapshot, "search provider setup");
 
-      // Label the window so the operator can tell which account this browser is
-      // among many open profiles (the cue AdsPower's panel gave). Registered
-      // before navigation so the title script is in place when the platform page
-      // loads. Strictly best-effort — never fail or stall a launch on it. Chromium 155
-      // got the label as a launch switch, so its pages get no title script. On Mac CloakBrowser has
-      // no such switch, and a title script is visible to pages, so its windows there go unlabeled.
-      const pageLabelHidden = this.hostPlatform === "darwin";
-      if (!this.skipDefaultWindowLabel && !this.nativeWindowLabel(profile) && !pageLabelHidden) {
-        try {
-          const displayNo = profileDisplayNo(profile.customNo, this.store.getSerial(profileId));
-          await this.labelWindowFn(ws, buildWindowLabel(profile.name, displayNo));
-        } catch (err) {
-          this.log(`window label failed for ${profileId} (continuing): ${err instanceof Error ? err.message : err}`);
-        }
-      }
-
       // Identity card (#3): open the AdsPower-style landing page in its OWN tab (leaves the
       // automation's tab 0 untouched). Native session restore may already contain it.
       if (SESSION_LAUNCH && startupTargets && !startupTargets.profileCardPresent) {
@@ -2726,9 +2697,7 @@ export class Launcher {
         : profile.proxy ? { server: `${profile.proxy.type}://${profile.proxy.host}:${profile.proxy.port}` } : undefined;
       // The engine shows the label in the native window title and adds the " — " separator itself,
       // so no page script edits document.title.
-      const windowLabel = this.skipDefaultWindowLabel
-        ? undefined
-        : buildWindowLabel(profile.name, profileDisplayNo(profile.customNo, this.store.getSerial(profileId))).replace(/ — $/, "");
+      const windowLabel = buildWindowLabel(profile.name, profileDisplayNo(profile.customNo, this.store.getSerial(profileId))).replace(/ \u2014 $/, "");
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
         userDataDir, config: firefoxLaunchConfig(profile, windowLabel, fontsDir, webRtcIp, intelMac, hostAvail), proxy, headless,
@@ -5656,46 +5625,6 @@ export function buildWindowLabel(name: string, serial: number | string | null): 
   const n = (name || "").trim() || "profile";
   return serial != null && serial !== "" ? `${n} · #${serial} — ` : `${n} — `;
 }
-
-/**
- * In-page script that keeps `label` prefixed on the window/tab title. The
- * platform (X is an SPA) rewrites document.title constantly, so a one-shot set
- * won't stick: re-apply on every title mutation, plus a slow interval as a
- * belt-and-suspenders. The `startsWith(label)` guard makes our own write a
- * no-op so the MutationObserver can't loop. Self-contained (serialized to the
- * page) and fully defensive — it must never throw into the host page.
- */
-function buildLabelScript(label: string): string {
-  const L = JSON.stringify(label);
-  return `(() => { try {
-    var L = ${L};
-    var apply = function(){ try { if (document.title.indexOf(L) !== 0) document.title = L + document.title; } catch(e){} };
-    var start = function(){
-      apply();
-      try {
-        var el = document.querySelector('title') || document.head || document.documentElement;
-        if (el) new MutationObserver(apply).observe(el, { subtree: true, childList: true, characterData: true });
-      } catch(e){}
-      try { setInterval(apply, 3000); } catch(e){}
-    };
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-    else start();
-  } catch(e){} })();`;
-}
-
-/**
- * Default window labeler: connect Playwright over CDP, register the title script
- * for future navigations, and apply it to the already-open page(s) now. Like the
- * other CDP helpers, close() only detaches the client (the browser keeps running).
- * Short connect timeout so a launch is never held up on labeling.
- */
-const defaultLabelWindow: WindowLabeler = async (ws, label) => {
-  await runPlaywrightWorker("label-window", {
-    endpoint: ws,
-    script: buildLabelScript(label),
-    connectTimeoutMs: 10_000,
-  });
-};
 
 /**
  * Default cookie injector: connect Playwright over CDP, add cookies to the

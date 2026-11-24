@@ -57,7 +57,6 @@ async function launchThrough(type: ProxyType, pass = proxyPass): Promise<{
     headless,
     portRange: { start: 9700, end: 9799 },
     baseArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
-    labelWindow: async () => {},
     cdpReadyTimeoutMs: 45_000,
   });
   try {
@@ -99,7 +98,6 @@ async function expectWrongCredentialsToFail(type: "http" | "socks5"): Promise<vo
     headless,
     portRange: { start: 9700, end: 9799 },
     baseArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
-    labelWindow: async () => {},
     cdpReadyTimeoutMs: 45_000,
   });
   try {
@@ -131,7 +129,6 @@ async function exerciseCloudThrough(type: "http" | "socks5"): Promise<void> {
     headless,
     portRange: type === "http" ? { start: 9700, end: 9799 } : { start: 9800, end: 9899 },
     baseArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
-    labelWindow: async () => {},
     cdpReadyTimeoutMs: 45_000,
   });
   let payload = encodePortableProfile(profile, JSON.stringify({

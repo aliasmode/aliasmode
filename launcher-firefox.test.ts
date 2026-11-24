@@ -35,7 +35,6 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   let launches = 0;
   let receivedConfig: unknown;
   let receivedPrefs: unknown;
-  let labeled = 0;
   let startupPreferences = "";
   let browserExecutable = "/fake/firefox.exe";
   let ownerExecutable = "node";
@@ -55,7 +54,6 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
     enforceHostCompatibility: true, hostPlatform, hostArch, captureFingerprint: async () => null,
     navigate: async (_endpoint, urls) => { navigated.push([...urls]); }, ensureCookies: async () => ({ injected: false }),
     addNativeSessionCookies: async () => ({ injected: false }),
-    labelWindow: async () => { labeled++; },
     applySession: async () => {}, log: () => {},
     ensureFirefoxFontPack: async (packRoot, pack) => {
       fontPacks.push(pack);
@@ -95,7 +93,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   };
   return {
     store, profile: store.getProfile(profile.id)!, options, killed, launcher: new Launcher(options),
-    launches: () => launches, config: () => receivedConfig, prefs: () => receivedPrefs, labeled: () => labeled,
+    launches: () => launches, config: () => receivedConfig, prefs: () => receivedPrefs,
     startupPreferences: () => startupPreferences, navigated, fontPacks,
     failFontPacks: (error?: Error) => { fontPackFailure = error; },
     setProcessPaths: (browser: string, owner: string) => {
@@ -118,8 +116,6 @@ test("Firefox launches one saved persona and retains ownership across manager re
   expect(f.config()).toMatchObject({ "aliasmode:windowLabel": LABEL, "voices:blockIfNotDefined": true, "mediaDevices:enabled": true });
   expect(f.prefs()).toEqual(firefoxStartupPrefs(f.profile));
   expect(f.store.getProfile(f.profile.id)!.firefox!.config).not.toHaveProperty("audio:seed");
-  // The engine shows the label in the native title, so no page script rewrites document.title.
-  expect(f.labeled()).toBe(0);
   expect(f.store.getLaunch(f.profile.id)?.engine).toBe("firefox");
   const restarted = new Launcher(f.options);
   expect(await restarted.start(f.profile.id)).toEqual({ ...opened, nativeSessionRestored: false, reattached: true });
