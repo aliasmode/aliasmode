@@ -98,6 +98,10 @@
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
   transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
 }
+.support-tier.pickable { cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.support-tier.pickable:hover { border-color: var(--tier); }
+.support-tier.pickable:focus-visible { outline: 2px solid var(--tier); outline-offset: 2px; }
+.support-tier.selected { border-color: var(--tier); box-shadow: 0 0 0 2px var(--tier); }
 .support-tier.current { border-color: var(--tier); box-shadow: 0 0 0 3px var(--tier-soft); background: linear-gradient(180deg, var(--tier-soft), var(--surface) 75%); }
 .support-tier-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .support-tier-mark { display: grid; place-items: center; flex: 0 0 auto; width: 22px; height: 22px; color: var(--tier); background: var(--tier-soft); border-radius: 7px; }

@@ -19,12 +19,24 @@ import {
   paymentBonusCents,
   snoozePrompt,
   supportBonusCents,
+  amountForTier,
+  tierForAmount,
   tierProgress,
   usd,
   type PromptState,
 } from "./support.tsx";
 import { cancelSupportMonthly, createSupport, fetchSupport, SupportRequestError } from "./api.ts";
 import type { Supporter } from "../contracts/cloud-v1.ts";
+
+test("a tier card picks its price as the amount and the chosen amount selects its card", () => {
+  expect(amountForTier(1000)).toEqual({ preset: 1000 });
+  expect(amountForTier(5000)).toEqual({ preset: 5000 });
+  expect(amountForTier(50000)).toEqual({ custom: "500" });
+  expect(tierForAmount(DEFAULT_TIERS, 500)).toBeNull();
+  expect(tierForAmount(DEFAULT_TIERS, 2500)).toBe("supporter");
+  expect(tierForAmount(DEFAULT_TIERS, 20000)).toBe("sponsor");
+  expect(tierForAmount(DEFAULT_TIERS, 50000)).toBe("partner");
+});
 
 const realFetch = globalThis.fetch;
 const memory = new Map<string, string>();

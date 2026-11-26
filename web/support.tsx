@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "./i18n.tsx";
 import { CardPaymentView, CryptoPaymentView, formatUsd, isStripeCheckoutUrl, mayStillBeCredited, useNow, watchDeposit, type ActiveDeposit } from "./store.tsx";
 import { SupportRequestError, cancelSupportMonthly, createSupport, fetchSupport, updateSupportProfile, type SupportStatus } from "./api.ts";
@@ -51,6 +51,16 @@ const sortTiers = (tiers: SupportTier[]) => [...tiers].sort((a, b) => a.minCents
 export function supportBonusCents(tiers: SupportTier[], amountCents: number): number {
   const tier = sortTiers(tiers).filter((candidate) => amountCents >= candidate.minCents).at(-1);
   return tier ? Math.floor(amountCents * tier.bonusPct / 100) : 0;
+}
+
+/** The tier one payment of this amount reaches on its own (the tier card it selects), or null below the first tier. */
+export function tierForAmount(tiers: SupportTier[], amountCents: number): SupportTierId | null {
+  return sortTiers(tiers).filter((tier) => amountCents >= tier.minCents).at(-1)?.id ?? null;
+}
+
+/** Choosing a tier card picks its price: the matching preset button, or a custom amount. */
+export function amountForTier(minCents: number): { preset: number } | { custom: string } {
+  return SUPPORT_PRESETS.includes(minCents) ? { preset: minCents } : { custom: String(minCents / 100) };
 }
 
 export interface TierProgress {
@@ -229,11 +239,27 @@ export function SupporterBadge({ tier, className = "" }: { tier: SupportTierId; 
   </span>;
 }
 
-function TierCards({ tiers, current }: { tiers: SupportTier[]; current: SupportTierId | null }) {
+function TierCards({ tiers, current, selected, onPick }: {
+  tiers: SupportTier[];
+  current: SupportTierId | null;
+  /** The tier the chosen amount buys; its card shows as selected. */
+  selected?: SupportTierId | null;
+  /** Picks the tier's price as the amount; without it the cards are not clickable. */
+  onPick?: (minCents: number) => void;
+}) {
   const { t, language } = useTranslation();
   return <ol className="support-tiers" aria-label={t("Supporter tiers")}>
-    {sortTiers(tiers).map((tier) => <li key={tier.id} className={`support-tier tier-${tier.id}${tier.id === current ? " current" : ""}`}
-      aria-current={tier.id === current ? "true" : undefined}>
+    {sortTiers(tiers).map((tier) => <li key={tier.id}
+      className={`support-tier tier-${tier.id}${tier.id === current ? " current" : ""}${onPick && tier.id === selected ? " selected" : ""}${onPick ? " pickable" : ""}`}
+      aria-current={tier.id === current ? "true" : undefined}
+      {...(onPick ? {
+        role: "button", tabIndex: 0, "aria-pressed": tier.id === selected,
+        "aria-label": t("Choose {tier}: {amount} per quarter", { tier: tierLabel(tier.id, t), amount: usd(tier.minCents, language) }),
+        onClick: () => onPick(tier.minCents),
+        onKeyDown: (event: KeyboardEvent<HTMLLIElement>) => {
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onPick(tier.minCents); }
+        },
+      } : {})}>
       <div className="support-tier-head">
         <span className="support-tier-mark"><HeartIcon filled /></span>
         <strong>{tierLabel(tier.id, t)}</strong>
@@ -452,7 +478,12 @@ export function SupportPanel({ source, mode, owner, state, balanceCents, onClose
   } else {
     body = <>
       {supporter && (supporter.lifetimeCents > 0 || supporter.monthly) && <SupporterStatus supporter={supporter} tiers={tiers} onChanged={(next) => { setChanged(next); void onReload(); }} />}
-      <TierCards tiers={tiers} current={supporter?.tier ?? null} />
+      <TierCards tiers={tiers} current={supporter?.tier ?? null} selected={validAmount ? tierForAmount(tiers, amountCents) : null}
+        onPick={ready ? (minCents) => {
+          const pick = amountForTier(minCents);
+          if ("preset" in pick) setPreset(pick.preset);
+          else { setPreset("custom"); setCustom(pick.custom); }
+        } : undefined} />
       <p className="support-duration"><HeartIcon filled />{t("Perks last 3 months. Quarterly support keeps them on.")}</p>
       {!ready && <section className="support-callout">
         {mode === "local" ? <>

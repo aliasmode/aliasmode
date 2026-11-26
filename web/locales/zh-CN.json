@@ -1119,5 +1119,6 @@
   "Quarterly": "按季度",
   "Charged to your card every 3 months. Cancel any time.": "每 3 个月从银行卡扣款。可随时取消。",
   "Support with {amount} every 3 months": "每 3 个月支持 {amount}",
-  "Charged every 3 months. Cancel any time. AliasMode stays free for everyone.": "每 3 个月扣款一次。可随时取消。AliasMode 对所有人保持免费。"
+  "Charged every 3 months. Cancel any time. AliasMode stays free for everyone.": "每 3 个月扣款一次。可随时取消。AliasMode 对所有人保持免费。",
+  "Choose {tier}: {amount} per quarter": "选择 {tier}：每季度 {amount}"
 }

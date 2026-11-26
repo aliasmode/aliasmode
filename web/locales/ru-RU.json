@@ -835,5 +835,6 @@
   "Quarterly": "Ежеквартально",
   "Charged to your card every 3 months. Cancel any time.": "Списание с карты каждые 3 месяца. Отменить можно в любой момент.",
   "Support with {amount} every 3 months": "Поддерживать на {amount} каждые 3 месяца",
-  "Charged every 3 months. Cancel any time. AliasMode stays free for everyone.": "Списание каждые 3 месяца. Отменить можно в любой момент. AliasMode остаётся бесплатным для всех."
+  "Charged every 3 months. Cancel any time. AliasMode stays free for everyone.": "Списание каждые 3 месяца. Отменить можно в любой момент. AliasMode остаётся бесплатным для всех.",
+  "Choose {tier}: {amount} per quarter": "Выбрать уровень {tier}: {amount} за квартал"
 }
