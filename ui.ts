@@ -504,6 +504,7 @@ function profileEditView(p: Profile) {
     timezone: p.timezone,
     ...(p.timezoneManual ? { timezoneManual: true } : {}),
     locale: p.locale ?? "",
+    ...(p.localeManual ? { localeManual: true } : {}),
     cores: p.hardware ? String(p.hardware.cores) : "",
     fingerprintSeed: String(p.fingerprintSeed),
     cookieCount: p.cookies.length, seeded: p.seeded,
@@ -555,7 +556,12 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
     }
     p.platformOs = platformOs;
   }
-  if ("locale" in set) p.locale = normalizeProfileLocale(set.locale) ?? p.locale;
+  if ("locale" in set) {
+    const locale = normalizeProfileLocale(set.locale);
+    // A typed language stays when the proxy changes. A blank one goes back to the default rule.
+    if (locale) { p.locale = locale; p.localeManual = true; }
+    else delete p.localeManual;
+  }
   if ("timezone" in set) {
     p.timezone = parseStrictTimezone(set.timezone);
     // A typed timezone stays when the proxy changes and on every launch. A blank one follows the proxy.
@@ -2229,6 +2235,7 @@ export async function handleUiRequest(
       }
       current.timezone = location.timezone;
       delete current.timezoneManual;
+      delete current.localeManual;
       current.locale = localeForCountry(location.country) ?? localeForTimezone(location.timezone);
       syncFirefoxTimezone(current);
       store.upsertProfile(current);
@@ -2514,11 +2521,10 @@ export async function handleUiRequest(
         p = store.getProfile(id);
         if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
         previousGroup = p.group;
-        const followedLocale = location ? localeAfterProxyExit(p, location) : p.locale;
         applyEdits(p, set);
         if (location) {
+          p.locale = localeAfterProxyExit(p, location);
           p.timezone = location.timezone;
-          if (!("locale" in set)) p.locale = followedLocale;
           syncFirefoxTimezone(p);
         }
       }

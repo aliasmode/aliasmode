@@ -1,7 +1,8 @@
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
-import { attachTimezones } from "./geoip.ts";
+import { attachTimezones, lookupExitLocation } from "./geoip.ts";
+import { localeAfterProxyExit } from "./profile-locale.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { proxyHostPort, proxyLegacyString } from "./proxy.ts";
 import type { ProxySpec } from "./types.ts";
@@ -397,7 +398,8 @@ export class AgentControlSession {
         throw agentError("invalid_request", error instanceof Error ? error.message : String(error));
       }
       if (proxyChanged && profile.proxy && !("timezone" in set) && !profile.timezoneManual) {
-        await attachTimezones([profile], undefined, !("locale" in set)).catch(() => {});
+        const exit = await lookupExitLocation(profile.proxy).catch(() => null);
+        if (exit) { profile.locale = localeAfterProxyExit(profile, exit); profile.timezone = exit.timezone; }
         syncFirefoxTimezone(profile);
       }
       this.deps.store.upsertProfile(profile);
@@ -535,14 +537,14 @@ export class AgentControlSession {
           if (!result.ok || !result.ws || !result.port) {
             throw agentError("open_failed", result.error ?? "Cloud browser open failed");
           }
-          return { ws: result.ws, port: result.port, alreadyOpen: false, headless: options.headless ?? false };
+          return { ws: result.ws, port: result.port, alreadyOpen: false, headless: options.headless ?? false, warning: result.warning };
         }
         if (this.deps.remote) {
           const result = await this.deps.remote.open(profileId, startupUrls, false, options);
           if (!result.ok || !result.ws || !result.port) {
             throw agentError("open_failed", result.error ?? "remote browser open failed");
           }
-          return { ws: result.ws, port: result.port, alreadyOpen: false, headless: options.headless ?? false };
+          return { ws: result.ws, port: result.port, alreadyOpen: false, headless: options.headless ?? false, warning: result.warning };
         }
         const result = await this.deps.launcher.start(profileId, startupUrls, options);
         const launch = this.deps.store.getLaunch(profileId);
@@ -553,6 +555,7 @@ export class AgentControlSession {
           // user's, unless this connection opened it; this connection must not close the user's.
           alreadyOpen: !!result.reattached && !this.openedByConnection.has(profileId),
           headless: launch?.headless ?? options.headless ?? false,
+          warning: result.warning,
         };
       },
     );
@@ -573,6 +576,7 @@ export class AgentControlSession {
       headless: opened.headless,
       alreadyOpen: opened.alreadyOpen,
       ownedByConnection: !opened.alreadyOpen,
+      ...(opened.warning ? { warning: opened.warning } : {}),
     };
   }
 

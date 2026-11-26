@@ -281,6 +281,8 @@ export interface PortableProfileV1 {
     /** The user typed the timezone; launches keep it instead of the proxy's. Older clients ignore it. */
     timezoneManual?: true;
     locale?: string;
+    /** The user typed the language; it stays when the proxy changes. Older clients ignore it. */
+    localeManual?: true;
     screenWidth: number;
     screenHeight: number;
     fingerprintSeed: number;

@@ -135,6 +135,8 @@ export interface Profile {
   timezone: string;
   /** The user typed this timezone. Launches and proxy changes keep it instead of the proxy's. */
   timezoneManual?: boolean;
+  /** The user typed the language; it stays when the proxy changes. */
+  localeManual?: boolean;
   /**
    * Chromium 155 on Windows: the display scale its pages draw at (1.25 at 125%), fixed at the first
    * open so the pages measure one screen on every computer. A site that sees a returning visitor's

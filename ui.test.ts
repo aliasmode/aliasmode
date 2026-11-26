@@ -1566,6 +1566,30 @@ test("a language the user set earlier stays when the proxy changes", async () =>
   s.close();
 });
 
+test("a typed language stays through several proxy changes, even when it matches the timezone's default", async () => {
+  for (const [startZone, typed, exits] of [
+    ["Asia/Kolkata", "de-DE", ["Europe/Berlin", "Europe/Paris"]],
+    ["America/New_York", "en-US", ["Europe/Berlin", "Europe/Paris"]],
+  ] as const) {
+    const s = store();
+    const before = s.getProfile("k1d0cd11")!;
+    before.timezone = startZone;
+    s.upsertProfile(before);
+    const update = (set: Record<string, unknown>, exit?: string) => handleUiRequest(
+      new Request("http://x/ui/api/profiles/k1d0cd11/update", { method: "POST", body: JSON.stringify({ set }) }),
+      {} as any, s, null, { timezoneFetch: timezoneFetch(exit ? { "next-proxy.example": exit } : {}) },
+    );
+    expect((await update({ locale: typed }))!.status).toBe(200);
+    expect(s.getProfile("k1d0cd11")!.localeManual).toBe(true);
+    for (const exit of exits) {
+      expect((await update({ proxyType: "http", proxy: "next-proxy.example:8080" }, exit))!.status).toBe(200);
+      expect(s.getProfile("k1d0cd11")).toMatchObject({ timezone: exit, locale: typed });
+      s.upsertProfile({ ...s.getProfile("k1d0cd11")!, proxy: null });
+    }
+    s.close();
+  }
+});
+
 test("a language typed with a new proxy stays", async () => {
   const s = store();
   const res = await handleUiRequest(

@@ -58,6 +58,7 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string):
     timezone: profile.timezone,
     ...(profile.timezoneManual ? { timezoneManual: true as const } : {}),
     ...(profile.locale ? { locale: profile.locale } : {}),
+    ...(profile.localeManual ? { localeManual: true as const } : {}),
     screenWidth: profile.screenWidth,
     screenHeight: profile.screenHeight,
     fingerprintSeed: profile.fingerprintSeed,
@@ -94,6 +95,7 @@ export function decodePortableProfile(payload: PortableProfile): {
     chromiumRuntime?: unknown;
     hardware?: unknown;
     timezoneManual?: unknown;
+    localeManual?: unknown;
     displayScale?: unknown;
   };
   let engine;
@@ -101,6 +103,9 @@ export function decodePortableProfile(payload: PortableProfile): {
   let hardware: ProfileHardware | undefined;
   try { hardware = normalizeProfileHardware(portableProfile.hardware); }
   catch { throw new Error("unsupported portable profile payload"); }
+  if (portableProfile.localeManual !== undefined && portableProfile.localeManual !== true) {
+    throw new Error("unsupported portable profile payload");
+  }
   if (portableProfile.timezoneManual !== undefined && portableProfile.timezoneManual !== true) {
     throw new Error("unsupported portable profile payload");
   }
@@ -149,6 +154,7 @@ export function decodePortableProfile(payload: PortableProfile): {
     ...(portableProfile.timezoneManual ? { timezoneManual: true } : {}),
     ...(isDisplayScale(portableProfile.displayScale) ? { displayScale: portableProfile.displayScale } : {}),
     ...(portableProfile.locale !== undefined ? { locale: portableProfile.locale } : {}),
+    ...(portableProfile.localeManual ? { localeManual: true } : {}),
     screenWidth: portableProfile.screenWidth,
     screenHeight: portableProfile.screenHeight,
     fingerprintSeed: portableProfile.fingerprintSeed,

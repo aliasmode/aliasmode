@@ -1,10 +1,10 @@
 import { CloudApiError, type CloudClient } from "./cloud-client.ts";
 import type { PortableProfile } from "./contracts/cloud-v1.ts";
 import { convertMobilePersonaToDesktop, editedProfileHardware, isMobileUserAgent } from "./fingerprint.ts";
-import { attachTimezones, type FetchLike } from "./geoip.ts";
+import { lookupExitLocation, type FetchLike } from "./geoip.ts";
 import { mergeCookies, parseStrictCores, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictSeed, parseStrictTimezone } from "./parse.ts";
 import { completeProfileFingerprint, setFirefoxScreen, syncFirefoxTimezone } from "./firefox-config.ts";
-import { normalizeProfileLocale } from "./profile-locale.ts";
+import { localeAfterProxyExit, normalizeProfileLocale } from "./profile-locale.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { proxyLegacyString } from "./proxy.ts";
@@ -34,6 +34,7 @@ export interface CloudProfileEditView {
   timezone: string;
   timezoneManual?: boolean;
   locale: string;
+  localeManual?: boolean;
   cores: string;
   fingerprintSeed: string;
   extensions: string[];
@@ -84,6 +85,7 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
     timezone: profile.timezone,
     ...(profile.timezoneManual ? { timezoneManual: true } : {}),
     locale: profile.locale ?? "",
+    ...(profile.localeManual ? { localeManual: true } : {}),
     cores: profile.hardware ? String(profile.hardware.cores) : "",
     fingerprintSeed: String(profile.fingerprintSeed),
     extensions: profile.extensions ?? [],
@@ -130,7 +132,12 @@ export function applyProfileEdits(profile: Profile, set: Record<string, unknown>
     }
     profile.platformOs = platformOs;
   }
-  if ("locale" in set) profile.locale = normalizeProfileLocale(set.locale) ?? profile.locale;
+  if ("locale" in set) {
+    const locale = normalizeProfileLocale(set.locale);
+    // A typed language stays when the proxy changes. A blank one goes back to the default rule.
+    if (locale) { profile.locale = locale; profile.localeManual = true; }
+    else delete profile.localeManual;
+  }
   if ("timezone" in set) {
     profile.timezone = parseStrictTimezone(set.timezone);
     // A typed timezone stays when the proxy changes and on every launch. A blank one follows the proxy.
@@ -227,7 +234,8 @@ export class CloudProfileEditor {
     }
     const proxyChanged = applyProfileEdits(profile, set);
     if (proxyChanged && profile.proxy && !("timezone" in set) && !profile.timezoneManual) {
-      await attachTimezones([profile], this.timezoneFetch, !("locale" in set)).catch(() => {});
+      const exit = await lookupExitLocation(profile.proxy, this.timezoneFetch).catch(() => null);
+      if (exit) { profile.locale = localeAfterProxyExit(profile, exit); profile.timezone = exit.timezone; }
       syncFirefoxTimezone(profile);
     }
 
@@ -239,6 +247,7 @@ export class CloudProfileEditor {
     if (!("proxyError" in encoded.profile)) delete encodedProfile.proxyError;
     if (!("platformOs" in encoded.profile)) delete encodedProfile.platformOs;
     if (!("timezoneManual" in encoded.profile)) delete encodedProfile.timezoneManual;
+    if (!("localeManual" in encoded.profile)) delete encodedProfile.localeManual;
     if (!("hardware" in encoded.profile)) delete (encodedProfile as { hardware?: unknown }).hardware;
     const payload = {
       ...authoritative.payload,
