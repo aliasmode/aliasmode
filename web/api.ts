@@ -1169,7 +1169,7 @@ export async function fetchScriptRun(): Promise<ScriptRun | null> {
   return body.run === null ? null : body.run as ScriptRun;
 }
 
-export async function startScriptRun(input: { scriptId: string; profileIds: string[]; inputs: object; useCredentials: boolean; concurrency?: number }): Promise<ScriptRun> {
+export async function startScriptRun(input: { scriptId: string; profileIds: string[]; inputs: object; useCredentials: boolean; headless?: boolean; concurrency?: number }): Promise<ScriptRun> {
   return (await scriptRequest("/ui/api/scripts/run", { method: "POST", body: JSON.stringify(input) })).run as ScriptRun;
 }
 

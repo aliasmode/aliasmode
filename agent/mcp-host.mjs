@@ -248,6 +248,55 @@ const ALIAS_TOOLS = [
     },
   },
   {
+    name: "aliasmode_scripts_list",
+    description: "List the user's Script Library scripts (id, name, language, description; never source code). Use an id with aliasmode_scripts_run.",
+    annotations: toolAnnotations("List AliasMode library scripts", { readOnly: true }),
+    inputSchema: EMPTY_SCHEMA,
+  },
+  {
+    name: "aliasmode_scripts_run",
+    description: "Run a Script Library script on one or more profiles; AliasMode opens and closes each browser. Only one run can be active at a time, and a second request fails while one is running. Returns the run immediately: follow it with aliasmode_scripts_status and aliasmode_scripts_log.",
+    annotations: toolAnnotations("Run an AliasMode library script"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptId: { type: "string", minLength: 1 },
+        profileIds: { type: "array", minItems: 1, items: PROFILE_ID },
+        inputs: { type: "object", description: "JSON inputs passed to the script." },
+        headless: { type: "boolean", description: "Run the browsers hidden." },
+        useCredentials: { type: "boolean", default: false, description: "Give the script the saved login details of each profile." },
+      },
+      required: ["scriptId", "profileIds"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aliasmode_scripts_status",
+    description: "Get the current or last script run: its id, status (running, stopping, finished) and the state of each profile. The run is null when none exists.",
+    annotations: toolAnnotations("Get AliasMode script run status", { readOnly: true }),
+    inputSchema: EMPTY_SCHEMA,
+  },
+  {
+    name: "aliasmode_scripts_log",
+    description: "Read the output log of a script run from a byte offset. Pass the nextOffset of the previous call to read only new output.",
+    annotations: toolAnnotations("Read AliasMode script run log", { readOnly: true }),
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: { type: "string", minLength: 1 },
+        offset: { type: "integer", minimum: 0, default: 0 },
+      },
+      required: ["runId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aliasmode_scripts_stop",
+    description: "Stop the running script and close its browsers. Returns the final run state.",
+    annotations: toolAnnotations("Stop the AliasMode script run", { destructive: true }),
+    inputSchema: EMPTY_SCHEMA,
+  },
+  {
     name: "browser_close",
     description: "Safely capture and close the selected AliasMode browser.",
     annotations: toolAnnotations("Close the selected AliasMode browser", { destructive: true }),
@@ -407,6 +456,21 @@ export async function createAliasModeMcp(options = {}) {
           alreadyOpen: opened.alreadyOpen,
           selected: args.select !== false,
         }));
+      }
+      if (name === "aliasmode_scripts_list") {
+        return toolResult(await runtime.call("scripts.list"));
+      }
+      if (name === "aliasmode_scripts_run") {
+        return toolResult(await runtime.call("scripts.run", args));
+      }
+      if (name === "aliasmode_scripts_status") {
+        return toolResult(await runtime.call("scripts.status"));
+      }
+      if (name === "aliasmode_scripts_log") {
+        return toolResult(await runtime.call("scripts.log", args));
+      }
+      if (name === "aliasmode_scripts_stop") {
+        return toolResult(await runtime.call("scripts.stop"));
       }
       if (name === "aliasmode_browser_select") {
         return toolResult(await selectBrowser(args.profileId));

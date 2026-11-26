@@ -462,6 +462,124 @@
       }
     },
     {
+      "name": "aliasmode_scripts_list",
+      "description": "List the user's Script Library scripts (id, name, language, description; never source code). Use an id with aliasmode_scripts_run.",
+      "annotations": {
+        "title": "List AliasMode library scripts",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "aliasmode_scripts_run",
+      "description": "Run a Script Library script on one or more profiles; AliasMode opens and closes each browser. Only one run can be active at a time, and a second request fails while one is running. Returns the run immediately: follow it with aliasmode_scripts_status and aliasmode_scripts_log.",
+      "annotations": {
+        "title": "Run an AliasMode library script",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scriptId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profileIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "inputs": {
+            "type": "object",
+            "description": "JSON inputs passed to the script."
+          },
+          "headless": {
+            "type": "boolean",
+            "description": "Run the browsers hidden."
+          },
+          "useCredentials": {
+            "type": "boolean",
+            "default": false,
+            "description": "Give the script the saved login details of each profile."
+          }
+        },
+        "required": [
+          "scriptId",
+          "profileIds"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "aliasmode_scripts_status",
+      "description": "Get the current or last script run: its id, status (running, stopping, finished) and the state of each profile. The run is null when none exists.",
+      "annotations": {
+        "title": "Get AliasMode script run status",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "aliasmode_scripts_log",
+      "description": "Read the output log of a script run from a byte offset. Pass the nextOffset of the previous call to read only new output.",
+      "annotations": {
+        "title": "Read AliasMode script run log",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0
+          }
+        },
+        "required": [
+          "runId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "aliasmode_scripts_stop",
+      "description": "Stop the running script and close its browsers. Returns the final run state.",
+      "annotations": {
+        "title": "Stop the AliasMode script run",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "browser_close",
       "description": "Safely capture and close the selected AliasMode browser.",
       "annotations": {

@@ -43,6 +43,7 @@ import {
   AGENT_CONTROL_PATH,
   AGENT_CONTROL_PROTOCOL,
   AgentControlHub,
+  type AgentControlDeps,
   type AgentControlSession,
   validAgentAuthorization,
 } from "./agent-control.ts";
@@ -277,7 +278,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
   const admission = opts.lifecycleAdmission ?? new LifecycleAdmissionController(opts.lifecycleAdmissionOptions);
   const lifecycle = { admission };
   const agentNonce = opts.agentNonce;
-  const agentControlDeps = {
+  const agentControlDeps: AgentControlDeps = {
     launcher,
     store,
     admission,
@@ -299,6 +300,8 @@ export function serveDashboard(opts: DashboardServerOptions) {
       remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
     }),
   } : undefined;
+  // The hub and the in-process host share this object, so they see the runner set here.
+  if (scripts) agentControlDeps.scripts = scripts;
   // The desktop app drives browsers through its packaged `aliasmode-mcp` helper; a source checkout
   // runs the same MCP host inside this server.
   const packaged = resolvePlaywrightRuntime().kind === "packaged";

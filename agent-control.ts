@@ -22,6 +22,7 @@ import type { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import type { ProfileStore } from "./store.ts";
+import type { ScriptLibrary, ScriptSupervisor } from "./scripts.ts";
 
 export const AGENT_CONTROL_PROTOCOL = "aliasmode-agent-v1";
 export const AGENT_CONTROL_PATH = "/api/agent/v1/connect";
@@ -50,6 +51,7 @@ export interface AgentControlDeps {
   remote?: RemoteCoordinator | null;
   cloudBrowser?: CloudBrowserLifecycle;
   cloudConnection?: CloudConnectionRuntime;
+  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor };
   log?: (message: string) => void;
 }
 
@@ -253,6 +255,22 @@ export class AgentControlSession {
       case "browser.close":
         return await this.closeProfile(stringParam(params, "profileId"),
           params.expectedEndpoint === undefined ? undefined : stringParam(params, "expectedEndpoint"));
+      case "scripts.list":
+        return { scripts: (await this.scriptTools().library.list()).map(({ id, name, language, description }) => ({ id, name, language, description })) };
+      case "scripts.run":
+        return { run: this.scriptTools().runner.start({
+          scriptId: stringParam(params, "scriptId"),
+          profileIds: Array.isArray(params.profileIds) ? params.profileIds as string[] : [],
+          inputs: params.inputs === undefined ? {} : object(params.inputs),
+          useCredentials: params.useCredentials === undefined ? false : params.useCredentials as boolean,
+          ...(params.headless === undefined ? {} : { headless: params.headless as boolean }),
+        }) };
+      case "scripts.status":
+        return { run: this.scriptTools().runner.status() };
+      case "scripts.log":
+        return this.scriptTools().runner.log(stringParam(params, "runId"), params.offset === undefined ? 0 : Number(params.offset));
+      case "scripts.stop":
+        return { run: await this.scriptTools().runner.stop() };
       case "mcp.connectors.create":
         return await this.createMcpConnector(stringParam(params, "label"));
       case "mcp.connectors.list":
@@ -262,6 +280,11 @@ export class AgentControlSession {
       default:
         throw agentError("unknown_method", `unknown agent method: ${method}`);
     }
+  }
+
+  private scriptTools(): NonNullable<AgentControlDeps["scripts"]> {
+    if (!this.deps.scripts) throw agentError("scripts_unavailable", "Scripts are not available here; use the AliasMode desktop app");
+    return this.deps.scripts;
   }
 
   private cloudMcpConnection(): { connection: CloudConnectionRuntime; deviceId: string } {

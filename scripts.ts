@@ -157,7 +157,7 @@ export interface ScriptRun {
   profiles: Array<{ id: string; name: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; error?: string; warning?: string }>;
 }
 
-interface RunRequest { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean; concurrency?: number }
+interface RunRequest { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean; headless?: boolean; concurrency?: number }
 interface RunnerInput {
   endpoint: string;
   engine?: "firefox";
@@ -328,7 +328,8 @@ export class ScriptSupervisor {
     if (this.active && this.active.view.status !== "finished") throw new ScriptError("A script is already running", 409);
     if (!request || typeof request.scriptId !== "string" || !request.scriptId
       || !Array.isArray(request.profileIds) || !request.profileIds.length || !request.profileIds.every((id) => typeof id === "string" && id)
-      || !request.inputs || typeof request.inputs !== "object" || Array.isArray(request.inputs) || typeof request.useCredentials !== "boolean") {
+      || !request.inputs || typeof request.inputs !== "object" || Array.isArray(request.inputs) || typeof request.useCredentials !== "boolean"
+      || (request.headless !== undefined && typeof request.headless !== "boolean")) {
       throw new ScriptError("Choose a script, profiles, and a JSON object for inputs");
     }
     const concurrency = request.concurrency === undefined ? 10 : request.concurrency;
@@ -440,7 +441,11 @@ export class ScriptSupervisor {
         const call = async (method: string) => {
           const response = await session.enqueue(JSON.stringify({
             protocol: AGENT_CONTROL_PROTOCOL, id: 1, method,
-            params: { profileId: item.id, ...(method === "browser.close" ? { expectedEndpoint: endpoint } : {}) },
+            params: {
+              profileId: item.id,
+              ...(method === "browser.close" ? { expectedEndpoint: endpoint } : {}),
+              ...(method === "browser.open" && request.headless !== undefined ? { headless: request.headless } : {}),
+            },
           }));
           if (!response.ok) throw new Error(response.error?.message ?? "Browser operation failed");
           return response.result as { ws: string; ownedByConnection: boolean; sync?: string };

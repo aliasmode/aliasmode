@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AgentControlSession } from "./agent-control.ts";
 import { ScriptLibrary, ScriptSupervisor, resolveScriptRunner, verifyScriptRuntime, type ScriptExecution } from "./scripts.ts";
 import { handleUiRequest } from "./ui.ts";
 import { CloudClient } from "./cloud-client.ts";
@@ -17,6 +18,7 @@ const input = { name: "Visit", description: "Example", language: "javascript" as
 function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; profileIds?: string[]; admission?: LifecycleAdmissionController; close?: (id: string) => Promise<void>; cloud?: any; firefoxOwner?: any; realExecute?: boolean; python?: PythonRuntime } = {}) {
   const directory = root();
   const events: string[] = [];
+  const startOptions: unknown[] = [];
   const launch = (id: string) => options.firefoxOwner
     ? { ws: `firefox://127.0.0.1:9000/${options.firefoxOwner.generation}`, debugPort: 9000, engine: "firefox", firefoxOwner: options.firefoxOwner }
     : { ws: `ws://test/${id}`, debugPort: 9000 };
@@ -28,13 +30,13 @@ function harness(execute: ScriptExecution = async () => {}, options: { active?: 
     store: { getProfile: (id: string) => profiles.find((p) => p.id === id), getLaunch: (id: string) => launches.get(id), listAgentTemporary: () => [] } as any,
     launcher: {
       certifiedActive: async (id: string) => launches.has(id),
-      start: async (id: string) => { events.push(`open:${id}`); const value = launch(id); launches.set(id, value); return { ws: value.ws, port: 9000 }; },
+      start: async (id: string, _urls?: string[], opened?: unknown) => { events.push(`open:${id}`); startOptions.push(opened); const value = launch(id); launches.set(id, value); return { ws: value.ws, port: 9000 }; },
       stop: async (id: string) => { await options.close?.(id); events.push(`close:${id}`); launches.delete(id); return true; },
     } as any,
     admission: options.admission ?? { run: async (_: unknown, work: () => Promise<unknown>) => work() } as any,
     cloudConnection: options.cloud,
   });
-  return { library, supervisor, events, directory, launches };
+  return { library, supervisor, events, directory, launches, startOptions };
 }
 
 const sourceRuntime = {
@@ -742,4 +744,40 @@ test("account transitions pause new script runs until the transition finishes", 
   h.supervisor.start(request);
   await h.supervisor.settled();
   expect(h.supervisor.status()?.profiles[0]?.status).toBe("succeeded");
+});
+
+test("agent control lists, runs, follows and stops library scripts", async () => {
+  const h = harness();
+  const script = await h.library.save(input);
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const response = await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method, params }));
+    return response.ok ? response.result as any : response.error!;
+  };
+  expect(await call("scripts.list")).toEqual({ scripts: [{ id: script.id, name: "Visit", language: "javascript", description: "Example" }] });
+  const started = await call("scripts.run", { scriptId: script.id, profileIds: ["a"], headless: true });
+  expect(started.run.status).toBe("running");
+  await h.supervisor.settled();
+  expect(h.startOptions).toEqual([{ headless: true }]);
+  expect((await call("scripts.status")).run.profiles.map((p: any) => p.status)).toEqual(["succeeded"]);
+  expect(await call("scripts.log", { runId: started.run.id })).toMatchObject({ nextOffset: expect.any(Number) });
+  // Credentials stay off unless asked for.
+  await call("scripts.run", { scriptId: script.id, profileIds: ["a"], headless: false });
+  await h.supervisor.settled();
+  expect(h.startOptions.at(-1)).toEqual({ headless: false });
+  expect((await call("scripts.stop")).run.status).toBe("finished");
+});
+
+test("agent control reports a busy runner and missing script support", async () => {
+  const release = Promise.withResolvers<void>();
+  const h = harness(async () => { await release.promise; });
+  const script = await h.library.save(input);
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
+  const run = () => session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "scripts.run", params: { scriptId: script.id, profileIds: ["a"] } }));
+  expect((await run()).ok).toBe(true);
+  expect(await run()).toMatchObject({ ok: false, error: { message: "A script is already running" } });
+  release.resolve();
+  await h.supervisor.settled();
+  const bare = await new AgentControlSession({} as any).enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "scripts.list" }));
+  expect(bare).toMatchObject({ ok: false, error: { code: "scripts_unavailable" } });
 });

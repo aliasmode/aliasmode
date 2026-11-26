@@ -581,6 +581,7 @@
   "Deleted profiles": "已删除的环境",
   "JSON inputs": "JSON 输入",
   "Use saved profile login details": "使用已保存的环境登录信息",
+  "Run hidden (headless)": "隐藏运行（无头）",
   "Parallel browsers": "并发浏览器",
   "Script log": "脚本日志",
   "Waiting for log output…": "等待日志输出…",

@@ -423,6 +423,7 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
   const [scriptId, setScriptId] = useState("");
   const [inputs, setInputs] = useState("{}");
   const [useCredentials, setUseCredentials] = useState(false);
+  const [headless, setHeadless] = useState(false);
   const [concurrency, setConcurrency] = useState("10");
   const [run, setRun] = useState<ScriptRun | null>(null);
   const [log, setLog] = useState("");
@@ -483,7 +484,7 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
     try {
       offset.current = 0;
       setLog("");
-      setRun(await startScriptRun({ scriptId, profileIds: selectedProfiles.map((profile) => profile.id), inputs: parsed, useCredentials, concurrency: parallel }));
+      setRun(await startScriptRun({ scriptId, profileIds: selectedProfiles.map((profile) => profile.id), inputs: parsed, useCredentials, headless, concurrency: parallel }));
     } catch (nextError) { setError(errorText(nextError)); }
     finally { setBusy(false); }
   };
@@ -509,6 +510,7 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
             <label className="fld"><span>{t("Script")}</span><select className="select" value={scriptId} onChange={(event) => setScriptId(event.target.value)} disabled={busy || runActive}><option value="">{t("Choose a script…")}</option>{scripts.map((script) => <option key={script.id} value={script.id}>{script.name}</option>)}</select></label>
             <label className="fld"><span>{t("JSON inputs")}</span><textarea className="input script-inputs" value={inputs} onChange={(event) => setInputs(event.target.value)} disabled={busy || runActive} /></label>
             <label className="script-credentials"><input type="checkbox" checked={useCredentials} onChange={(event) => setUseCredentials(event.target.checked)} disabled={busy || runActive} />{t("Use saved profile login details")}</label>
+            <label className="script-credentials"><input type="checkbox" checked={headless} onChange={(event) => setHeadless(event.target.checked)} disabled={busy || runActive} />{t("Run hidden (headless)")}</label>
             <label className="fld"><span>{t("Parallel browsers")}</span><input className="input" type="number" min={1} step={1} value={concurrency} onChange={(event) => setConcurrency(event.target.value)} disabled={busy || runActive} /></label>
             <p className="formnote">{t("{n} selected profiles. Run up to this many at a time; the rest wait for a free slot. Browser startup may be staggered. Parallel runs share the log below.", { n: String(selectedProfiles.length) })}</p>
             {run && <div className="script-progress"><b>{run.scriptName} · {run.status}</b>{run.profiles.map((profile) => <div key={profile.id} className={`script-profile ${profile.status}`}><span>{profile.name}</span><span>{profile.status}</span>{profile.error && <small>{profile.error}</small>}{profile.warning && <small className="warning">{profile.warning}</small>}</div>)}</div>}

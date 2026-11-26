@@ -44,6 +44,7 @@ class FakeRuntime {
       };
     }
     if (method === "browser.close") return { profileId: params.profileId, closed: true, deleted: false };
+    if (method.startsWith("scripts.")) return { ok: true };
     throw new Error(`unexpected runtime method ${method}`);
   }
 
@@ -416,6 +417,33 @@ test("browser actions require one selected profile", async () => {
   const result = await client.callTool({ name: "browser_snapshot", arguments: {} });
   expect(result.isError).toBe(true);
   expect((result.content as Array<{ text?: string }>)[0]).toMatchObject({ text: "select an open AliasMode browser first" });
+
+  await client.close();
+  await host.close();
+});
+
+test("MCP host lists and runs library scripts through the runtime", async () => {
+  const runtime = new FakeRuntime();
+  const host = await createAliasModeMcp({ discovered: { client: runtime }, playwright: new FakePlaywright() });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  const tools = (await client.listTools()).tools;
+  const script = (name: string) => tools.find((tool) => tool.name === name);
+  expect(script("aliasmode_scripts_list")?.annotations?.readOnlyHint).toBe(true);
+  expect(script("aliasmode_scripts_run")?.annotations?.readOnlyHint).toBe(false);
+  expect(script("aliasmode_scripts_stop")?.annotations?.readOnlyHint).toBe(false);
+  expect(script("aliasmode_scripts_run")?.inputSchema).toMatchObject({ required: ["scriptId", "profileIds"] });
+  const args = { scriptId: "s1", profileIds: ["p1"], inputs: { a: 1 }, headless: true, useCredentials: false };
+  await client.callTool({ name: "aliasmode_scripts_run", arguments: args });
+  expect(runtime.calls.at(-1)).toEqual({ method: "scripts.run", params: args });
+  await client.callTool({ name: "aliasmode_scripts_log", arguments: { runId: "r1", offset: 5 } });
+  expect(runtime.calls.at(-1)).toEqual({ method: "scripts.log", params: { runId: "r1", offset: 5 } });
+  for (const name of ["list", "status", "stop"]) {
+    await client.callTool({ name: `aliasmode_scripts_${name}`, arguments: {} });
+    expect(runtime.calls.at(-1)?.method).toBe(`scripts.${name}`);
+  }
 
   await client.close();
   await host.close();
