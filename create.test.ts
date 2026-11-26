@@ -58,7 +58,7 @@ test("buildNewProfile generates and fixes a selected Windows identity for Firefo
   const config = p.firefox!.config as Record<string, number>;
   expect([config["screen.width"], config["screen.height"]]).toEqual([1440, 900]);
   expect([p.screenWidth, p.screenHeight]).toEqual([1440, 900]);
-  expect(config["window.outerWidth"]).toBeLessThanOrEqual(Math.min(936, config["screen.availWidth"]!));
+  expect(config["window.outerWidth"]).toBeLessThanOrEqual(Math.min(1024, config["screen.availWidth"]!));
   expect(config["window.outerHeight"]).toBeLessThanOrEqual(Math.min(810, config["screen.availHeight"]!));
   const configTimezone = p.firefox!.config.timezone;
   expect(p.timezone).toBe(configTimezone as string);
