@@ -4,6 +4,7 @@ import { CloudProfileEditor } from "./cloud-profile-editor.ts";
 import type { PortableProfileV1, PortableProfileV2 } from "./contracts/cloud-v1.ts";
 import { completeProfileFingerprint } from "./firefox-config.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
+import { localeForTimezone } from "./profile-locale.ts";
 
 function payload(): PortableProfileV1 {
   return {
@@ -121,7 +122,7 @@ test("Firefox Cloud edits set a new proxy's timezone in the saved config", async
 
 test("Cloud proxy edits set the language from the proxy country", async () => {
   const authoritative = { ...response(), payload: firefoxPayload() };
-  authoritative.payload.profile.locale = "en-GB";
+  authoritative.payload.profile.locale = localeForTimezone(authoritative.payload.profile.timezone);
   let updated: any;
   const editor = new CloudProfileEditor({
     getProfile: async () => authoritative,
@@ -129,6 +130,12 @@ test("Cloud proxy edits set the language from the proxy country", async () => {
   } as any, readOnlyStore(), timezoneFetch({ "new-proxy.example": "America/New_York" }));
   await editor.save("cloud1", 7, { proxy: "new-proxy.example:8080" });
   expect(updated.payload.profile.locale).toBe("en-US");
+  expect(updated.payload.profile).not.toHaveProperty("localeManual");
+
+  // A typed language stays.
+  authoritative.payload.profile.locale = "en-US";
+  await editor.save("cloud1", 7, { locale: "de-DE", proxy: "new-proxy.example:8081" });
+  expect(updated.payload.profile).toMatchObject({ locale: "de-DE", localeManual: true });
 });
 
 test("Firefox Cloud edits keep saved identity and session when the timezone lookup fails", async () => {

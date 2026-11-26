@@ -196,3 +196,12 @@ test("portable Chromium 155 profiles carry their pinned display scale, and other
     expect(() => decodePortableProfile(payload as any)).toThrow("unsupported portable profile payload");
   }
 });
+
+test("portable profile codec writes localeManual as true or leaves it out, never false", () => {
+  expect(encodePortableProfile(profile()).profile).not.toHaveProperty("localeManual");
+  expect(() => encodePortableProfile({ ...profile(), localeManual: false } as Profile)).toThrow();
+  const on = encodePortableProfile({ ...profile(), localeManual: true });
+  expect(on.profile.localeManual).toBe(true);
+  expect(decodePortableProfile(on).profile.localeManual).toBe(true);
+  expect(() => decodePortableProfile({ ...on, profile: { ...on.profile, localeManual: false } } as any)).toThrow();
+});
