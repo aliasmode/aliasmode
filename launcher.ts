@@ -36,6 +36,7 @@ import type { CookieRecord, LaunchInfo, LaunchPersona, Profile, ProxySpec } from
 import { cookiesForEngine } from "./parse.ts";
 import type { ProfileStore } from "./store.ts";
 import { lookupProxyExitLocation, type ExitLocation } from "./geoip.ts";
+import { localeForCountry, localeForTimezone } from "./profile-locale.ts";
 import type { AutofillBridge } from "./autofill-bridge.ts";
 import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-extension.ts";
 import { isFirefoxAddonId } from "./extensions.ts";
@@ -2115,7 +2116,8 @@ export class Launcher {
     // The proxy exit is looked up once per launch. A missing or stale saved timezone (an import
     // whose lookup failed, a rotating proxy that moved) becomes the exit's before any engine reads
     // the profile, so pages see the timezone of the IP they come from. Without an answer the saved
-    // timezone stays, and so does one the user typed. The exit IP is WebRTC's public address below.
+    // timezone stays, and so does one the user typed. The language follows only while it is still the
+    // default of the saved timezone. The exit IP is WebRTC's public address below.
     const proxy = profile.proxy;
     const lookupExit = () => proxy && this.lookupExitLocationFn ? this.lookupExitLocationFn(proxy).catch(() => null) : Promise.resolve(null);
     let exit = await lookupExit();
@@ -2123,12 +2125,15 @@ export class Launcher {
     // never shows. A slow lookup gets more time and a failed one a second try, both through the proxy.
     if (!exit?.ip && proxy && (profile.engine === "firefox" || this.chromiumWebRtcIp(profile))) exit = await lookupExit();
     if (exit?.timezone && exit.timezone !== profile.timezone && !profile.timezoneManual) {
-      const updated = { ...this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup"), timezone: exit.timezone };
+      const unchanged = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup");
+      const languageFollows = unchanged.locale === localeForTimezone(unchanged.timezone);
+      const updated = { ...unchanged, timezone: exit.timezone };
+      if (languageFollows) updated.locale = localeForCountry(exit.country) ?? localeForTimezone(exit.timezone);
       syncFirefoxTimezone(updated);
       this.store.upsertProfile(updated);
       profile = this.store.getProfile(profileId)!;
       profileSnapshot = JSON.stringify(profile);
-      this.log(`profile ${profileId} timezone set to ${exit.timezone} from its proxy exit`);
+      this.log(`profile ${profileId} timezone set to ${exit.timezone}${languageFollows ? ` and language to ${profile.locale}` : ""} from its proxy exit`);
     }
     if (profile.engine === "firefox") {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession, exit);

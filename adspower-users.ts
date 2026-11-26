@@ -25,7 +25,8 @@ import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
 import type { Profile, ProxySpec } from "./types.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
-import { attachTimezones, lookupExitLocation } from "./geoip.ts";
+import { attachTimezones, lookupExitLocation, type ExitLocation } from "./geoip.ts";
+import { localeForCountry, localeForTimezone } from "./profile-locale.ts";
 import { normalizeProxySpec, proxyIdentityKey } from "./proxy.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { isValidProfileName } from "./profile-validation.ts";
@@ -136,10 +137,15 @@ function editsFromUpdateBody(body: any): ProfileEdits {
   return edits;
 }
 
+/** The exit location of a new proxy. Null when the proxy stays or the user typed a timezone. */
+async function exitLocationForEdit(profile: Profile, edits: ProfileEdits, geoipFetch?: GeoipFetch): Promise<ExitLocation | null> {
+  if (!edits.proxy || profile.timezoneManual || proxyIdentityKey(edits.proxy) === proxyIdentityKey(profile.proxy)) return null;
+  return lookupExitLocation(edits.proxy, geoipFetch);
+}
+
 /** A new proxy's exit timezone, as the Edit dialog looks it up. Null when the proxy stays or the user typed a timezone. */
 export async function exitTimezoneForEdit(profile: Profile, edits: ProfileEdits, geoipFetch?: GeoipFetch): Promise<string | null> {
-  if (!edits.proxy || profile.timezoneManual || proxyIdentityKey(edits.proxy) === proxyIdentityKey(profile.proxy)) return null;
-  return (await lookupExitLocation(edits.proxy, geoipFetch))?.timezone ?? null;
+  return (await exitLocationForEdit(profile, edits, geoipFetch))?.timezone ?? null;
 }
 
 export function profileWithEdits(profile: Profile, edits: ProfileEdits, timezone: string | null = null): Profile {
@@ -363,12 +369,15 @@ export async function handleUserApi(
     try {
       const profile = store.getProfile(id);
       if (!profile) return fail(`no such profile: ${id}`);
-      // An open browser keeps the timezone it launched with; its next launch looks the new proxy up.
-      const timezone = store.getLaunch(id) ? null : await exitTimezoneForEdit(profile, edits, geoipFetch);
+      // An open browser keeps the timezone and language it launched with; its next launch looks the new proxy up.
+      let exit = store.getLaunch(id) ? null : await exitLocationForEdit(profile, edits, geoipFetch);
       // Apply to the current copy, so changes saved during the lookup are kept.
       const current = store.getProfile(id);
       if (!current) return fail(`no such profile: ${id}`);
-      store.upsertProfile(profileWithEdits(current, edits, store.getLaunch(id) ? null : timezone));
+      if (store.getLaunch(id)) exit = null;
+      const next = profileWithEdits(current, edits, exit?.timezone ?? null);
+      if (exit) next.locale = localeForCountry(exit.country) ?? localeForTimezone(exit.timezone);
+      store.upsertProfile(next);
       return ok({});
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

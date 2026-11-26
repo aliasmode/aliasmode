@@ -3,7 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { firefoxLaunchConfig, firefoxStartupPrefs, graphicsIdentity } from "./firefox-config.ts";
+import { firefoxLaunchConfig, firefoxStartupPrefs, graphicsIdentity, syncFirefoxTimezone } from "./firefox-config.ts";
 import { FIREFOX_FONT_PACKS, firefoxFontPackPrefs, type FirefoxFontPack } from "./firefox-fonts.ts";
 import { Launcher, BrowserLaunchError, decodeMozLz4, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
 import { FirefoxOwnerError } from "./firefox-runtime.ts";
@@ -194,6 +194,28 @@ test("a proxied Firefox launch saves the proxy exit's timezone in its config, an
     expect(await restarted.certifiedActive(f.profile.id)).toBe(true);
     expect(f.launches()).toBe(1);
     expect(await restarted.stop(f.profile.id)).toBe(true);
+  }
+});
+
+test("a proxied Firefox launch moves the default language to the proxy exit's, and keeps a typed language or the saved one without an answer", async () => {
+  const paris = { timezone: "Europe/Paris", country: "FR", ip: "203.0.113.7" };
+  const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
+  for (const [locale, exit, expected] of [
+    ["hi-IN", paris, { timezone: "Europe/Paris", locale: "fr-FR" }],
+    ["en-GB", paris, { timezone: "Europe/Paris", locale: "en-GB" }],
+    ["hi-IN", null, { timezone: "Asia/Kolkata", locale: "hi-IN" }],
+  ] as const) {
+    const f = fixture();
+    const saved = { ...f.profile, proxy, timezone: "Asia/Kolkata", locale };
+    syncFirefoxTimezone(saved);
+    f.store.upsertProfile(saved);
+    const launcher = new Launcher({ ...f.options, lookupExitLocation: async () => exit });
+    await launcher.start(f.profile.id);
+    expect(f.store.getProfile(f.profile.id)).toMatchObject(expected);
+    // The engine starts with the same language the profile stores.
+    expect(f.config()).toMatchObject({ timezone: expected.timezone, "navigator.language": expected.locale, "locale:language": expected.locale.split("-")[0] });
+    expect(f.prefs()).toMatchObject({ "intl.locale.requested": expected.locale });
+    expect(await launcher.stop(f.profile.id)).toBe(true);
   }
 });
 
