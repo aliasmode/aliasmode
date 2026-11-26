@@ -185,6 +185,7 @@ test("portable profile codec round-trips blockMedia and reads an older payload w
   expect(decodePortableProfile(encoded).profile.blockMedia).toBe(true);
   const plain = encodePortableProfile(profile());
   expect("blockMedia" in plain.profile).toBe(false);
+  expect("blockMedia" in encodePortableProfile({ ...profile(), blockMedia: false as any }).profile).toBe(false);
   expect(decodePortableProfile(plain).profile.blockMedia).toBeUndefined();
   expect(() => decodePortableProfile({ ...encoded, profile: { ...encoded.profile, blockMedia: false } } as any)).toThrow("unsupported portable profile payload");
 });

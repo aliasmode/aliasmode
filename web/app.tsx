@@ -5246,9 +5246,9 @@ function App() {
                   />}
                   <label className="extchk">
                     <input type="checkbox" checked={editForm.blockMedia === "1"} disabled={editSaving} onChange={(e) => setEF("blockMedia", e.target.checked ? "1" : "")} />
-                    <span>{t("Save proxy traffic: block images and stop video autoplay")}</span>
+                    <span>{t("Save proxy traffic: block images")}</span>
                   </label>
-                  {editForm.blockMedia === "1" && <p className="formnote">{t("Captchas and some sites may break.")}</p>}
+                  {editForm.blockMedia === "1" && <p className="formnote">{t("Firefox profiles also stop videos from playing by themselves. Captchas and some sites may break.")}</p>}
                   {editExtensionChoices.length > 0 && (
                     <div className="fld">
                       <span>{t("Extensions")}</span>

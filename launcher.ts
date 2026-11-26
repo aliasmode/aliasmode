@@ -1505,8 +1505,6 @@ export class Launcher {
       // machine. Cookies/site data are separate stores; this only trims asset caching.
       `--disk-cache-size=${20 * 1024 * 1024}`,
       ...deriveFingerprintFlags(screen),
-      // "Save proxy traffic": no images, and no video that plays before a click.
-      ...(profile.blockMedia ? ["--blink-settings=imagesEnabled=false", "--autoplay-policy=document-user-activation-required"] : []),
     ];
     // Chromium builds with different signatures share one "Chromium Safe Storage" Keychain item,
     // and macOS stops the second build with a password prompt. The runtimes that the app
@@ -2215,6 +2213,7 @@ export class Launcher {
     const restoreLastSession = nativeSessionAvailable;
 
     if (profile.proxy) await this.persistWebRtcPolicyPreference(profileId);
+    await this.persistImagesPreference(profileId, !!profile.blockMedia);
 
     // Identity bookmark (#2): `<name> · #<serial>` on a visible bookmark bar, pointing at the card.
     if (SESSION_LAUNCH) {
@@ -4294,6 +4293,39 @@ export class Launcher {
         /* best-effort: a locked/unreadable prefs file must not block the launch */
       }
     }
+  }
+
+  /**
+   * "Save proxy traffic": block images with the profile's content setting. The --blink-settings flag is ignored for
+   * the first page of a tab that starts on chrome://newtab/, so it cannot do this alone.
+   */
+  private async persistImagesPreference(profileId: string, block: boolean): Promise<void> {
+    const base = this.containedUserDataDir(profileId, "persistImagesPreference");
+    if (!base) throw new Error(`cannot persist image setting for unsafe profile id ${JSON.stringify(profileId)}`);
+    const file = join(base, "Default", "Preferences");
+    let prefs: any = {};
+    if (existsSync(file)) {
+      try { prefs = JSON.parse(readFileSync(file, "utf8")); }
+      catch (error) {
+        if (!block) return;
+        throw new Error(`cannot persist image setting for ${profileId}: Preferences is unreadable (${error instanceof Error ? error.message : error})`);
+      }
+    } else if (!block) return;
+    if (!prefs || typeof prefs !== "object" || Array.isArray(prefs)) {
+      if (!block) return;
+      throw new Error(`cannot persist image setting for ${profileId}: Preferences root is not an object`);
+    }
+    const values = prefs.profile?.default_content_setting_values;
+    if (!block && values?.images === undefined) return;
+    if (block) {
+      prefs.profile = { ...(prefs.profile && typeof prefs.profile === "object" ? prefs.profile : {}) };
+      prefs.profile.default_content_setting_values = { ...(prefs.profile.default_content_setting_values ?? {}), images: 2 };
+    } else {
+      delete values.images;
+    }
+    mkdirSync(join(base, "Default"), { recursive: true });
+    try { await writeFileAtomic(file, JSON.stringify(prefs)); }
+    catch (error) { throw new Error(`cannot persist image setting for ${profileId}: ${error instanceof Error ? error.message : error}`); }
   }
 
   /** Persist the WebRTC routing floor as profile state as well as argv state. */
