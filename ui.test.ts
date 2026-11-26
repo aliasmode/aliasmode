@@ -1511,6 +1511,85 @@ test("a changed proxy gets its exit timezone", async () => {
   s.close();
 });
 
+test("a changed proxy gets its exit language", async () => {
+  for (const engine of ["chromium", "firefox"] as const) {
+    const s = store();
+    const id = engine === "firefox" ? "firefox-language" : "k1d0cd11";
+    if (engine === "firefox") s.upsertProfile(firefoxProfile(s, id));
+    const before = s.getProfile(id)!;
+    before.timezone = "Asia/Kolkata";
+    before.locale = "hi-IN";
+    s.upsertProfile(before);
+
+    const res = await handleUiRequest(
+      new Request(`http://x/ui/api/profiles/${id}/update`, {
+        method: "POST",
+        body: JSON.stringify({ set: { proxyType: "http", proxy: "new-proxy.example:8080" } }),
+      }),
+      {} as any,
+      s,
+      null,
+      { timezoneFetch: timezoneFetch({ "new-proxy.example": "Europe/Paris" }) },
+    );
+
+    expect(res!.status).toBe(200);
+    expect(s.getProfile(id)).toMatchObject({ timezone: "Europe/Paris", locale: "fr-FR" });
+    if (engine === "firefox") {
+      expect(s.getProfile(id)!.firefox!.config).toMatchObject({
+        timezone: "Europe/Paris",
+        "navigator.language": "fr-FR",
+        "locale:all": "fr-FR, fr",
+      });
+    }
+    s.close();
+  }
+});
+
+test("a language typed with a new proxy stays", async () => {
+  const s = store();
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxyType: "http", proxy: "new-proxy.example:8080", locale: "en-GB" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { timezoneFetch: timezoneFetch({ "new-proxy.example": "Europe/Paris" }) },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")).toMatchObject({ timezone: "Europe/Paris", locale: "en-GB" });
+  s.close();
+});
+
+test("a failed proxy lookup keeps the saved language", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.timezone = "Asia/Kolkata";
+  before.locale = "hi-IN";
+  s.upsertProfile(before);
+
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxyType: "http", proxy: "new-proxy.example:8080" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { timezoneFetch: timezoneFetch({}) },
+  );
+
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")).toMatchObject({
+    proxy: { host: "new-proxy.example" },
+    timezone: "Asia/Kolkata",
+    locale: "hi-IN",
+  });
+  s.close();
+});
+
 test("a typed timezone stays when the proxy changes, and a blank one follows the proxy again", async () => {
   const s = store();
   const update = (set: Record<string, unknown>) => handleUiRequest(

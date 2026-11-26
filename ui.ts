@@ -2507,7 +2507,7 @@ export async function handleUiRequest(
       if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
       let previousGroup = p.group;
       const proxyChanged = applyEdits(p, set);
-      // A new proxy gets its exit timezone, like a Cloud edit. A failed lookup keeps the saved one.
+      // A new proxy gets its exit timezone and language, like a Cloud edit. A failed lookup keeps the saved ones.
       if (!remote && proxyChanged && p.proxy && !("timezone" in set) && !p.timezoneManual) {
         const location = await lookupExitLocation(p.proxy, options.timezoneFetch);
         // Apply the edit to the current copy, so changes saved during the lookup are kept.
@@ -2517,6 +2517,7 @@ export async function handleUiRequest(
         applyEdits(p, set);
         if (location) {
           p.timezone = location.timezone;
+          if (!("locale" in set)) p.locale = localeForCountry(location.country) ?? localeForTimezone(location.timezone);
           syncFirefoxTimezone(p);
         }
       }

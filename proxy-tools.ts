@@ -159,7 +159,7 @@ export async function handleProxyToolsRequest(
                     await launcher.cacheCleanupSettled(id);
                     if (launcher.profileDeletionBlocked(id)) { Object.assign(row.view, { status: "skipped", code: "profile_open" }); continue; }
                     const changed = { ...profile, proxy: row.next!, timezone: "" };
-                    await attachTimezones([changed], options.timezoneFetch).catch(() => {});
+                    await attachTimezones([changed], options.timezoneFetch, true).catch(() => {});
                     assertCurrent();
                     profile = store.getProfile(id);
                     if (!profile || proxyIdentityKey(profile.proxy) !== row.originalKey || profile.group !== row.view.group) {
@@ -167,8 +167,8 @@ export async function handleProxyToolsRequest(
                     }
                     if (launcher.profileDeletionBlocked(id)) { Object.assign(row.view, { status: "skipped", code: "profile_open" }); continue; }
                     profile.proxy = row.next!; delete profile.proxyError;
-                    // A failed lookup keeps the saved timezone.
-                    if (changed.timezone) { profile.timezone = changed.timezone; syncFirefoxTimezone(profile); }
+                    // A failed lookup keeps the saved timezone and language.
+                    if (changed.timezone) { profile.timezone = changed.timezone; profile.locale = changed.locale; syncFirefoxTimezone(profile); }
                     store.upsertProfile(profile);
                     Object.assign(row.view, { status: "updated", code: undefined });
                   } catch { Object.assign(row.view, { status: "failed", code: "update_failed" }); }
