@@ -1472,10 +1472,11 @@ function App() {
   // Offers open the shop on the Proxies page: the quantity is preselected and the shop scrolls into view.
   const [storeRequest, setStoreRequest] = useState({ quantity: 0, key: 0 });
   // "Ask agent" on the profile list opens the agent panel with these profiles in the composer.
-  const [agentDraft, setAgentDraft] = useState({ text: "", key: 0 });
+  const [agentDraft, setAgentDraft] = useState<{ text: string; key: number; send?: boolean }>({ text: "", key: 0 });
   const askAgent = (picked: UiProfile[]) => {
     setAgentDraft((current) => ({ text: `Profiles: ${picked.map((profile) => `${profile.name} (${profile.id})`).join(", ")}\n\n`, key: current.key + 1 }));
   };
+  const sendToAgent = (text: string) => setAgentDraft((current) => ({ text, key: current.key + 1, send: true }));
   const openStore = useCallback((quantity: number, src: ProxySrc) => {
     enterStore(src);
     setStoreRequest((current) => ({ quantity, key: current.key + 1 }));
@@ -4325,7 +4326,7 @@ function App() {
         </footer>
       </div>
       ) : view === "scripts" ? (
-      <ScriptsPage onViewRun={() => setScriptRunOpen(true)} />
+      <ScriptsPage onViewRun={() => setScriptRunOpen(true)} onAskAgent={sendToAgent} />
       ) : view === "extensions" ? (
       <div className="workspace">
         <div className="settingspage">

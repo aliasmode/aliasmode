@@ -1717,6 +1717,11 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .scripts-library { display: grid; gap: 14px; }
 .scripts-library-search { display: flex; gap: 8px; }
 .scripts-library-search .input { flex: 1; }
+.script-ai { display: flex; gap: 12px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--accent-line); border-radius: var(--r-lg); box-shadow: var(--sh-xs); }
+.script-ai-body { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.script-ai-body strong { color: var(--ink); font-size: 13.5px; font-weight: 600; }
+.script-ai-body p { margin: 0; color: var(--muted); font-size: 13px; }
+.script-ai-body textarea { width: 100%; resize: vertical; }
 .script-publication { display: grid; gap: 10px; padding-top: 2px; }
 .script-publication-preview { display: grid; gap: 2px; padding: 10px; color: var(--muted); background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); font-size: var(--t-sm); }
 .script-publication-preview b { color: var(--ink); }

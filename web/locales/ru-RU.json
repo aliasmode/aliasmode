@@ -836,5 +836,17 @@
   "Charged to your card every 3 months. Cancel any time.": "Списание с карты каждые 3 месяца. Отменить можно в любой момент.",
   "Support with {amount} every 3 months": "Поддерживать на {amount} каждые 3 месяца",
   "Charged every 3 months. Cancel any time. AliasMode stays free for everyone.": "Списание каждые 3 месяца. Отменить можно в любой момент. AliasMode остаётся бесплатным для всех.",
-  "Choose {tier}: {amount} per quarter": "Выбрать уровень {tier}: {amount} за квартал"
+  "Choose {tier}: {amount} per quarter": "Выбрать уровень {tier}: {amount} за квартал",
+  "Customize with AI": "Доработать с помощью ИИ",
+  "Need a change? Our AI agent can edit this script for you.": "Нужны изменения? Наш ИИ-агент отредактирует этот скрипт за вас.",
+  "What should change?": "Что нужно изменить?",
+  "Ask the agent": "Попросить агента",
+  "Listed scripts": "Получил список скриптов",
+  "Read a script": "Прочитал скрипт",
+  "Saved a script": "Сохранил скрипт",
+  "Started a script": "Запустил скрипт",
+  "Checked the script run": "Проверил запуск скрипта",
+  "Read the script log": "Прочитал журнал скрипта",
+  "Stopped the script run": "Остановил запуск скрипта",
+  "Run hidden (headless)": "Запуск в скрытом режиме (headless)"
 }

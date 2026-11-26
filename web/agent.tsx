@@ -57,7 +57,7 @@ const GLYPHS = {
 
 type GlyphName = keyof typeof GLYPHS;
 
-function Glyph({ name, className }: { name: GlyphName; className?: string }) {
+export function Glyph({ name, className }: { name: GlyphName; className?: string }) {
   return <svg className={className ? `icon ${className}` : "icon"} viewBox="0 0 24 24" aria-hidden="true">{GLYPHS[name]}</svg>;
 }
 
@@ -112,6 +112,13 @@ export function describeStep(step: { name: string; args: string }, t: Translate)
     case "aliasmode_profiles_replace_proxies": return { label: t("Changed proxies"), icon: "shield" };
     case "aliasmode_trash_list": return { label: t("Checked Trash"), icon: "trash" };
     case "aliasmode_trash_restore": return { label: t("Restored from Trash"), icon: "trash" };
+    case "aliasmode_scripts_list": return { label: t("Listed scripts"), icon: "list" };
+    case "aliasmode_scripts_get": return { label: t("Read a script"), icon: "eye" };
+    case "aliasmode_scripts_save": return { label: t("Saved a script"), icon: "compose" };
+    case "aliasmode_scripts_run": return { label: t("Started a script"), icon: "tool" };
+    case "aliasmode_scripts_status": return { label: t("Checked the script run"), icon: "clock" };
+    case "aliasmode_scripts_log": return { label: t("Read the script log"), icon: "eye" };
+    case "aliasmode_scripts_stop": return { label: t("Stopped the script run"), icon: "window" };
     case "aliasmode_browser_open": return { label: t("Opened profile"), icon: "window" };
     case "aliasmode_browser_select": return { label: t("Switched browser"), icon: "window" };
     case "aliasmode_browser_status": return { label: t("Checked browser"), icon: "window" };
@@ -288,6 +295,12 @@ function useAgentController(visible: boolean) {
         setComposer("");
       });
     },
+    /** Starts a new chat with this prompt and sends it. */
+    ask: (prompt: string) => {
+      selectedRef.current = null;
+      setSelectedId(null); setConversation(null); setComposer("");
+      void act(async () => show(await startAgentConversation(prompt)));
+    },
     resume: () => conversation && void act(async () => show(await resumeAgentConversation(conversation.id))),
     stop: () => conversation && void act(async () => setConversation(await stopAgentConversation(conversation.id))),
   };
@@ -308,7 +321,7 @@ export function AgentHost({ active, cloudMode, owner, wallet, draft, onReloadWal
   /** The workspace wallet when this Cloud has the in-app store; null otherwise. */
   wallet: GetWalletResponse | null;
   /** Text for the composer from "Ask agent" on the profile list; a new key starts a new chat with it. */
-  draft: { text: string; key: number };
+  draft: { text: string; key: number; send?: boolean };
   onReloadWallet: () => Promise<void>;
   onUseCloud: () => void;
   onOpenPage: () => void;
@@ -321,7 +334,7 @@ export function AgentHost({ active, cloudMode, owner, wallet, draft, onReloadWal
 
   useEffect(() => {
     if (!draft.key) return;
-    agent.newChat(draft.text);
+    if (draft.send) agent.ask(draft.text); else agent.newChat(draft.text);
     if (!active) setPanelOpen(true);
   }, [draft.key]);
   useEffect(() => { if (active) setPanelOpen(false); }, [active]);

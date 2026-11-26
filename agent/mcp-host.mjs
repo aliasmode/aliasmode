@@ -254,6 +254,34 @@ const ALIAS_TOOLS = [
     inputSchema: EMPTY_SCHEMA,
   },
   {
+    name: "aliasmode_scripts_get",
+    description: "Read one Script Library script: its metadata, revision and full source code. Use it before changing a script.",
+    annotations: toolAnnotations("Read an AliasMode library script", { readOnly: true }),
+    inputSchema: {
+      type: "object",
+      properties: { scriptId: { type: "string", minLength: 1 } },
+      required: ["scriptId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aliasmode_scripts_save",
+    description: "Create a script in the user's own Script Library, or update one by passing its scriptId. On update, omitted fields keep their current value; source replaces the whole file. JavaScript scripts export a default async function receiving { browser, context, page, profile, inputs, credentials, log }; Python scripts define async def run(...) with the same names. Read an existing script first to match its shape.",
+    annotations: toolAnnotations("Save an AliasMode library script"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptId: { type: "string", minLength: 1, description: "Omit to create a new script." },
+        name: { type: "string" },
+        description: { type: "string" },
+        language: { type: "string", enum: ["javascript", "python"] },
+        source: { type: "string" },
+        expectedRevision: { type: "integer", minimum: 1, description: "Revision you read; the save fails if the script changed since." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "aliasmode_scripts_run",
     description: "Run a Script Library script on one or more profiles; AliasMode opens and closes each browser. Only one run can be active at a time, and a second request fails while one is running. Returns the run immediately: follow it with aliasmode_scripts_status and aliasmode_scripts_log.",
     annotations: toolAnnotations("Run an AliasMode library script"),
@@ -459,6 +487,12 @@ export async function createAliasModeMcp(options = {}) {
       }
       if (name === "aliasmode_scripts_list") {
         return toolResult(await runtime.call("scripts.list"));
+      }
+      if (name === "aliasmode_scripts_get") {
+        return toolResult(await runtime.call("scripts.get", args));
+      }
+      if (name === "aliasmode_scripts_save") {
+        return toolResult(await runtime.call("scripts.save", args));
       }
       if (name === "aliasmode_scripts_run") {
         return toolResult(await runtime.call("scripts.run", args));

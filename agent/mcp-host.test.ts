@@ -438,6 +438,13 @@ test("MCP host lists and runs library scripts through the runtime", async () => 
   const args = { scriptId: "s1", profileIds: ["p1"], inputs: { a: 1 }, headless: true, useCredentials: false };
   await client.callTool({ name: "aliasmode_scripts_run", arguments: args });
   expect(runtime.calls.at(-1)).toEqual({ method: "scripts.run", params: args });
+  const save = { scriptId: "s1", source: "export default async () => {};" };
+  await client.callTool({ name: "aliasmode_scripts_save", arguments: save });
+  expect(runtime.calls.at(-1)).toEqual({ method: "scripts.save", params: save });
+  await client.callTool({ name: "aliasmode_scripts_get", arguments: { scriptId: "s1" } });
+  expect(runtime.calls.at(-1)).toEqual({ method: "scripts.get", params: { scriptId: "s1" } });
+  expect(script("aliasmode_scripts_get")?.annotations?.readOnlyHint).toBe(true);
+  expect(script("aliasmode_scripts_save")?.annotations?.readOnlyHint).toBe(false);
   await client.callTool({ name: "aliasmode_scripts_log", arguments: { runId: "r1", offset: 5 } });
   expect(runtime.calls.at(-1)).toEqual({ method: "scripts.log", params: { runId: "r1", offset: 5 } });
   for (const name of ["list", "status", "stop"]) {

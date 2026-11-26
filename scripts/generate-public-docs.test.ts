@@ -162,7 +162,7 @@ test("MCP catalogs list the expected tools", () => {
   expect(released.aliasModeTools.map((tool: any) => tool.name)).toEqual(BETA42_ALIASMODE_TOOLS);
   expect(current.status).toBe("source");
   expect(current.playwrightToolAvailability).toBe("listed-before-selection");
-  expect(current.aliasModeTools.length).toBe(15);
+  expect(current.aliasModeTools.length).toBe(17);
   expect(current.aliasModeTools.map((tool: any) => tool.name)).toContain("aliasmode_profiles_replace_proxies");
   expect(current.aliasModeTools.map((tool: any) => tool.name)).toContain("aliasmode_profile_update");
   for (const catalog of [current, released]) {

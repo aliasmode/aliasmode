@@ -1121,5 +1121,16 @@
   "Charged to your card every 3 months. Cancel any time.": "每 3 个月从银行卡扣款。可随时取消。",
   "Support with {amount} every 3 months": "每 3 个月支持 {amount}",
   "Charged every 3 months. Cancel any time. AliasMode stays free for everyone.": "每 3 个月扣款一次。可随时取消。AliasMode 对所有人保持免费。",
-  "Choose {tier}: {amount} per quarter": "选择 {tier}：每季度 {amount}"
+  "Choose {tier}: {amount} per quarter": "选择 {tier}：每季度 {amount}",
+  "Customize with AI": "用 AI 定制",
+  "Need a change? Our AI agent can edit this script for you.": "需要修改？我们的 AI 助手可以为你编辑此脚本。",
+  "What should change?": "需要修改什么？",
+  "Ask the agent": "询问助手",
+  "Listed scripts": "列出了脚本",
+  "Read a script": "读取了脚本",
+  "Saved a script": "保存了脚本",
+  "Started a script": "启动了脚本",
+  "Checked the script run": "检查了脚本运行",
+  "Read the script log": "读取了脚本日志",
+  "Stopped the script run": "停止了脚本运行"
 }

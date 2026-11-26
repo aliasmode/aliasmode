@@ -10,6 +10,7 @@ import type { ScriptRun } from "../scripts.ts";
 import type { PythonRuntimeStatus } from "../python-runtime.ts";
 import type { UiProfile } from "./api.ts";
 import { useTranslation } from "./i18n.tsx";
+import { Glyph } from "./agent.tsx";
 import {
   createScript,
   deleteScript,
@@ -96,7 +97,7 @@ function PythonRuntimeNote({ status, onDownload }: { status: PythonRuntimeStatus
   return <p className="formnote">{t("Python scripts need the Python runtime ({size}). It downloads once, before the first Python script runs.", { size })} <button className="btn" type="button" onClick={onDownload}>{t("Download now")}</button></p>;
 }
 
-export function ScriptsPage({ onViewRun }: { onViewRun: () => void }) {
+export function ScriptsPage({ onViewRun, onAskAgent }: { onViewRun: () => void; onAskAgent: (prompt: string) => void }) {
   const { t } = useTranslation();
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
   const [script, setScript] = useState<ScriptRecord | null>(null);
@@ -109,6 +110,7 @@ export function ScriptsPage({ onViewRun }: { onViewRun: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [currentRun, setCurrentRun] = useState<ScriptRun | null>(null);
+  const [change, setChange] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
   const selectionRequest = useRef(0);
@@ -303,6 +305,22 @@ export function ScriptsPage({ onViewRun }: { onViewRun: () => void }) {
                   <div className="script-publication-preview"><b>{script.name}</b><span>{script.description || t("No description")}</span><span>{languageName(script.language)}</span></div>
                   <div className="script-actions"><button className="btn primary" type="submit" disabled={busy || detailsChanged}>{busy ? t("Publishing…") : isPublished ? t("Update publication") : t("Publish")}</button><button className="btn" type="button" disabled={busy} onClick={() => setPublicationOpen(false)}>{t("Cancel")}</button></div>
                 </form>}
+                <form className="script-ai" onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!change.trim()) return;
+                  onAskAgent(`Change my script "${script.name}" (id ${script.id}). Read it with aliasmode_scripts_get, make the change below, then save it with aliasmode_scripts_save using the same id.\n\nWhat should change: ${change.trim()}`);
+                  setChange("");
+                }}>
+                  <span className="agent-notice-icon"><Glyph name="sparkle" /></span>
+                  <div className="script-ai-body">
+                    <strong>{t("Customize with AI")}</strong>
+                    <p>{t("Need a change? Our AI agent can edit this script for you.")}</p>
+                    <textarea className="input" rows={2} value={change} placeholder={t("What should change?")} aria-label={t("What should change?")}
+                      onChange={(event) => setChange(event.target.value)}
+                      onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+                    <div><button className="btn primary" type="submit" disabled={busy || !change.trim()}>{t("Ask the agent")}</button></div>
+                  </div>
+                </form>
                 <label className="fld"><span>{t("Source")}</span><pre className="script-source">{script.source}</pre></label>
               </div>
             </section>

@@ -781,3 +781,21 @@ test("agent control reports a busy runner and missing script support", async () 
   const bare = await new AgentControlSession({} as any).enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "scripts.list" }));
   expect(bare).toMatchObject({ ok: false, error: { code: "scripts_unavailable" } });
 });
+
+test("agent control reads, creates and updates library scripts", async () => {
+  const h = harness();
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const response = await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method, params }));
+    return response.ok ? response.result as any : response.error!;
+  };
+  const created = (await call("scripts.save", input)).script;
+  expect(created).toMatchObject({ name: "Visit", revision: 1 });
+  expect(created.source).toBeUndefined();
+  // An update keeps the fields it leaves out.
+  const updated = (await call("scripts.save", { scriptId: created.id, source: "export default async () => { /* v2 */ };" })).script;
+  expect(updated).toMatchObject({ id: created.id, name: "Visit", description: "Example", revision: 2 });
+  expect((await call("scripts.get", { scriptId: created.id })).script.source).toContain("v2");
+  expect(await call("scripts.save", { scriptId: created.id, source: "x", expectedRevision: 1 })).toMatchObject({ message: expect.stringContaining("changed") });
+  expect(await call("scripts.get", { scriptId: "missing" })).toMatchObject({ message: "Script not found" });
+});

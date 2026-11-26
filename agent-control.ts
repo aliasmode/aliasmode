@@ -23,6 +23,7 @@ import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import type { ProfileStore } from "./store.ts";
 import type { ScriptLibrary, ScriptSupervisor } from "./scripts.ts";
+import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
 export const AGENT_CONTROL_PROTOCOL = "aliasmode-agent-v1";
 export const AGENT_CONTROL_PATH = "/api/agent/v1/connect";
@@ -257,6 +258,10 @@ export class AgentControlSession {
           params.expectedEndpoint === undefined ? undefined : stringParam(params, "expectedEndpoint"));
       case "scripts.list":
         return { scripts: (await this.scriptTools().library.list()).map(({ id, name, language, description }) => ({ id, name, language, description })) };
+      case "scripts.get":
+        return { script: await this.scriptTools().library.get(stringParam(params, "scriptId")) };
+      case "scripts.save":
+        return await this.saveScript(params);
       case "scripts.run":
         return { run: this.scriptTools().runner.start({
           scriptId: stringParam(params, "scriptId"),
@@ -285,6 +290,19 @@ export class AgentControlSession {
   private scriptTools(): NonNullable<AgentControlDeps["scripts"]> {
     if (!this.deps.scripts) throw agentError("scripts_unavailable", "Scripts are not available here; use the AliasMode desktop app");
     return this.deps.scripts;
+  }
+
+  /** Creates a script, or updates the one named by scriptId; omitted fields keep their current value. */
+  private async saveScript(params: Record<string, unknown>) {
+    const { library } = this.scriptTools();
+    const current = params.scriptId === undefined ? undefined : await library.get(stringParam(params, "scriptId"));
+    const field = (name: "name" | "description" | "language" | "source") => params[name] ?? current?.[name] ?? (name === "description" ? "" : undefined);
+    const { source: _source, ...saved } = await library.save(
+      { name: field("name"), description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
+      current?.id,
+      current && (params.expectedRevision === undefined ? current.revision : Number(params.expectedRevision)),
+    );
+    return { script: saved };
   }
 
   private cloudMcpConnection(): { connection: CloudConnectionRuntime; deviceId: string } {
