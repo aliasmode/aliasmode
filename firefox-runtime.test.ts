@@ -9,8 +9,11 @@ import {
   type FirefoxOwner,
 } from "./firefox-runtime.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
-import { camouEnvironment, firefoxLaunchOptions, observedFirefoxCaptureUrl, trackFirefoxPages } from "./firefox-worker.mjs";
+import { camouEnvironment, downloadsDirectory, firefoxLaunchOptions, reserveDownloadPath, saveFirefoxDownloads, observedFirefoxCaptureUrl, trackFirefoxPages } from "./firefox-worker.mjs";
 import { EventEmitter } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 async function ownerServer(handler: RequestListener) {
   const server = createServer(handler);
@@ -196,4 +199,46 @@ test("Firefox owner reservations keep tokens out of their endpoint", async () =>
   expect(reservation.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
   expect(reservation.endpoint).not.toContain(reservation.token);
   expect(reservation.generation).not.toContain(reservation.token);
+});
+
+test("downloads go to the XDG or home Downloads folder", () => {
+  const home = mkdtempSync(join(tmpdir(), "dl-home-"));
+  expect(downloadsDirectory({}, home, "linux")).toBe(join(home, "Downloads"));
+  mkdirSync(join(home, ".config"));
+  writeFileSync(join(home, ".config", "user-dirs.dirs"), '# x\nXDG_DOWNLOAD_DIR="$HOME/Telechargements"\n');
+  expect(downloadsDirectory({}, home, "linux")).toBe(join(home, "Telechargements"));
+  expect(downloadsDirectory({}, home, "win32")).toBe(join(home, "Downloads"));
+  expect(downloadsDirectory({ XDG_CONFIG_HOME: join(home, "none") }, home, "linux")).toBe(join(home, "Downloads"));
+});
+
+test("a download keeps its name and never overwrites a file", () => {
+  const dir = join(mkdtempSync(join(tmpdir(), "dl-")), "Downloads");
+  expect(reserveDownloadPath(dir, "a.tar.gz")).toBe(join(dir, "a.tar.gz"));
+  expect(reserveDownloadPath(dir, "a.tar.gz")).toBe(join(dir, "a.tar (1).gz"));
+  expect(reserveDownloadPath(dir, "../../etc/a.tar.gz")).toBe(join(dir, "a.tar (2).gz"));
+  expect(reserveDownloadPath(dir, "noext")).toBe(join(dir, "noext"));
+  expect(reserveDownloadPath(dir, "noext")).toBe(join(dir, "noext (1)"));
+  expect(reserveDownloadPath(dir, "")).toBe(join(dir, "download"));
+});
+
+test("firefox downloads are saved for existing and new pages", async () => {
+  const home = mkdtempSync(join(tmpdir(), "dl-save-"));
+  {
+    const first = new EventEmitter();
+    const context = Object.assign(new EventEmitter(), { pages: () => [first] });
+    saveFirefoxDownloads(context, () => join(home, "Downloads"));
+    const saved: string[] = [];
+    const download = (name: string) => ({
+      suggestedFilename: () => name,
+      saveAs: async (path: string) => { writeFileSync(path, name); saved.push(path); },
+    });
+    first.emit("download", download("one.txt"));
+    const second = new EventEmitter();
+    context.emit("page", second);
+    second.emit("download", download("one.txt"));
+    await Bun.sleep(50);
+    expect(saved.length).toBe(2);
+    expect(readFileSync(join(home, "Downloads", "one.txt"), "utf8")).toBe("one.txt");
+    expect(existsSync(join(home, "Downloads", "one (1).txt"))).toBe(true);
+  }
 });

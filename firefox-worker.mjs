@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { basename, extname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connectOfficial, nonClosingContext } from "./agent/playwright-proxy.mjs";
 import { MAX_BYTES, VERSION, operatePersistentContext } from "./playwright-worker.mjs";
@@ -204,6 +205,46 @@ export function firefoxLaunchOptions(input) {
   };
 }
 
+/** The user's Downloads folder: XDG_DOWNLOAD_DIR on Linux, else ~/Downloads. */
+export function downloadsDirectory(env = process.env, home = homedir(), platform = process.platform) {
+  if (platform === "linux") {
+    try {
+      const config = env.XDG_CONFIG_HOME || join(home, ".config");
+      const line = readFileSync(join(config, "user-dirs.dirs"), "utf8").match(/^\s*XDG_DOWNLOAD_DIR="([^"\n]+)"/m);
+      if (line) {
+        const dir = line[1].replace(/^\$HOME(?=\/|$)/, home);
+        if (isAbsolute(dir) && dir !== home) return dir;
+      }
+    } catch {}
+  }
+  return join(home, "Downloads");
+}
+
+/** A free path in `dir` for `name`, as "name (1).ext" when taken. The empty file reserves the name. */
+export function reserveDownloadPath(dir, name) {
+  mkdirSync(dir, { recursive: true });
+  const safe = basename(String(name || "").replace(/\\/g, "/")) || "download";
+  const ext = extname(safe);
+  const stem = ext ? safe.slice(0, -ext.length) : safe;
+  for (let i = 0; ; i++) {
+    const path = join(dir, i ? `${stem} (${i})${ext}` : safe);
+    try { writeFileSync(path, "", { flag: "wx" }); return path; }
+    catch (error) { if (error?.code !== "EEXIST") throw error; }
+  }
+}
+
+// The engine saves downloads under a temporary name that goes away on close. Copy each one to the
+// Downloads folder under its real name; script and MCP clients still receive the download event.
+export function saveFirefoxDownloads(context, directory = downloadsDirectory) {
+  const watch = (page) => page.on?.("download", (download) => {
+    void (async () => {
+      try { await download.saveAs(reserveDownloadPath(directory(), download.suggestedFilename())); } catch {}
+    })();
+  });
+  for (const page of context.pages()) watch(page);
+  context.on?.("page", watch);
+}
+
 /**
  * Whether the browser may still show a page. The engine drops a tab from the page list when its
  * content process crashes, yet the tab stays in its window (the crashed-tab page) and nothing adds it
@@ -267,6 +308,7 @@ async function run() {
   for (const page of context.pages()) observePage(page);
   context.on?.("page", observePage);
   const hasPages = trackFirefoxPages(context);
+  saveFirefoxDownloads(context);
   let official;
   let closed = false;
   let closing = false;
