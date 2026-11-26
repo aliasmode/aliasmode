@@ -22,7 +22,6 @@ export type PlaywrightWorkerOperation =
   | "search-provider"
   | "profile-card"
   | "navigate"
-  | "label-window"
   | "ensure-cookies"
   | "session-capture"
   | "session-restore"
