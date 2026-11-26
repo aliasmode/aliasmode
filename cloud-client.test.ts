@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { zstdDecompressSync } from "node:zlib";
 import { CloudApiError, CloudClient, CloudRequestError, type CloudFetch } from "./cloud-client.ts";
 import type { PortableProfileV1 } from "./contracts/cloud-v1.ts";
 
@@ -468,4 +469,23 @@ test("Cloud client reads, creates and edits support with the contract shapes", a
     { url: "https://cloud.aliasmode.test/v1/support", method: "POST", body: { amountCents: 2500, method: "card", source: "prompt-card", monthly: true } },
     { url: "https://cloud.aliasmode.test/v1/support/monthly", method: "DELETE", body: undefined },
   ]);
+});
+
+test("Cloud client compresses large uploads and gives them the session upload time", async () => {
+  const sent: Array<{ encoding: string | null; body: unknown }> = [];
+  const cloud = client(async (_url, init) => {
+    const headers = new Headers(init?.headers);
+    const encoding = headers.get("content-encoding");
+    const raw = init?.body as string | Uint8Array;
+    sent.push({ encoding, body: JSON.parse(encoding === "zstd" ? zstdDecompressSync(raw as Uint8Array).toString() : String(raw)) });
+    // Longer than the 1 s request limit of this client: a large upload must still finish.
+    if (encoding) await new Promise((resolve) => setTimeout(resolve, 1_200));
+    return Response.json({ ok: true, version: 5 });
+  });
+  const large = { ...payload, session: { cookies: [], origins: [{ origin: "https://x.test", localStorage: [{ name: "k", value: "v".repeat(100_000) }] }] } } as PortableProfileV1;
+  await cloud.checkpointOpen("registration-1", { expectedVersion: 4, payload: large });
+  await cloud.checkpointOpen("registration-1", { expectedVersion: 4, payload });
+  expect(sent.map((item) => item.encoding)).toEqual(["zstd", null]);
+  expect(sent[0]!.body).toEqual({ expectedVersion: 4, payload: large });
+  expect(sent[1]!.body).toEqual({ expectedVersion: 4, payload });
 });

@@ -1,3 +1,4 @@
+import { zstdCompressSync } from "node:zlib";
 import { normalizeSecureServiceUrl } from "./app-config.ts";
 import {
   CLOUD_API_BASE_PATH,
@@ -81,6 +82,8 @@ export type CloudCredentialProvider = () => string | undefined | Promise<string 
 const DEFAULT_CLOUD_REQUEST_TIMEOUT_MS = 30_000;
 /** A profile with its saved session can be megabytes; it is read whole (see readResponseText). */
 const SESSION_BODY_TIMEOUT_MS = 120_000;
+// Saved sessions are mostly text and shrink about 8x; Cloud decodes zstd bodies (aliasmode-cloud 687bd10).
+const COMPRESS_BODY_BYTES = 64 * 1024;
 const AI_CHAT_TIMEOUT_MS = 300_000;
 
 export type CloudRequestFailure =
@@ -177,6 +180,13 @@ export class CloudClient {
       if (deviceCredential) headers.set("x-aliasmode-device", deviceCredential);
     }
     if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+    // The silence limit cannot see upload progress, so a large upload gets the session body time.
+    let uploadTimeoutMs: number | undefined;
+    if (typeof init.body === "string" && Buffer.byteLength(init.body) >= COMPRESS_BODY_BYTES) {
+      init = { ...init, body: zstdCompressSync(Buffer.from(init.body)) };
+      headers.set("content-encoding", "zstd");
+      uploadTimeoutMs = Math.max(responseOptions.timeoutMs ?? this.requestTimeoutMs, SESSION_BODY_TIMEOUT_MS);
+    }
 
     const controller = new AbortController();
     const upstreamSignal = init.signal;
@@ -201,7 +211,7 @@ export class CloudClient {
       }, ms);
       if (timer && typeof timer === "object" && "unref" in timer) timer.unref();
     };
-    restartTimeout(responseOptions.timeoutMs);
+    restartTimeout(uploadTimeoutMs ?? responseOptions.timeoutMs);
 
     try {
       const request = Promise.resolve().then(async () => {
