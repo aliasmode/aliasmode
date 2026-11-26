@@ -15,7 +15,7 @@ import { StorePage, useCloudStore } from "./store.tsx";
 import { trackStoreEvent, useStoreEvents } from "./store-events.ts";
 import { TrashPage } from "./trash.tsx";
 import { parsePastedProxy } from "./proxy-input.ts";
-import { ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
+import { RunOnOpenField, ScriptRunPanel, ScriptsPage } from "./scripts.tsx";
 import { I18nProvider, availableLanguages, languageNativeName, useTranslation } from "./i18n.tsx";
 import { localeTimezoneMismatch } from "../profile-locale.ts";
 import { folderTree, folderScope, folderGrantPermission, type FolderInfo } from "../folders.ts";
@@ -4327,7 +4327,7 @@ function App() {
         </footer>
       </div>
       ) : view === "scripts" ? (
-      <ScriptsPage onViewRun={() => setScriptRunOpen(true)} onAskAgent={sendToAgent} />
+      <ScriptsPage onViewRun={() => setScriptRunOpen(true)} onAskAgent={sendToAgent} profiles={profiles} />
       ) : view === "extensions" ? (
       <div className="workspace">
         <div className="settingspage">
@@ -5165,6 +5165,7 @@ function App() {
                     <span>{t("Tags")} <span className="muted">{t("(comma-separated)")}</span></span>
                     <input value={editForm.tags ?? ""} placeholder="warmup, us, priority" onChange={(e) => setEF("tags", e.target.value)} />
                   </label>
+                  <RunOnOpenField profileId={editId} />
                   <div className="fld-row">
                     <label className="fld type">
                       <span>{t("Proxy type")}</span>

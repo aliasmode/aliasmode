@@ -66,6 +66,7 @@ import { join, resolve, dirname } from "node:path";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { validAgentAuthorization } from "./agent-control.ts";
 import { ScriptError, prefetchPythonFor, type ScriptLibrary, type ScriptSupervisor } from "./scripts.ts";
+import type { Scheduler } from "./scheduler.ts";
 import { AgentError, type AgentRunner } from "./agent-runner.ts";
 import type { PythonRuntime } from "./python-runtime.ts";
 import { runtimeDownloads } from "./runtime-download.ts";
@@ -616,7 +617,7 @@ function legalAcceptanceIsCurrent(legal: {
 }
 
 export interface UiRuntimeOptions {
-  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; nonce: string; python?: PythonRuntime };
+  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; scheduler?: Scheduler; nonce: string; python?: PythonRuntime };
   /** The in-app AI agent; desktop only, authorized like scripts. */
   agent?: AgentRunner;
   appConfig?: AppConfigStore;
@@ -671,6 +672,38 @@ export async function handleUiRequest(
       }
       if (pathname === "/ui/api/scripts/stop" && req.method === "POST") {
         return noStoreJson({ ok: true, run: await scripts.runner.stop() });
+      }
+      if (pathname === "/ui/api/scripts/schedules" || pathname.startsWith("/ui/api/scripts/schedules/") || pathname.startsWith("/ui/api/scripts/on-open/")) {
+        const scheduler = scripts.scheduler;
+        if (!scheduler) throw new ScriptError("Schedules are unavailable", 503);
+        if (pathname === "/ui/api/scripts/schedules") {
+          if (req.method === "GET") return noStoreJson({ ok: true, ...scheduler.list() });
+          if (req.method === "POST") return noStoreJson({ ok: true, job: scheduler.save(await req.json()) });
+        }
+        const jobMatch = pathname.match(/^\/ui\/api\/scripts\/schedules\/([^/]+)$/);
+        if (jobMatch) {
+          const id = decodeURIComponent(jobMatch[1]!);
+          if (req.method === "PUT") return noStoreJson({ ok: true, job: scheduler.save(await req.json(), id) });
+          if (req.method === "DELETE") {
+            scheduler.remove(id);
+            return noStoreJson({ ok: true });
+          }
+        }
+        const openMatch = pathname.match(/^\/ui\/api\/scripts\/on-open\/([^/]+)$/);
+        if (openMatch) {
+          const profileId = decodeURIComponent(openMatch[1]!);
+          if (req.method === "PUT") {
+            const body = await req.json();
+            if (typeof body?.scriptId !== "string") throw new ScriptError("Choose a script");
+            scheduler.setOnOpen(profileId, body.scriptId);
+            return noStoreJson({ ok: true });
+          }
+          if (req.method === "DELETE") {
+            scheduler.setOnOpen(profileId, null);
+            return noStoreJson({ ok: true });
+          }
+        }
+        return noStoreJson({ ok: false, error: "Unknown script operation" }, 404);
       }
       if (pathname === "/ui/api/scripts/python-runtime") {
         // null: a source checkout runs Python scripts on python3 and downloads nothing.
@@ -2609,6 +2642,7 @@ export async function handleUiRequest(
       try {
         if (action[2] === "open") {
           const result = await options.cloudBrowser.open(id);
+          if (result.ok) options.scripts?.scheduler?.enqueueOpen(id);
           return result.ok
             ? openResponse(store.getProfile(id), result)
             : Response.json({ ok: false, error: result.error ?? "open failed" }, { status: 500 });
@@ -2629,7 +2663,10 @@ export async function handleUiRequest(
             ? await remote.getProfile(id).catch(() => null)
             : null;
           const r = await remote.open(id, [], force);
-          if (r.ok) return openResponse(profile, r);
+          if (r.ok) {
+            options.scripts?.scheduler?.enqueueOpen(id);
+            return openResponse(profile, r);
+          }
           return Response.json(
             { ok: false, error: r.lockedBy ? `in use by ${r.lockedBy}` : (r.error ?? "open failed"), lockedBy: r.lockedBy },
             { status: r.lockedBy ? 409 : 500 },
@@ -2650,6 +2687,7 @@ export async function handleUiRequest(
     try {
       if (action[2] === "open") {
         const r = await launcher.start(id);
+        options.scripts?.scheduler?.enqueueOpen(id);
         return openResponse(profile, r);
       }
       if (action[2] === "close") {

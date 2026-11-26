@@ -8,11 +8,12 @@ import type {
 } from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
 import type { PythonRuntimeStatus } from "../python-runtime.ts";
-import type { UiProfile } from "./api.ts";
+import type { ScheduleState, UiProfile } from "./api.ts";
 import { useTranslation } from "./i18n.tsx";
 import { AGENT_FINISHED_EVENT, Glyph } from "./agent.tsx";
 import {
   createScript,
+  deleteSchedule,
   deleteScript,
   downloadPythonRuntime,
   fetchPublishedScript,
@@ -23,9 +24,12 @@ import {
   fetchScripts,
   fetchScriptLog,
   fetchScriptRun,
+  fetchSchedules,
   importPublishedScript,
   publishScript,
+  saveSchedule,
   scriptsDesktopAvailable,
+  setOnOpenScript,
   startScriptRun,
   stopScriptRun,
   unpublishScript,
@@ -47,7 +51,7 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-type ScriptsTab = "mine" | "library";
+type ScriptsTab = "mine" | "schedules" | "library";
 
 function languageName(language: ScriptLanguage): string {
   return language === "python" ? "Python" : "JavaScript";
@@ -97,7 +101,7 @@ function PythonRuntimeNote({ status, onDownload }: { status: PythonRuntimeStatus
   return <p className="formnote">{t("Python scripts need the Python runtime ({size}). It downloads once, before the first Python script runs.", { size })} <button className="btn" type="button" onClick={onDownload}>{t("Download now")}</button></p>;
 }
 
-export function ScriptsPage({ onViewRun, onAskAgent }: { onViewRun: () => void; onAskAgent: (prompt: string) => void }) {
+export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: () => void; onAskAgent: (prompt: string) => void; profiles: UiProfile[] }) {
   const { t } = useTranslation();
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
   const [script, setScript] = useState<ScriptRecord | null>(null);
@@ -282,10 +286,11 @@ export function ScriptsPage({ onViewRun, onAskAgent }: { onViewRun: () => void; 
       </div>
       <div className="tabs scripts-tabs" role="tablist" aria-label={t("Script library")}>
         <button className={`tab${tab === "mine" ? " active" : ""}`} role="tab" aria-selected={tab === "mine"} type="button" onClick={() => setTab("mine")}>{t("My scripts")}</button>
+        <button className={`tab${tab === "schedules" ? " active" : ""}`} role="tab" aria-selected={tab === "schedules"} type="button" onClick={() => setTab("schedules")}>{t("Schedules")}</button>
         <button className={`tab${tab === "library" ? " active" : ""}`} role="tab" aria-selected={tab === "library"} type="button" onClick={() => setTab("library")}>{t("Public library")}</button>
       </div>
       {error && <div className="modal-err" role="alert">{error}</div>}
-      {tab === "library" ? <PublicLibrary onImported={imported} /> : <>
+      {tab === "schedules" ? <SchedulesPanel scripts={scripts} profiles={profiles} /> : tab === "library" ? <PublicLibrary onImported={imported} /> : <>
         {currentRun && <button className="scripts-run-note" type="button" onClick={onViewRun}>{t("{scriptName}: {status}. View run", { scriptName: currentRun.scriptName, status: currentRun.status })}</button>}
         <PythonRuntimeNote status={python} onDownload={downloadPython} />
         <div className="scripts-layout">
@@ -444,6 +449,164 @@ function PublicLibrary({ onImported }: { onImported: (script: ScriptRecord) => P
       </section> : <div className="emptystate"><b>{t("Select a public script")}</b><p>{t("Choose a script to view its details and source.")}</p></div>}
     </div>
   </div>;
+}
+
+interface ScheduleForm {
+  id?: string;
+  name: string;
+  scriptId: string;
+  profileIds: string[];
+  inputs: string;
+  useCredentials: boolean;
+  mode: "every" | "daily";
+  hours: string;
+  dailyAt: string;
+  enabled: boolean;
+}
+
+const NEW_SCHEDULE: ScheduleForm = { name: "", scriptId: "", profileIds: [], inputs: "{}", useCredentials: false, mode: "every", hours: "6", dailyAt: "09:00", enabled: true };
+
+function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profiles: UiProfile[] }) {
+  const { t } = useTranslation();
+  const [state, setState] = useState<ScheduleState>({ jobs: [], history: [], onOpen: {} });
+  const [form, setForm] = useState<ScheduleForm | null>(null);
+  const [filter, setFilter] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const reload = async () => setState(await fetchSchedules());
+  useEffect(() => {
+    void reload().catch((nextError) => setError(errorText(nextError)));
+    // Run results arrive while the page is open.
+    const timer = window.setInterval(() => { void reload().catch(() => {}); }, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const scriptName = (id: string) => scripts.find((item) => item.id === id)?.name ?? t("Missing script");
+  const cadence = (job: ScheduleState["jobs"][number]) => job.dailyAt
+    ? t("Daily at {time}", { time: job.dailyAt })
+    : t("Every {n} hours", { n: String(job.everyHours) });
+  const jobLabel = (jobId: string) => {
+    if (jobId.startsWith("open:")) return t("Run on open: {name}", { name: profiles.find((item) => item.id === jobId.slice(5))?.name ?? jobId.slice(5) });
+    const job = state.jobs.find((item) => item.id === jobId);
+    return job ? job.name || scriptName(job.scriptId) : t("Deleted schedule");
+  };
+  const edit = (job: ScheduleState["jobs"][number]) => setForm({
+    id: job.id, name: job.name ?? "", scriptId: job.scriptId, profileIds: job.profileIds, inputs: JSON.stringify(job.inputs), useCredentials: job.useCredentials,
+    mode: job.dailyAt ? "daily" : "every", hours: String(job.everyHours ?? 6), dailyAt: job.dailyAt ?? "09:00", enabled: job.enabled,
+  });
+  const run = async (work: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try { await work(); await reload(); }
+    catch (nextError) { setError(errorText(nextError)); }
+    finally { setBusy(false); }
+  };
+  const submit = async () => {
+    if (!form) return;
+    let inputs: unknown;
+    try { inputs = JSON.parse(form.inputs); }
+    catch { setError(t("Inputs must be valid JSON.")); return; }
+    if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)) { setError(t("Inputs must be a JSON object.")); return; }
+    const hours = Number(form.hours);
+    if (form.mode === "every" && !(hours > 0)) { setError(t("Hours must be a number above zero.")); return; }
+    await run(async () => {
+      await saveSchedule({
+        ...(form.name.trim() ? { name: form.name.trim() } : {}), scriptId: form.scriptId, profileIds: form.profileIds, inputs: inputs as Record<string, unknown>,
+        useCredentials: form.useCredentials, enabled: form.enabled,
+        ...(form.mode === "every" ? { everyHours: hours } : { dailyAt: form.dailyAt }),
+      }, form.id);
+      setForm(null);
+    });
+  };
+  const shown = profiles.filter((item) => item.name.toLowerCase().includes(filter.toLowerCase()));
+  const toggle = (id: string) => form && setForm({ ...form, profileIds: form.profileIds.includes(id) ? form.profileIds.filter((item) => item !== id) : [...form.profileIds, id] });
+
+  return <div className="scripts-library">
+    <p className="formnote">{t("Schedules run only while AliasMode is open. A script you run by hand delays a due schedule until it finishes. A missed run happens once when AliasMode is open again.")}</p>
+    {error && <div className="modal-err" role="alert">{error}</div>}
+    <div className="script-actions"><button className="btn primary" type="button" disabled={busy || !!form} onClick={() => { setError(null); setForm(NEW_SCHEDULE); }}>{t("New schedule")}</button></div>
+    {form && <section className="settings-card script-detail">
+      <header><h2>{form.id ? t("Edit schedule") : t("New schedule")}</h2></header>
+      <form className="card-body" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+        <label className="fld"><span>{t("Name")}</span><input className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+        <label className="fld"><span>{t("Script")}</span><select className="select" value={form.scriptId} onChange={(event) => setForm({ ...form, scriptId: event.target.value })}><option value="">{t("Choose a script…")}</option>{scripts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <div className="fld"><span>{t("Profiles")} ({form.profileIds.length})</span>
+          <input className="input" aria-label={t("Search profiles")} placeholder={t("Search profiles")} value={filter} onChange={(event) => setFilter(event.target.value)} />
+          <div className="schedule-profiles">{shown.map((item) => <label key={item.id} className="script-credentials"><input type="checkbox" checked={form.profileIds.includes(item.id)} onChange={() => toggle(item.id)} />{item.name}</label>)}</div>
+        </div>
+        <div className="fld"><span>{t("Repeat")}</span>
+          <div className="script-actions">
+            <select className="select" aria-label={t("Repeat")} value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value as ScheduleForm["mode"] })}><option value="every">{t("Every N hours")}</option><option value="daily">{t("Daily at a time")}</option></select>
+            {form.mode === "every"
+              ? <input className="input" type="number" min={0.5} step={0.5} aria-label={t("Hours")} value={form.hours} onChange={(event) => setForm({ ...form, hours: event.target.value })} />
+              : <input className="input" type="time" aria-label={t("Time")} value={form.dailyAt} onChange={(event) => setForm({ ...form, dailyAt: event.target.value })} />}
+          </div>
+        </div>
+        <label className="fld"><span>{t("JSON inputs")}</span><textarea className="input script-inputs" value={form.inputs} onChange={(event) => setForm({ ...form, inputs: event.target.value })} /></label>
+        <label className="script-credentials"><input type="checkbox" checked={form.useCredentials} onChange={(event) => setForm({ ...form, useCredentials: event.target.checked })} />{t("Use saved profile login details")}</label>
+        <label className="script-credentials"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />{t("Schedule is on")}</label>
+        <div className="script-actions">
+          <button className="btn primary" type="submit" disabled={busy || !form.scriptId || form.profileIds.length === 0}>{busy ? t("Saving…") : t("Save schedule")}</button>
+          <button className="btn" type="button" disabled={busy} onClick={() => setForm(null)}>{t("Cancel")}</button>
+        </div>
+      </form>
+    </section>}
+    <div className="scripts-list" aria-label={t("Schedules")}>
+      {state.jobs.length === 0 ? <p className="formnote">{t("No schedules yet.")}</p> : state.jobs.map((job) => (
+        <div className="script-row" key={job.id}>
+          <b>{job.name || scriptName(job.scriptId)}</b>
+          <span>{scriptName(job.scriptId)} · {t("{n} profiles", { n: String(job.profileIds.length) })} · {cadence(job)}</span>
+          <small>{job.enabled ? t("Next run: {time}", { time: new Date(job.nextRun).toLocaleString() }) : t("Off")}{job.lastRun ? ` · ${t("Last run: {status}", { status: job.lastRun.status })} ${new Date(job.lastRun.at).toLocaleString()}` : ""}</small>
+          <div className="script-actions">
+            <button className="btn" type="button" disabled={busy} onClick={() => edit(job)}>{t("Edit")}</button>
+            <button className="btn" type="button" disabled={busy} onClick={() => void run(() => saveSchedule({ ...job, enabled: !job.enabled }, job.id))}>{job.enabled ? t("Turn off") : t("Turn on")}</button>
+            <button className="btn danger" type="button" disabled={busy} onClick={() => { if (window.confirm(t("Delete {name}?", { name: job.name || scriptName(job.scriptId) }))) void run(() => deleteSchedule(job.id)); }}>{t("Delete")}</button>
+          </div>
+        </div>
+      ))}
+    </div>
+    <section className="settings-card">
+      <header><h2>{t("History")}</h2></header>
+      <div className="card-body">
+        {state.history.length === 0 ? <p className="formnote">{t("Nothing has run yet.")}</p> : state.history.map((entry) => (
+          <div key={`${entry.runId}-${entry.at}`} className={`script-profile ${entry.status}`}>
+            <span>{new Date(entry.at).toLocaleString()} · {jobLabel(entry.jobId)}</span><span>{entry.status}</span>
+            {(entry.error || entry.profiles.some((item) => item.error)) && <small>{entry.error ?? entry.profiles.filter((item) => item.error).map((item) => `${item.name}: ${item.error}`).join("; ")}</small>}
+          </div>
+        ))}
+      </div>
+    </section>
+  </div>;
+}
+
+/** Picks the library script that runs each time this profile opens from the dashboard. */
+export function RunOnOpenField({ profileId }: { profileId: string }) {
+  const { t } = useTranslation();
+  const [scripts, setScripts] = useState<ScriptSummary[]>([]);
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void Promise.all([fetchScripts(), fetchSchedules()]).then(([nextScripts, state]) => {
+      if (!live) return;
+      setScripts(nextScripts);
+      setValue(state.onOpen[profileId] ?? "");
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [profileId]);
+  if (!scriptsDesktopAvailable()) return null;
+  const change = (scriptId: string) => {
+    setError(null);
+    void setOnOpenScript(profileId, scriptId || null).then(() => setValue(scriptId)).catch((nextError) => setError(errorText(nextError)));
+  };
+  return <label className="fld">
+    <span>{t("Run a script on open")}</span>
+    <select className="select" value={value} onChange={(event) => change(event.target.value)}>
+      <option value="">{t("None")}</option>
+      {scripts.map((script) => <option key={script.id} value={script.id}>{script.name}</option>)}
+    </select>
+    <small>{error ?? t("Runs after you open this profile from the dashboard. Saved as soon as you choose.")}</small>
+  </label>;
 }
 
 export function ScriptRunPanel({ open, selectedProfiles, onClose }: {

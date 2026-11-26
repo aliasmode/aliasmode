@@ -30,6 +30,7 @@ import {
 } from "./server.ts";
 import { handleUiRequest, type UiHealthMetadata } from "./ui.ts";
 import { ScriptLibrary, ScriptSupervisor, prefetchPythonFor } from "./scripts.ts";
+import { Scheduler } from "./scheduler.ts";
 import { AgentRunner, InProcessToolSession, McpHelperSession, cloudChat, ownModelChat, spawnMcpHelper } from "./agent-runner.ts";
 import { handleTrashRequest } from "./trash.ts";
 import { PythonRuntime } from "./python-runtime.ts";
@@ -293,13 +294,13 @@ export function serveDashboard(opts: DashboardServerOptions) {
   const python = library && resolvePlaywrightRuntime().kind === "packaged"
     ? new PythonRuntime(join(opts.paths!.root, "runtimes"), { log })
     : undefined;
-  const scripts = library && agentNonce ? {
-    library, nonce: agentNonce, python,
-    runner: new ScriptSupervisor({
-      root: opts.paths!.root, library, launcher, store, admission, python,
-      remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
-    }),
-  } : undefined;
+  const runner = library && agentNonce ? new ScriptSupervisor({
+    root: opts.paths!.root, library, launcher, store, admission, python,
+    remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
+  }) : undefined;
+  const scheduler = library && runner ? new Scheduler({ root: opts.paths!.root, runner, scope: () => library.scope(), log }) : undefined;
+  scheduler?.start();
+  const scripts = library && agentNonce && runner ? { library, nonce: agentNonce, python, runner, scheduler } : undefined;
   // The hub and the in-process host share this object, so they see the runner set here.
   if (scripts) agentControlDeps.scripts = scripts;
   // The desktop app drives browsers through its packaged `aliasmode-mcp` helper; a source checkout
@@ -430,6 +431,6 @@ export function serveDashboard(opts: DashboardServerOptions) {
   void agentHub?.cleanupTemporaryProfiles();
   log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AliasMode Local API under /api; AdsPower-compatible)`);
   return Object.assign(server, {
-    stopScripts: () => Promise.all([scripts?.runner.shutdown(), agent?.shutdown()]).then(() => {}),
+    stopScripts: () => Promise.all([scheduler?.shutdown().then(() => scripts?.runner.shutdown()), agent?.shutdown()]).then(() => {}),
   });
 }

@@ -15,6 +15,7 @@ import type {
   ScriptSummary,
 } from "../contracts/cloud-v1.ts";
 import type { ScriptRun } from "../scripts.ts";
+import type { ScheduleJob, ScheduleState } from "../scheduler.ts";
 import type { AgentConversation, AgentConversationSummary, AgentMessage, AgentSettingsView } from "../agent-runner.ts";
 import type { PythonRuntimeStatus } from "../python-runtime.ts";
 import type { ServicesResult } from "../services-directory.ts";
@@ -1051,7 +1052,7 @@ export async function deleteGroup(name: string): Promise<any> {
 }
 
 // ---- Local scripts ------------------------------------------------------------
-export type { ScriptLanguage, ScriptRecord, ScriptRun, ScriptSummary };
+export type { ScheduleJob, ScheduleState, ScriptLanguage, ScriptRecord, ScriptRun, ScriptSummary };
 
 type ScriptInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -1178,6 +1179,29 @@ export async function startScriptRun(input: { scriptId: string; profileIds: stri
 
 export async function stopScriptRun(): Promise<ScriptRun> {
   return (await scriptRequest("/ui/api/scripts/stop", { method: "POST", body: "{}" })).run as ScriptRun;
+}
+
+export type ScheduleJobInput = Pick<ScheduleJob, "name" | "scriptId" | "profileIds" | "inputs" | "useCredentials" | "everyHours" | "dailyAt" | "enabled">;
+
+export async function fetchSchedules(): Promise<ScheduleState> {
+  const { ok: _ok, ...state } = await scriptRequest("/ui/api/scripts/schedules");
+  return state as ScheduleState;
+}
+
+export async function saveSchedule(input: ScheduleJobInput, id?: string): Promise<ScheduleJob> {
+  return (await scriptRequest(id ? `/ui/api/scripts/schedules/${encodeURIComponent(id)}` : "/ui/api/scripts/schedules", {
+    method: id ? "PUT" : "POST", body: JSON.stringify(input),
+  })).job as ScheduleJob;
+}
+
+export async function deleteSchedule(id: string): Promise<void> {
+  await scriptRequest(`/ui/api/scripts/schedules/${encodeURIComponent(id)}`, { method: "DELETE", body: "{}" });
+}
+
+/** The script that runs after the profile opens from the dashboard; null clears it. */
+export async function setOnOpenScript(profileId: string, scriptId: string | null): Promise<void> {
+  const path = `/ui/api/scripts/on-open/${encodeURIComponent(profileId)}`;
+  await scriptRequest(path, scriptId ? { method: "PUT", body: JSON.stringify({ scriptId }) } : { method: "DELETE", body: "{}" });
 }
 
 function pythonRuntimeStatus(body: any): PythonRuntimeStatus | null {

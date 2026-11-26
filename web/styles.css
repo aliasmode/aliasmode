@@ -1739,6 +1739,7 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .script-source, .script-log { max-height: 330px; margin: 0; padding: 10px; overflow: auto; color: var(--ink-soft); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .script-run-modal { max-width: 640px; }
 .script-inputs { min-height: 86px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.schedule-profiles { display: grid; gap: 6px; max-height: 180px; overflow-y: auto; padding: 8px; background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); }
 .script-credentials { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); font-size: var(--t-sm); }
 .script-progress { display: grid; gap: 6px; padding: 10px; background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); }
 .script-profile { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; color: var(--muted); font-size: var(--t-sm); }

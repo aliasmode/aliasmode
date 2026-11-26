@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { AgentControlSession } from "./agent-control.ts";
 import { ScriptLibrary, ScriptSupervisor, resolveScriptRunner, verifyScriptRuntime, type ScriptExecution } from "./scripts.ts";
 import { handleUiRequest } from "./ui.ts";
+import { Scheduler } from "./scheduler.ts";
 import { CloudClient } from "./cloud-client.ts";
 import { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import { PYTHON_RUNTIME_FAILED, PythonRuntime } from "./python-runtime.ts";
@@ -550,7 +551,7 @@ test("all script API operations require the desktop nonce and trusted origin", a
   const h = harness();
   const nonce = "a".repeat(64);
   const options = { scripts: { library: h.library, runner: h.supervisor, nonce } };
-  for (const [method, path] of [["GET", ""], ["POST", ""], ["GET", "/run"], ["POST", "/run"], ["POST", "/stop"], ["GET", "/log"], ["GET", "/id"], ["PATCH", "/id"], ["DELETE", "/id"], ["GET", "/library"], ["GET", "/library/id"], ["POST", "/library/id/import"], ["PUT", "/id/publication"], ["DELETE", "/id/publication"], ["GET", "/python-runtime"], ["POST", "/python-runtime"]]) {
+  for (const [method, path] of [["GET", ""], ["POST", ""], ["GET", "/run"], ["POST", "/run"], ["POST", "/stop"], ["GET", "/log"], ["GET", "/id"], ["PATCH", "/id"], ["DELETE", "/id"], ["GET", "/library"], ["GET", "/library/id"], ["POST", "/library/id/import"], ["PUT", "/id/publication"], ["DELETE", "/id/publication"], ["GET", "/python-runtime"], ["POST", "/python-runtime"], ["GET", "/schedules"], ["POST", "/schedules"], ["PUT", "/schedules/id"], ["DELETE", "/schedules/id"], ["PUT", "/on-open/p1"], ["DELETE", "/on-open/p1"]]) {
     const response = await handleUiRequest(new Request(`http://127.0.0.1/ui/api/scripts${path}`, { method }), {} as any, {} as any, null, options);
     expect(response?.status).toBe(401);
   }
@@ -802,4 +803,38 @@ test("agent control reads, creates and updates library scripts", async () => {
   expect((await call("scripts.get", { scriptId: created.id })).script.source).toContain("v2");
   expect(await call("scripts.save", { scriptId: created.id, source: "x", expectedRevision: 1 })).toMatchObject({ message: expect.stringContaining("changed") });
   expect(await call("scripts.get", { scriptId: "missing" })).toMatchObject({ message: "Script not found" });
+test("schedule and run-on-open routes save, list, and delete under the nonce", async () => {
+  const h = harness();
+  const nonce = "e".repeat(64);
+  const scheduler = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope() });
+  const options = { scripts: { library: h.library, runner: h.supervisor, scheduler, nonce } };
+  const call = async (method: string, path: string, body?: unknown) => {
+    const response = (await handleUiRequest(new Request(`http://127.0.0.1/ui/api/scripts${path}`, {
+      method, headers: { authorization: `Bearer ${nonce}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+    }), {} as any, {} as any, null, options))!;
+    return { status: response.status, body: await response.json() as any };
+  };
+  const job = { scriptId: "s1", profileIds: ["a"], inputs: {}, everyHours: 6 };
+  const created = await call("POST", "/schedules", job);
+  expect(created.status).toBe(200);
+  const id = created.body.job.id;
+  expect((await call("PUT", `/schedules/${id}`, { ...job, enabled: false })).body.job.enabled).toBe(false);
+  expect((await call("POST", "/schedules", { ...job, everyHours: 0 })).status).toBe(400);
+  expect((await call("PUT", "/schedules/missing", job)).status).toBe(404);
+  expect((await call("PUT", "/on-open/p1", { scriptId: "s1" })).status).toBe(200);
+  expect((await call("GET", "/schedules")).body).toMatchObject({ jobs: [{ id, enabled: false }], history: [], onOpen: { p1: "s1" } });
+  expect((await call("DELETE", "/on-open/p1")).status).toBe(200);
+  expect((await call("DELETE", `/schedules/${id}`)).status).toBe(200);
+  expect((await call("GET", "/schedules")).body).toMatchObject({ jobs: [], onOpen: {} });
+});
+
+test("opening a profile from the dashboard queues its run-on-open script", async () => {
+  const queued: string[] = [];
+  const scheduler = { enqueueOpen: (id: string) => { queued.push(id); } } as unknown as Scheduler;
+  const launcher = { start: async () => ({ ws: "ws://test/p1", port: 9000 }) } as any;
+  const store = { getProfile: (id: string) => ({ id, name: id }) } as any;
+  const options = { scripts: { scheduler } as any };
+  const response = await handleUiRequest(new Request("http://127.0.0.1/ui/api/profiles/p1/open", { method: "POST" }), launcher, store, null, options);
+  expect(response?.status).toBe(200);
+  expect(queued).toEqual(["p1"]);
 });
