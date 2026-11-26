@@ -267,7 +267,8 @@ export class AgentControlSession {
           scriptId: stringParam(params, "scriptId"),
           profileIds: Array.isArray(params.profileIds) ? params.profileIds as string[] : [],
           inputs: params.inputs === undefined ? {} : object(params.inputs),
-          useCredentials: params.useCredentials === undefined ? false : params.useCredentials as boolean,
+          // Saved logins stay out of reach of MCP clients and the agent; only the dashboard Run panel can pass them.
+          useCredentials: false,
           ...(params.headless === undefined ? {} : { headless: params.headless as boolean }),
         }) };
       case "scripts.status":

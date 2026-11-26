@@ -10,7 +10,7 @@ import type { ScriptRun } from "../scripts.ts";
 import type { PythonRuntimeStatus } from "../python-runtime.ts";
 import type { UiProfile } from "./api.ts";
 import { useTranslation } from "./i18n.tsx";
-import { Glyph } from "./agent.tsx";
+import { AGENT_FINISHED_EVENT, Glyph } from "./agent.tsx";
 import {
   createScript,
   deleteScript,
@@ -125,6 +125,20 @@ export function ScriptsPage({ onViewRun, onAskAgent }: { onViewRun: () => void; 
     if (nextRun) setCurrentRun(nextRun);
   };
 
+  // After the agent finishes, reload the list and the open script so its saved changes are not overwritten.
+  const openId = useRef<string | undefined>(undefined);
+  openId.current = script?.id;
+  useEffect(() => {
+    if (!desktop) return;
+    const refresh = () => {
+      void reload().catch(() => {});
+      const id = openId.current;
+      if (id) void fetchScript(id).then((next) => { if (openId.current === id) setScript((current) => current && current.revision !== next.revision ? next : current); }, () => {});
+    };
+    window.addEventListener(AGENT_FINISHED_EVENT, refresh);
+    return () => window.removeEventListener(AGENT_FINISHED_EVENT, refresh);
+  }, [desktop]);
+
   useEffect(() => {
     if (!desktop) return;
     void reload().catch((nextError) => setError(errorText(nextError)));
@@ -145,6 +159,7 @@ export function ScriptsPage({ onViewRun, onAskAgent }: { onViewRun: () => void; 
     setBusy(true);
     setError(null);
     setScript(null);
+    setChange("");
     setPublicationOpen(false);
     try {
       const nextScript = await fetchScript(id);
@@ -308,7 +323,7 @@ export function ScriptsPage({ onViewRun, onAskAgent }: { onViewRun: () => void; 
                 <form className="script-ai" onSubmit={(event) => {
                   event.preventDefault();
                   if (!change.trim()) return;
-                  onAskAgent(`Change my script "${script.name}" (id ${script.id}). Read it with aliasmode_scripts_get, make the change below, then save it with aliasmode_scripts_save using the same id.\n\nWhat should change: ${change.trim()}`);
+                  onAskAgent(`Change my script "${script.name}" (id ${script.id}): ${change.trim()}`);
                   setChange("");
                 }}>
                   <span className="agent-notice-icon"><Glyph name="sparkle" /></span>
@@ -502,7 +517,7 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
     try {
       offset.current = 0;
       setLog("");
-      setRun(await startScriptRun({ scriptId, profileIds: selectedProfiles.map((profile) => profile.id), inputs: parsed, useCredentials, headless, concurrency: parallel }));
+      setRun(await startScriptRun({ scriptId, profileIds: selectedProfiles.map((profile) => profile.id), inputs: parsed, useCredentials, ...(headless ? { headless } : {}), concurrency: parallel }));
     } catch (nextError) { setError(errorText(nextError)); }
     finally { setBusy(false); }
   };

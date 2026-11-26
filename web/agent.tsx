@@ -204,6 +204,10 @@ function useDismiss<T extends HTMLElement>(open: boolean, close: () => void) {
   return ref;
 }
 
+/** The last draft the agent consumed; it outlives a remount of the host. */
+let consumedDraftKey = 0;
+export const AGENT_FINISHED_EVENT = "aliasmode-agent-finished";
+
 /** Agent state shared by the full page and the side panel, so both show the same chat and draft. */
 function useAgentController(visible: boolean) {
   const [settings, setSettings] = useState<AgentSettingsView | null>(null);
@@ -260,7 +264,11 @@ function useAgentController(visible: boolean) {
   // A finished run changed the balance and the free allowance.
   const lastStatus = useRef(conversation?.status);
   useEffect(() => {
-    if (lastStatus.current === "running" && conversation?.status !== "running") void loadUsage();
+    if (lastStatus.current === "running" && conversation?.status !== "running") {
+      void loadUsage();
+      // The agent may have saved a script; open Scripts pages reload it.
+      window.dispatchEvent(new Event(AGENT_FINISHED_EVENT));
+    }
     lastStatus.current = conversation?.status;
   }, [conversation?.status, loadUsage]);
 
@@ -333,7 +341,9 @@ export function AgentHost({ active, cloudMode, owner, wallet, draft, onReloadWal
   const launcherRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!draft.key) return;
+    // A remount (account change) must not send the same prompt, and bill it, again.
+    if (!draft.key || draft.key === consumedDraftKey) return;
+    consumedDraftKey = draft.key;
     if (draft.send) agent.ask(draft.text); else agent.newChat(draft.text);
     if (!active) setPanelOpen(true);
   }, [draft.key]);

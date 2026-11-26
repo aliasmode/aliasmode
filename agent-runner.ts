@@ -83,6 +83,8 @@ export class AgentCreditsError extends Error {}
 
 /** Results above this are cut: one page snapshot of a busy feed can be 100k+ characters. */
 export const TOOL_RESULT_MAX_CHARS = 40_000;
+/** A script the agent reads is never cut: a cut source saved back would destroy the rest of the script. */
+const SCRIPT_SOURCE_MAX_CHARS = 150_000;
 /** Above this transcript size, old tool output is dropped once (keeps the cached prefix stable afterwards). */
 const COMPACT_ABOVE_CHARS = 300_000;
 const KEEP_RECENT_TOOL_RESULTS = 2;
@@ -90,8 +92,9 @@ const HELPER_IDLE_MS = 30 * 60_000;
 const COMPACTED = "[Older tool output removed to save space. Call the tool again if you need it.]";
 /** Tools that return files or images the agent cannot use. */
 /** Tools that return files or images the agent cannot use, and browser_run_code: it runs in a Node `vm`,
-    which is no sandbox, so a page that talks the agent into calling it could run code on this computer. */
-const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code"]);
+    which is no sandbox, so a page that talks the agent into calling it could run code on this computer.
+    Running a library script is the same risk, so the user presses Run on the Scripts page. */
+const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code", "aliasmode_scripts_run"]);
 /** Downloads and upload files live in one folder; above this size the oldest files are deleted after a run. */
 export const AGENT_FILES_MAX_BYTES = 1024 ** 3;
 /** Older chats beyond this many are deleted when a new chat starts. */
@@ -436,6 +439,9 @@ export class AgentRunner {
         if (!paths) return `Error: upload only files the user named in this chat, or files inside ${this.filesDir()}.`;
         text = await tools.callTool(name, { ...args, paths });
       } else text = await tools.callTool(name, args);
+      if (name === "aliasmode_scripts_get") {
+        return text.length > SCRIPT_SOURCE_MAX_CHARS ? "Error: this script is too large for the agent to edit. Ask the user to edit it by hand." : text;
+      }
       return text.length > TOOL_RESULT_MAX_CHARS
         ? `${text.slice(0, TOOL_RESULT_MAX_CHARS)}\n[Output cut at ${TOOL_RESULT_MAX_CHARS} characters.]`
         : text;

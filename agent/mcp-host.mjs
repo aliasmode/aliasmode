@@ -292,7 +292,6 @@ const ALIAS_TOOLS = [
         profileIds: { type: "array", minItems: 1, items: PROFILE_ID },
         inputs: { type: "object", description: "JSON inputs passed to the script." },
         headless: { type: "boolean", description: "Run the browsers hidden." },
-        useCredentials: { type: "boolean", default: false, description: "Give the script the saved login details of each profile." },
       },
       required: ["scriptId", "profileIds"],
       additionalProperties: false,

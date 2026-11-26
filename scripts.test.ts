@@ -747,7 +747,8 @@ test("account transitions pause new script runs until the transition finishes", 
 });
 
 test("agent control lists, runs, follows and stops library scripts", async () => {
-  const h = harness();
+  const credentials: unknown[] = [];
+  const h = harness(async ({ input: data }) => { credentials.push(data.credentials); });
   const script = await h.library.save(input);
   const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
   const call = async (method: string, params: Record<string, unknown> = {}) => {
@@ -761,10 +762,13 @@ test("agent control lists, runs, follows and stops library scripts", async () =>
   expect(h.startOptions).toEqual([{ headless: true }]);
   expect((await call("scripts.status")).run.profiles.map((p: any) => p.status)).toEqual(["succeeded"]);
   expect(await call("scripts.log", { runId: started.run.id })).toMatchObject({ nextOffset: expect.any(Number) });
-  // Credentials stay off unless asked for.
   await call("scripts.run", { scriptId: script.id, profileIds: ["a"], headless: false });
   await h.supervisor.settled();
   expect(h.startOptions.at(-1)).toEqual({ headless: false });
+  // MCP clients never get saved logins, even when they ask for them.
+  await call("scripts.run", { scriptId: script.id, profileIds: ["a"], useCredentials: true });
+  await h.supervisor.settled();
+  expect(credentials).toEqual([null, null, null]);
   expect((await call("scripts.stop")).run.status).toBe("finished");
 });
 

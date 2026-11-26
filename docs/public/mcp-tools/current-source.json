@@ -572,11 +572,6 @@
           "headless": {
             "type": "boolean",
             "description": "Run the browsers hidden."
-          },
-          "useCredentials": {
-            "type": "boolean",
-            "default": false,
-            "description": "Give the script the saved login details of each profile."
           }
         },
         "required": [
