@@ -180,6 +180,8 @@ function newLauncher(
       mkdirSync(fontsDir, { recursive: true });
       return fontsDir;
     },
+    // A zone no test profile uses, so a refusal for the computer's own timezone never depends on the machine running the tests.
+    hostTimezone: "Antarctica/Troll",
     ...overrides,
   });
 }
@@ -5688,6 +5690,55 @@ test("a proxied Chromium launch moves the default language to the proxy exit's, 
     .toEqual({ timezone: "Europe/Paris", locale: "en-GB", flags: ["--fingerprint-timezone=Europe/Paris", "--fingerprint-locale=en-GB"] });
   expect(await launch("hi-IN", null))
     .toEqual({ timezone: "Asia/Kolkata", locale: "hi-IN", flags: ["--fingerprint-timezone=Asia/Kolkata", "--fingerprint-locale=hi-IN"] });
+});
+
+const PROXY_TIMEZONE_PROXY = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
+const PROXY_TIMEZONE_PARIS = { timezone: "Europe/Paris", country: "FR", ip: "203.0.113.7" };
+// "opens" is the timezone the browser gets, or null when the launch is refused before any browser starts.
+const PROXY_TIMEZONE_ROWS = [
+  { name: "this computer's timezone and no answer is refused", saved: { timezone: "Antarctica/Troll" }, answers: [], opens: null, asked: 2 },
+  { name: "no saved timezone and no answer is refused", saved: { timezone: "" }, answers: [], opens: null, asked: 2 },
+  { name: "no answer at first and Paris on the second try opens on Paris", saved: { timezone: "Antarctica/Troll" }, answers: [null, PROXY_TIMEZONE_PARIS], opens: "Europe/Paris", asked: 2 },
+  { name: "another computer's timezone and no answer opens unchanged", saved: { timezone: "Europe/Paris" }, answers: [], opens: "Europe/Paris" },
+  { name: "a typed timezone and no answer opens unchanged", saved: { timezone: "Antarctica/Troll", timezoneManual: true }, answers: [], opens: "Antarctica/Troll" },
+  { name: "no proxy opens unchanged and nothing is looked up", saved: { timezone: "Antarctica/Troll", proxy: null }, answers: [], opens: "Antarctica/Troll", asked: 0 },
+];
+const PROXY_TIMEZONE_CASES = (["aliasmode", "cloakbrowser"] as const)
+  .flatMap((engine) => PROXY_TIMEZONE_ROWS.map((row) => [`${engine}: ${row.name}`, engine, row] as const));
+
+test.each(PROXY_TIMEZONE_CASES)("proxied launch, %s", async (_name, engine, row) => {
+  const store = new ProfileStore(":memory:");
+  const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy: PROXY_TIMEZONE_PROXY, ...row.saved };
+  const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+  const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
+  store.upsertProfile(profile);
+  const before = store.getProfile(profile.id)!;
+  const spawnedArgs: string[][] = [];
+  const answers: Array<ExitLocation | null> = [...row.answers];
+  let asked = 0;
+  // darwin: win32 saves the display scale before the lookup, which the unchanged-profile check would see.
+  const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
+    hostPlatform: "darwin",
+    hostArch: "arm64",
+    chromiumRuntimeRoot: "/fake/runtimes",
+    ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
+    chromiumSandboxBlocked: () => false,
+    captureFingerprint: async () => null,
+    lookupExitLocation: async () => { asked++; return answers.shift() ?? null; },
+  });
+  if (row.opens === null) {
+    await expect(launcher.start(profile.id)).rejects.toEqual(new BrowserLaunchError("preflight", "proxy_timezone"));
+    expect(new BrowserLaunchError("preflight", "proxy_timezone").guidance).toContain("set the timezone in Edit");
+    expect(spawnedArgs).toEqual([]);
+    expect(store.getProfile(profile.id)).toEqual(before);
+  } else {
+    await launcher.start(profile.id);
+    expect(spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-timezone="))).toEqual([`--fingerprint-timezone=${row.opens}`]);
+    expect(store.getProfile(profile.id)!.timezone).toBe(row.opens);
+    await launcher.stop(profile.id);
+  }
+  if (row.asked !== undefined) expect(asked).toBe(row.asked);
+  store.close();
 });
 
 test("a headed Chromium 155 window is kept on the profile's available screen until the browser stops", async () => {

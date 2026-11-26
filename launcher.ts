@@ -260,6 +260,7 @@ const PREFLIGHT_GUIDANCE = {
   firefox_setup: "Firefox runtime approval is missing or invalid. Run bun cli.ts setup, then restart AliasMode.",
   proxy_invalid: "Saved proxy settings are invalid. Edit or clear this profile's proxy.",
   proxy_https_auth: "Authenticated HTTPS proxies are unsupported. Use HTTP or SOCKS5.",
+  proxy_timezone: "This profile's proxy location could not be looked up, so its timezone would be this computer's. Check the proxy and open the profile again, or set the timezone in Edit.",
   persona_mobile: "This profile has a mobile user agent. Use a desktop browser profile.",
   persona_unsupported: "This profile's user agent has no recognized desktop platform. Check its saved browser identity.",
   firefox_configuration: "The saved Firefox configuration is missing or incompatible with this runtime. Use a matching AliasMode runtime and profile export.",
@@ -583,6 +584,8 @@ export interface LauncherOptions {
   /** Injectable Windows DPAPI check for cookie-key tests. Defaults to PowerShell. */
   dpapiKeysReadable?: (keys: string[]) => Promise<boolean[] | null>;
   hostArch?: string;
+  /** This computer's timezone, which a proxied profile is not opened with unless the user typed it. Defaults to the system timezone. */
+  hostTimezone?: string;
   /** Scale of the host's primary display, such as 1.25 at 125%. Defaults to hostDisplayScale(). */
   hostScale?: number;
   /** Available area of the host's primary display as Firefox pages measure it. Defaults to hostDisplayAvail(). */
@@ -941,6 +944,7 @@ export class Launcher {
   private enforceHostCompatibility: boolean;
   private hostPlatform: NodeJS.Platform;
   private hostArch: string;
+  private hostTimezone: string;
   private hostScale: number;
   private hostAvail: { width: number; height: number } | null;
   private watchWindowFitFn?: typeof watchWindowFit;
@@ -1062,6 +1066,7 @@ export class Launcher {
     this.enforceHostCompatibility = opts.enforceHostCompatibility ?? !this.unsafeDisableIdentityGates;
     this.hostPlatform = opts.hostPlatform ?? process.platform;
     this.hostArch = opts.hostArch ?? process.arch;
+    this.hostTimezone = opts.hostTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
     this.hostScale = opts.hostScale ?? hostDisplayScale();
     this.hostAvail = opts.hostAvail ?? hostDisplayAvail();
     this.watchWindowFitFn = opts.watchWindowFit ?? (this.unsafeDisableIdentityGates ? undefined : watchWindowFit);
@@ -2108,9 +2113,12 @@ export class Launcher {
     const proxy = profile.proxy;
     const lookupExit = () => proxy && this.lookupExitLocationFn ? this.lookupExitLocationFn(proxy).catch(() => null) : Promise.resolve(null);
     let exit = await lookupExit();
+    const needsExitIp = !!proxy && (profile.engine === "firefox" || this.chromiumWebRtcIp(profile));
+    const needsExitTimezone = !!proxy && !!this.lookupExitLocationFn && !profile.timezoneManual && (!profile.timezone || profile.timezone === this.hostTimezone);
     // Without the exit IP, WebRTC behind the proxy finds no address at all, which a real browser
-    // never shows. A slow lookup gets more time and a failed one a second try, both through the proxy.
-    if (!exit?.ip && proxy && (profile.engine === "firefox" || this.chromiumWebRtcIp(profile))) exit = await lookupExit();
+    // never shows, and a timezone that is still this computer's would show next to the proxy's IP.
+    // A slow lookup gets more time and a failed one a second try, both through the proxy.
+    if ((needsExitIp && !exit?.ip) || (needsExitTimezone && !exit?.timezone)) exit = await lookupExit();
     if (exit?.timezone && exit.timezone !== profile.timezone && !profile.timezoneManual) {
       const unchanged = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup");
       const updated = { ...unchanged, timezone: exit.timezone, locale: localeAfterProxyExit(unchanged, exit) };
@@ -2120,6 +2128,8 @@ export class Launcher {
       profileSnapshot = JSON.stringify(profile);
       this.log(`profile ${profileId} timezone set to ${exit.timezone}${profile.locale !== unchanged.locale ? ` and language to ${profile.locale}` : ""} from its proxy exit`);
     }
+    // Still no answer.
+    if (needsExitTimezone && !exit?.timezone) throw new BrowserLaunchError("preflight", "proxy_timezone");
     if (profile.engine === "firefox") {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession, exit);
     }
