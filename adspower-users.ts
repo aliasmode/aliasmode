@@ -26,7 +26,7 @@ import type { RemoteCoordinator } from "./remote.ts";
 import type { Profile, ProxySpec } from "./types.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
 import { attachTimezones, lookupExitLocation, type ExitLocation } from "./geoip.ts";
-import { localeForCountry, localeForTimezone } from "./profile-locale.ts";
+import { localeAfterProxyExit } from "./profile-locale.ts";
 import { normalizeProxySpec, proxyIdentityKey } from "./proxy.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { isValidProfileName } from "./profile-validation.ts";
@@ -376,7 +376,7 @@ export async function handleUserApi(
       if (!current) return fail(`no such profile: ${id}`);
       if (store.getLaunch(id)) exit = null;
       const next = profileWithEdits(current, edits, exit?.timezone ?? null);
-      if (exit) next.locale = localeForCountry(exit.country) ?? localeForTimezone(exit.timezone);
+      if (exit) next.locale = localeAfterProxyExit(current, exit);
       store.upsertProfile(next);
       return ok({});
     } catch (e) {

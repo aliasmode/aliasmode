@@ -60,6 +60,18 @@ test("stale and running rows are skipped independently; failed-only retry requir
   expect(store.getProfile("p2")!.proxy!.port).toBe("9001");
 });
 
+test("bulk replacements keep a language the user set", async () => {
+  const { store, request, preview, options } = setup(["p1"]);
+  const before = store.getProfile("p1")!;
+  before.timezone = "America/Los_Angeles";
+  before.locale = "en-GB";
+  store.upsertProfile(before);
+  options.timezoneFetch = async () => new Response('{"status":"success","timezone":"Europe/Paris"}');
+  const result = await preview();
+  await events(await request("apply", { previewId: result.previewId }));
+  expect(store.getProfile("p1")).toMatchObject({ timezone: "Europe/Paris", locale: "en-GB" });
+});
+
 test("bulk replacements set the new proxy's timezone and language and keep the saved ones when the lookup fails", async () => {
   for (const [body, timezone, locale] of [['{"status":"success","timezone":"Europe/Paris"}', "Europe/Paris", "fr-FR"], ["{}", "America/Los_Angeles", "en-US"]] as const) {
     const { store, request, preview, options } = setup(["p1"]);

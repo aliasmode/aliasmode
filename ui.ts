@@ -40,7 +40,7 @@ import { hostChromiumRuntime, supportsChromium155Host } from "./aliasmode-chromi
 import { buildNewProfile, defaultProfileEngine, type NewProfileInput } from "./create.ts";
 import { firefoxGraphicsRenderer } from "./firefox-config.ts";
 import { attachTimezones, lookupExitLocation, type FetchLike } from "./geoip.ts";
-import { localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
+import { localeAfterProxyExit, localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictTimezone, parseStrictCustomNo, parseStrictCores, parseStrictSeed, decodeText, parseCookieText, cookiesForEngine } from "./parse.ts";
 import type { ProfileExport } from "./parse.ts";
 import { writeXlsx, readXlsx } from "./xlsx.ts";
@@ -2514,10 +2514,11 @@ export async function handleUiRequest(
         p = store.getProfile(id);
         if (!p) return Response.json({ ok: false, error: "no such profile" }, { status: 404 });
         previousGroup = p.group;
+        const followedLocale = location ? localeAfterProxyExit(p, location) : p.locale;
         applyEdits(p, set);
         if (location) {
           p.timezone = location.timezone;
-          if (!("locale" in set)) p.locale = localeForCountry(location.country) ?? localeForTimezone(location.timezone);
+          if (!("locale" in set)) p.locale = followedLocale;
           syncFirefoxTimezone(p);
         }
       }

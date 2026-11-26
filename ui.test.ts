@@ -1545,6 +1545,27 @@ test("a changed proxy gets its exit language", async () => {
   }
 });
 
+test("a language the user set earlier stays when the proxy changes", async () => {
+  const s = store();
+  const before = s.getProfile("k1d0cd11")!;
+  before.timezone = "Asia/Kolkata";
+  before.locale = "en-GB";
+  s.upsertProfile(before);
+  const res = await handleUiRequest(
+    new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST",
+      body: JSON.stringify({ set: { proxyType: "http", proxy: "new-proxy.example:8080" } }),
+    }),
+    {} as any,
+    s,
+    null,
+    { timezoneFetch: timezoneFetch({ "new-proxy.example": "Europe/Paris" }) },
+  );
+  expect(res!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")).toMatchObject({ timezone: "Europe/Paris", locale: "en-GB" });
+  s.close();
+});
+
 test("a language typed with a new proxy stays", async () => {
   const s = store();
   const res = await handleUiRequest(

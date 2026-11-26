@@ -36,7 +36,7 @@ import type { CookieRecord, LaunchInfo, LaunchPersona, Profile, ProxySpec } from
 import { cookiesForEngine } from "./parse.ts";
 import type { ProfileStore } from "./store.ts";
 import { lookupProxyExitLocation, type ExitLocation } from "./geoip.ts";
-import { localeForCountry, localeForTimezone } from "./profile-locale.ts";
+import { localeAfterProxyExit } from "./profile-locale.ts";
 import type { AutofillBridge } from "./autofill-bridge.ts";
 import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-extension.ts";
 import { isFirefoxAddonId } from "./extensions.ts";
@@ -2126,14 +2126,12 @@ export class Launcher {
     if (!exit?.ip && proxy && (profile.engine === "firefox" || this.chromiumWebRtcIp(profile))) exit = await lookupExit();
     if (exit?.timezone && exit.timezone !== profile.timezone && !profile.timezoneManual) {
       const unchanged = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup");
-      const languageFollows = unchanged.locale === localeForTimezone(unchanged.timezone);
-      const updated = { ...unchanged, timezone: exit.timezone };
-      if (languageFollows) updated.locale = localeForCountry(exit.country) ?? localeForTimezone(exit.timezone);
+      const updated = { ...unchanged, timezone: exit.timezone, locale: localeAfterProxyExit(unchanged, exit) };
       syncFirefoxTimezone(updated);
       this.store.upsertProfile(updated);
       profile = this.store.getProfile(profileId)!;
       profileSnapshot = JSON.stringify(profile);
-      this.log(`profile ${profileId} timezone set to ${exit.timezone}${languageFollows ? ` and language to ${profile.locale}` : ""} from its proxy exit`);
+      this.log(`profile ${profileId} timezone set to ${exit.timezone}${profile.locale !== unchanged.locale ? ` and language to ${profile.locale}` : ""} from its proxy exit`);
     }
     if (profile.engine === "firefox") {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession, exit);

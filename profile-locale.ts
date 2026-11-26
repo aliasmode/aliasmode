@@ -819,6 +819,12 @@ export function localeForTimezone(timezone: string): string {
 }
 
 /** True when the locale names a region that differs from the timezone's country. Unknown either way never mismatches. */
+/** The language after the proxy exit moved: it follows the exit unless it differs from the default of the saved timezone (the user set it). */
+export function localeAfterProxyExit(profile: { locale?: string; timezone: string }, exit: { country?: string; timezone: string }): string | undefined {
+  if (profile.locale !== localeForTimezone(profile.timezone)) return profile.locale;
+  return localeForCountry(exit.country) ?? localeForTimezone(exit.timezone);
+}
+
 export function localeTimezoneMismatch(locale: string, timezone: string): boolean {
   const country = TIMEZONE_COUNTRIES[timezone];
   if (!country || !locale) return false;
