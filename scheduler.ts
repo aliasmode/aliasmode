@@ -19,7 +19,7 @@ export interface ScheduleJob {
   lastRun?: { at: number; status: HistoryStatus };
 }
 
-export type HistoryStatus = "succeeded" | "failed" | "cancelled";
+export type HistoryStatus = "succeeded" | "failed" | "cancelled" | "skipped";
 
 export interface ScheduleHistoryEntry {
   /** A job id, or `open:<profileId>` for a run-on-open run. */
@@ -42,6 +42,8 @@ export interface ScheduleRunner {
   start(request: { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean }): ScriptRun;
   settled(): Promise<void>;
   status(): ScriptRun | null;
+  /** Abort any run and refuse new ones. */
+  shutdown(): Promise<void>;
 }
 
 export interface SchedulerOptions {
@@ -49,6 +51,8 @@ export interface SchedulerOptions {
   runner: ScheduleRunner;
   /** The library scope; throws while no account is available. */
   scope: () => string;
+  /** Whether the profile's browser is still open; a run on open is dropped when it is not. */
+  isOpen?: (profileId: string) => Promise<boolean>;
   now?: () => number;
   tickMs?: number;
   log?: (message: string) => void;
@@ -122,6 +126,8 @@ export class Scheduler {
     this.closed = true;
     clearInterval(this.timer);
     this.timer = undefined;
+    // Abort the run first; waiting for it to end on its own could outlast the quit deadline.
+    await this.options.runner.shutdown();
     await this.inflight;
   }
 
@@ -208,6 +214,11 @@ export class Scheduler {
     ] as { at: number; job?: ScheduleJob; open?: OpenItem }[]).sort((a, b) => a.at - b.at)[0];
     if (!due) return;
     const id = due.job?.id ?? `open:${due.open!.profileId}`;
+    if (due.open && this.options.isOpen && !await this.options.isOpen(due.open.profileId).catch(() => false)) {
+      this.opens = this.opens.filter((item) => item !== due.open);
+      this.record(scope, undefined, { jobId: id, at: now, status: "skipped", profiles: [], runId: "", error: "skipped: profile closed" });
+      return;
+    }
     const request = due.job
       ? { scriptId: due.job.scriptId, profileIds: due.job.profileIds, inputs: due.job.inputs, useCredentials: due.job.useCredentials }
       : { scriptId: due.open!.scriptId, profileIds: [due.open!.profileId], inputs: {}, useCredentials: false };

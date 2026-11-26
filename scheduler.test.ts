@@ -14,7 +14,9 @@ function harness(options: { busy?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "aliasmode-scheduler-"));
   roots.push(root);
   const clock = { now: new Date(2026, 0, 1, 8, 0, 0).getTime() };
-  const state = { scope: "local", busy: !!options.busy, failProfile: "" as string, started: [] as any[], view: null as ScriptRun | null };
+  const state = { scope: "local", busy: !!options.busy, hang: false, shutdowns: 0, open: true, failProfile: "" as string, started: [] as any[], view: null as ScriptRun | null };
+  let release = () => {};
+  const hung = new Promise<void>((resolve) => { release = resolve; });
   const runner: ScheduleRunner = {
     start(request) {
       if (state.busy) throw new ScriptError("A script is already running", 409);
@@ -27,10 +29,11 @@ function harness(options: { busy?: boolean } = {}) {
       };
       return state.view;
     },
-    settled: () => Promise.resolve(),
+    settled: () => state.hang ? hung : Promise.resolve(),
     status: () => state.view,
+    shutdown: async () => { state.shutdowns++; release(); },
   };
-  const scheduler = new Scheduler({ root, runner, scope: () => state.scope, now: () => clock.now });
+  const scheduler = new Scheduler({ root, runner, scope: () => state.scope, isOpen: async () => state.open, now: () => clock.now });
   const job = { scriptId: "s1", profileIds: ["a", "b"], inputs: { k: 1 }, everyHours: 2 };
   return { root, clock, state, scheduler, job };
 }
@@ -112,7 +115,7 @@ test("a run on open starts after the open, once per profile, and retries while b
   h.scheduler.enqueueOpen("p1");
   h.scheduler.enqueueOpen("p1");
   h.scheduler.enqueueOpen("p2");
-  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   expect(h.state.started).toHaveLength(0);
   h.state.busy = false;
   await h.scheduler.tick();
@@ -133,4 +136,30 @@ test("history keeps the last 50 entries and shutdown stops new runs", async () =
   expect(h.state.started).toHaveLength(55);
   expect(existsSync(join(h.root, "schedules", "local.json"))).toBe(true);
   expect(JSON.parse(readFileSync(join(h.root, "schedules", "local.json"), "utf8")).history).toHaveLength(50);
+});
+
+test("shutdown aborts a running job before waiting for it", async () => {
+  const h = harness();
+  h.state.hang = true;
+  h.scheduler.save(h.job);
+  h.clock.now += 2 * HOUR;
+  const ticking = h.scheduler.tick();
+  await Promise.resolve();
+  await h.scheduler.shutdown();
+  await ticking;
+  expect(h.state.shutdowns).toBe(1);
+});
+
+test("a queued run on open is skipped when the profile was closed meanwhile", async () => {
+  const h = harness({ busy: true });
+  h.scheduler.setOnOpen("p1", "s9");
+  h.scheduler.enqueueOpen("p1");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  h.state.busy = false;
+  h.state.open = false;
+  await h.scheduler.tick();
+  expect(h.state.started).toHaveLength(0);
+  expect(h.scheduler.list().history[0]).toMatchObject({ jobId: "open:p1", status: "skipped", error: "skipped: profile closed" });
+  await h.scheduler.tick();
+  expect(h.state.started).toHaveLength(0);
 });

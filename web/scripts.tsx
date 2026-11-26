@@ -491,7 +491,7 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
     return job ? job.name || scriptName(job.scriptId) : t("Deleted schedule");
   };
   const edit = (job: ScheduleState["jobs"][number]) => setForm({
-    id: job.id, name: job.name ?? "", scriptId: job.scriptId, profileIds: job.profileIds, inputs: JSON.stringify(job.inputs), useCredentials: job.useCredentials,
+    id: job.id, name: job.name ?? "", scriptId: job.scriptId, profileIds: job.profileIds.filter((id) => profiles.some((item) => item.id === id)), inputs: JSON.stringify(job.inputs), useCredentials: job.useCredentials,
     mode: job.dailyAt ? "daily" : "every", hours: String(job.everyHours ?? 6), dailyAt: job.dailyAt ?? "09:00", enabled: job.enabled,
   });
   const run = async (work: () => Promise<unknown>) => {

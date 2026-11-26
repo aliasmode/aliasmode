@@ -298,7 +298,7 @@ export function serveDashboard(opts: DashboardServerOptions) {
     root: opts.paths!.root, library, launcher, store, admission, python,
     remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
   }) : undefined;
-  const scheduler = library && runner ? new Scheduler({ root: opts.paths!.root, runner, scope: () => library.scope(), log }) : undefined;
+  const scheduler = library && runner ? new Scheduler({ root: opts.paths!.root, runner, scope: () => library.scope(), isOpen: opts.remote ? undefined : (id) => launcher.certifiedActive(id), log }) : undefined;
   scheduler?.start();
   const scripts = library && agentNonce && runner ? { library, nonce: agentNonce, python, runner, scheduler } : undefined;
   // The hub and the in-process host share this object, so they see the runner set here.
@@ -431,6 +431,6 @@ export function serveDashboard(opts: DashboardServerOptions) {
   void agentHub?.cleanupTemporaryProfiles();
   log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AliasMode Local API under /api; AdsPower-compatible)`);
   return Object.assign(server, {
-    stopScripts: () => Promise.all([scheduler?.shutdown().then(() => scripts?.runner.shutdown()), agent?.shutdown()]).then(() => {}),
+    stopScripts: () => Promise.all([scheduler ? scheduler.shutdown() : scripts?.runner.shutdown(), agent?.shutdown()]).then(() => {}),
   });
 }
