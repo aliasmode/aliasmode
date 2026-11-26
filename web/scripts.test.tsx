@@ -29,7 +29,7 @@ test("the scripts page has a Schedules tab and the profile editor defaults run-o
     configurable: true, value: { __TAURI_INTERNALS__: { invoke: async () => "test-capability" } },
   });
   try {
-    const page = renderToStaticMarkup(<I18nProvider><ScriptsPage onViewRun={() => {}} profiles={[]} /></I18nProvider>);
+    const page = renderToStaticMarkup(<I18nProvider><ScriptsPage onViewRun={() => {}} onAskAgent={() => {}} profiles={[]} /></I18nProvider>);
     expect(page).toContain("Schedules");
     const field = renderToStaticMarkup(<I18nProvider><RunOnOpenField profileId="p1" /></I18nProvider>);
     expect(field).toContain("Run a script on open");

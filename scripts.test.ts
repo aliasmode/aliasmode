@@ -803,6 +803,8 @@ test("agent control reads, creates and updates library scripts", async () => {
   expect((await call("scripts.get", { scriptId: created.id })).script.source).toContain("v2");
   expect(await call("scripts.save", { scriptId: created.id, source: "x", expectedRevision: 1 })).toMatchObject({ message: expect.stringContaining("changed") });
   expect(await call("scripts.get", { scriptId: "missing" })).toMatchObject({ message: "Script not found" });
+});
+
 test("schedule and run-on-open routes save, list, and delete under the nonce", async () => {
   const h = harness();
   const nonce = "e".repeat(64);

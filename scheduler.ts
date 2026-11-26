@@ -10,6 +10,8 @@ export interface ScheduleJob {
   profileIds: string[];
   inputs: Record<string, unknown>;
   useCredentials: boolean;
+  /** Open the browsers hidden. */
+  headless?: boolean;
   /** Exactly one of these sets the cadence. */
   everyHours?: number;
   /** "HH:MM" in the computer's local time. */
@@ -39,7 +41,7 @@ export interface ScheduleState {
 
 /** The part of ScriptSupervisor the scheduler drives. */
 export interface ScheduleRunner {
-  start(request: { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean }): ScriptRun;
+  start(request: { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean; headless?: boolean }): ScriptRun;
   settled(): Promise<void>;
   status(): ScriptRun | null;
   /** Abort any run and refuse new ones. */
@@ -72,7 +74,7 @@ function nextAfter(job: Pick<ScheduleJob, "everyHours" | "dailyAt">, now: number
   return next.getTime();
 }
 
-function jobInput(value: any): Pick<ScheduleJob, "name" | "scriptId" | "profileIds" | "inputs" | "useCredentials" | "everyHours" | "dailyAt" | "enabled"> {
+function jobInput(value: any): Pick<ScheduleJob, "name" | "scriptId" | "profileIds" | "inputs" | "useCredentials" | "headless" | "everyHours" | "dailyAt" | "enabled"> {
   const hours = value?.everyHours;
   const daily = value?.dailyAt;
   if (!value || typeof value.scriptId !== "string" || !value.scriptId
@@ -89,6 +91,7 @@ function jobInput(value: any): Pick<ScheduleJob, "name" | "scriptId" | "profileI
     ...(typeof value.name === "string" && value.name.trim() ? { name: value.name.trim() } : {}),
     scriptId: value.scriptId, profileIds: [...new Set<string>(value.profileIds)], inputs: value.inputs,
     useCredentials: value.useCredentials === true,
+    ...(value.headless === true ? { headless: true } : {}),
     ...(hours !== undefined ? { everyHours: hours } : { dailyAt: daily }),
     enabled: value.enabled !== false,
   };
@@ -220,7 +223,7 @@ export class Scheduler {
       return;
     }
     const request = due.job
-      ? { scriptId: due.job.scriptId, profileIds: due.job.profileIds, inputs: due.job.inputs, useCredentials: due.job.useCredentials }
+      ? { scriptId: due.job.scriptId, profileIds: due.job.profileIds, inputs: due.job.inputs, useCredentials: due.job.useCredentials, ...(due.job.headless ? { headless: true } : {}) }
       : { scriptId: due.open!.scriptId, profileIds: [due.open!.profileId], inputs: {}, useCredentials: false };
     let view: ScriptRun;
     try {

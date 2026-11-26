@@ -458,13 +458,14 @@ interface ScheduleForm {
   profileIds: string[];
   inputs: string;
   useCredentials: boolean;
+  headless: boolean;
   mode: "every" | "daily";
   hours: string;
   dailyAt: string;
   enabled: boolean;
 }
 
-const NEW_SCHEDULE: ScheduleForm = { name: "", scriptId: "", profileIds: [], inputs: "{}", useCredentials: false, mode: "every", hours: "6", dailyAt: "09:00", enabled: true };
+const NEW_SCHEDULE: ScheduleForm = { name: "", scriptId: "", profileIds: [], inputs: "{}", useCredentials: false, headless: false, mode: "every", hours: "6", dailyAt: "09:00", enabled: true };
 
 function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profiles: UiProfile[] }) {
   const { t } = useTranslation();
@@ -491,7 +492,7 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
     return job ? job.name || scriptName(job.scriptId) : t("Deleted schedule");
   };
   const edit = (job: ScheduleState["jobs"][number]) => setForm({
-    id: job.id, name: job.name ?? "", scriptId: job.scriptId, profileIds: job.profileIds.filter((id) => profiles.some((item) => item.id === id)), inputs: JSON.stringify(job.inputs), useCredentials: job.useCredentials,
+    id: job.id, name: job.name ?? "", scriptId: job.scriptId, profileIds: job.profileIds.filter((id) => profiles.some((item) => item.id === id)), inputs: JSON.stringify(job.inputs), useCredentials: job.useCredentials, headless: job.headless === true,
     mode: job.dailyAt ? "daily" : "every", hours: String(job.everyHours ?? 6), dailyAt: job.dailyAt ?? "09:00", enabled: job.enabled,
   });
   const run = async (work: () => Promise<unknown>) => {
@@ -512,7 +513,7 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
     await run(async () => {
       await saveSchedule({
         ...(form.name.trim() ? { name: form.name.trim() } : {}), scriptId: form.scriptId, profileIds: form.profileIds, inputs: inputs as Record<string, unknown>,
-        useCredentials: form.useCredentials, enabled: form.enabled,
+        useCredentials: form.useCredentials, headless: form.headless, enabled: form.enabled,
         ...(form.mode === "every" ? { everyHours: hours } : { dailyAt: form.dailyAt }),
       }, form.id);
       setForm(null);
@@ -544,6 +545,7 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
         </div>
         <label className="fld"><span>{t("JSON inputs")}</span><textarea className="input script-inputs" value={form.inputs} onChange={(event) => setForm({ ...form, inputs: event.target.value })} /></label>
         <label className="script-credentials"><input type="checkbox" checked={form.useCredentials} onChange={(event) => setForm({ ...form, useCredentials: event.target.checked })} />{t("Use saved profile login details")}</label>
+        <label className="script-credentials"><input type="checkbox" checked={form.headless} onChange={(event) => setForm({ ...form, headless: event.target.checked })} />{t("Run hidden (headless)")}</label>
         <label className="script-credentials"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />{t("Schedule is on")}</label>
         <div className="script-actions">
           <button className="btn primary" type="submit" disabled={busy || !form.scriptId || form.profileIds.length === 0}>{busy ? t("Saving…") : t("Save schedule")}</button>

@@ -163,3 +163,15 @@ test("a queued run on open is skipped when the profile was closed meanwhile", as
   await h.scheduler.tick();
   expect(h.state.started).toHaveLength(0);
 });
+
+test("a job can run hidden and a run on open never does", async () => {
+  const h = harness();
+  h.scheduler.save({ ...h.job, headless: true });
+  h.clock.now += 2 * HOUR;
+  await h.scheduler.tick();
+  expect(h.state.started[0]).toMatchObject({ headless: true });
+  h.scheduler.setOnOpen("p1", "s9");
+  h.scheduler.enqueueOpen("p1");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(h.state.started[1]).not.toHaveProperty("headless");
+});

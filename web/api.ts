@@ -1181,7 +1181,7 @@ export async function stopScriptRun(): Promise<ScriptRun> {
   return (await scriptRequest("/ui/api/scripts/stop", { method: "POST", body: "{}" })).run as ScriptRun;
 }
 
-export type ScheduleJobInput = Pick<ScheduleJob, "name" | "scriptId" | "profileIds" | "inputs" | "useCredentials" | "everyHours" | "dailyAt" | "enabled">;
+export type ScheduleJobInput = Pick<ScheduleJob, "name" | "scriptId" | "profileIds" | "inputs" | "useCredentials" | "headless" | "everyHours" | "dailyAt" | "enabled">;
 
 export async function fetchSchedules(): Promise<ScheduleState> {
   const { ok: _ok, ...state } = await scriptRequest("/ui/api/scripts/schedules");
