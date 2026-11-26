@@ -4788,6 +4788,19 @@ test("windowWidthScale / windowHeightScale control the launched window size", as
   store.close();
 });
 
+test("buildArgs blocks images and video autoplay only for a profile with blockMedia", () => {
+  const store = seeded();
+  const f = fleet();
+  const profile = store.getProfile("k1d0cd11")!;
+  const launcher = new Launcher({ store, binaryPath: "/fake", spawn: f.spawn, fetch: f.fetchFn, ensureCookies: async () => ({ injected: true }) });
+  const off = launcher.buildArgs(profile, 9333, "/data", []);
+  expect(off.some((arg) => arg.startsWith("--blink-settings") || arg.startsWith("--autoplay-policy"))).toBe(false);
+  const on = launcher.buildArgs({ ...profile, blockMedia: true }, 9333, "/data", []);
+  expect(on.filter((arg) => arg.startsWith("--blink-settings"))).toEqual(["--blink-settings=imagesEnabled=false"]);
+  expect(on).toContain("--autoplay-policy=document-user-activation-required");
+  store.close();
+});
+
 test("buildArgs keeps a minimized window's renderer priority but Chrome's page timers and visibility", () => {
   const store = seeded();
   const f = fleet();

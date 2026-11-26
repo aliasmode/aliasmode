@@ -57,6 +57,7 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string):
     ua: profile.ua,
     timezone: profile.timezone,
     ...(profile.timezoneManual ? { timezoneManual: true as const } : {}),
+    ...(profile.blockMedia ? { blockMedia: true as const } : {}),
     ...(profile.locale ? { locale: profile.locale } : {}),
     ...(profile.localeManual ? { localeManual: true as const } : {}),
     screenWidth: profile.screenWidth,
@@ -96,6 +97,7 @@ export function decodePortableProfile(payload: PortableProfile): {
     hardware?: unknown;
     timezoneManual?: unknown;
     localeManual?: unknown;
+    blockMedia?: unknown;
     displayScale?: unknown;
   };
   let engine;
@@ -107,6 +109,9 @@ export function decodePortableProfile(payload: PortableProfile): {
     throw new Error("unsupported portable profile payload");
   }
   if (portableProfile.timezoneManual !== undefined && portableProfile.timezoneManual !== true) {
+    throw new Error("unsupported portable profile payload");
+  }
+  if (portableProfile.blockMedia !== undefined && portableProfile.blockMedia !== true) {
     throw new Error("unsupported portable profile payload");
   }
   // Only Chromium 155 (V3) profiles carry a display scale.
@@ -152,6 +157,7 @@ export function decodePortableProfile(payload: PortableProfile): {
     ua: portableProfile.ua,
     timezone: portableProfile.timezone,
     ...(portableProfile.timezoneManual ? { timezoneManual: true } : {}),
+    ...(portableProfile.blockMedia ? { blockMedia: true } : {}),
     ...(isDisplayScale(portableProfile.displayScale) ? { displayScale: portableProfile.displayScale } : {}),
     ...(portableProfile.locale !== undefined ? { locale: portableProfile.locale } : {}),
     ...(portableProfile.localeManual ? { localeManual: true } : {}),

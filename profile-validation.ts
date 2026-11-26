@@ -66,6 +66,7 @@ export function assertValidProfile(value: unknown): asserts value is Profile {
   normalizeProfileHardware(profile.hardware);
   if (profile.localeManual !== undefined && profile.localeManual !== true) throw new Error("profile localeManual must be true when present");
   if (profile.timezoneManual !== undefined && profile.timezoneManual !== true) throw new Error("profile timezoneManual must be true when present");
+  if (profile.blockMedia !== undefined && profile.blockMedia !== true) throw new Error("profile blockMedia must be true when present");
   if (profile.displayScale !== undefined && !isDisplayScale(profile.displayScale)) throw new Error("profile displayScale must be a number from 1 to 5");
   assertSafeProfileId(profile.id);
 

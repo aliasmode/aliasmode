@@ -108,6 +108,20 @@ test("a typed Cloud timezone and CPU count travel to every device and survive a 
   expect(authoritative.payload.profile.hardware.cores).not.toBe(6);
 });
 
+test("the Cloud blockMedia switch travels in the payload and clears when turned off", async () => {
+  const authoritative = { ...response(), payload: payload() as any };
+  const editor = new CloudProfileEditor({
+    getProfile: async () => authoritative,
+    updateProfile: async (_id: string, request: any) => { authoritative.payload = request.payload; },
+  } as any, readOnlyStore());
+  await editor.save("cloud1", 7, { blockMedia: true });
+  expect(authoritative.payload.profile.blockMedia).toBe(true);
+  expect(await editor.get("cloud1")).toMatchObject({ blockMedia: true });
+  await editor.save("cloud1", 7, { blockMedia: false });
+  expect(authoritative.payload.profile.blockMedia).toBeUndefined();
+  await expect(editor.save("cloud1", 7, { blockMedia: "yes" })).rejects.toThrow("blockMedia");
+});
+
 test("Firefox Cloud edits set a new proxy's timezone in the saved config", async () => {
   const authoritative = { ...response(), payload: firefoxPayload() };
   let updated: any;

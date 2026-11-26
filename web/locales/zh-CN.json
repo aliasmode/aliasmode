@@ -251,6 +251,8 @@
   "; the existing desktop-sized screen stays intact": "；桌面尺寸的屏幕保持不变",
   "Cookies and locked fingerprint values are preserved. Only editable fields change.": "Cookie 和锁定的指纹值会被保留，只有可编辑的字段会变更。",
   " Extensions load when the browser opens.": " 浏览器打开时加载扩展。",
+  "Save proxy traffic: block images and stop video autoplay": "节省代理流量：屏蔽图片并停止视频自动播放",
+  "Captchas and some sites may break.": "验证码和部分网站可能无法正常使用。",
   "Save proxy changes before setting the timezone.": "设置时区前请先保存代理更改。",
   "This action saves the timezone immediately. It applies the next time this profile opens.": "此操作会立即保存时区，但下次打开此环境时才开始生效。",
   "Use current connection timezone and language": "使用当前连接的时区和语言",

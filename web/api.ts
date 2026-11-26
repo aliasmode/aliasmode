@@ -881,6 +881,7 @@ export interface EditProfile {
   timezoneManual?: boolean;
   /** The user typed the language. */
   localeManual?: boolean;
+  blockMedia?: boolean;
   /** Processor count the profile reports, or "" when the engine chooses. */
   cores?: string;
   fingerprintSeed?: string;

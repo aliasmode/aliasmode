@@ -58,6 +58,7 @@ export class ProfileStore {
         timezone_manual INTEGER NOT NULL DEFAULT 0,
         locale_manual INTEGER NOT NULL DEFAULT 0,
         display_scale REAL NOT NULL DEFAULT 0,
+        block_media INTEGER NOT NULL DEFAULT 0,
         locale TEXT NOT NULL DEFAULT '',
         screen_width INTEGER NOT NULL DEFAULT 1920,
         screen_height INTEGER NOT NULL DEFAULT 1080,
@@ -184,6 +185,7 @@ export class ProfileStore {
       "timezone_manual INTEGER NOT NULL DEFAULT 0",
       "locale_manual INTEGER NOT NULL DEFAULT 0",
       "display_scale REAL NOT NULL DEFAULT 0",
+      "block_media INTEGER NOT NULL DEFAULT 0",
     ]) {
       try {
         this.db.exec(`ALTER TABLE profiles ADD COLUMN ${col}`);
@@ -352,15 +354,15 @@ export class ProfileStore {
     this.db
       .query(
         `INSERT INTO profiles
-           (id, engine, chromium_runtime, hardware_json, firefox_config_json, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone, timezone_manual, locale_manual, locale,
+           (id, engine, chromium_runtime, hardware_json, firefox_config_json, acc_id, name, "group", platform, username, password, email, email_password, twofa, proxy_json, proxy_error, extensions_json, tags_json, custom_no, ua, timezone, timezone_manual, locale_manual, block_media, locale,
             screen_width, screen_height, fingerprint_seed, platform_os, fp_observed_json, fp_expected_json, fp_verdict_json, cookies_json, seeded, created_at)
          -- fp_verdict_json is literal '': a verdict is a COMPUTED fact, written
          -- only by saveObservedFingerprint from a real measurement. If a caller
          -- could supply one, an import could hand itself a "verified" badge and
          -- the badge would mean nothing.
-         VALUES ($id,$engine,$chromiumRuntime,$hardware,$firefox,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$tzManual,$localeManual,$locale,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
+         VALUES ($id,$engine,$chromiumRuntime,$hardware,$firefox,$acc,$name,$group,$platform,$user,$pass,$email,$emailPass,$twofa,$proxy,$proxyError,$ext,$tags,$customNo,$ua,$tz,$tzManual,$localeManual,$blockMedia,$locale,$w,$h,$seed,$platformOs,$fpObserved,$fpExpected,'',$cookies,$seeded,$created)
          ON CONFLICT(id) DO UPDATE SET
-           engine=$engine, firefox_config_json=$firefox, hardware_json=$hardware, timezone_manual=$tzManual, locale_manual=$localeManual,
+           engine=$engine, firefox_config_json=$firefox, hardware_json=$hardware, timezone_manual=$tzManual, locale_manual=$localeManual, block_media=$blockMedia,
            acc_id=$acc, name=$name, "group"=$group, platform=$platform, username=$user, password=$pass,
            email=$email, email_password=$emailPass, twofa=$twofa,
            -- An unrelated edit to a quarantined profile must preserve the raw
@@ -425,6 +427,7 @@ export class ProfileStore {
         $tz: p.timezone ?? "",
         $tzManual: p.timezoneManual ? 1 : 0,
         $localeManual: p.localeManual ? 1 : 0,
+        $blockMedia: p.blockMedia ? 1 : 0,
         $locale: p.locale ?? "",
         $w: p.screenWidth,
         $h: p.screenHeight,
@@ -1115,6 +1118,7 @@ function rowToProfile(row: any): Profile {
     timezone: row.timezone ?? "",
     ...(row.timezone_manual ? { timezoneManual: true } : {}),
     ...(row.locale_manual ? { localeManual: true } : {}),
+    ...(row.block_media ? { blockMedia: true as const } : {}),
     ...(row.display_scale >= 1 ? { displayScale: row.display_scale } : {}),
     ...(row.locale ? { locale: row.locale } : {}),
     screenWidth: row.screen_width ?? 1920,

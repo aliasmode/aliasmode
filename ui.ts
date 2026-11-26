@@ -503,6 +503,7 @@ function profileEditView(p: Profile) {
     platformOs: p.platformOs ?? "",
     timezone: p.timezone,
     ...(p.timezoneManual ? { timezoneManual: true } : {}),
+    ...(p.blockMedia ? { blockMedia: true } : {}),
     locale: p.locale ?? "",
     ...(p.localeManual ? { localeManual: true } : {}),
     cores: p.hardware ? String(p.hardware.cores) : "",
@@ -568,6 +569,11 @@ function applyEdits(p: Profile, set: Record<string, unknown>): boolean {
     if (p.timezone) p.timezoneManual = true;
     else delete p.timezoneManual;
     syncFirefoxTimezone(p);
+  }
+  if ("blockMedia" in set) {
+    if (typeof set.blockMedia !== "boolean") throw new Error("blockMedia must be true or false");
+    if (set.blockMedia) p.blockMedia = true;
+    else delete p.blockMedia;
   }
   if ("fingerprintSeed" in set) p.fingerprintSeed = parseStrictSeed(set.fingerprintSeed);
   if ("cores" in set) {

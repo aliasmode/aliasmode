@@ -280,6 +280,8 @@ export interface PortableProfileV1 {
     timezone: string;
     /** The user typed the timezone; launches keep it instead of the proxy's. Older clients ignore it. */
     timezoneManual?: true;
+    /** Save proxy traffic: block images and video autoplay. Older clients ignore it. */
+    blockMedia?: true;
     locale?: string;
     /** The user typed the language; it stays when the proxy changes. Older clients ignore it. */
     localeManual?: true;

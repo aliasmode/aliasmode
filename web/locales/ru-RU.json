@@ -251,6 +251,8 @@
   "; the existing desktop-sized screen stays intact": "; существующий экран настольного размера не изменится",
   "Cookies and locked fingerprint values are preserved. Only editable fields change.": "Cookie и заблокированные значения отпечатка сохраняются. Меняются только редактируемые поля.",
   " Extensions load when the browser opens.": " Расширения загружаются при открытии браузера.",
+  "Save proxy traffic: block images and stop video autoplay": "Сэкономить трафик прокси: не загружать изображения и не воспроизводить видео автоматически",
+  "Captchas and some sites may break.": "Капчи и некоторые сайты могут не работать.",
   "Save proxy changes before setting the timezone.": "Сохраните изменения прокси перед установкой часового пояса.",
   "This action saves the timezone immediately. It applies the next time this profile opens.": "Это действие сразу сохраняет часовой пояс. Он применится при следующем открытии профиля.",
   "Use current connection timezone and language": "Использовать часовой пояс и язык текущего соединения",

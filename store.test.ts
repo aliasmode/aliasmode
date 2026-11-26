@@ -41,6 +41,18 @@ test("upsert + get round-trips a full profile", () => {
   store.close();
 });
 
+test("blockMedia persists, clears on edit, and defaults to absent", () => {
+  const store = memStore();
+  const p = parseExport(SAMPLE).profiles[0]!;
+  store.upsertProfile(p);
+  expect(store.getProfile("k1d0cd11")!.blockMedia).toBeUndefined();
+  store.upsertProfile({ ...p, blockMedia: true });
+  expect(store.getProfile("k1d0cd11")!.blockMedia).toBe(true);
+  store.upsertProfile(p);
+  expect(store.getProfile("k1d0cd11")!.blockMedia).toBeUndefined();
+  store.close();
+});
+
 test("store persists a Firefox identity and rejects in-place engine conversion", () => {
   const store = memStore();
   const chromium = parseExport(SAMPLE).profiles[0]!;

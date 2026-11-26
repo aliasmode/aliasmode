@@ -179,6 +179,16 @@ test("portable profile codec rejects unsupported schema versions", () => {
   );
 });
 
+test("portable profile codec round-trips blockMedia and reads an older payload without it", () => {
+  const encoded = encodePortableProfile({ ...profile(), blockMedia: true });
+  expect(encoded.profile.blockMedia).toBe(true);
+  expect(decodePortableProfile(encoded).profile.blockMedia).toBe(true);
+  const plain = encodePortableProfile(profile());
+  expect("blockMedia" in plain.profile).toBe(false);
+  expect(decodePortableProfile(plain).profile.blockMedia).toBeUndefined();
+  expect(() => decodePortableProfile({ ...encoded, profile: { ...encoded.profile, blockMedia: false } } as any)).toThrow("unsupported portable profile payload");
+});
+
 test("portable Chromium 155 profiles carry their pinned display scale, and other engines carry none", () => {
   const chromium155: Profile = { ...profile(), chromiumRuntime: "aliasmode", displayScale: 1.25 };
   const encoded = encodePortableProfile(chromium155);

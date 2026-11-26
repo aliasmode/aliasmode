@@ -176,6 +176,7 @@ const ALIAS_TOOLS = [
             proxy: { type: "string", description: "host:port:user:pass, or an empty string to remove the proxy" },
             proxyType: { type: "string" },
             resolution: { type: "string", description: "WIDTH*HEIGHT" },
+            blockMedia: { type: "boolean", description: "Save proxy traffic: block images and stop video autoplay (takes effect at next open)" },
             extensions: { type: "array", items: { type: "string" } },
             tags: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] },
           },

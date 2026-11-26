@@ -455,6 +455,15 @@ test("Cloud profile edits use roster versions and preserve unedited credentials 
   expect(JSON.stringify(result)).not.toContain("session-secret");
 });
 
+test("Cloud profile edits accept a boolean blockMedia and reject other types", async () => {
+  const h = cloudEditHarness();
+  const ok = await h.session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { blockMedia: true } }));
+  expect(ok).toMatchObject({ ok: true });
+  expect(h.updates[0].request.payload.profile.blockMedia).toBe(true);
+  const bad = await h.session.enqueue(wire("profiles.update", { profileId: "profile1", expectedVersion: 7, set: { blockMedia: "yes" } }));
+  expect(bad.ok).toBe(false);
+});
+
 test("Cloud profile edits reject open, stale, unsupported and malformed updates before PATCH", async () => {
   const h = cloudEditHarness();
   for (const params of [

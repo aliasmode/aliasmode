@@ -33,6 +33,7 @@ export interface CloudProfileEditView {
   platformOs: string;
   timezone: string;
   timezoneManual?: boolean;
+  blockMedia?: boolean;
   locale: string;
   localeManual?: boolean;
   cores: string;
@@ -84,6 +85,7 @@ function editView(profile: Profile, expectedVersion: number): CloudProfileEditVi
     platformOs: profile.platformOs ?? "",
     timezone: profile.timezone,
     ...(profile.timezoneManual ? { timezoneManual: true } : {}),
+    ...(profile.blockMedia ? { blockMedia: true } : {}),
     locale: profile.locale ?? "",
     ...(profile.localeManual ? { localeManual: true } : {}),
     cores: profile.hardware ? String(profile.hardware.cores) : "",
@@ -144,6 +146,11 @@ export function applyProfileEdits(profile: Profile, set: Record<string, unknown>
     if (profile.timezone) profile.timezoneManual = true;
     else delete profile.timezoneManual;
     syncFirefoxTimezone(profile);
+  }
+  if ("blockMedia" in set) {
+    if (typeof set.blockMedia !== "boolean") throw new CloudProfileEditorError("blockMedia must be true or false", 400);
+    if (set.blockMedia) profile.blockMedia = true;
+    else delete profile.blockMedia;
   }
   if ("fingerprintSeed" in set) profile.fingerprintSeed = parseStrictSeed(set.fingerprintSeed);
   if ("cores" in set) {
@@ -248,6 +255,7 @@ export class CloudProfileEditor {
     if (!("platformOs" in encoded.profile)) delete encodedProfile.platformOs;
     if (!("timezoneManual" in encoded.profile)) delete encodedProfile.timezoneManual;
     if (!("localeManual" in encoded.profile)) delete encodedProfile.localeManual;
+    if (!("blockMedia" in encoded.profile)) delete encodedProfile.blockMedia;
     if (!("hardware" in encoded.profile)) delete (encodedProfile as { hardware?: unknown }).hardware;
     const payload = {
       ...authoritative.payload,

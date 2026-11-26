@@ -137,6 +137,8 @@ export interface Profile {
   timezoneManual?: boolean;
   /** The user typed the language; it stays when the proxy changes. */
   localeManual?: boolean;
+  /** Save proxy traffic: the browser loads no images and does not autoplay video. Absent when off. */
+  blockMedia?: true;
   /**
    * Chromium 155 on Windows: the display scale its pages draw at (1.25 at 125%), fixed at the first
    * open so the pages measure one screen on every computer. A site that sees a returning visitor's
@@ -224,7 +226,7 @@ export interface FingerprintVerdict {
 /** Profile fields a running browser took at launch (see LAUNCH_PERSONA_KEYS in launcher.ts). */
 export type LaunchPersona = Partial<Pick<Profile,
   | "engine" | "chromiumRuntime" | "firefox" | "hardware" | "ua" | "platformOs" | "platform" | "proxy" | "proxyError"
-  | "timezone" | "locale" | "screenWidth" | "screenHeight" | "displayScale" | "fingerprintSeed" | "extensions">>;
+  | "timezone" | "locale" | "screenWidth" | "screenHeight" | "displayScale" | "fingerprintSeed" | "extensions" | "blockMedia">>;
 
 /** Internal launch ownership. Only Chromium's control address is public CDP. */
 export interface LaunchInfo {

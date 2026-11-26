@@ -115,6 +115,13 @@ test("a Firefox launch shows the window label in the native title and starts in 
   expect(firefoxStartupPrefs(profile(5))["intl.locale.requested"]).toBe("en-US");
 });
 
+test("a Firefox profile with blockMedia blocks images and video autoplay, and others do not", () => {
+  expect(firefoxStartupPrefs({ ...profile(5), blockMedia: true })).toMatchObject({ "permissions.default.image": 2, "media.autoplay.default": 5 });
+  const off = firefoxStartupPrefs(profile(5));
+  expect(off).not.toHaveProperty("permissions.default.image");
+  expect(off).not.toHaveProperty("media.autoplay.default");
+});
+
 test("WebGPU shows where stock Firefox 156 has it, with this computer's adapter only for a macOS profile on an Apple Silicon Mac", () => {
   const macos = (config: Record<string, JsonValue> = {}) => ({ ...profile(5, { "navigator.platform": "MacIntel", ...config }), platformOs: "macos" as const });
   const webgpu = (persona: Profile, platform?: NodeJS.Platform, arch?: string) => {

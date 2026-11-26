@@ -2881,6 +2881,7 @@ function App() {
           locale: p.locale ?? "",
           cores: p.cores ?? "",
           fingerprintSeed: p.fingerprintSeed ?? "",
+          blockMedia: p.blockMedia ? "1" : "",
         });
         setEditInitialProxy({ proxy: p.proxy, proxyType: p.proxyType || "http" });
         setEditInitialFingerprint({
@@ -2985,7 +2986,7 @@ function App() {
         proxy: editForm.proxy ?? "", proxyType: editForm.proxyType ?? "http",
         username: editForm.username ?? "", password: editForm.password ?? "",
         email: editForm.email ?? "", emailPassword: editForm.emailPassword ?? "", twofa: editForm.twofa ?? "",
-        tags: editForm.tags ?? "", ...fingerprintEdits,
+        tags: editForm.tags ?? "", blockMedia: editForm.blockMedia === "1", ...fingerprintEdits,
         ...(!isCloudMode ? { customNo: editForm.customNo ?? "" } : {}),
         ...(!sameExtensionSelection(editExts, editInitialExts) ? { extensions: editExts } : {}),
       }, isCloudMode && !editLive ? editExpectedVersion ?? undefined : undefined);
@@ -5243,6 +5244,11 @@ function App() {
                     onUndo={() => setEditForm((form) => ({ ...form, ...editInitialFingerprint }))}
                     hardware={editHardware}
                   />}
+                  <label className="extchk">
+                    <input type="checkbox" checked={editForm.blockMedia === "1"} disabled={editSaving} onChange={(e) => setEF("blockMedia", e.target.checked ? "1" : "")} />
+                    <span>{t("Save proxy traffic: block images and stop video autoplay")}</span>
+                  </label>
+                  {editForm.blockMedia === "1" && <p className="formnote">{t("Captchas and some sites may break.")}</p>}
                   {editExtensionChoices.length > 0 && (
                     <div className="fld">
                       <span>{t("Extensions")}</span>

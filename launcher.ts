@@ -363,7 +363,7 @@ export type CookieSetter = (ws: string, cookies: CookieRecord[]) => Promise<void
  */
 export const LAUNCH_PERSONA_KEYS = [
   "engine", "chromiumRuntime", "firefox", "hardware", "ua", "platformOs", "platform", "proxy", "proxyError",
-  "timezone", "locale", "screenWidth", "screenHeight", "displayScale", "fingerprintSeed", "extensions",
+  "timezone", "locale", "screenWidth", "screenHeight", "displayScale", "fingerprintSeed", "extensions", "blockMedia",
 ] as const satisfies readonly (keyof LaunchPersona)[];
 
 export function launchPersona(profile: Profile): LaunchPersona {
@@ -1505,6 +1505,8 @@ export class Launcher {
       // machine. Cookies/site data are separate stores; this only trims asset caching.
       `--disk-cache-size=${20 * 1024 * 1024}`,
       ...deriveFingerprintFlags(screen),
+      // "Save proxy traffic": no images, and no video that plays before a click.
+      ...(profile.blockMedia ? ["--blink-settings=imagesEnabled=false", "--autoplay-policy=document-user-activation-required"] : []),
     ];
     // Chromium builds with different signatures share one "Chromium Safe Storage" Keychain item,
     // and macOS stops the second build with a password prompt. The runtimes that the app

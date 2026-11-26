@@ -368,6 +368,7 @@ export class AgentControlSession {
       const valid = stringFields.includes(field) ? typeof value === "string"
         : field === "extensions" || field === "tags"
           ? (field === "tags" && typeof value === "string") || Array.isArray(value) && value.every((item) => typeof item === "string")
+          : field === "blockMedia" ? typeof value === "boolean"
           : false;
       if (!valid) throw agentError("invalid_request", `invalid editable field: ${field}`);
     }

@@ -1650,6 +1650,11 @@ test("a typed timezone stays when the proxy changes, and a blank one follows the
   expect((await update({ proxyType: "http", proxy: "new-proxy.example:8080" }))!.status).toBe(200);
   expect(s.getProfile("k1d0cd11")).toMatchObject({ timezone: "America/Chicago", timezoneManual: true });
 
+  expect((await update({ blockMedia: true }))!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.blockMedia).toBe(true);
+  expect((await update({ blockMedia: false }))!.status).toBe(200);
+  expect(s.getProfile("k1d0cd11")!.blockMedia).toBeUndefined();
+
   expect((await update({ timezone: "" }))!.status).toBe(200);
   expect(s.getProfile("k1d0cd11")!.timezoneManual).toBeUndefined();
   expect((await update({ proxyType: "http", proxy: "other-proxy.example:8080" }))!.status).toBe(200);

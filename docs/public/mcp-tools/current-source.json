@@ -308,6 +308,10 @@
                 "type": "string",
                 "description": "WIDTH*HEIGHT"
               },
+              "blockMedia": {
+                "type": "boolean",
+                "description": "Save proxy traffic: block images and stop video autoplay (takes effect at next open)"
+              },
               "extensions": {
                 "type": "array",
                 "items": {
