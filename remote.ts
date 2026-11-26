@@ -917,7 +917,7 @@ export class RemoteCoordinator {
       // yet, and suppress the launcher's own startup navigation: remote mode must
       // write the hub session before the first request hits the platform.
       const { chromeArgs, startupUrls } = splitLaunchUrls(launchArgs);
-      const { ws, port } = await this.d.launcher.start(profileId, chromeArgs, {
+      const { ws, port, warning: launchWarning } = await this.d.launcher.start(profileId, chromeArgs, {
         autoNavigate: false,
         restoreLocalSession: false,
         restoreLastSession: false,
@@ -958,7 +958,7 @@ export class RemoteCoordinator {
         ws,
         port,
         lockedBy,
-        warning: this.advisoryLaunches.get(profileId),
+        warning: [this.advisoryLaunches.get(profileId), launchWarning].filter(Boolean).join(" ") || undefined,
       };
     } catch (e) {
       cleanupOwnsLock &&= this.lastLeaseConfirmedAt.has(profileId);

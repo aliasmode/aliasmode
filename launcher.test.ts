@@ -5694,10 +5694,10 @@ test("a proxied Chromium launch moves the default language to the proxy exit's, 
 
 const PROXY_TIMEZONE_PROXY = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
 const PROXY_TIMEZONE_PARIS = { timezone: "Europe/Paris", country: "FR", ip: "203.0.113.7" };
-// "opens" is the timezone the browser gets, or null when the launch is refused before any browser starts.
-const PROXY_TIMEZONE_ROWS = [
-  { name: "this computer's timezone and no answer is refused", saved: { timezone: "Antarctica/Troll" }, answers: [], opens: null, asked: 2 },
-  { name: "no saved timezone and no answer is refused", saved: { timezone: "" }, answers: [], opens: null, asked: 2 },
+// "opens" is the timezone the browser gets. "warns" is whether the open result tells the user the lookup failed.
+const PROXY_TIMEZONE_ROWS: Array<{ name: string; saved: Record<string, unknown>; answers: Array<ExitLocation | null>; opens: string; warns?: boolean; asked?: number }> = [
+  { name: "this computer's timezone and no answer opens with a warning", saved: { timezone: "Antarctica/Troll" }, answers: [], opens: "Antarctica/Troll", warns: true, asked: 2 },
+  { name: "no saved timezone and no answer opens with a warning", saved: { timezone: "" }, answers: [], opens: "", warns: true, asked: 2 },
   { name: "no answer at first and Paris on the second try opens on Paris", saved: { timezone: "Antarctica/Troll" }, answers: [null, PROXY_TIMEZONE_PARIS], opens: "Europe/Paris", asked: 2 },
   { name: "another computer's timezone and no answer opens unchanged", saved: { timezone: "Europe/Paris" }, answers: [], opens: "Europe/Paris" },
   { name: "a typed timezone and no answer opens unchanged", saved: { timezone: "Antarctica/Troll", timezoneManual: true }, answers: [], opens: "Antarctica/Troll" },
@@ -5712,7 +5712,6 @@ test.each(PROXY_TIMEZONE_CASES)("proxied launch, %s", async (_name, engine, row)
   const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
   const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
   store.upsertProfile(profile);
-  const before = store.getProfile(profile.id)!;
   const spawnedArgs: string[][] = [];
   const answers: Array<ExitLocation | null> = [...row.answers];
   let asked = 0;
@@ -5726,17 +5725,11 @@ test.each(PROXY_TIMEZONE_CASES)("proxied launch, %s", async (_name, engine, row)
     captureFingerprint: async () => null,
     lookupExitLocation: async () => { asked++; return answers.shift() ?? null; },
   });
-  if (row.opens === null) {
-    await expect(launcher.start(profile.id)).rejects.toEqual(new BrowserLaunchError("preflight", "proxy_timezone"));
-    expect(new BrowserLaunchError("preflight", "proxy_timezone").guidance).toContain("set the timezone in Edit");
-    expect(spawnedArgs).toEqual([]);
-    expect(store.getProfile(profile.id)).toEqual(before);
-  } else {
-    await launcher.start(profile.id);
-    expect(spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-timezone="))).toEqual([`--fingerprint-timezone=${row.opens}`]);
-    expect(store.getProfile(profile.id)!.timezone).toBe(row.opens);
-    await launcher.stop(profile.id);
-  }
+  const result = await launcher.start(profile.id);
+  expect(typeof result.warning).toBe(row.warns ? "string" : "undefined");
+  if (row.opens) expect(spawnedArgs[0]!.filter((arg) => arg.startsWith("--fingerprint-timezone="))).toEqual([`--fingerprint-timezone=${row.opens}`]);
+  expect(store.getProfile(profile.id)!.timezone).toBe(row.opens);
+  await launcher.stop(profile.id);
   if (row.asked !== undefined) expect(asked).toBe(row.asked);
   store.close();
 });

@@ -255,12 +255,13 @@ export type BrowserLaunchFailure =
   | "process_spawn"
   | "cdp_readiness";
 
+const PROXY_TIMEZONE_WARNING = "This profile shows your computer's timezone because the proxy location lookup failed. Set a timezone in the profile settings.";
+
 const PREFLIGHT_GUIDANCE = {
   chromium_setup: "Chrome runtime approval is missing or invalid. Run bun cli.ts setup, then restart AliasMode.",
   firefox_setup: "Firefox runtime approval is missing or invalid. Run bun cli.ts setup, then restart AliasMode.",
   proxy_invalid: "Saved proxy settings are invalid. Edit or clear this profile's proxy.",
   proxy_https_auth: "Authenticated HTTPS proxies are unsupported. Use HTTP or SOCKS5.",
-  proxy_timezone: "This profile's proxy location could not be looked up, so its timezone would be this computer's. Check the proxy and open the profile again, or set the timezone in Edit.",
   persona_mobile: "This profile has a mobile user agent. Use a desktop browser profile.",
   persona_unsupported: "This profile's user agent has no recognized desktop platform. Check its saved browser identity.",
   firefox_configuration: "The saved Firefox configuration is missing or incompatible with this runtime. Use a matching AliasMode runtime and profile export.",
@@ -687,6 +688,8 @@ export interface LaunchStartResult {
   nativeSessionLoaded?: boolean;
   /** True when the browser was already running and this call only attached to it. */
   reattached?: boolean;
+  /** Set when the browser opened anyway, but the user should know something. */
+  warning?: string;
 }
 
 export type LaunchGeneration = Pick<LaunchInfo, "debugPort" | "startedAt">;
@@ -993,6 +996,8 @@ export class Launcher {
    * overlap during that window.
    */
   private startsInFlight = new Map<string, Promise<LaunchStartResult>>();
+  /** Warnings of the start in flight, added to its result. */
+  private startWarnings = new Map<string, string>();
   private startModesInFlight = new Map<string, boolean>();
   /** Launch generations retained after a rejected start, keyed to that rejection. */
   private failedStartGenerations = new WeakMap<object, LaunchGeneration>();
@@ -1850,7 +1855,11 @@ export class Launcher {
           this.log(`start ${profileId}: waiting for in-flight stop to settle`);
           await stopping;
         }
-        return await this.doStart(profileId, launchArgs, opts);
+        this.startWarnings.delete(profileId);
+        const result = await this.doStart(profileId, launchArgs, opts);
+        const warning = this.startWarnings.get(profileId);
+        this.startWarnings.delete(profileId);
+        return warning ? { ...result, warning } : result;
       })
       .catch((error) => {
         if (error instanceof BrowserLaunchError || error instanceof SessionRestoreError) {
@@ -2128,8 +2137,8 @@ export class Launcher {
       profileSnapshot = JSON.stringify(profile);
       this.log(`profile ${profileId} timezone set to ${exit.timezone}${profile.locale !== unchanged.locale ? ` and language to ${profile.locale}` : ""} from its proxy exit`);
     }
-    // Still no answer.
-    if (needsExitTimezone && !exit?.timezone) throw new BrowserLaunchError("preflight", "proxy_timezone");
+    // Still no answer: the browser opens, and the user is told.
+    if (needsExitTimezone && !exit?.timezone) this.startWarnings.set(profileId, PROXY_TIMEZONE_WARNING);
     if (profile.engine === "firefox") {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession, exit);
     }

@@ -993,6 +993,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         navigationWarning,
         hasTerminalConflict ? TERMINAL_CONFLICT_WARNING : undefined,
         lapsedWarning,
+        launched.warning,
       ].filter((warning): warning is string => !!warning);
       return {
         ok: true,

@@ -215,22 +215,22 @@ test("a proxied Firefox launch moves the default language to the proxy exit's, a
   }
 });
 
-test("a proxied Firefox profile whose timezone is this computer's is not opened without the proxy exit's answer", async () => {
+test("a proxied Firefox profile whose timezone is this computer's opens with a warning when the proxy exit does not answer", async () => {
   const f = fixture();
   const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
   const firefox = { ...f.profile.firefox!, config: { ...f.profile.firefox!.config, timezone: "Antarctica/Troll" } };
   f.store.upsertProfile({ ...f.profile, proxy, timezone: "Antarctica/Troll", firefox });
-  const before = f.store.getProfile(f.profile.id)!;
   const asked: unknown[] = [];
   const launcher = new Launcher({
     ...f.options,
     lookupExitLocation: async (spec) => { asked.push(spec); return null; },
   });
-  await expect(launcher.start(f.profile.id)).rejects.toEqual(new BrowserLaunchError("preflight", "proxy_timezone"));
+  const result = await launcher.start(f.profile.id);
+  expect(typeof result.warning).toBe("string");
   expect(asked).toEqual([proxy, proxy]);
-  expect(f.launches()).toBe(0);
-  expect(f.store.getProfile(f.profile.id)).toEqual(before);
-  expect(f.store.getLaunch(f.profile.id)).toBeNull();
+  expect(f.launches()).toBe(1);
+  expect(f.store.getProfile(f.profile.id)!.timezone).toBe("Antarctica/Troll");
+  expect(await launcher.stop(f.profile.id)).toBe(true);
 });
 
 test.each([false, true])("legacy Firefox keeps its old digest until confirmed close (stale=%s)", async (stale) => {

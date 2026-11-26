@@ -236,12 +236,14 @@ export async function handleRequest(
     if (!store.getProfile(userId)) return fail(`no such profile: ${userId}`);
     try {
       const launchArgs = parseLaunchArgs(searchParams.get("launch_args"));
-      const { ws, port } = await launcher.start(userId, launchArgs);
-      if (isFirefoxEngine(store.getLaunch(userId)) || ws.startsWith("firefox://")) return ok(await firefoxConnectFields(store.getLaunch(userId)));
+      const { ws, port, warning } = await launcher.start(userId, launchArgs);
+      const warn = warning ? { warning } : {};
+      if (isFirefoxEngine(store.getLaunch(userId)) || ws.startsWith("firefox://")) return ok({ ...await firefoxConnectFields(store.getLaunch(userId)), ...warn });
       return ok({
         ws: { puppeteer: ws, selenium: "" },
         debug_port: String(port),
         webdriver: "",
+        ...warn,
       });
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
