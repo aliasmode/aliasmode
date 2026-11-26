@@ -1,11 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rename, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
-import { basename, extname, isAbsolute, join } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { connectOfficial, nonClosingContext } from "./agent/playwright-proxy.mjs";
 import { MAX_BYTES, VERSION, operatePersistentContext } from "./playwright-worker.mjs";
@@ -212,8 +213,9 @@ export function downloadsDirectory(env = process.env, home = homedir(), platform
       const config = env.XDG_CONFIG_HOME || join(home, ".config");
       const line = readFileSync(join(config, "user-dirs.dirs"), "utf8").match(/^\s*XDG_DOWNLOAD_DIR="([^"\n]+)"/m);
       if (line) {
-        const dir = line[1].replace(/^\$HOME(?=\/|$)/, home);
-        if (isAbsolute(dir) && dir !== home) return dir;
+        const raw = line[1];
+        const dir = /^\$HOME(\/|$)/.test(raw) ? join(home, raw.slice(5)) : raw;
+        if (isAbsolute(dir) && resolve(dir) !== resolve(home)) return dir;
       }
     } catch {}
   }
@@ -233,14 +235,41 @@ export function reserveDownloadPath(dir, name) {
   }
 }
 
+/** The NTFS "downloaded from the Internet" mark, as stock Firefox writes it. */
+export function zoneIdentifier(url) {
+  const host = /^https?:\/\//i.test(url || "") ? url : "about:internet";
+  return `[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=${host}\r\n`;
+}
+
+// Windows and macOS warn before opening a file marked as downloaded; errors are not important.
+async function markDownloaded(path, url) {
+  try {
+    if (process.platform === "win32") await writeFile(`${path}:Zone.Identifier`, zoneIdentifier(url));
+    else if (process.platform === "darwin") {
+      const stamp = Math.floor(Date.now() / 1000).toString(16);
+      await promisify(execFile)("xattr", ["-w", "com.apple.quarantine", `0081;${stamp};AliasMode;`, path]);
+    }
+  } catch {}
+}
+
 // The engine saves downloads under a temporary name that goes away on close. Copy each one to the
 // Downloads folder under its real name; script and MCP clients still receive the download event.
+// The copy gets its real name only when whole, so a failed download leaves no file behind.
+export async function saveDownload(download, directory = downloadsDirectory) {
+  let path;
+  try {
+    path = reserveDownloadPath(directory(), download.suggestedFilename());
+    await download.saveAs(`${path}.part`);
+    await rename(`${path}.part`, path);
+  } catch {
+    if (path) await Promise.all([unlink(`${path}.part`), unlink(path)].map((job) => job.catch(() => {})));
+    return;
+  }
+  await markDownloaded(path, download.url());
+}
+
 export function saveFirefoxDownloads(context, directory = downloadsDirectory) {
-  const watch = (page) => page.on?.("download", (download) => {
-    void (async () => {
-      try { await download.saveAs(reserveDownloadPath(directory(), download.suggestedFilename())); } catch {}
-    })();
-  });
+  const watch = (page) => page.on?.("download", (download) => { void saveDownload(download, directory); });
   for (const page of context.pages()) watch(page);
   context.on?.("page", watch);
 }

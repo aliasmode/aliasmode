@@ -9,9 +9,9 @@ import {
   type FirefoxOwner,
 } from "./firefox-runtime.ts";
 import { runPlaywrightWorker } from "./playwright-runtime.ts";
-import { camouEnvironment, downloadsDirectory, firefoxLaunchOptions, reserveDownloadPath, saveFirefoxDownloads, observedFirefoxCaptureUrl, trackFirefoxPages } from "./firefox-worker.mjs";
+import { camouEnvironment, downloadsDirectory, firefoxLaunchOptions, reserveDownloadPath, saveDownload, saveFirefoxDownloads, zoneIdentifier, observedFirefoxCaptureUrl, trackFirefoxPages } from "./firefox-worker.mjs";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -207,6 +207,8 @@ test("downloads go to the XDG or home Downloads folder", () => {
   mkdirSync(join(home, ".config"));
   writeFileSync(join(home, ".config", "user-dirs.dirs"), '# x\nXDG_DOWNLOAD_DIR="$HOME/Telechargements"\n');
   expect(downloadsDirectory({}, home, "linux")).toBe(join(home, "Telechargements"));
+  writeFileSync(join(home, ".config", "user-dirs.dirs"), 'XDG_DOWNLOAD_DIR="$HOME/"\n');
+  expect(downloadsDirectory({}, home, "linux")).toBe(join(home, "Downloads"));
   expect(downloadsDirectory({}, home, "win32")).toBe(join(home, "Downloads"));
   expect(downloadsDirectory({ XDG_CONFIG_HOME: join(home, "none") }, home, "linux")).toBe(join(home, "Downloads"));
 });
@@ -230,6 +232,7 @@ test("firefox downloads are saved for existing and new pages", async () => {
     const saved: string[] = [];
     const download = (name: string) => ({
       suggestedFilename: () => name,
+      url: () => "https://example.test/f",
       saveAs: async (path: string) => { writeFileSync(path, name); saved.push(path); },
     });
     first.emit("download", download("one.txt"));
@@ -241,4 +244,20 @@ test("firefox downloads are saved for existing and new pages", async () => {
     expect(readFileSync(join(home, "Downloads", "one.txt"), "utf8")).toBe("one.txt");
     expect(existsSync(join(home, "Downloads", "one (1).txt"))).toBe(true);
   }
+});
+
+test("a failed download leaves no file in the Downloads folder", async () => {
+  const dir = join(mkdtempSync(join(tmpdir(), "dl-fail-")), "Downloads");
+  const failing = {
+    suggestedFilename: () => "x.zip",
+    url: () => "",
+    saveAs: async (path: string) => { writeFileSync(path, "partial"); throw new Error("canceled"); },
+  };
+  await saveDownload(failing, () => dir);
+  expect(readdirSync(dir)).toEqual([]);
+});
+
+test("the Zone.Identifier mark names the source", () => {
+  expect(zoneIdentifier("https://a.test/f")).toBe("[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://a.test/f\r\n");
+  expect(zoneIdentifier("blob:https://a.test/1")).toContain("HostUrl=about:internet");
 });
