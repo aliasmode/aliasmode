@@ -885,5 +885,10 @@
   "Use saved profile login details": "Использовать сохранённые данные входа профиля",
   "Inputs must be valid JSON.": "Входные данные должны быть корректным JSON.",
   "Inputs must be a JSON object.": "Входные данные должны быть объектом JSON.",
-  "Delete {name}?": "Удалить {name}?"
+  "Delete {name}?": "Удалить {name}?",
+  "When the window closes": "При закрытии окна",
+  "Keep AliasMode running in the tray so schedules and scripts continue.": "Оставить AliasMode в трее, чтобы расписания и скрипты продолжали работать.",
+  "Ask me": "Спрашивать",
+  "Keep running in the tray": "Оставить в трее",
+  "Quit": "Выйти"
 }

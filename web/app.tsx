@@ -1310,6 +1310,7 @@ function App() {
   const [desktopUpdateInstalling, setDesktopUpdateInstalling] = useState(false);
   const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<DesktopUpdateProgress | null>(null);
   const [desktopUpdateErr, setDesktopUpdateErr] = useState<string | null>(null);
+  const [closeToTray, setCloseToTray] = useState<"ask" | "tray" | "quit" | null>(null);
   const [logDir, setLogDir] = useState<string | undefined>(undefined);
   const [diskSpace, setDiskSpace] = useState<DiskSpace | null>(null);
   const [diskWarningDismissed, setDiskWarningDismissed] = useState(false);
@@ -2104,6 +2105,24 @@ function App() {
       setAuthErr(error instanceof Error ? error.message : String(error));
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const invoke = desktopInvoke();
+    if (!invoke) return;
+    void invoke("get_close_to_tray")
+      .then((value) => setCloseToTray(value === true ? "tray" : value === false ? "quit" : "ask"))
+      .catch(() => {});
+  }, []);
+
+  const changeCloseToTray = async (choice: "ask" | "tray" | "quit") => {
+    const previous = closeToTray;
+    setCloseToTray(choice);
+    try {
+      await desktopInvoke()?.("set_close_to_tray", { value: choice === "ask" ? null : choice === "tray" });
+    } catch {
+      setCloseToTray(previous);
     }
   };
 
@@ -4689,6 +4708,21 @@ function App() {
           {settingsTab === "advanced" && (
             <>
               <h2 className="sect-title">{t("Updates and diagnostics")}</h2>
+{closeToTray && (
+            <section className="settings-card">
+              <header><Icon name="settings" className="sm" /><h2>{t("When the window closes")}</h2></header>
+              <div className="card-body">
+                <div className="settings-row">
+                  <span>{t("Keep AliasMode running in the tray so schedules and scripts continue.")}</span>
+                  <select className="select" value={closeToTray} onChange={(e) => void changeCloseToTray(e.target.value as "ask" | "tray" | "quit")}>
+                    <option value="ask">{t("Ask me")}</option>
+                    <option value="tray">{t("Keep running in the tray")}</option>
+                    <option value="quit">{t("Quit")}</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+          )}
 <section className="settings-card update-settings">
             <header><Icon name="import" className="sm" /><h2>{t("Updates")}</h2></header>
             <div className="card-body">

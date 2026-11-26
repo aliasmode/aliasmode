@@ -1162,5 +1162,10 @@
   "Time": "时间",
   "Turn off": "关闭",
   "Turn on": "开启",
-  "{n} profiles": "{n} 个档案"
+  "{n} profiles": "{n} 个档案",
+  "When the window closes": "关闭窗口时",
+  "Keep AliasMode running in the tray so schedules and scripts continue.": "让 AliasMode 在托盘中继续运行,以便计划和脚本持续执行。",
+  "Ask me": "每次询问",
+  "Keep running in the tray": "在托盘中继续运行",
+  "Quit": "退出"
 }

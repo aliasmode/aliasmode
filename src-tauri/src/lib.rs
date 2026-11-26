@@ -4,6 +4,7 @@ mod releases;
 mod runtime_descriptor;
 mod shutdown;
 mod sidecar;
+mod tray;
 mod update_attempt;
 mod update_download;
 
@@ -552,6 +553,8 @@ pub fn run() {
             runtime_descriptor::agent_runtime_ready,
             runtime_descriptor::script_capability,
             shutdown::restart_after_mode_change,
+            tray::get_close_to_tray,
+            tray::set_close_to_tray,
             releases::check_for_updates,
             releases::last_update_result,
             releases::update_now,
@@ -692,6 +695,7 @@ pub fn run() {
             let origin = format!("http://127.0.0.1:{port}");
             app.manage(CredentialOrigin(origin.clone()));
             app.manage(sidecar.clone());
+            app.manage(tray::TrayState::new(&data_dir));
             if let Err(error) = app.add_capability(
                 CapabilityBuilder::new(format!("loopback-{port}"))
                     .local(false)
@@ -785,6 +789,7 @@ pub fn run() {
                 Err(error) => return Err(error.into()),
             };
 
+            tray::install(app.handle());
             shutdown::install_close_handler(app.handle().clone(), window.clone(), sidecar, origin);
             if app.state::<RevealRequested>().0.load(Ordering::Acquire) {
                 let _ = window.show();
@@ -808,6 +813,15 @@ pub fn run() {
         tauri::RunEvent::ExitRequested {
             code: Some(code), ..
         } => exit_code.store(code, Ordering::Release),
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } => {
+            if let Some(window) = app.get_webview_window("main") {
+                tray::show_window(&window);
+            }
+        }
         tauri::RunEvent::Exit => {
             if let Some(runtime) = app.try_state::<runtime_descriptor::RuntimeDescriptorState>() {
                 let _ = runtime.remove_owned();

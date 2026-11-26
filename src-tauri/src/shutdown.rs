@@ -1,4 +1,4 @@
-use crate::sidecar::SidecarSupervisor;
+use crate::{sidecar::SidecarSupervisor, tray::TrayState};
 use reqwest::{redirect::Policy, Client};
 use serde::Deserialize;
 use std::sync::{
@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
 };
 use std::time::Duration;
-use tauri::{AppHandle, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[derive(Default)]
@@ -106,6 +106,14 @@ fn exit_after_cleanup_failure_message(
         .show(move |_| app.exit(1));
 }
 
+pub(crate) fn quit_after_cleanup(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: SidecarSupervisor,
+) {
+    finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
+}
+
 fn finish_after_cleanup(
     app: AppHandle,
     window: WebviewWindow,
@@ -162,6 +170,49 @@ fn ask_to_close(
         });
 }
 
+fn close_with_cleanup(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: SidecarSupervisor,
+    state: Arc<CloseState>,
+    origin: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let active = active_browser_count(&origin).await;
+        if matches!(active, Ok(0)) {
+            finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
+        } else {
+            ask_to_close(app, window, sidecar, state, active);
+        }
+    });
+}
+
+fn ask_keep_in_tray(
+    app: AppHandle,
+    window: WebviewWindow,
+    sidecar: SidecarSupervisor,
+    state: Arc<CloseState>,
+    origin: String,
+) {
+    app.dialog()
+        .message("Keep AliasMode running in the tray so schedules and scripts continue? You can change this later in Settings.")
+        .title("Close AliasMode?")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Keep running in the tray".to_owned(),
+            "Quit".to_owned(),
+        ))
+        .show(move |keep| {
+            let _ = app.state::<TrayState>().save_preference(Some(keep));
+            if keep {
+                let _ = window.hide();
+                state.in_progress.store(false, Ordering::Release);
+            } else {
+                close_with_cleanup(app, window, sidecar, state, origin);
+            }
+        });
+}
+
 pub fn install_close_handler(
     app: AppHandle,
     window: WebviewWindow,
@@ -180,14 +231,22 @@ pub fn install_close_handler(
             let sidecar = sidecar.clone();
             let state = state.clone();
             let origin = origin.clone();
-            tauri::async_runtime::spawn(async move {
-                let active = active_browser_count(&origin).await;
-                if matches!(active, Ok(0)) {
-                    finish_after_cleanup(app, window, sidecar, CleanupAction::Exit);
-                } else {
-                    ask_to_close(app, window, sidecar, state, active);
+            let (preference, tray_available) = {
+                let tray = app.state::<TrayState>();
+                (tray.preference(), tray.available())
+            };
+            match (preference, tray_available) {
+                (Some(true), true) => {
+                    let _ = window.hide();
+                    state.in_progress.store(false, Ordering::Release);
                 }
-            });
+                (Some(true), false) => {
+                    let _ = window.minimize();
+                    state.in_progress.store(false, Ordering::Release);
+                }
+                (None, true) => ask_keep_in_tray(app, window, sidecar, state, origin),
+                _ => close_with_cleanup(app, window, sidecar, state, origin),
+            }
         }
     });
 }
