@@ -420,6 +420,7 @@ export class AgentRunner {
   }
 
   private async callTool(tools: AgentToolSession, name: string, rawArgs: string | undefined, messages: AgentMessage[]): Promise<string> {
+    if (HIDDEN_TOOLS.has(name)) return "Error: this tool is not available.";
     let args: Record<string, unknown>;
     try {
       const parsed = JSON.parse(rawArgs || "{}");

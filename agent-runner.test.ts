@@ -207,6 +207,27 @@ describe("AgentRunner", () => {
     expect(readFileSync(copied, "utf8")).toBe("jpg");
   });
 
+  test("refuses hidden tools even when the model names them", async () => {
+    const calls: string[] = [];
+    let step = 0;
+    const { agent } = runner(async () => ({
+      message: [
+        toolCall("h1", "aliasmode_scripts_run", { scriptId: "s", profileIds: ["a"] }),
+        toolCall("h2", "browser_run_code", { code: "1" }),
+        { role: "assistant", content: "done" },
+      ][step++]! as AgentMessage,
+    }), {
+      openTools: () => ({
+        listTools: async () => [{ name: "aliasmode_scripts_run" }, { name: "browser_run_code" }],
+        callTool: async (name) => { calls.push(name); return "ran"; },
+        close: () => {},
+      }),
+    });
+    const done = await settled(agent, agent.start("run it").id);
+    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)).toEqual(["Error: this tool is not available.", "Error: this tool is not available."]);
+    expect(calls).toEqual([]);
+  });
+
   test("keeps the newest chats and prunes the files folder to its size cap", async () => {
     const { agent, root } = runner(async () => ({ message: { role: "assistant", content: "ok" } }));
     const dir = join(root, "agent", "local", "conversations");
