@@ -436,6 +436,7 @@ async function gateB(E) {
       if (stable === false) result.blockers.push({ engine, key, detail: "changes across restarts", values: [...Array(n).keys()].flatMap((i) => [1, 2].map((p) => value(`${engine}-${i}-${p}`, key).slice(0, 60))) });
     }
     result.engines[engine] = table;
+    (result.debug ??= {})[engine] = { runs: Object.keys(runs), sample: value(`${engine}-0-1`, "canvas.toDataURL"), type: typeof runs[`${engine}-0-1`] };
   }
   server.close();
   if (opts.buckets) result.status = "info";

@@ -1,7 +1,7 @@
 name: Release gates
 
-# Manual only. Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (the runner
-# image's) and stock Firefox 159.0.1. Gate A needs the detection lab from the private site repo (secret
+# Manual only. Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (Google's
+# current stable) and stock Firefox 159.0.1. Gate A needs the detection lab from the private site repo (secret
 # GATES_SITE_TOKEN, read access); without it Gate A is skipped. Gate C runs only when the secret GATES_PROXY
 # (an http:// proxy URL) exists, because runner IPs are datacenter IPs.
 on:
@@ -61,6 +61,22 @@ jobs:
           token: ${{ secrets.GATES_SITE_TOKEN }}
           path: site
           sparse-checkout: tests
+      # Runner images lag behind Chrome stable (macos-15-intel had 151): install Google's current stable build.
+      - name: Stock Chrome stable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi" -OutFile "$env:RUNNER_TEMP\chrome.msi"
+          Start-Process msiexec.exe -Wait -ArgumentList "/i `"$env:RUNNER_TEMP\chrome.msi`" /qn /norestart"
+          (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
+      - name: Stock Chrome stable (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/chrome.dmg" "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/chmnt" "$RUNNER_TEMP/chrome.dmg"
+          mkdir -p "$RUNNER_TEMP/chrome" && cp -R "$RUNNER_TEMP/chmnt/Google Chrome.app" "$RUNNER_TEMP/chrome/"
+          hdiutil detach "$RUNNER_TEMP/chmnt"
+          echo "CHROME_BIN=$RUNNER_TEMP/chrome/Google Chrome.app/Contents/MacOS/Google Chrome" >> "$GITHUB_ENV"
       - name: Stock Firefox 159.0.1 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
