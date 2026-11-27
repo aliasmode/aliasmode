@@ -65,14 +65,16 @@ export function normalizeProfileIdentity(value: unknown): ProfileIdentity | unde
   const fail = () => { throw new Error("unsupported profile identity"); };
   const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
   const id = (v: unknown) => typeof v === "string" && IDENTITY_VALUE.test(v);
-  if (!isObject(value) || Object.keys(value).some((key) => key !== "gpu" && key !== "textBucket")) fail();
-  const { gpu, textBucket } = value as Record<string, unknown>;
+  if (!isObject(value) || Object.keys(value).some((key) => key !== "gpu" && key !== "textBucket" && key !== "mediaCatalogue")) fail();
+  const { gpu, textBucket, mediaCatalogue } = value as Record<string, unknown>;
   if (gpu !== undefined && (!isObject(gpu) || !id(gpu.vendor) || (gpu.anchor !== undefined && !id(gpu.anchor))
     || Object.keys(gpu).some((key) => key !== "vendor" && key !== "anchor"))) fail();
   if (textBucket !== undefined && !id(textBucket)) fail();
+  if (mediaCatalogue !== undefined && !(Number.isSafeInteger(mediaCatalogue) && (mediaCatalogue as number) > 0)) fail();
   const identity: ProfileIdentity = {
     ...(isObject(gpu) ? { gpu: { vendor: gpu.vendor as string, ...(gpu.anchor !== undefined ? { anchor: gpu.anchor as string } : {}) } } : {}),
     ...(textBucket !== undefined ? { textBucket: textBucket as string } : {}),
+    ...(mediaCatalogue !== undefined ? { mediaCatalogue: mediaCatalogue as number } : {}),
   };
   return Object.keys(identity).length ? identity : undefined;
 }
@@ -86,57 +88,55 @@ export function switchOff(name: "gpu-family", env: NodeJS.ProcessEnv = process.e
 }
 
 /**
- * The engine's measured GPU families (aliasmode-chromium docs/guides/gpu.mdx) by the key a profile stores.
- * TODO-PIN(159): the measurement hashes of the 159 build's families; these are the 155 build's.
+ * The 159 engine's measured GPU families (aliasmode-chromium docs/guides/gpu.mdx), by system and vendor.
+ * Read only when a profile is made: the profile stores the full id, so a later table never moves it.
  */
 const CHROMIUM_GPU_ANCHORS: Record<string, string> = {
-  "windows-d3d11-nvidia": "windows-d3d11-nvidia-0947761dfbe9",
-  "windows-d3d11-intel": "windows-d3d11-intel-79dfeb5b4f99",
-  "windows-d3d11-qualcomm": "windows-d3d11-qualcomm-6388f9914f3f",
-  "macos-metal-apple": "macos-metal-apple-850a91233555",
-  "linux-vulkan-nvidia": "linux-vulkan-nvidia-adf287b8f0ee",
+  "windows-intel": "windows-d3d11-intel-79dfeb5b4f99",
+  "windows-nvidia": "windows-d3d11-nvidia-0947761dfbe9",
+  "windows-qualcomm": "windows-d3d11-qualcomm-6388f9914f3f",
+  "macos-apple": "macos-metal-apple-850a91233555",
+  "linux-nvidia": "linux-vulkan-nvidia-adf287b8f0ee",
 };
-const GRAPHICS_API: Record<string, string> = { windows: "d3d11", macos: "metal", linux: "vulkan" };
+/** Host GPUs with no measured family that the engine shows as they are, on their own system. */
+const CHROMIUM_HOST_GPU_FAMILIES = new Set(["windows-amd", "linux-intel", "linux-amd", "macos-intel", "macos-amd"]);
 /** Selects a GPU family by its full id. */
 export const CHROMIUM_ANCHOR_SWITCH = "--fingerprint-anchor";
-/**
- * Claims this computer's own GPU, for a host GPU with no measured family of the profile's system.
- * TODO-SWITCH(159): the 155 build has no such switch (an unknown anchor makes every surface the
- * host's), so nothing is sent until the engine names it.
- */
-export const CHROMIUM_HOST_GPU_ARG: string | undefined = undefined;
+/** The stored anchor for the engine's host-GPU switch. */
+export const CHROMIUM_HOST_GPU_ANCHOR = "host";
+/** Shows this computer's own GPU while the rest of the identity is composed. */
+export const CHROMIUM_HOST_GPU_ARG = "--fingerprint-gpu-host";
 
 /**
- * The GPU of a new AliasMode Chromium profile (GPU-family rule): the engine family of its system and
- * this computer's GPU vendor, or this computer's own GPU when the profile has this computer's system
- * and the engine has no such family. None without a known host GPU, or for another system without a
- * family: the engine then draws one from the seed, as for every profile made before.
+ * The GPU decision of a new AliasMode Chromium profile (GPU-family rule), for a profile with this
+ * computer's system only: the engine family of this computer's GPU vendor, or the host-GPU switch
+ * where the engine has no family. None for another system, a computer without a known GPU, or a
+ * vendor with neither: the engine then draws a GPU from the seed, as for every profile made before.
  */
 export function newProfileGpuIdentity(platformOs: string, hostOs: string, vendor: string | undefined): ProfileIdentity["gpu"] {
-  if (!vendor) return undefined;
-  const anchor = `${platformOs}-${GRAPHICS_API[platformOs]}-${vendor}`;
-  if (CHROMIUM_GPU_ANCHORS[anchor]) return { vendor, anchor };
-  return platformOs === hostOs ? { vendor } : undefined;
+  if (!vendor || platformOs !== hostOs) return undefined;
+  const key = `${platformOs}-${vendor}`;
+  const anchor = CHROMIUM_GPU_ANCHORS[key] ?? (CHROMIUM_HOST_GPU_FAMILIES.has(key) ? CHROMIUM_HOST_GPU_ANCHOR : undefined);
+  return anchor ? { vendor, anchor } : undefined;
 }
 
 /**
- * The GPU flags of one AliasMode Chromium launch. Profiles without a stored GPU get none. A profile
- * whose system was changed after creation gets the family of its stored vendor on its current system,
- * and never another system's family.
+ * The GPU flags of one AliasMode Chromium launch: only the decision stored at creation. Profiles
+ * without a stored anchor get none. A stored family is sent only while the profile has that family's
+ * system, and the host switch only on a computer of the profile's system, so a system changed after
+ * creation, or a Cloud profile opened on another system, never shows a GPU of another system.
  */
 export function chromiumGpuArgs(
   profile: Pick<Profile, "chromiumRuntime" | "identity"> & Partial<Pick<Profile, "platformOs" | "ua">>,
   env: NodeJS.ProcessEnv = process.env,
   hostOs: string = hostPlatformOs(),
 ): string[] {
-  const gpu = profile.chromiumRuntime ? profile.identity?.gpu : undefined;
-  if (!gpu || switchOff("gpu-family", env)) return [];
+  const anchor = profile.chromiumRuntime ? profile.identity?.gpu?.anchor : undefined;
+  if (!anchor || switchOff("gpu-family", env)) return [];
   // Without a platform flag the engine shows macOS on a Mac and Windows elsewhere.
   const platform = profile.platformOs || platformFromUA(profile.ua ?? "") || (hostOs === "macos" ? "macos" : "windows");
-  const key = gpu.anchor?.startsWith(`${platform}-`) ? gpu.anchor : `${platform}-${GRAPHICS_API[platform]}-${gpu.vendor}`;
-  const anchor = CHROMIUM_GPU_ANCHORS[key];
-  if (anchor) return [`${CHROMIUM_ANCHOR_SWITCH}=${anchor}`];
-  return CHROMIUM_HOST_GPU_ARG && platform === hostOs ? [CHROMIUM_HOST_GPU_ARG] : [];
+  if (anchor === CHROMIUM_HOST_GPU_ANCHOR) return platform === hostOs ? [CHROMIUM_HOST_GPU_ARG] : [];
+  return anchor.startsWith(`${platform}-`) ? [`${CHROMIUM_ANCHOR_SWITCH}=${anchor}`] : [];
 }
 
 /** The hardware after the user types a processor count, or clears it: CloakBrowser then draws its count from the seed again. */

@@ -1255,30 +1255,39 @@ async def run(*, log, **_):
       $checks.nativeNetworkObservation = $true
 
       Set-AcceptanceStage "runtime-desktop-chromium-beta"
+      # The pinned AliasMode Chromium build, read from its one pin block in aliasmode-chromium.ts.
+      $chromiumSource = Get-Content -LiteralPath (Join-Path $repoRoot "aliasmode-chromium.ts") -Raw
+      $chromiumVersion = [regex]::Match($chromiumSource, 'const OWN_VERSION = "([^"]+)"').Groups[1].Value
+      $chromiumRelease = [regex]::Match($chromiumSource, 'const OWN_RELEASE = "([^"]+)"').Groups[1].Value
+      $chromiumExecutableSha256 = [regex]::Match($chromiumSource, '(?s)windows: \{.*?executableSha256: "([0-9a-f]{64})"').Groups[1].Value
+      if (-not $chromiumVersion -or -not $chromiumRelease -or -not $chromiumExecutableSha256) {
+        throw "could not read the AliasMode Chromium pin from aliasmode-chromium.ts"
+      }
+      $chromiumMajor = $chromiumVersion.Split(".")[0]
       $betaProfile = (& $helper profiles create --name ci-chromium-beta --temporary --chromium-runtime aliasmode | ConvertFrom-Json)
       if ($LASTEXITCODE -ne 0 -or -not $betaProfile.ok -or -not $betaProfile.result.id) {
-        throw "installed JSON CLI could not create a temporary Chromium 155 beta profile: $($betaProfile.error)"
+        throw "installed JSON CLI could not create a temporary Chromium $chromiumMajor profile: $($betaProfile.error)"
       }
       $betaProfileId = $betaProfile.result.id
       $betaOpened = (& $helper browser open --profile $betaProfileId --headless | ConvertFrom-Json)
       if ($LASTEXITCODE -ne 0 -or -not $betaOpened.ok -or -not $betaOpened.result.port -or $betaOpened.result.alreadyOpen) {
-        throw "installed JSON CLI could not download and open Chromium 155 beta: $($betaOpened.error)"
+        throw "installed JSON CLI could not download and open Chromium ${chromiumMajor}: $($betaOpened.error)"
       }
       $betaVersion = Invoke-RestMethod "http://127.0.0.1:$($betaOpened.result.port)/json/version" -TimeoutSec 10
-      if ($betaVersion.'User-Agent' -notmatch 'Chrome/155\.') {
-        throw "Chromium 155 beta reported an unexpected browser version: $($betaVersion.'User-Agent')"
+      if ($betaVersion.'User-Agent' -notmatch "Chrome/$chromiumMajor\.") {
+        throw "Chromium $chromiumMajor reported an unexpected browser version: $($betaVersion.'User-Agent')"
       }
-      $betaRuntime = Join-Path $appDataRoot "runtimes\chromium-155.0.8059.85-aliasmode.5"
-      if (-not (Test-Path -LiteralPath (Join-Path $betaRuntime "155.0.8059.85.manifest") -PathType Leaf)) {
-        throw "Chromium 155 beta runtime is missing its version manifest"
+      $betaRuntime = Join-Path $appDataRoot "runtimes\chromium-$chromiumVersion-$chromiumRelease"
+      if (-not (Test-Path -LiteralPath (Join-Path $betaRuntime "$chromiumVersion.manifest") -PathType Leaf)) {
+        throw "Chromium $chromiumMajor runtime is missing its version manifest"
       }
       $betaHash = (Get-FileHash -LiteralPath (Join-Path $betaRuntime "chrome.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
-      if ($betaHash -ne "0ef4de1bef7c12534031318e07ac89fa7942916a3abc89057985aafefbca619f") {
-        throw "Chromium 155 beta chrome.exe does not match its pin"
+      if ($betaHash -ne $chromiumExecutableSha256) {
+        throw "Chromium $chromiumMajor chrome.exe does not match its pin"
       }
       $betaClosed = (& $helper browser close --profile $betaProfileId | ConvertFrom-Json)
       if ($LASTEXITCODE -ne 0 -or -not $betaClosed.ok -or -not $betaClosed.result.closed -or -not $betaClosed.result.deleted) {
-        throw "installed JSON CLI did not close and delete its temporary Chromium 155 beta profile: $($betaClosed.error)"
+        throw "installed JSON CLI did not close and delete its temporary Chromium $chromiumMajor profile: $($betaClosed.error)"
       }
       $checks.chromiumBetaLifecycle = $true
 

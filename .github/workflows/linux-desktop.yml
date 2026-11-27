@@ -240,7 +240,8 @@ jobs:
           "$helper" browser open --profile "$chromium" --url https://example.com/ | jq -e '.ok and (.result.port | type == "number")'
           sleep 5
           shot chromium-155-profile
-          pgrep -af "runtimes/chromium-155.0.8059.85-aliasmode.5/chrome" | head -n 3 | tee "$evidence/chromium-155-processes.txt"
+          runtime_dir="$(bun --no-env-file -e 'const m = await import("./aliasmode-chromium.ts"); console.log(m.ALIASMODE_CHROMIUM_RUNTIME_DIR)')"
+          pgrep -af "runtimes/$runtime_dir/chrome" | head -n 3 | tee "$evidence/chromium-155-processes.txt"
           ! grep -q -- "--no-sandbox" "$evidence/chromium-155-processes.txt"
           observed="$(observe "$chromium" platform)"
           printf "%s" "$observed" > "$evidence/chromium-155-observed.json"

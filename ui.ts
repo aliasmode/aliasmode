@@ -38,6 +38,7 @@ import { handleTrashRequest } from "./trash.ts";
 import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, type ImportOverrides } from "./inbox.ts";
 import { hostChromiumRuntime, supportsChromium155Host } from "./aliasmode-chromium.ts";
 import { buildNewProfile, defaultProfileEngine, type NewProfileInput } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import { firefoxGraphicsRenderer } from "./firefox-config.ts";
 import { attachTimezones, lookupExitLocation, type ExitLocation, type FetchLike } from "./geoip.ts";
 import { localeAfterProxyExit, localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
@@ -1584,6 +1585,7 @@ export async function handleUiRequest(
         const { id } = await remote.createProfile(input);
         return Response.json({ ok: true, id });
       }
+      await waitForHostGpu();
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
       if (!options.cloudBrowser) store.applyGroupExtensionDefaults(profile, null, false);
       // Best-effort: match the browser clock to the proxy's exit location. A

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { buildNewProfile, withDefaultBrowser } from "./create.ts";
 import { chromiumGpuArgs, deriveFingerprintFlags, hostPlatformOs, newProfileGpuIdentity, normalizeProfileIdentity } from "./fingerprint.ts";
 import { createFirefoxProfileConfig } from "./firefox-config.ts";
-import { detectHostGpu, linuxGpuVendor, windowsGpuVendor } from "./host-gpu.ts";
+import { detectHostGpu, hostGpuVendor, linuxGpuVendor, resetHostGpuForTest, waitForHostGpu, windowsGpuVendor } from "./host-gpu.ts";
+import { parseExport, serializeAdsTxt, serializeXlsxRows } from "./parse.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { ProfileStore } from "./store.ts";
 
@@ -39,63 +40,92 @@ test("Linux takes the boot display GPU from /sys/class/drm", () => {
   expect(linuxGpuVendor(join(drm, "missing"))).toBeUndefined();
 });
 
-test("Apple Silicon is Apple, and an Intel Mac reads its vendor from system_profiler", () => {
-  const never = () => { throw new Error("no command expected"); };
-  expect(detectHostGpu("darwin", "arm64", never)).toBe("apple");
+test("Apple Silicon is Apple, and an Intel Mac reads its vendor from system_profiler", async () => {
+  const never = async () => { throw new Error("no command expected"); };
+  expect(await detectHostGpu("darwin", "arm64", never)).toBe("apple");
   const report = JSON.stringify({ SPDisplaysDataType: [{ sppci_model: "Intel UHD Graphics 630", spdisplays_vendor: "Intel" }, { sppci_model: "AMD Radeon Pro 5500M" }] });
-  expect(detectHostGpu("darwin", "x64", () => report)).toBe("intel");
-  expect(detectHostGpu("darwin", "x64", () => "")).toBeUndefined();
-  expect(detectHostGpu("freebsd" as NodeJS.Platform, "x64", never)).toBeUndefined();
+  expect(await detectHostGpu("darwin", "x64", async () => report)).toBe("intel");
+  expect(await detectHostGpu("darwin", "x64", async () => "")).toBeUndefined();
+  expect(await detectHostGpu("freebsd" as NodeJS.Platform, "x64", never)).toBeUndefined();
 });
 
-test("a new profile keeps to the host GPU family: the engine's family where it has one, else the host's own GPU on its own system", () => {
-  expect(newProfileGpuIdentity("windows", "windows", "nvidia")).toEqual({ vendor: "nvidia", anchor: "windows-d3d11-nvidia" });
-  expect(newProfileGpuIdentity("windows", "windows", "intel")).toEqual({ vendor: "intel", anchor: "windows-d3d11-intel" });
-  expect(newProfileGpuIdentity("macos", "macos", "apple")).toEqual({ vendor: "apple", anchor: "macos-metal-apple" });
-  expect(newProfileGpuIdentity("linux", "linux", "nvidia")).toEqual({ vendor: "nvidia", anchor: "linux-vulkan-nvidia" });
-  // No measured family: the host's own GPU, on the host's own system only.
-  expect(newProfileGpuIdentity("windows", "windows", "amd")).toEqual({ vendor: "amd" });
-  expect(newProfileGpuIdentity("macos", "macos", "intel")).toEqual({ vendor: "intel" });
-  // Another system with a family of this vendor (a Windows identity on an Intel Mac, like Boot Camp).
-  expect(newProfileGpuIdentity("windows", "macos", "intel")).toEqual({ vendor: "intel", anchor: "windows-d3d11-intel" });
-  // No Windows computer has an Apple GPU: the engine keeps its seed draw.
-  expect(newProfileGpuIdentity("windows", "macos", "apple")).toBeUndefined();
-  expect(newProfileGpuIdentity("linux", "windows", "amd")).toBeUndefined();
+test("the host GPU is read once without blocking, and a timed-out read is not kept", async () => {
+  resetHostGpuForTest();
+  let calls = 0;
+  const timedOut = async () => { calls++; throw new Error("GPU detection timed out"); };
+  const [first, second] = await Promise.all([waitForHostGpu(timedOut), waitForHostGpu(timedOut)]);
+  expect([first, second, calls]).toEqual([undefined, undefined, 1]);
+  expect(await waitForHostGpu(async () => "amd")).toBe("amd");
+  expect(await waitForHostGpu(async () => "nvidia")).toBe("amd");
+  expect(hostGpuVendor()).toBe("amd");
+  // While the read is pending, a profile made without waiting stores no GPU decision.
+  resetHostGpuForTest();
+  let finish!: (vendor: "intel") => void;
+  const pending = waitForHostGpu(() => new Promise((resolve) => { finish = resolve; }));
+  expect(hostGpuVendor()).toBeUndefined();
+  finish("intel");
+  expect(await pending).toBe("intel");
+  expect(hostGpuVendor()).toBe("intel");
+  resetHostGpuForTest();
+});
+
+test("a new profile stores its GPU decision: the engine's family where it has one, else the host GPU switch, on the host's own system only", () => {
+  expect(newProfileGpuIdentity("windows", "windows", "intel")).toEqual({ vendor: "intel", anchor: "windows-d3d11-intel-79dfeb5b4f99" });
+  expect(newProfileGpuIdentity("windows", "windows", "nvidia")).toEqual({ vendor: "nvidia", anchor: "windows-d3d11-nvidia-0947761dfbe9" });
+  expect(newProfileGpuIdentity("windows", "windows", "qualcomm")).toEqual({ vendor: "qualcomm", anchor: "windows-d3d11-qualcomm-6388f9914f3f" });
+  expect(newProfileGpuIdentity("macos", "macos", "apple")).toEqual({ vendor: "apple", anchor: "macos-metal-apple-850a91233555" });
+  expect(newProfileGpuIdentity("linux", "linux", "nvidia")).toEqual({ vendor: "nvidia", anchor: "linux-vulkan-nvidia-adf287b8f0ee" });
+  // No measured family: the engine's host-GPU switch.
+  for (const [os, vendor] of [["windows", "amd"], ["linux", "intel"], ["linux", "amd"], ["macos", "intel"], ["macos", "amd"]]) {
+    expect(newProfileGpuIdentity(os!, os!, vendor)).toEqual({ vendor: vendor!, anchor: "host" });
+  }
+  // Another system, a computer without a known GPU, or a vendor with neither: no decision (the seed draw).
+  expect(newProfileGpuIdentity("windows", "macos", "intel")).toBeUndefined();
+  expect(newProfileGpuIdentity("linux", "windows", "nvidia")).toBeUndefined();
   expect(newProfileGpuIdentity("windows", "windows", undefined)).toBeUndefined();
+  expect(newProfileGpuIdentity("linux", "linux", "qualcomm")).toBeUndefined();
 });
 
-test("launch flags: a stored family selects the engine family, and a profile without a stored GPU gets no GPU flag", () => {
+test("launch flags come only from the stored decision, never from the vendor", () => {
   const aliasmode = { chromiumRuntime: "aliasmode" as const, platformOs: "windows" };
-  expect(chromiumGpuArgs({ ...aliasmode, identity: { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia" } } }, {}))
-    .toEqual(["--fingerprint-anchor=windows-d3d11-nvidia-0947761dfbe9"]);
-  expect(chromiumGpuArgs({ ...aliasmode, platformOs: "macos", identity: { gpu: { vendor: "apple", anchor: "macos-metal-apple" } } }, {}))
-    .toEqual(["--fingerprint-anchor=macos-metal-apple-850a91233555"]);
-  // The 155 build has no host GPU switch yet (TODO-SWITCH), so nothing is sent.
-  expect(chromiumGpuArgs({ ...aliasmode, identity: { gpu: { vendor: "amd" } } }, {})).toEqual([]);
-  expect(chromiumGpuArgs(aliasmode, {})).toEqual([]);
-  expect(chromiumGpuArgs({ identity: { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia" } } }, {})).toEqual([]);
-  // A system changed after creation never keeps another system's family: the stored vendor's
-  // family of the new system, or none (the seed draw).
-  const nvidia = { ...aliasmode, identity: { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia" } } };
-  expect(chromiumGpuArgs({ ...nvidia, platformOs: "windows" }, {})).toEqual(["--fingerprint-anchor=windows-d3d11-nvidia-0947761dfbe9"]);
-  expect(chromiumGpuArgs({ ...nvidia, platformOs: "linux" }, {})).toEqual(["--fingerprint-anchor=linux-vulkan-nvidia-adf287b8f0ee"]);
-  expect(chromiumGpuArgs({ ...nvidia, platformOs: "macos" }, {})).toEqual([]);
+  const nvidia = { ...aliasmode, identity: { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia-0947761dfbe9" } } };
+  expect(chromiumGpuArgs(nvidia, {}, "windows")).toEqual(["--fingerprint-anchor=windows-d3d11-nvidia-0947761dfbe9"]);
+  // A stored id is sent as stored, also one this version's table does not list.
+  expect(chromiumGpuArgs({ ...aliasmode, identity: { gpu: { vendor: "amd", anchor: "windows-d3d11-amd-0123456789ab" } } }, {}, "windows"))
+    .toEqual(["--fingerprint-anchor=windows-d3d11-amd-0123456789ab"]);
+  // A vendor without a stored anchor gets nothing, whatever the tables hold.
+  expect(chromiumGpuArgs({ ...aliasmode, identity: { gpu: { vendor: "nvidia" } } }, {}, "windows")).toEqual([]);
+  expect(chromiumGpuArgs({ ...aliasmode, identity: { gpu: { vendor: "amd" } } }, {}, "windows")).toEqual([]);
+  expect(chromiumGpuArgs(aliasmode, {}, "windows")).toEqual([]);
+  expect(chromiumGpuArgs({ identity: nvidia.identity }, {}, "windows")).toEqual([]);
+  // The host switch, only on a computer of the profile's system.
+  const host = { ...aliasmode, identity: { gpu: { vendor: "amd", anchor: "host" } } };
+  expect(chromiumGpuArgs(host, {}, "windows")).toEqual(["--fingerprint-gpu-host"]);
+  expect(chromiumGpuArgs(host, {}, "macos")).toEqual([]);
+  expect(chromiumGpuArgs({ ...host, platformOs: "macos" }, {}, "macos")).toEqual(["--fingerprint-gpu-host"]);
+  // A system changed after creation never shows another system's family.
+  expect(chromiumGpuArgs({ ...nvidia, platformOs: "linux" }, {}, "linux")).toEqual([]);
+  expect(chromiumGpuArgs({ ...nvidia, platformOs: "macos" }, {}, "macos")).toEqual([]);
   // The internal switch turns the rule off for bisecting a failed gate.
-  expect(chromiumGpuArgs({ ...aliasmode, identity: { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia" } } }, { ALIASMODE_SWITCHES_OFF: "x, gpu-family" }))
-    .toEqual([]);
+  expect(chromiumGpuArgs(nvidia, { ALIASMODE_SWITCHES_OFF: "x, gpu-family" }, "windows")).toEqual([]);
+  expect(chromiumGpuArgs(host, { ALIASMODE_SWITCHES_OFF: "gpu-family" }, "windows")).toEqual([]);
 });
 
 test("new AliasMode Chromium profiles store the host GPU; CloakBrowser and hosts without a known GPU store none", () => {
   const host = hostPlatformOs();
-  const nvidia = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, "nvidia");
-  expect(nvidia.identity).toEqual({ gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia" } });
-  expect(deriveFingerprintFlags(nvidia)).toContain("--fingerprint-anchor=windows-d3d11-nvidia-0947761dfbe9");
-  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "amd").identity).toEqual({ gpu: { vendor: "amd" } });
-  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, undefined).identity).toBeUndefined();
-  expect(buildNewProfile({ chromiumRuntime: "cloakbrowser", platformOs: "windows" }, () => false, undefined, "nvidia").identity).toBeUndefined();
-  expect(buildNewProfile({ engine: "firefox", platformOs: "windows" }, () => false, undefined, "nvidia").identity).toBeUndefined();
-  const imported = withDefaultBrowser({ ...buildNewProfile({ chromiumRuntime: "cloakbrowser", platformOs: "windows" }, () => false), engine: undefined, extensions: ["abcdefghijklmnopabcdefghijklmnop"] }, "intel");
-  if (imported.chromiumRuntime) expect(imported.identity).toEqual({ gpu: { vendor: "intel", anchor: "windows-d3d11-intel" } });
+  const nvidia = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "nvidia");
+  const nvidiaAnchor = { windows: "windows-d3d11-nvidia-0947761dfbe9", linux: "linux-vulkan-nvidia-adf287b8f0ee" }[host as "windows" | "linux"];
+  if (nvidiaAnchor) {
+    expect(nvidia.identity).toEqual({ gpu: { vendor: "nvidia", anchor: nvidiaAnchor } });
+    expect(deriveFingerprintFlags(nvidia)).toContain(`--fingerprint-anchor=${nvidiaAnchor}`);
+  }
+  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "amd").identity).toEqual({ gpu: { vendor: "amd", anchor: "host" } });
+  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "").identity).toBeUndefined();
+  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host === "windows" ? "linux" : "windows" }, () => false, undefined, "nvidia").identity).toBeUndefined();
+  expect(buildNewProfile({ chromiumRuntime: "cloakbrowser", platformOs: host }, () => false, undefined, "nvidia").identity).toBeUndefined();
+  expect(buildNewProfile({ engine: "firefox", platformOs: host }, () => false, undefined, "nvidia").identity).toBeUndefined();
+  const imported = withDefaultBrowser({ ...buildNewProfile({ chromiumRuntime: "cloakbrowser", platformOs: host }, () => false), engine: undefined, extensions: ["abcdefghijklmnopabcdefghijklmnop"] }, "amd");
+  if (imported.chromiumRuntime) expect(imported.identity).toEqual({ gpu: { vendor: "amd", anchor: "host" } });
 });
 
 test("new Firefox profiles get a card of the host GPU vendor where their system has one", () => {
@@ -114,16 +144,17 @@ test("new Firefox profiles get a card of the host GPU vendor where their system 
 
 test("a stored identity stays through edits, travels in Cloud schema V5, and older payloads must not carry one", () => {
   const store = new ProfileStore(":memory:");
-  const profile = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, "intel");
+  const identity = { gpu: { vendor: "intel", anchor: "windows-d3d11-intel-79dfeb5b4f99" }, mediaCatalogue: 2 };
+  const profile = { ...buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, ""), identity };
   store.upsertProfile(profile);
   const { identity: _identity, ...edited } = store.getProfile(profile.id)!;
   store.upsertProfile({ ...edited, name: "renamed" });
-  expect(store.getProfile(profile.id)).toMatchObject({ name: "renamed", identity: { gpu: { vendor: "intel", anchor: "windows-d3d11-intel" } } });
+  expect(store.getProfile(profile.id)).toMatchObject({ name: "renamed", identity });
 
   const payload = encodePortableProfile(store.getProfile(profile.id)!);
   expect(payload.schemaVersion).toBe(5);
-  expect(payload.profile).toMatchObject({ chromiumRuntime: "aliasmode", identity: { gpu: { vendor: "intel", anchor: "windows-d3d11-intel" } } });
-  expect(decodePortableProfile(payload).profile.identity).toEqual({ gpu: { vendor: "intel", anchor: "windows-d3d11-intel" } });
+  expect(payload.profile).toMatchObject({ chromiumRuntime: "aliasmode", identity });
+  expect(decodePortableProfile(payload).profile.identity).toEqual(identity);
   // A newer client's values, and the reserved text bucket, are kept unchanged.
   const newer = { ...payload, profile: { ...payload.profile, identity: { gpu: { vendor: "moore-threads" }, textBucket: "win.smoothing-off" } } };
   expect(encodePortableProfile(decodePortableProfile(newer as any).profile).profile).toMatchObject({ identity: newer.profile.identity });
@@ -133,6 +164,9 @@ test("a stored identity stays through edits, travels in Cloud schema V5, and old
     { ...payload, profile: { ...payload.profile, identity: { gpu: { vendor: "NVIDIA" } } } },
     { ...payload, profile: { ...payload.profile, identity: { gpu: { vendor: "nvidia", model: "x" } } } },
     { ...payload, profile: { ...payload.profile, identity: {} } },
+    { ...payload, profile: { ...payload.profile, identity: { mediaCatalogue: 0 } } },
+    { ...payload, profile: { ...payload.profile, identity: { mediaCatalogue: 2.5 } } },
+    { ...payload, profile: { ...payload.profile, identity: { mediaCatalogue: "2" } } },
   ]) {
     expect(() => decodePortableProfile(invalid as any)).toThrow("unsupported portable profile payload");
   }
@@ -142,4 +176,33 @@ test("a stored identity stays through edits, travels in Cloud schema V5, and old
   expect(() => store.upsertProfile({ ...buildNewProfile({ chromiumRuntime: "cloakbrowser" }, () => false), identity: { gpu: { vendor: "nvidia" } } }))
     .toThrow("only AliasMode Chromium profiles store an identity");
   store.close();
+});
+
+test("export and import keep the stored identity", () => {
+  const identity = { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia-0947761dfbe9" }, mediaCatalogue: 2 };
+  const profile = { ...buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, ""), identity };
+  const legacy = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, "");
+  const text = serializeAdsTxt([profile, legacy]);
+  expect(text.match(/^identity=.*$/gm)).toEqual([`identity=${JSON.stringify(identity)}`]);
+  const imported = parseExport(text);
+  expect(imported.imports.every((item) => item.validationErrors.length === 0)).toBe(true);
+  expect(imported.profiles.find((item) => item.id === profile.id)?.identity).toEqual(identity);
+  expect(imported.profiles.find((item) => item.id === legacy.id)?.identity).toBeUndefined();
+  const sheet = serializeXlsxRows([profile]);
+  expect(sheet.rows[0]![sheet.headers.indexOf("identity")]).toBe(JSON.stringify(identity));
+  expect(serializeXlsxRows([legacy]).headers).not.toContain("identity");
+
+  const store = new ProfileStore(":memory:");
+  store.upsertProfile(imported.profiles.find((item) => item.id === profile.id)!);
+  expect(store.getProfile(profile.id)?.identity).toEqual(identity);
+  store.close();
+
+  // An invalid identity, or one on a browser that has none, is refused rather than dropped.
+  const invalid = (value: string, runtime = "aliasmode") =>
+    parseExport(text.split("\n").map((line) => line.startsWith("identity=") ? `identity=${value}` : line.startsWith("chromium_runtime=") ? `chromium_runtime=${runtime}` : line).join("\n"))
+      .imports.find((item) => item.profile.id === profile.id)!.validationErrors;
+  expect(invalid("{}")).toEqual([]);
+  expect(invalid("{not json")[0]).toStartWith("invalid identity");
+  expect(invalid(JSON.stringify({ gpu: { vendor: "NVIDIA" } }))[0]).toStartWith("invalid identity");
+  expect(invalid(JSON.stringify(identity), "cloakbrowser")).toContain("invalid identity: only AliasMode Chromium profiles store an identity");
 });

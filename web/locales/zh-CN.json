@@ -329,7 +329,7 @@
   "Chrome version": "Chrome 版本",
   "CloakBrowser 146 (default)": "CloakBrowser 146（默认）",
   "CloakBrowser 145 (default)": "CloakBrowser 145（默认）",
-  "AliasMode Chromium 155 (default)": "AliasMode Chromium 155（默认）",
+  "AliasMode Chromium 159 (default)": "AliasMode Chromium 159（默认）",
   "Downloads once (about 190 MB) on each computer that opens it.": "每台打开它的电脑只需下载一次（约 190 MB）。",
   "CloakBrowser profiles on one computer can be linked to each other. Use AliasMode Chromium or AliasMode Firefox for separate identities.": "同一台电脑上的 CloakBrowser 环境可能会被相互关联。如需相互独立的身份，请使用 AliasMode Chromium 或 AliasMode Firefox。",
   "User agent": "用户代理",

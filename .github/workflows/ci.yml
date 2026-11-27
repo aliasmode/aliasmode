@@ -931,15 +931,18 @@ jobs:
           # Later runs reuse that download instead of fetching it again.
           $env:CLOAKBROWSER_BINARY_PATH = $browserPath.FullName
           $env:CLOAKBROWSER_BINARY_SHA256 = $browserSha256
+          # The pinned AliasMode Chromium folder and version, from aliasmode-chromium.ts.
+          $betaDir, $betaVersion = (bun --no-env-file -e 'const m = await import(`./aliasmode-chromium.ts`); console.log(m.ALIASMODE_CHROMIUM_RUNTIME_DIR); console.log(m.ALIASMODE_CHROMIUM_VERSION)')
+          if (-not $betaDir -or -not $betaVersion) { throw "could not read the pinned AliasMode Chromium version" }
           Push-Location $smoke
           try {
             & ".\aliasmode-sidecar.exe" __cloud-launcher-smoke --proxy-mismatch --headless --state-root "$smoke\proxy-mismatch-state"
             if ($LASTEXITCODE -ne 0) { throw "deterministic proxy mismatch smoke exited with code $LASTEXITCODE" }
-            # A Cloud V3 payload must download and open the Chromium 155 beta, not CloakBrowser.
+            # A Cloud V3 payload must download and open AliasMode Chromium, not CloakBrowser.
             & ".\aliasmode-sidecar.exe" __cloud-launcher-smoke --chromium-runtime aliasmode --headless --state-root "$smoke\cloud-beta-state"
-            if ($LASTEXITCODE -ne 0) { throw "Cloud Chromium 155 beta smoke exited with code $LASTEXITCODE" }
-            if (-not (Test-Path -LiteralPath "$smoke\cloud-beta-state\runtimes\chromium-155.0.8059.85-aliasmode.5\155.0.8059.85.manifest" -PathType Leaf)) {
-              throw "Cloud Chromium 155 beta smoke did not install the beta runtime"
+            if ($LASTEXITCODE -ne 0) { throw "Cloud AliasMode Chromium smoke exited with code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath "$smoke\cloud-beta-state\runtimes\$betaDir\$betaVersion.manifest" -PathType Leaf)) {
+              throw "Cloud AliasMode Chromium smoke did not install the pinned runtime"
             }
           } finally {
             Pop-Location

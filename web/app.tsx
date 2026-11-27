@@ -5048,8 +5048,8 @@ function App() {
                   <select value={form.chromiumRuntime} onChange={(e) => setF("chromiumRuntime", e.target.value as "" | "aliasmode")}>
                     {/* CloakBrowser publishes no Mac build after 145. */}
                     {appMode?.defaultChromiumRuntime
-                      ? <><option value="aliasmode">{t("AliasMode Chromium 155 (default)")}</option><option value="">{appMode.hostOs === "macos" ? t("CloakBrowser 145") : t("CloakBrowser 146")}</option></>
-                      : <><option value="">{appMode?.hostOs === "macos" ? t("CloakBrowser 145 (default)") : t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 155")}</option></>}
+                      ? <><option value="aliasmode">{t("AliasMode Chromium 159 (default)")}</option><option value="">{appMode.hostOs === "macos" ? t("CloakBrowser 145") : t("CloakBrowser 146")}</option></>
+                      : <><option value="">{appMode?.hostOs === "macos" ? t("CloakBrowser 145 (default)") : t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 159")}</option></>}
                   </select>
                   <small>{!form.chromiumRuntime
                     ? t(CLOAKBROWSER_NOTE)

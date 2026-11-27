@@ -301,8 +301,8 @@ test("dashboard selects browser for new profiles", () => {
   // elsewhere. 155 works in Local and Cloud, not legacy Remote. Choosing 146 asks for CloakBrowser.
   expect(createModal).toContain('{form.engine === "chromium" && !appMode?.legacyRemote && !appMode?.chromiumRuntime && (');
   // A Mac runs CloakBrowser 145: CloakBrowser publishes no Mac build after it.
-  expect(createModal).toContain('? <><option value="aliasmode">{t("AliasMode Chromium 155 (default)")}</option><option value="">{appMode.hostOs === "macos" ? t("CloakBrowser 145") : t("CloakBrowser 146")}</option></>');
-  expect(createModal).toContain(': <><option value="">{appMode?.hostOs === "macos" ? t("CloakBrowser 145 (default)") : t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 155")}</option></>}');
+  expect(createModal).toContain('? <><option value="aliasmode">{t("AliasMode Chromium 159 (default)")}</option><option value="">{appMode.hostOs === "macos" ? t("CloakBrowser 145") : t("CloakBrowser 146")}</option></>');
+  expect(createModal).toContain(': <><option value="">{appMode?.hostOs === "macos" ? t("CloakBrowser 145 (default)") : t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 159")}</option></>}');
   expect(app).toContain('chromiumRuntime: "" as "" | "aliasmode"');
   expect(app).toContain('...(form.engine === "chromium" && !appMode?.legacyRemote ? { chromiumRuntime: form.chromiumRuntime || "cloakbrowser" } : {}),');
   // A CloakBrowser choice or profile shows the linkability note, in every bundled language.

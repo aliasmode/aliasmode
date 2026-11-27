@@ -30,10 +30,10 @@ jobs:
       matrix:
         include:
           # arch is the file name part of the release files, as Tauri names a .dmg.
-          - { arch: aarch64, runner: macos-15, artifact: aliasmode-macos-arm64, chrome: AliasMode Chromium, chrome_runtime: chromium-155.0.8059.85-aliasmode.5 }
+          - { arch: aarch64, runner: macos-15, artifact: aliasmode-macos-arm64, chrome: AliasMode Chromium }
           # New Chrome profiles on an Intel Mac use AliasMode Chromium too; CloakBrowser opens only existing ones.
-          # TODO-PIN(159): this leg needs the published Intel Mac build pinned in aliasmode-chromium.ts.
-          - { arch: x64, runner: macos-15-intel, artifact: aliasmode-macos-x64, chrome: AliasMode Chromium, chrome_runtime: chromium-155.0.8059.85-aliasmode.5 }
+          # TODO-PIN-FINAL: this leg needs the published Intel Mac build pinned in aliasmode-chromium.ts.
+          - { arch: x64, runner: macos-15-intel, artifact: aliasmode-macos-x64, chrome: AliasMode Chromium }
     env:
       ARCH: ${{ matrix.arch }}
       BUNDLE: src-tauri/target/release/bundle
@@ -269,7 +269,8 @@ jobs:
           chromium="$(jq -er 'select(.ok) | .result.id' <<<"$created")"
           "$helper" browser open --profile "$chromium" --url https://example.com/ | jq -e '.ok and (.result.port | type == "number")'
           sleep 5
-          pgrep -f "runtimes/${{ matrix.chrome_runtime }}.*/Chromium.app/Contents/MacOS/Chromium" >/dev/null
+          runtime_dir="$(bun --no-env-file -e 'const m = await import("./aliasmode-chromium.ts"); console.log(m.ALIASMODE_CHROMIUM_RUNTIME_DIR)')"
+          pgrep -f "runtimes/$runtime_dir.*/Chromium.app/Contents/MacOS/Chromium" >/dev/null
           screencapture -x "$RUNNER_TEMP/evidence/chromium-profile.png"
           # Chromium 155 must accept the DuckDuckGo default search setup, which runs after launch.
           sleep 10

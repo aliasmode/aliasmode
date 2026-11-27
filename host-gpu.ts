@@ -50,39 +50,61 @@ export function linuxGpuVendor(drm = "/sys/class/drm", read = (path: string) => 
   return (vendors.find((card) => card.boot) ?? vendors[0])?.vendor;
 }
 
-function spawnText(command: string[]): string {
-  try {
-    const result = Bun.spawnSync(command, { stdout: "pipe", stderr: "ignore", timeout: 15_000 });
-    return result.exitCode === 0 ? result.stdout.toString() : "";
-  } catch {
-    return "";
-  }
+/** How long one detection command may run before the vendor counts as not read yet. */
+const DETECT_TIMEOUT_MS = 15_000;
+
+/** A command's output, without blocking the event loop. Throws when it runs out of time. */
+async function spawnText(command: string[]): Promise<string> {
+  const child = Bun.spawn(command, { stdout: "pipe", stderr: "ignore", windowsHide: true, timeout: DETECT_TIMEOUT_MS });
+  const [text, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  if (child.signalCode) throw new Error("GPU detection timed out");
+  return code === 0 ? text : "";
 }
 
-/** Detect this computer's GPU vendor. Undefined when it has none that a GPU family covers. */
-export function detectHostGpu(
+/** Detect this computer's GPU vendor. Undefined when it has none that a GPU family covers; rejects when it could not be read. */
+export async function detectHostGpu(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
-  run: (command: string[]) => string = spawnText,
-): GpuVendor | undefined {
+  run: (command: string[]) => Promise<string> = spawnText,
+): Promise<GpuVendor | undefined> {
   if (platform === "darwin") {
     if (arch === "arm64") return "apple";
-    return intelMacGraphicsVendor(run(["/usr/sbin/system_profiler", "SPDisplaysDataType", "-json"]));
+    return intelMacGraphicsVendor(await run(["/usr/sbin/system_profiler", "SPDisplaysDataType", "-json"]));
   }
   if (platform === "linux") return linuxGpuVendor();
   if (platform === "win32") {
     // The full path also works when PATH has no PowerShell folder.
     const powershell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const script = "Get-CimInstance Win32_VideoController -ErrorAction Stop | Select-Object PNPDeviceID, CurrentHorizontalResolution | ConvertTo-Json -Compress";
-    return windowsGpuVendor(run([powershell, "-NoProfile", "-NonInteractive", "-Command", script]));
+    return windowsGpuVendor(await run([powershell, "-NoProfile", "-NonInteractive", "-Command", script]));
   }
   return undefined;
 }
 
-let cached: { vendor: GpuVendor | undefined } | undefined;
+let known: { vendor: GpuVendor | undefined } | undefined;
+let reading: Promise<GpuVendor | undefined> | undefined;
 
-/** This computer's GPU vendor, read once per app run. */
+/**
+ * Read this computer's GPU vendor once per app run; a new profile waits for it. A failed or timed-out
+ * read gives undefined (the profile stores no GPU decision) and is not kept, so the next one reads again.
+ */
+export function waitForHostGpu(detect: () => Promise<GpuVendor | undefined> = detectHostGpu): Promise<GpuVendor | undefined> {
+  if (known) return Promise.resolve(known.vendor);
+  reading ??= detect().then(
+    (vendor) => (known = { vendor }).vendor,
+    () => undefined,
+  ).finally(() => { reading = undefined; });
+  return reading;
+}
+
+/** This computer's GPU vendor once read, else undefined (and the read starts). */
 export function hostGpuVendor(): GpuVendor | undefined {
-  cached ??= { vendor: detectHostGpu() };
-  return cached.vendor;
+  if (!known) void waitForHostGpu();
+  return known?.vendor;
+}
+
+/** Tests only: forget the read vendor. */
+export function resetHostGpuForTest(): void {
+  known = undefined;
+  reading = undefined;
 }

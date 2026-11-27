@@ -80,11 +80,15 @@ export interface ProfileHardware {
 export interface ProfileIdentity {
   /**
    * The GPU vendor of the computer the profile was made on ("nvidia", "intel", "amd", "apple",
-   * "qualcomm"), and the engine GPU family chosen for it, if the engine has one (GPU-family rule).
+   * "qualcomm"), and the GPU decision made then (GPU-family rule): `anchor` is the full engine family
+   * id sent as --fingerprint-anchor, or "host" for the engine's host-GPU switch. Without an anchor
+   * the launch gets no GPU flag. A launch never works out a new flag from the vendor.
    */
   gpu?: { vendor: string; anchor?: string };
   /** Reserved for real variation: the profile's text rendering bucket. No version sets it yet. */
   textBucket?: string;
+  /** The engine's media device catalogue of the profile (--fingerprint-media-catalogue), e.g. 2. */
+  mediaCatalogue?: number;
 }
 
 export interface Profile {

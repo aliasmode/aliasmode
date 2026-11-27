@@ -1,6 +1,6 @@
 /**
  * Browser runtimes that are downloaded on first use instead of being bundled:
- * the opt-in Chromium 155 beta, and CloakBrowser. Each is pinned by archive and
+ * AliasMode Chromium, and CloakBrowser. Each is pinned by archive and
  * executable SHA-256, and lives in the app's data folder, which survives app updates.
  */
 import { randomUUID } from "node:crypto";
@@ -14,21 +14,53 @@ import {
 import { trackRuntimeDownload } from "./runtime-download.ts";
 import { runCurlDirectFirst } from "./system-proxy.ts";
 
-// AliasMode's own Windows, Linux and macOS arm64 builds of the patch series. The Windows package includes
+// AliasMode's own Windows, Linux and macOS builds of the patch series. The Windows package includes
 // Chromium's version manifest, which upstream's Windows archive omits. Each build gets its
 // own directory, so a browser still running from an earlier build keeps its files.
 // A new build changes the version, the release tag, and each target's two SHA-256 values and archive size.
-const OWN_VERSION = "155.0.8059.85";
-const OWN_RELEASE = "aliasmode.5";
+// Every pin is in this block; names, runtime folders and download URLs derive from OWN_VERSION and OWN_RELEASE.
+// TODO-PIN-FINAL: the Windows pin is the first 159 build, which a fix rebuild replaces; Linux, Mac arm64
+// and Mac x64 are not pinned yet (their values below are placeholders or the 155 build's).
+const OWN_VERSION = "159.0.8154.34";
+const OWN_RELEASE = "aliasmode.1";
+const PINS = {
+  // TODO-PIN-FINAL: replace with the fix rebuild.
+  windows: {
+    archiveSha256: "0bfc9c6baafc15a6665b03599382f96b1f65b77923edd5b4354c31f4d3d98bbe",
+    size: 214879214,
+    executableSha256: "155bbba8b639e252c1988786b8899ef7ae355bec7b891ed80ee7419fc1673de5",
+  },
+  // TODO-PIN-FINAL: the 159 Mac arm64 build (these are 155's).
+  macosArm64: {
+    archiveSha256: "5723d95c1d13e5efa6eba581ff799472cb9f4042a6a46961f43ba7eac7f78084",
+    size: 159506881,
+    executableSha256: "cb03f4622ea0dbbcb4fc0a5b8a2a3d63ed2e59f427230d4dcb6d494fdabf1744",
+  },
+  // TODO-PIN-FINAL: the Intel Mac build exists from the 159 release on. Until it is pinned, an Intel Mac
+  // fails the download check (chromium155_download).
+  macosX64: {
+    archiveSha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    size: 0,
+    executableSha256: "0000000000000000000000000000000000000000000000000000000000000000",
+  },
+  // TODO-PIN-FINAL: the 159 Linux build (these are 155's).
+  linux: {
+    archiveSha256: "86e6c4304161ece6628ceb79eb6c9e5f57a148f5bec211753b8b4399319220d0",
+    size: 197916653,
+    executableSha256: "a49eb6c62fe794d9cf32d14ddfd59731a96074af02e5563da7b7fc800ffce2f1",
+  },
+};
 const OWN_RELEASE_URL = `https://github.com/aliasmode/aliasmode-chromium/releases/download/v${OWN_VERSION}-${OWN_RELEASE}`;
+/** The pinned AliasMode Chromium version, e.g. "159.0.8154.34". */
+export const ALIASMODE_CHROMIUM_VERSION = OWN_VERSION;
+/** The folder under the runtimes root that holds the pinned build. */
+export const ALIASMODE_CHROMIUM_RUNTIME_DIR = `chromium-${OWN_VERSION}-${OWN_RELEASE}`;
 const WINDOWS_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-windows-x64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-windows-x64.zip`,
-  dir: `chromium-${OWN_VERSION}-${OWN_RELEASE}`,
-  archiveSha256: "52ab2c6a616813bd95f5473fd73c492b7ee333ae4f0e57c4a366da956b2a7b8c",
-  size: 203517665,
+  dir: ALIASMODE_CHROMIUM_RUNTIME_DIR,
+  ...PINS.windows,
   executable: "chrome.exe",
-  executableSha256: "0ef4de1bef7c12534031318e07ac89fa7942916a3abc89057985aafefbca619f",
   // Pages read and draw at --force-device-scale-factor, and
   // --aliasmode-window-label names the window without touching page titles.
   hostScale: true,
@@ -44,34 +76,26 @@ const WINDOWS_BUILD = {
 const MACOS_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-macos-arm64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-macos-arm64.zip`,
-  dir: `chromium-${OWN_VERSION}-${OWN_RELEASE}`,
-  archiveSha256: "5723d95c1d13e5efa6eba581ff799472cb9f4042a6a46961f43ba7eac7f78084",
-  size: 159506881,
+  dir: ALIASMODE_CHROMIUM_RUNTIME_DIR,
+  ...PINS.macosArm64,
   executable: "Chromium.app/Contents/MacOS/Chromium",
-  executableSha256: "cb03f4622ea0dbbcb4fc0a5b8a2a3d63ed2e59f427230d4dcb6d494fdabf1744",
   hostScale: false,
   windowLabel: true,
   webRtcIp: true,
   keepAlive: true,
 };
-// TODO-PIN(159): the Intel Mac build exists from the 159 release on. Until it is pinned here, an Intel
-// Mac fails the download check (chromium155_download); the URL, size and both SHA-256 values are placeholders.
 const MACOS_X64_BUILD = {
   ...MACOS_BUILD,
   root: `aliasmode-chromium-${OWN_VERSION}-macos-x64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-macos-x64.zip`,
-  archiveSha256: "0000000000000000000000000000000000000000000000000000000000000000",
-  size: 0,
-  executableSha256: "0000000000000000000000000000000000000000000000000000000000000000",
+  ...PINS.macosX64,
 };
 const LINUX_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-linux-x64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-linux-x64.tar.zst`,
-  dir: `chromium-${OWN_VERSION}-${OWN_RELEASE}`,
-  archiveSha256: "86e6c4304161ece6628ceb79eb6c9e5f57a148f5bec211753b8b4399319220d0",
-  size: 197916653,
+  dir: ALIASMODE_CHROMIUM_RUNTIME_DIR,
+  ...PINS.linux,
   executable: "chrome",
-  executableSha256: "a49eb6c62fe794d9cf32d14ddfd59731a96074af02e5563da7b7fc800ffce2f1",
   hostScale: false,
   windowLabel: true,
   webRtcIp: true,
@@ -114,7 +138,7 @@ interface PinnedRuntime {
 function chromium155(platform: NodeJS.Platform, arch: string): PinnedRuntime {
   const build = chromiumBuild(platform, arch);
   return {
-    label: "AliasMode Chromium 155",
+    label: `AliasMode Chromium ${OWN_VERSION.split(".")[0]}`,
     runtime: "aliasmode",
     dir: build.dir,
     url: build.url,
