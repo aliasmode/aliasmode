@@ -76,8 +76,8 @@ jobs:
       - name: Gates
         shell: bash
         env:
-          ENGINE_BUILD: ${{ inputs.engine_build }}
-          ONLY: ${{ inputs.only }}
+          ENGINE_BUILD: ${{ inputs.engine_build || 'released' }}
+          ONLY: ${{ inputs.only || 'p,a,b' }}
           SWITCHES: ${{ inputs.switches }}
         run: |
           only=$ONLY; proxy=()
