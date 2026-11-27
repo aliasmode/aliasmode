@@ -1635,6 +1635,35 @@ test("a failed proxy lookup keeps the saved language", async () => {
   s.close();
 });
 
+test("Cloud live and bulk proxy edits follow the exit language unless the user typed one", async () => {
+  const paris = async () => ({ json: async () => ({ status: "success", timezone: "Europe/Paris", countryCode: "FR" }) });
+  for (const typed of [false, true]) {
+    const s = store();
+    const before = s.getProfile("k1d0cd11")!;
+    s.upsertProfile({ ...before, timezone: "Asia/Kolkata", locale: "hi-IN", ...(typed ? { localeManual: true } : {}) });
+    const expected = typed ? "hi-IN" : "fr-FR";
+    const committed: Profile[] = [];
+    s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 123 });
+    const live = await handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/update", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ set: { proxy: "new-proxy.example:8080" } }),
+    }), {} as any, s, null, {
+      cloudBrowser: { canEditLive: () => true, commitLiveEdit: async (profile: Profile) => { committed.push(profile); return true; } } as any,
+      timezoneFetch: paris,
+    });
+    expect(live!.status).toBe(200);
+    expect(committed[0]).toMatchObject({ timezone: "Europe/Paris", locale: expected });
+    s.clearLaunch("k1d0cd11");
+
+    const form = new FormData();
+    form.append("files", new File(["id,proxy,proxytype\nk1d0cd11,next-proxy.example:8080,http"], "updates.csv", { type: "text/csv" }));
+    const bulk = await handleUiRequest(new Request("http://x/ui/api/profiles/update-file", { method: "POST", body: form }), {} as any, s, null, { timezoneFetch: paris });
+    expect(bulk!.status).toBe(200);
+    expect(s.getProfile("k1d0cd11")).toMatchObject({ proxy: { host: "next-proxy.example" }, timezone: "Europe/Paris", locale: expected });
+    s.close();
+  }
+});
+
 test("a typed timezone stays when the proxy changes, and a blank one follows the proxy again", async () => {
   const s = store();
   const update = (set: Record<string, unknown>) => handleUiRequest(

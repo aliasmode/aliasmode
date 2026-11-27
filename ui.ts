@@ -39,7 +39,7 @@ import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, t
 import { hostChromiumRuntime, supportsChromium155Host } from "./aliasmode-chromium.ts";
 import { buildNewProfile, defaultProfileEngine, type NewProfileInput } from "./create.ts";
 import { firefoxGraphicsRenderer } from "./firefox-config.ts";
-import { attachTimezones, lookupExitLocation, type FetchLike } from "./geoip.ts";
+import { attachTimezones, lookupExitLocation, type ExitLocation, type FetchLike } from "./geoip.ts";
 import { localeAfterProxyExit, localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
 import { parseUpdateFile, rowsToUpdates, serializeCsv, serializeAdsTxt, serializeXlsxRows, parseStrictProxy, parseStrictResolution, parseStrictPlatformOs, parseStrictTimezone, parseStrictCustomNo, parseStrictCores, parseStrictSeed, decodeText, parseCookieText, cookiesForEngine } from "./parse.ts";
 import type { ProfileExport } from "./parse.ts";
@@ -2007,13 +2007,19 @@ export async function handleUiRequest(
         return Response.json({ ok: errors.length === 0, updated, skipped, notFound, errors });
       }
       // Open profiles change too. Their browsers keep the identity they launched with until the next start.
-      // A new proxy gets its exit timezone. A failed lookup keeps the saved one.
+      // A new proxy gets its exit timezone and language. A failed lookup keeps the saved ones.
       const located = [...proxyChanged]
         .map((id) => pending.get(id))
         .filter((profile): profile is Profile => !!profile?.proxy && !profile.timezoneManual)
-        .map((profile) => ({ ...profile, timezone: "" }));
+        .map((profile) => ({ id: profile.id, proxy: profile.proxy!, exit: null as ExitLocation | null }));
       if (located.length > 0) {
-        await attachTimezones(located, options.timezoneFetch).catch(() => {});
+        let next = 0;
+        await Promise.all(Array.from({ length: Math.min(16, located.length) }, async () => {
+          while (next < located.length) {
+            const item = located[next++]!;
+            item.exit = await lookupExitLocation(item.proxy, options.timezoneFetch);
+          }
+        }));
         // Apply the rows again to current copies, so changes saved during the lookups are kept.
         pending.clear();
         for (const { id, set } of applied) {
@@ -2024,10 +2030,11 @@ export async function handleUiRequest(
           store.applyGroupExtensionDefaults(p, previousGroup, "extensions" in set);
           pending.set(id, p);
         }
-        for (const { id, timezone } of located) {
+        for (const { id, exit } of located) {
           const p = pending.get(id);
-          if (p && timezone) {
-            p.timezone = timezone;
+          if (p && exit) {
+            p.locale = localeAfterProxyExit(p, exit);
+            p.timezone = exit.timezone;
             syncFirefoxTimezone(p);
           }
         }
@@ -2531,7 +2538,7 @@ export async function handleUiRequest(
           const liveProxyChanged = applyEdits(live, set) && !live.timezoneManual;
           if (liveProxyChanged && live.proxy && !("timezone" in set)) {
             const location = await lookupExitLocation(live.proxy, options.timezoneFetch);
-            if (location) live.timezone = location.timezone;
+            if (location) { live.locale = localeAfterProxyExit(live, location); live.timezone = location.timezone; }
             syncFirefoxTimezone(live);
           } else if (liveProxyChanged && !("timezone" in set)) {
             live.timezone = "";

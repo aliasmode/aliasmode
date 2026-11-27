@@ -37,7 +37,8 @@ import { handleTrashRequest } from "./trash.ts";
 import { PythonRuntime } from "./python-runtime.ts";
 import { resolvePlaywrightRuntime } from "./playwright-runtime.ts";
 
-import { exitTimezoneForEdit, handleUserApi, profileWithEdits, type ProfileRoster } from "./adspower-users.ts";
+import { exitLocationForEdit, handleUserApi, profileWithEdits, type ProfileRoster } from "./adspower-users.ts";
+import { localeAfterProxyExit } from "./profile-locale.ts";
 import { proxyUrl } from "./proxy.ts";
 import { CloudProfileEditor } from "./cloud-profile-editor.ts";
 import {
@@ -202,8 +203,10 @@ async function handleAutomationRequest(
           if (cloudBrowser.canEditLive?.(id) === true) {
             const live = store.getProfile(id);
             if (!live) throw new Error(`no such profile: ${id}`);
-            const timezone = await exitTimezoneForEdit(live, edits);
-            if (!(await cloudBrowser.commitLiveEdit?.(profileWithEdits(live, edits, timezone)))) {
+            const exit = await exitLocationForEdit(live, edits);
+            const next = profileWithEdits(live, edits, exit?.timezone ?? null);
+            if (exit) next.locale = localeAfterProxyExit(live, exit);
+            if (!(await cloudBrowser.commitLiveEdit?.(next))) {
               throw new Error("the browser just closed; retry the update");
             }
             return;

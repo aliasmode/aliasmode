@@ -137,15 +137,10 @@ function editsFromUpdateBody(body: any): ProfileEdits {
   return edits;
 }
 
-/** The exit location of a new proxy. Null when the proxy stays or the user typed a timezone. */
-async function exitLocationForEdit(profile: Profile, edits: ProfileEdits, geoipFetch?: GeoipFetch): Promise<ExitLocation | null> {
+/** The exit location of a new proxy, as the Edit dialog looks it up. Null when the proxy stays or the user typed a timezone. */
+export async function exitLocationForEdit(profile: Profile, edits: ProfileEdits, geoipFetch?: GeoipFetch): Promise<ExitLocation | null> {
   if (!edits.proxy || profile.timezoneManual || proxyIdentityKey(edits.proxy) === proxyIdentityKey(profile.proxy)) return null;
   return lookupExitLocation(edits.proxy, geoipFetch);
-}
-
-/** A new proxy's exit timezone, as the Edit dialog looks it up. Null when the proxy stays or the user typed a timezone. */
-export async function exitTimezoneForEdit(profile: Profile, edits: ProfileEdits, geoipFetch?: GeoipFetch): Promise<string | null> {
-  return (await exitLocationForEdit(profile, edits, geoipFetch))?.timezone ?? null;
 }
 
 export function profileWithEdits(profile: Profile, edits: ProfileEdits, timezone: string | null = null): Profile {

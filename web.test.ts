@@ -536,6 +536,42 @@ test("Cloud user/update changes the proxy of open and closed profiles", async ()
   }
 });
 
+test("Cloud user/update of an open profile follows the exit language unless the user typed one", async () => {
+  const store = new ProfileStore(":memory:");
+  const oldProxy = { type: "http", host: "127.0.0.1", port: "8", user: "", pass: "" };
+  const follow = { ...buildNewProfile({ name: "follow", proxy: oldProxy }, () => false), timezone: "Asia/Kolkata", locale: "hi-IN" };
+  const typed = { ...buildNewProfile({ name: "typed", proxy: oldProxy }, (id) => id === follow.id), timezone: "Asia/Kolkata", locale: "hi-IN", localeManual: true };
+  store.upsertProfiles([follow, typed]);
+  const committed: any[] = [];
+  const server = serveAutomationApi({
+    port: 0, launcher: {} as any, store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudBrowser: { canEditLive: () => true, commitLiveEdit: async (profile: any) => { committed.push(profile); return true; } } as any,
+    log: () => {},
+  });
+  const realFetch = globalThis.fetch;
+  const lookups = spyOn(globalThis, "fetch").mockImplementation(((url: string | URL | Request, init?: RequestInit) => String(url).startsWith(`http://127.0.0.1:${server.port}/`)
+    ? realFetch(url, init)
+    : Promise.resolve(Response.json({ status: "success", timezone: "Europe/Paris", countryCode: "FR", country_code: "FR" }))) as typeof fetch);
+  try {
+    for (const profile of [follow, typed]) {
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/v1/user/update`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ user_id: profile.id, user_proxy_config: { proxy_type: "http", proxy_host: "127.0.0.1", proxy_port: "9" } }),
+      });
+      expect(await response.json()).toMatchObject({ code: 0 });
+    }
+    expect(committed).toMatchObject([
+      { id: follow.id, timezone: "Europe/Paris", locale: "fr-FR" },
+      { id: typed.id, timezone: "Europe/Paris", locale: "hi-IN" },
+    ]);
+  } finally {
+    lookups.mockRestore();
+    await server.stop(true);
+    store.close();
+  }
+});
+
 test("Cloud user/update renames and saves credentials on open and closed profiles", async () => {
   const store = new ProfileStore(":memory:");
   const open = buildNewProfile({ name: "open-old", username: "old", password: "old-pw" }, () => false);
