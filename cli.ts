@@ -389,7 +389,7 @@ function makeLauncher(
   remoteMode = false,
   defaultDataRoot = "profiles",
   ensureSearchProvider = ensureDuckDuckGoDefault,
-  // Local and Cloud profiles share one downloaded Chromium 155 runtime.
+  // Local and Cloud profiles share one downloaded Chromium 159 runtime.
   chromiumRuntimeRoot?: string,
 ): Launcher {
   const unsafeCanary = has(rest, "unsafe-disable-identity-gates");

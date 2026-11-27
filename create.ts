@@ -22,7 +22,7 @@ import { parseStrictCustomNo, parseStrictResolution, parsePlatformOs } from "./p
 export interface NewProfileInput {
   /** Browser identity engine. Omitted means this computer's default engine. */
   engine?: ProfileEngine;
-  /** "aliasmode" (Chromium 155) or "cloakbrowser". Omitted means Chromium 155 where this computer can run it. */
+  /** "aliasmode" (Chromium 159) or "cloakbrowser". Omitted means Chromium 159 where this computer can run it. */
   chromiumRuntime?: string;
   name?: string;
   group?: string;

@@ -5053,7 +5053,7 @@ function App() {
                   </select>
                   <small>{!form.chromiumRuntime
                     ? t(CLOAKBROWSER_NOTE)
-                    : t("Downloads once (about 190 MB) on each computer that opens it.")}</small>
+                    : t("Downloads once (about 215 MB) on each computer that opens it.")}</small>
                 </label>
               )}
               <details className="fingerprint-settings" open={createProxyOpen} onToggle={(event) => setCreateProxyOpen(event.currentTarget.open)}>
