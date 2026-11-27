@@ -310,7 +310,7 @@ export class AgentControlSession {
     const scheduled = !!state && (state.jobs.some((job) => job.scriptId === current!.id) || Object.values(state.onOpen).includes(current!.id));
     const name = field("name");
     const { source: _source, ...saved } = await library.save(
-      { name: scheduled && typeof name === "string" ? `${name.trim()} (AI edit)` : name, description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
+      { name: scheduled && typeof name === "string" && !name.trim().endsWith("(AI edit)") ? `${name.trim()} (AI edit)` : name, description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
       scheduled ? undefined : current?.id,
       scheduled ? undefined : current && (params.expectedRevision === undefined ? current.revision : Number(params.expectedRevision)),
     );

@@ -40,21 +40,30 @@ test("the scripts page has a Schedules tab and the profile editor defaults run-o
   }
 });
 
-test("the fix prompt names the script and keeps the last 40 lines of the failed profile's part of the log", () => {
+test("the fix prompt keeps the last 40 log lines of a single-profile run without saved logins", () => {
   const lines = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix} ${i + 1}`).join("\n");
-  const log = `Python runtime ready\n\n--- Shop A ---\n${lines("a", 5)}\n\n--- Shop B ---\n${lines("b", 50)}\n${"x".repeat(400)}\n\n--- Shop C ---\n${lines("c", 3)}\n`;
-  const prompt = fixScriptPrompt({ id: "s1", name: "Visit feed" }, { id: "b", name: "Shop B", error: "Script exited with code 1; see its log" }, log);
+  const log = `Python runtime ready\n\n--- Shop B ---\n${lines("b", 50)}\n${"x".repeat(400)}\n`;
+  const single = { profiles: [{}], useCredentials: false };
+  const failed = { id: "b", name: "Shop B", error: "Script exited with code 1; see its log" };
+  const prompt = fixScriptPrompt({ id: "s1", name: "Visit feed" }, single, failed, log);
   expect(prompt.startsWith('Fix my script "Visit feed" (id s1). It failed on profile "Shop B": Script exited with code 1; see its log')).toBe(true);
   const tail = prompt.split("Last lines of its log:\n")[1]!.split("\n");
   expect(tail).toHaveLength(40);
   expect(tail[0]).toBe("b 12");
   expect(tail.at(-1)).toBe(`${"x".repeat(300)}…`);
-  expect(prompt).not.toContain("a 1");
-  expect(prompt).not.toContain("c 1");
   // A profile that failed before its browser opened gets the lines written before any profile.
-  expect(fixScriptPrompt({ name: "Visit feed" }, { id: "d", name: "d", error: "Profile edit access is required" }, log))
+  expect(fixScriptPrompt({ name: "Visit feed" }, single, { id: "d", name: "d", error: "Profile edit access is required" }, log))
     .toBe('Fix my script "Visit feed". It failed on profile "d": Profile edit access is required\n\nLast lines of its log:\nPython runtime ready');
-  expect(fixScriptPrompt({ name: "Visit feed" }, { id: "d", name: "" }, "")).toBe('Fix my script "Visit feed". It failed on profile "d".');
+  expect(fixScriptPrompt({ name: "Visit feed" }, single, { id: "d", name: "" }, "")).toBe('Fix my script "Visit feed". It failed on profile "d".');
+});
+
+test("the fix prompt sends only the error for parallel runs, runs with saved logins, and unknown runs", () => {
+  const log = "\n--- Shop A ---\nopened\n\n--- Shop B ---\nopened\nTimeoutError: page.goto\n";
+  const failed = { id: "b", name: "Shop B", error: "Script exited with code 1; see its log" };
+  const errorOnly = 'Fix my script "Visit feed". It failed on profile "Shop B": Script exited with code 1; see its log';
+  for (const run of [{ profiles: [{}, {}], useCredentials: false }, { profiles: [{}], useCredentials: true }, { profiles: [{}] }]) {
+    expect(fixScriptPrompt({ name: "Visit feed" }, run, failed, log)).toBe(errorOnly);
+  }
 });
 
 test("the AI card shows the credits hint", () => {

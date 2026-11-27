@@ -154,6 +154,7 @@ export interface ScriptRun {
   id: string;
   scriptId: string;
   scriptName: string;
+  useCredentials: boolean;
   status: "running" | "stopping" | "finished";
   profiles: Array<{ id: string; name: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; error?: string; warning?: string }>;
 }
@@ -340,7 +341,7 @@ export class ScriptSupervisor {
     mkdirSync(this.options.library.directory, { recursive: true });
     const directory = mkdtempSync(join(this.options.library.directory, "run-"));
     const run: ActiveRun = {
-      view: { id: randomUUID(), scriptId: request.scriptId, scriptName: "Script", status: "running", profiles: [...new Set(request.profileIds)].map((id) => ({ id, name: id, status: "queued" })) },
+      view: { id: randomUUID(), scriptId: request.scriptId, scriptName: "Script", useCredentials: request.useCredentials, status: "running", profiles: [...new Set(request.profileIds)].map((id) => ({ id, name: id, status: "queued" })) },
       scope, directory, logPath: join(directory, "output.log"), abort: new AbortController(), done: Promise.resolve(),
     };
     writeFileSync(run.logPath, "", { mode: 0o600 });

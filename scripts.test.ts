@@ -872,6 +872,10 @@ test("an agent edit of a scheduled or run-on-open script is saved as a copy, and
   }
   expect(scheduler.list().jobs[0]!.scriptId).toBe(scheduled.id);
   expect(scheduler.list().onOpen).toEqual({ b: onOpen.id });
+  // A copy that is scheduled too gets another copy, without a second suffix.
+  const copy = (await h.library.list()).find((item) => item.name === "Visit (AI edit)")!;
+  scheduler.setOnOpen("c", copy.id);
+  expect((await save({ scriptId: copy.id, source: "export default async () => { /* again */ };" })).script.name).toBe("Visit (AI edit)");
 
   const edited = await save({ scriptId: free.id, source: "export default async () => { /* agent */ };" });
   expect(edited).toEqual({ script: expect.objectContaining({ id: free.id, revision: 2 }) });

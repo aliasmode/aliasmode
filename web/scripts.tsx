@@ -58,11 +58,13 @@ const FIX_LINE_CHARS = 300;
  * The agent prompt for a failed run: the script, the profile and its error, and the last lines of
  * the profile's part of the run log. That part runs from its "--- name ---" line to the next one;
  * a profile that failed before its browser opened gets the lines the run wrote before any profile.
+ * Profiles of one run share the log without a prefix, so a run of several profiles sends no lines,
+ * and neither does a run with saved logins.
  */
-export function fixScriptPrompt(script: { id?: string; name: string }, profile: { id: string; name: string; error?: string }, log: string): string {
+export function fixScriptPrompt(script: { id?: string; name: string }, run: { profiles: unknown[]; useCredentials?: boolean }, profile: { id: string; name: string; error?: string }, log: string): string {
   const marker = `\n--- ${profile.name || profile.id} ---\n`;
   const at = log.lastIndexOf(marker);
-  const part = log.slice(at < 0 ? 0 : at + marker.length).split(/\n--- .* ---\n/, 1)[0]!;
+  const part = run.profiles.length > 1 || run.useCredentials !== false ? "" : log.slice(at < 0 ? 0 : at + marker.length).split(/\n--- .* ---\n/, 1)[0]!;
   const lines = part.split("\n").filter((line) => line.trim()).slice(-FIX_LOG_LINES)
     .map((line) => line.length > FIX_LINE_CHARS ? `${line.slice(0, FIX_LINE_CHARS)}…` : line);
   return `Fix my script "${script.name}"${script.id ? ` (id ${script.id})` : ""}. It failed on profile "${profile.name || profile.id}"${profile.error ? `: ${profile.error}` : "."}`
@@ -555,14 +557,9 @@ function SchedulesPanel({ scripts, profiles, onAskAgent }: { scripts: ScriptSumm
   const cadence = (job: ScheduleState["jobs"][number]) => job.dailyAt
     ? t("Daily at {time}", { time: job.dailyAt })
     : t("Every {n} hours", { n: String(job.everyHours) });
-  // The script a history entry ran, while the schedule and the script still exist.
-  const historyScript = (jobId: string) => {
-    const id = jobId.startsWith("open:") ? state.onOpen[jobId.slice(5)] : state.jobs.find((item) => item.id === jobId)?.scriptId;
-    return scripts.some((item) => item.id === id) ? id : undefined;
-  };
   const askFix = async (entry: ScheduleState["history"][number], scriptId: string) => {
     const failed = entry.profiles.find((item) => item.status === "failed")!;
-    onAskAgent(fixScriptPrompt({ id: scriptId, name: scriptName(scriptId) }, failed, await readRunLog(entry.runId)), false);
+    onAskAgent(fixScriptPrompt({ id: scriptId, name: scriptName(scriptId) }, entry, failed, await readRunLog(entry.runId)), false);
   };
   const jobLabel = (jobId: string) => {
     if (jobId.startsWith("open:")) return t("Run on open: {name}", { name: profiles.find((item) => item.id === jobId.slice(5))?.name ?? jobId.slice(5) });
@@ -649,7 +646,8 @@ function SchedulesPanel({ scripts, profiles, onAskAgent }: { scripts: ScriptSumm
       <header><h2>{t("History")}</h2></header>
       <div className="card-body">
         {state.history.length === 0 ? <p className="formnote">{t("Nothing has run yet.")}</p> : state.history.map((entry) => {
-          const scriptId = historyScript(entry.jobId);
+          // Older entries do not record their script, and a deleted script cannot be fixed.
+          const scriptId = scripts.some((item) => item.id === entry.scriptId) ? entry.scriptId : undefined;
           return <div key={`${entry.runId}-${entry.at}`} className={`script-profile ${entry.status}`}>
             <span>{new Date(entry.at).toLocaleString()} · {jobLabel(entry.jobId)}</span><span>{statusText(entry.status)}</span>
             {(entry.error || entry.profiles.some((item) => item.error)) && <small>{entry.error ? historyError(entry.error) : entry.profiles.filter((item) => item.error).map((item) => `${item.name}: ${item.error}`).join("; ")}</small>}
@@ -795,7 +793,7 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose, onAskAgent }: 
             <label className="fld"><span>{t("Parallel browsers")}</span><input className="input" type="number" min={1} step={1} value={concurrency} onChange={(event) => setConcurrency(event.target.value)} disabled={busy || runActive} /></label>
             <p className="formnote">{t("{n} selected profiles. Run up to this many at a time; the rest wait for a free slot. Browser startup may be staggered. Parallel runs share the log below.", { n: String(selectedProfiles.length) })}</p>
             {run && <div className="script-progress"><b>{run.scriptName} · {run.status}</b>{run.profiles.map((profile) => <div key={profile.id} className={`script-profile ${profile.status}`}><span>{profile.name}</span><span>{profile.status}</span>{profile.error && <small>{profile.error}</small>}{profile.warning && <small className="warning">{profile.warning}</small>}</div>)}
-              {failed && onAskAgent && <FixWithAiButton onClick={() => { onAskAgent(fixScriptPrompt({ id: run.scriptId, name: run.scriptName }, failed, log), false); onClose(); }} />}</div>}
+              {failed && onAskAgent && <FixWithAiButton onClick={() => { onAskAgent(fixScriptPrompt({ id: run.scriptId, name: run.scriptName }, run, failed, log), false); onClose(); }} />}</div>}
             {run && <pre className="script-log" aria-label={t("Script log")}>{log || t("Waiting for log output…")}</pre>}
           </>}
         </div>

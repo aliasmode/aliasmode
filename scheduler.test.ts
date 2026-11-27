@@ -22,7 +22,7 @@ function harness(options: { busy?: boolean } = {}) {
       if (state.busy) throw new ScriptError("A script is already running", 409);
       state.started.push(request);
       state.view = {
-        id: `run-${state.started.length}`, scriptId: request.scriptId, scriptName: "Script", status: "finished",
+        id: `run-${state.started.length}`, scriptId: request.scriptId, scriptName: "Script", useCredentials: request.useCredentials, status: "finished",
         profiles: request.profileIds.map((id) => id === state.failProfile
           ? { id, name: id, status: "failed" as const, error: "Profile is open on another device" }
           : { id, name: id, status: "succeeded" as const }),
@@ -50,7 +50,7 @@ test("a due job runs once and records history", async () => {
   const { jobs, history } = h.scheduler.list();
   expect(jobs[0]!.nextRun).toBe(h.clock.now + 2 * HOUR);
   expect(jobs[0]!.lastRun).toEqual({ at: h.clock.now, status: "succeeded" });
-  expect(history).toEqual([expect.objectContaining({ jobId: saved.id, status: "succeeded", runId: "run-1" })]);
+  expect(history).toEqual([expect.objectContaining({ jobId: saved.id, status: "succeeded", runId: "run-1", scriptId: "s1", useCredentials: false })]);
   const file = join(h.root, "schedules", "local.json");
   if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
 });

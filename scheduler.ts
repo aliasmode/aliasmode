@@ -31,6 +31,9 @@ export interface ScheduleHistoryEntry {
   profiles: { id: string; name: string; status: string; error?: string; warning?: string }[];
   runId: string;
   error?: string;
+  /** The script the run ran and whether it had saved logins; absent in older entries and when no run started. */
+  scriptId?: string;
+  useCredentials?: boolean;
 }
 
 export interface ScheduleState {
@@ -241,7 +244,7 @@ export class Scheduler {
     if (due.job) this.update(scope, due.job.id, (job) => ({ ...job, nextRun: nextAfter(job, now) }));
     this.inflight = this.options.runner.settled().then(() => {
       const { status, profiles } = summarize(this.options.runner.status());
-      this.record(scope, due.job, { jobId: id, at: this.now(), status, profiles, runId: view.id });
+      this.record(scope, due.job, { jobId: id, at: this.now(), status, profiles, runId: view.id, scriptId: request.scriptId, useCredentials: request.useCredentials });
     }).finally(() => { this.inflight = undefined; });
     await this.inflight;
   }
