@@ -54,6 +54,16 @@ const MACOS_BUILD = {
   webRtcIp: true,
   keepAlive: true,
 };
+// TODO-PIN(159): the Intel Mac build exists from the 159 release on. Until it is pinned here, an Intel
+// Mac fails the download check (chromium155_download); the URL, size and both SHA-256 values are placeholders.
+const MACOS_X64_BUILD = {
+  ...MACOS_BUILD,
+  root: `aliasmode-chromium-${OWN_VERSION}-macos-x64`,
+  url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-macos-x64.zip`,
+  archiveSha256: "0000000000000000000000000000000000000000000000000000000000000000",
+  size: 0,
+  executableSha256: "0000000000000000000000000000000000000000000000000000000000000000",
+};
 const LINUX_BUILD = {
   root: `aliasmode-chromium-${OWN_VERSION}-linux-x64`,
   url: `${OWN_RELEASE_URL}/aliasmode-chromium-${OWN_VERSION}-linux-x64.tar.zst`,
@@ -67,11 +77,12 @@ const LINUX_BUILD = {
   webRtcIp: true,
   keepAlive: true,
 };
-// Windows, Linux and Apple Silicon macOS get AliasMode's own builds.
-function chromiumBuild(platform: NodeJS.Platform): typeof WINDOWS_BUILD {
-  return platform === "darwin" ? MACOS_BUILD : platform === "linux" ? LINUX_BUILD : WINDOWS_BUILD;
+// Windows, Linux and macOS (Apple Silicon and Intel) get AliasMode's own builds.
+function chromiumBuild(platform: NodeJS.Platform, arch: string): typeof WINDOWS_BUILD {
+  if (platform === "darwin") return arch === "x64" ? MACOS_X64_BUILD : MACOS_BUILD;
+  return platform === "linux" ? LINUX_BUILD : WINDOWS_BUILD;
 }
-const BUILD = chromiumBuild(process.platform);
+const BUILD = chromiumBuild(process.platform, process.arch);
 export const ALIASMODE_CHROMIUM_ARCHIVE_URL = BUILD.url;
 export const ALIASMODE_CHROMIUM_ARCHIVE_SHA256 = BUILD.archiveSha256;
 export const ALIASMODE_CHROMIUM_EXECUTABLE_SHA256 = BUILD.executableSha256;
@@ -100,8 +111,8 @@ interface PinnedRuntime {
   executableSha256: string;
 }
 
-function chromium155(platform: NodeJS.Platform): PinnedRuntime {
-  const build = chromiumBuild(platform);
+function chromium155(platform: NodeJS.Platform, arch: string): PinnedRuntime {
+  const build = chromiumBuild(platform, arch);
   return {
     label: "AliasMode Chromium 155",
     runtime: "aliasmode",
@@ -178,9 +189,9 @@ export function cloakBrowserExecutableSha256(platform: NodeJS.Platform, arch: st
   return cloakBrowser(platform, arch)?.executableSha256;
 }
 
-/** The computers that can run Chromium 155. */
+/** The computers that can run AliasMode Chromium. */
 export function supportsChromium155Host(platform: NodeJS.Platform, arch: string): boolean {
-  return (platform === "win32" && arch === "x64") || (platform === "darwin" && arch === "arm64")
+  return (platform === "win32" && arch === "x64") || (platform === "darwin" && (arch === "arm64" || arch === "x64"))
     || (platform === "linux" && arch === "x64");
 }
 
@@ -203,9 +214,12 @@ export function linuxChromiumSandboxBlocked(
   return !exists(LINUX_CHROMIUM_APPARMOR_PROFILE);
 }
 
-/** New Chromium profiles made on an Apple Silicon Mac use this runtime, unless a CloakBrowser binary is configured. */
+/**
+ * New Chromium profiles made on a Mac use this runtime, unless a CloakBrowser binary is configured.
+ * CloakBrowser opens only the Mac's existing CloakBrowser profiles.
+ */
 export function hostChromiumRuntime(platform = process.platform, env = process.env, arch: string = process.arch): "aliasmode" | undefined {
-  return platform === "darwin" && arch === "arm64" && !env.CLOAKBROWSER_BINARY_PATH ? "aliasmode" : undefined;
+  return platform === "darwin" && supportsChromium155Host(platform, arch) && !env.CLOAKBROWSER_BINARY_PATH ? "aliasmode" : undefined;
 }
 
 /** New Chromium profiles that name no runtime use Chromium 155 wherever this computer can run it. */
@@ -310,8 +324,8 @@ async function downloadWithRetry(
   }
 }
 
-export function aliasmodeChromiumExecutable(root: string, platform = process.platform): string {
-  const build = chromiumBuild(platform);
+export function aliasmodeChromiumExecutable(root: string, platform = process.platform, arch: string = process.arch): string {
+  const build = chromiumBuild(platform, arch);
   return join(root, build.dir, build.executable);
 }
 
@@ -322,7 +336,7 @@ export function aliasmodeChromiumExecutable(root: string, platform = process.pla
 export function chromiumComponentsDir(executable: string, platform = process.platform): string | null {
   if (platform === "darwin") return null;
   const dir = dirname(executable);
-  return basename(dir) === chromiumBuild(platform).dir ? dir : null;
+  return basename(dir) === chromiumBuild(platform, process.arch).dir ? dir : null;
 }
 
 const COMPONENT_VERSION = /^\d+(\.\d+)*$/;
@@ -374,9 +388,9 @@ export async function shareChromiumComponents(userDataDir: string, componentsDir
   }
 }
 
-/** The pinned 155 archive of one system. */
-export function aliasmodeChromiumArchive(platform: NodeJS.Platform): { url: string; archiveSha256: string; executableSha256: string } {
-  const { url, archiveSha256, executableSha256 } = chromiumBuild(platform);
+/** The pinned archive of one system and processor. */
+export function aliasmodeChromiumArchive(platform: NodeJS.Platform, arch: string = process.arch): { url: string; archiveSha256: string; executableSha256: string } {
+  const { url, archiveSha256, executableSha256 } = chromiumBuild(platform, arch);
   return { url, archiveSha256, executableSha256 };
 }
 
@@ -474,8 +488,8 @@ function ensure(spec: PinnedRuntime, root: string, deps: AliasmodeChromiumDeps, 
 }
 
 /** Install the pinned Chromium 155 runtime and return its executable. */
-export function ensureAliasmodeChromium(root: string, deps: AliasmodeChromiumDeps = {}, platform = process.platform): Promise<string> {
-  return ensure(chromium155(platform), root, deps, platform);
+export function ensureAliasmodeChromium(root: string, deps: AliasmodeChromiumDeps = {}, platform = process.platform, arch: string = process.arch): Promise<string> {
+  return ensure(chromium155(platform, arch), root, deps, platform);
 }
 
 /** Install the pinned CloakBrowser build of this computer and return its executable. */
@@ -504,7 +518,7 @@ export function pruneBrowserRuntimes(root: string, inUse: readonly string[], pla
   } catch {
     return;
   }
-  const pins = [chromium155(platform), ...(cloakBrowser(platform, arch) ? [cloakBrowser(platform, arch)!] : [])];
+  const pins = [chromium155(platform, arch), ...(cloakBrowser(platform, arch) ? [cloakBrowser(platform, arch)!] : [])];
   const keep = new Set(pins.flatMap((spec) => [spec.dir, partialName(spec)]));
   for (const entry of entries) {
     if (!/^\.?(chromium|cloakbrowser)-/.test(entry) || keep.has(entry)) continue;

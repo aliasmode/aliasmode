@@ -22,7 +22,7 @@ import type {
   ProxySpec,
 } from "./types.ts";
 import { completeProfileFingerprint, normalizeChromiumRuntime, normalizeProfileEngine } from "./firefox-config.ts";
-import { normalizeProfileHardware } from "./fingerprint.ts";
+import { normalizeProfileHardware, normalizeProfileIdentity } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import { assertValidProfile } from "./profile-validation.ts";
@@ -59,6 +59,7 @@ export class ProfileStore {
         locale_manual INTEGER NOT NULL DEFAULT 0,
         display_scale REAL NOT NULL DEFAULT 0,
         block_media INTEGER NOT NULL DEFAULT 0,
+        identity_json TEXT NOT NULL DEFAULT '',
         locale TEXT NOT NULL DEFAULT '',
         screen_width INTEGER NOT NULL DEFAULT 1920,
         screen_height INTEGER NOT NULL DEFAULT 1080,
@@ -186,6 +187,7 @@ export class ProfileStore {
       "locale_manual INTEGER NOT NULL DEFAULT 0",
       "display_scale REAL NOT NULL DEFAULT 0",
       "block_media INTEGER NOT NULL DEFAULT 0",
+      "identity_json TEXT NOT NULL DEFAULT ''",
     ]) {
       try {
         this.db.exec(`ALTER TABLE profiles ADD COLUMN ${col}`);
@@ -444,6 +446,9 @@ export class ProfileStore {
       });
     // An edit or re-import that omits the display scale keeps it; a Cloud copy that carries one sets it.
     if (p.displayScale !== undefined) this.setDisplayScale(p.id, p.displayScale);
+    // The identity is fixed at creation: an edit or re-import that omits it keeps it; a Cloud copy that carries one sets it.
+    const identity = chromiumRuntime ? normalizeProfileIdentity(p.identity) : undefined;
+    if (identity) this.db.query("UPDATE profiles SET identity_json = ? WHERE id = ?").run(JSON.stringify(identity), p.id);
     if (p.group) this.registerGroup(p.group);
     this.onProfileSaved?.(p);
   }
@@ -1120,6 +1125,7 @@ function rowToProfile(row: any): Profile {
     engine: browser.engine,
     ...(row.chromium_runtime ? { chromiumRuntime: normalizeChromiumRuntime(row.chromium_runtime, browser.engine) } : {}),
     ...(row.hardware_json ? { hardware: normalizeProfileHardware(JSON.parse(row.hardware_json)) } : {}),
+    ...(row.identity_json ? { identity: normalizeProfileIdentity(JSON.parse(row.identity_json)) } : {}),
     ...(browser.firefox ? { firefox: browser.firefox } : {}),
     accId: row.acc_id ?? "",
     name: row.name ?? "",

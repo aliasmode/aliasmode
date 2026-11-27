@@ -328,6 +328,7 @@
   "Readable TXT, CSV, JSON, or XLSX exports from AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut, and similar browsers": "Читаемые экспорты TXT, CSV, JSON или XLSX из AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut и похожих браузеров",
   "Chrome version": "Версия Chrome",
   "CloakBrowser 146 (default)": "CloakBrowser 146 (по умолчанию)",
+  "CloakBrowser 145 (default)": "CloakBrowser 145 (по умолчанию)",
   "AliasMode Chromium 155 (default)": "AliasMode Chromium 155 (по умолчанию)",
   "Downloads once (about 190 MB) on each computer that opens it.": "Браузер загружается один раз (около 190 МБ) на каждом компьютере, где его открывают.",
   "CloakBrowser profiles on one computer can be linked to each other. Use AliasMode Chromium or AliasMode Firefox for separate identities.": "Профили CloakBrowser на одном компьютере могут быть связаны между собой. Для отдельных цифровых личностей используйте AliasMode Chromium или AliasMode Firefox.",
@@ -904,5 +905,6 @@
   "Skipped": "Пропущено",
   "skipped: profile closed": "пропущено: профиль закрыт",
   "Official": "Официальный",
-  "Ask AI to fix this script": "Попросить ИИ исправить этот скрипт"
+  "Ask AI to fix this script": "Попросить ИИ исправить этот скрипт",
+  "Less safe on strict sites like Amazon, Nike and Google.": "Менее безопасно на строгих сайтах, таких как Amazon, Nike и Google."
 }

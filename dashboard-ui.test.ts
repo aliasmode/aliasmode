@@ -300,8 +300,9 @@ test("dashboard selects browser for new profiles", () => {
   // Chrome version: 155 is the default where this computer can run it, and 146 stays the default
   // elsewhere. 155 works in Local and Cloud, not legacy Remote. Choosing 146 asks for CloakBrowser.
   expect(createModal).toContain('{form.engine === "chromium" && !appMode?.legacyRemote && !appMode?.chromiumRuntime && (');
-  expect(createModal).toContain('? <><option value="aliasmode">{t("AliasMode Chromium 155 (default)")}</option><option value="">{t("CloakBrowser 146")}</option></>');
-  expect(createModal).toContain(': <><option value="">{t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 155")}</option></>}');
+  // A Mac runs CloakBrowser 145: CloakBrowser publishes no Mac build after it.
+  expect(createModal).toContain('? <><option value="aliasmode">{t("AliasMode Chromium 155 (default)")}</option><option value="">{appMode.hostOs === "macos" ? t("CloakBrowser 145") : t("CloakBrowser 146")}</option></>');
+  expect(createModal).toContain(': <><option value="">{appMode?.hostOs === "macos" ? t("CloakBrowser 145 (default)") : t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 155")}</option></>}');
   expect(app).toContain('chromiumRuntime: "" as "" | "aliasmode"');
   expect(app).toContain('...(form.engine === "chromium" && !appMode?.legacyRemote ? { chromiumRuntime: form.chromiumRuntime || "cloakbrowser" } : {}),');
   // A CloakBrowser choice or profile shows the linkability note, in every bundled language.
@@ -341,6 +342,16 @@ test("both engines offer OS choices at creation and only Chromium allows later O
   expect(settings).toContain('readOnly tabIndex={-1} className="ro"');
   expect(app).toContain('platformOs={form.platformOs} onPlatformOsChange={(value) => setF("platformOs", value)}');
   expect(app).toContain('platformOs={editForm.platformOs ?? ""} onPlatformOsChange={editEngine === "chromium" ? (value) => setEF("platformOs", value) : undefined}');
+  // Another operating system than this computer's gets one short warning, in every bundled language.
+  const warning = "Less safe on strict sites like Amazon, Nike and Google.";
+  expect(settings).toContain(`{platformOs && hostOs && platformOs !== hostOs && <small>{t("${warning}")}</small>}`);
+  expect(app).toContain('onPlatformOsChange={(value) => setF("platformOs", value)} hostOs={appMode?.hostOs} />');
+  expect(app.match(/hostOs=\{appMode\?\.hostOs\}/g)).toHaveLength(2);
+  for (const locale of ["ru-RU", "zh-CN"]) {
+    const catalog = JSON.parse(readFileSync(join(import.meta.dir, "web", "locales", `${locale}.json`), "utf8"));
+    expect(catalog[warning]).toBeTruthy();
+    expect(catalog["CloakBrowser 145 (default)"]).toContain("CloakBrowser 145");
+  }
 });
 
 test("Local timezone follows the proxy and can be refreshed on request", () => {

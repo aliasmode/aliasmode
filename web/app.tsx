@@ -808,6 +808,7 @@ function FingerprintSettings({
   disabled = false,
   onUndo,
   hardware,
+  hostOs,
 }: {
   engine: "chromium" | "firefox";
   chromiumRuntime?: string;
@@ -826,6 +827,8 @@ function FingerprintSettings({
   disabled?: boolean;
   onUndo?: () => void;
   hardware?: { gpu?: string; cores?: number };
+  /** This computer's operating system: another one gets a warning. */
+  hostOs?: string;
 }) {
   const { t } = useTranslation();
   return (
@@ -855,6 +858,7 @@ function FingerprintSettings({
           ) : (
             <input value={{ windows: "Windows", macos: "macOS", linux: "Linux" }[platformOs] ?? "Automatic"} readOnly tabIndex={-1} className="ro" />
           )}
+          {platformOs && hostOs && platformOs !== hostOs && <small>{t("Less safe on strict sites like Amazon, Nike and Google.")}</small>}
         </label>
         {onTimezoneChange && (
           <label className="fld">
@@ -5042,9 +5046,10 @@ function App() {
                 <label className="fld">
                   <span>{t("Chrome version")}</span>
                   <select value={form.chromiumRuntime} onChange={(e) => setF("chromiumRuntime", e.target.value as "" | "aliasmode")}>
+                    {/* CloakBrowser publishes no Mac build after 145. */}
                     {appMode?.defaultChromiumRuntime
-                      ? <><option value="aliasmode">{t("AliasMode Chromium 155 (default)")}</option><option value="">{t("CloakBrowser 146")}</option></>
-                      : <><option value="">{t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 155")}</option></>}
+                      ? <><option value="aliasmode">{t("AliasMode Chromium 155 (default)")}</option><option value="">{appMode.hostOs === "macos" ? t("CloakBrowser 145") : t("CloakBrowser 146")}</option></>
+                      : <><option value="">{appMode?.hostOs === "macos" ? t("CloakBrowser 145 (default)") : t("CloakBrowser 146 (default)")}</option><option value="aliasmode">{t("AliasMode Chromium 155")}</option></>}
                   </select>
                   <small>{!form.chromiumRuntime
                     ? t(CLOAKBROWSER_NOTE)
@@ -5113,7 +5118,7 @@ function App() {
                 </div>
               </details>
               <ProxyCheckFeedback hasProxy={createHasProxy} state={createProxyCheck} />
-              <FingerprintSettings engine={form.engine} chromiumRuntime={appMode?.legacyRemote ? "" : appMode?.chromiumRuntime ?? form.chromiumRuntime} screen={form.screen} onScreenChange={(value) => setF("screen", value)} platformOs={form.platformOs} onPlatformOsChange={(value) => setF("platformOs", value)} />
+              <FingerprintSettings engine={form.engine} chromiumRuntime={appMode?.legacyRemote ? "" : appMode?.chromiumRuntime ?? form.chromiumRuntime} screen={form.screen} onScreenChange={(value) => setF("screen", value)} platformOs={form.platformOs} onPlatformOsChange={(value) => setF("platformOs", value)} hostOs={appMode?.hostOs} />
             </div>
             <div className="modal-foot">
               <button className="btn ghost" onClick={closeCreate}>{t("Cancel")}</button>
@@ -5293,6 +5298,7 @@ function App() {
                     disabled={editSaving || timezoneBusy}
                     onUndo={() => setEditForm((form) => ({ ...form, ...editInitialFingerprint }))}
                     hardware={editHardware}
+                    hostOs={appMode?.hostOs}
                   />}
                   <label className="extchk">
                     <input type="checkbox" checked={editForm.blockMedia === "1"} disabled={editSaving} onChange={(e) => setEF("blockMedia", e.target.checked ? "1" : "")} />

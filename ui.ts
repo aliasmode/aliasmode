@@ -60,7 +60,7 @@ import {
 import { decodePortableProfile } from "./portable-profile.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { normalizeProxySpec, proxyHostPort, proxyLegacyString, type ProxyInput } from "./proxy.ts";
-import { convertMobilePersonaToDesktop, editedProfileHardware, isMobileUserAgent } from "./fingerprint.ts";
+import { convertMobilePersonaToDesktop, editedProfileHardware, hostPlatformOs, isMobileUserAgent } from "./fingerprint.ts";
 import { setFirefoxScreen, syncFirefoxTimezone } from "./firefox-config.ts";
 import { join, resolve, dirname } from "node:path";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -875,7 +875,7 @@ export async function handleUiRequest(
       ...(options.runtimeMode ? { restartRequired: config.mode !== options.runtimeMode } : {}),
       ...(hostChromiumRuntime() ? { chromiumRuntime: hostChromiumRuntime() } : {}),
       ...(!remote && supportsChromium155Host(process.platform, process.arch) ? { defaultChromiumRuntime: "aliasmode" } : {}),
-      ...(!remote ? { defaultEngine: defaultProfileEngine() } : {}),
+      ...(!remote ? { defaultEngine: defaultProfileEngine(), hostOs: hostPlatformOs() } : {}),
     });
   }
 

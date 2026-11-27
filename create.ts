@@ -13,7 +13,8 @@
 import type { Profile, ProfileEngine, ProxySpec } from "./types.ts";
 import { completeProfileFingerprint, createFirefoxProfileConfig, firefoxPersonaOs, normalizeChromiumRuntime, syncFirefoxTimezone } from "./firefox-config.ts";
 import { chromiumDeviceScale, defaultChromiumRuntime, hostDisplayScale, hostDisplaySize } from "./aliasmode-chromium.ts";
-import { deterministicSeed, generateProfileHardware, hostPlatformOs } from "./fingerprint.ts";
+import { deterministicSeed, generateProfileHardware, hostPlatformOs, newProfileGpuIdentity, platformFromUA, switchOff } from "./fingerprint.ts";
+import { hostGpuVendor } from "./host-gpu.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { isFirefoxAddonId } from "./extensions.ts";
 import { parseStrictCustomNo, parseStrictResolution, parsePlatformOs } from "./parse.ts";
@@ -105,10 +106,17 @@ export function generateId(exists: (id: string) => boolean): string {
   throw new Error("could not generate a unique profile id");
 }
 
+/** This computer's GPU vendor for a new profile, unless the gpu-family switch is off. */
+function newProfileGpuVendor(): string | undefined {
+  return switchOff("gpu-family") ? undefined : hostGpuVendor();
+}
+
+/** `gpuVendor` is this computer's GPU vendor: a new profile claims a GPU of that vendor where it can. */
 export function buildNewProfile(
   input: NewProfileInput,
   exists: (id: string) => boolean,
   seedFor: (id: string) => number = deterministicSeed,
+  gpuVendor = newProfileGpuVendor(),
 ): Profile {
   const id = generateId(exists);
   const seed = seedFor(id);
@@ -127,8 +135,9 @@ export function buildNewProfile(
   const selected = screen ? parseStrictResolution(screen) : engine === "firefox" && display ? display : defaultScreen(display);
   const platformOs = parsePlatformOs(input.platformOs) ?? hostPlatformOs();
   const firefox = engine === "firefox"
-    ? createFirefoxProfileConfig(selected.width, selected.height, platformOs, seed)
+    ? createFirefoxProfileConfig(selected.width, selected.height, platformOs, seed, gpuVendor)
     : undefined;
+  const gpu = chromiumRuntime ? newProfileGpuIdentity(platformOs, hostPlatformOs(), gpuVendor) : undefined;
   const firefoxUa = firefox?.config["navigator.userAgent"];
   const firefoxScreenWidth = firefox?.config["screen.width"];
   const firefoxScreenHeight = firefox?.config["screen.height"];
@@ -138,6 +147,7 @@ export function buildNewProfile(
     id,
     engine,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
+    ...(gpu ? { identity: { gpu } } : {}),
     ...(engine === "chromium" && !chromiumRuntime ? { hardware: generateProfileHardware(seed) } : {}),
     ...(firefox ? { firefox } : {}),
     accId: "",
@@ -211,14 +221,17 @@ export function freshIdentity(profile: Profile, taken: (seed: number) => boolean
  * browser of every other new profile on this computer. It keeps its screen, system, seed and
  * timezone. Chrome extensions need Chromium.
  */
-export function withDefaultBrowser(profile: Profile): Profile {
+export function withDefaultBrowser(profile: Profile, gpuVendor = newProfileGpuVendor()): Profile {
   const engine = profile.engine ?? (profile.extensions?.some((id) => !isFirefoxAddonId(id)) ? "chromium" : defaultProfileEngine());
   if (engine === "chromium") {
     const chromiumRuntime = defaultChromiumRuntime();
-    return { ...profile, engine, ...(chromiumRuntime ? { chromiumRuntime } : {}) };
+    const gpu = chromiumRuntime
+      ? newProfileGpuIdentity(parsePlatformOs(profile.platformOs) ?? platformFromUA(profile.ua) ?? hostPlatformOs(), hostPlatformOs(), gpuVendor)
+      : undefined;
+    return { ...profile, engine, ...(chromiumRuntime ? { chromiumRuntime } : {}), ...(gpu ? { identity: { gpu } } : {}) };
   }
   const platformOs = parsePlatformOs(profile.platformOs) ?? hostPlatformOs();
-  const firefox = createFirefoxProfileConfig(profile.screenWidth, profile.screenHeight, platformOs, profile.fingerprintSeed);
+  const firefox = createFirefoxProfileConfig(profile.screenWidth, profile.screenHeight, platformOs, profile.fingerprintSeed, gpuVendor);
   const { "navigator.userAgent": ua, "screen.width": width, "screen.height": height, timezone } = firefox.config;
   const imported: Profile = {
     ...profile,

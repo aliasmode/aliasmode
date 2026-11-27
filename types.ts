@@ -73,6 +73,20 @@ export interface ProfileHardware {
   cores: number;
 }
 
+/**
+ * Identity inputs fixed when an AliasMode Chromium profile is made. Values are short lowercase
+ * ids; a value this version does not know is kept unchanged. Profiles made before it have none.
+ */
+export interface ProfileIdentity {
+  /**
+   * The GPU vendor of the computer the profile was made on ("nvidia", "intel", "amd", "apple",
+   * "qualcomm"), and the engine GPU family chosen for it, if the engine has one (GPU-family rule).
+   */
+  gpu?: { vendor: string; anchor?: string };
+  /** Reserved for real variation: the profile's text rendering bucket. No version sets it yet. */
+  textBucket?: string;
+}
+
 export interface Profile {
   /** AdsPower profile id, e.g. "k1d0cd11". Stays the same after migration. */
   id: string;
@@ -82,6 +96,8 @@ export interface Profile {
   chromiumRuntime?: ChromiumRuntime;
   /** Stored hardware of a CloakBrowser profile. Profiles made before it existed have none and keep the engine default. */
   hardware?: ProfileHardware;
+  /** AliasMode Chromium only: identity inputs fixed at creation (see ProfileIdentity). */
+  identity?: ProfileIdentity;
   /**
    * Firefox's complete Camoufox identity. It is generated once on creation and
    * must accompany every Firefox profile; Chromium profiles must not carry it.

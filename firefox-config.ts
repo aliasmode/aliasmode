@@ -98,9 +98,21 @@ const graphicsIdentities = await (async (): Promise<Record<PersonaOs | "intelMac
   };
 })();
 
-/** Choose the graphics identity of a profile. The same seed always gives the same one. */
-export function graphicsIdentity(platformOs: PersonaOs, seed: number): Record<string, JsonValue> {
-  return pickGraphics(graphicsIdentities[platformOs], seed);
+const GPU_VENDOR_CARDS: Record<string, RegExp> = {
+  nvidia: /NVIDIA|GeForce/, intel: /Intel/, amd: /\bAMD\b|\bATI\b|Radeon/, apple: /^Apple/, qualcomm: /Qualcomm|Adreno/,
+};
+
+/**
+ * Choose the graphics identity of a profile. The same seed always gives the same one. With
+ * `gpuVendor`, this computer's GPU vendor, only cards of that vendor (GPU-family rule), when the
+ * system has any: pages draw on this computer's GPU.
+ */
+export function graphicsIdentity(platformOs: PersonaOs, seed: number, gpuVendor?: string): Record<string, JsonValue> {
+  const pattern = gpuVendor ? GPU_VENDOR_CARDS[gpuVendor] : undefined;
+  const family = pattern
+    ? graphicsIdentities[platformOs].filter((option) => pattern.test(`${option.keys["webGl:vendor"]} ${option.keys["webGl:renderer"]}`))
+    : [];
+  return pickGraphics(family.length ? family : graphicsIdentities[platformOs], seed);
 }
 
 /** The card of a macOS profile on an Intel Mac: one of that Mac's GPU vendor when it is known. */
@@ -175,13 +187,15 @@ const FIREFOX_UA_MAJOR_VERSION = "156";
 /**
  * Generate an OS-matched identity once, for durable profile storage. With a seed the
  * identity also has its own graphics card, so the profile shows the same hardware on
- * every computer instead of the graphics card of the computer that opens it.
+ * every computer instead of the graphics card of the computer that opens it. The card is
+ * of `gpuVendor`, this computer's GPU vendor, where the system has one (graphicsIdentity).
  */
 export function createFirefoxProfileConfig(
   screenWidth: number,
   screenHeight: number,
   platformOs: PersonaOs = "windows",
   seed?: number,
+  gpuVendor?: string,
 ): FirefoxProfileConfig {
   // The chosen size is the screen. The window opens at the app's usual fraction of it.
   const windowSize = launchWindowSize(screenWidth, screenHeight);
@@ -206,7 +220,7 @@ export function createFirefoxProfileConfig(
     config.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   }
   if (seed !== undefined) {
-    Object.assign(config, graphicsIdentity(platformOs, seed));
+    Object.assign(config, graphicsIdentity(platformOs, seed, gpuVendor));
     // The same count a launch would pick for this card (firefoxLaunchConfig).
     fitThreads(config, platformOs, false, (key) => seedFraction(deterministicSeed(`${seed}:${key}`)));
   }
