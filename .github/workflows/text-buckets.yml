@@ -1,0 +1,26 @@
+name: Text render measure
+# Measures canvas/text hashes of stock Chrome and Firefox under Windows text settings on a throwaway runner.
+on:
+  push:
+    branches: [measure/text-buckets]
+permissions:
+  contents: read
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Measure
+        shell: pwsh
+        run: ./measure/run.ps1 -Out "$env:RUNNER_TEMP\out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: text-buckets-${{ matrix.os }}
+          path: ${{ runner.temp }}/out
+          retention-days: 3

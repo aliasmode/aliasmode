@@ -1,0 +1,123 @@
+<!doctype html><html><head><meta charset="utf-8"><title>bucket probe</title></head><body>
+<div id="dom" style="position:absolute;left:0;top:0;white-space:nowrap"></div>
+<script>
+const FONTS = ['Arial', 'Times New Roman', 'Courier New', 'Segoe UI', 'Verdana', 'Georgia', 'Tahoma', 'sans-serif', 'serif', 'monospace', 'system-ui'];
+const STR = ['Cwm fjordbank gly \u{1F603}', 'mmmmmmmmmmlli', 'The quick brown fox 0123456789', 'Åéß€ΩЖאا'];
+const enc = new TextEncoder();
+async function sha(d) {
+  const b = typeof d === 'string' ? enc.encode(d) : d;
+  const h = await crypto.subtle.digest('SHA-256', b);
+  return [...new Uint8Array(h)].map(x => x.toString(16).padStart(2, '0')).join('').slice(0, 16);
+}
+function canvas(w, h, opts) { const c = document.createElement('canvas'); c.width = w; c.height = h; return [c, c.getContext('2d', opts)]; }
+// FingerprintJS v4 getCanvasFingerprint, verbatim drawing.
+function fpjsText() {
+  const [c, x] = canvas(240, 60);
+  x.textBaseline = 'alphabetic'; x.fillStyle = '#f60'; x.fillRect(100, 1, 62, 20);
+  x.fillStyle = '#069'; x.font = '11pt "Times New Roman"';
+  const t = `Cwm fjordbank gly ${String.fromCharCode(55357, 56835)}`;
+  x.fillText(t, 2, 15); x.fillStyle = 'rgba(102, 204, 0, 0.2)'; x.font = '18pt Arial'; x.fillText(t, 4, 45);
+  return c.toDataURL();
+}
+function fpjsGeometry() {
+  const [c, x] = canvas(122, 110);
+  x.globalCompositeOperation = 'multiply';
+  for (const [color, px, py] of [['#f2f', 40, 40], ['#2ff', 80, 40], ['#ff2', 60, 80]]) {
+    x.fillStyle = color; x.beginPath(); x.arc(px, py, 40, 0, Math.PI * 2, true); x.closePath(); x.fill();
+  }
+  x.fillStyle = '#f9c'; x.arc(60, 60, 60, 0, Math.PI * 2, true); x.arc(60, 60, 20, 0, Math.PI * 2, true); x.fill('evenodd');
+  return c.toDataURL();
+}
+function drawText300(x, opaque) {
+  if (opaque) { x.fillStyle = '#fff'; x.fillRect(0, 0, 300, 150); }
+  let y = 12;
+  for (const [i, f] of FONTS.entries()) {
+    x.fillStyle = i % 3 === 0 ? '#000' : i % 3 === 1 ? '#1a4d8f' : '#7a2a00';
+    x.font = `${11 + (i % 4) * 2}px "${f}"`;
+    x.fillText('Cwm fjordbank gly 0123 éß', 2, y); y += 13;
+  }
+}
+function text300(opaque) {
+  const [c, x] = canvas(300, 150, opaque ? { alpha: false } : undefined);
+  drawText300(x, opaque);
+  return x.getImageData(0, 0, 300, 150).data;
+}
+function inkStats(d) {
+  // Count gray vs colored (subpixel) anti-aliased pixels: tells AA mode without eyeballing.
+  let ink = 0, color = 0, partial = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+    if (a === 0) continue; ink++;
+    if (a < 255) partial++;
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 24) color++;
+  }
+  return { ink, partial, color };
+}
+function bwText() {
+  // Black-on-transparent text only: AA/gamma show directly in alpha.
+  const [c, x] = canvas(200, 40); x.fillStyle = '#000'; x.font = '16px Arial'; x.fillText('Cwm fjordbank gly', 2, 26);
+  return x.getImageData(0, 0, 200, 40).data;
+}
+function bwTextOpaque() {
+  const [c, x] = canvas(200, 40, { alpha: false }); x.fillStyle = '#fff'; x.fillRect(0, 0, 200, 40);
+  x.fillStyle = '#000'; x.font = '16px Arial'; x.fillText('Cwm fjordbank gly', 2, 26);
+  return x.getImageData(0, 0, 200, 40).data;
+}
+function emoji() { const [c, x] = canvas(60, 60); x.font = '40px sans-serif'; x.fillText('\u{1F600}', 5, 45); return x.getImageData(0, 0, 60, 60).data; }
+function metrics() {
+  const [c, x] = canvas(10, 10); const m = {};
+  for (const f of FONTS) for (const s of STR) {
+    x.font = `16px "${f}"`; const r = x.measureText(s);
+    m[f + '|' + s.slice(0, 4)] = [r.width, r.actualBoundingBoxLeft, r.actualBoundingBoxRight, r.actualBoundingBoxAscent, r.actualBoundingBoxDescent, r.fontBoundingBoxAscent, r.fontBoundingBoxDescent];
+  }
+  return m;
+}
+function domText() {
+  const d = document.getElementById('dom'); const m = {};
+  for (const f of FONTS) {
+    const s = document.createElement('span'); s.style.font = `16px "${f}"`; s.textContent = STR[0] + ' ' + STR[2]; d.appendChild(s);
+    const r = s.getBoundingClientRect(); m[f] = [r.width, r.height]; d.removeChild(s);
+  }
+  return m;
+}
+function webgl() {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const gl = c.getContext('webgl', { preserveDrawingBuffer: true }); if (!gl) return null;
+  const vs = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(vs, 'attribute vec2 p;varying vec2 v;void main(){v=p;gl_Position=vec4(p,0.,1.);}'); gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(fs, 'precision mediump float;varying vec2 v;void main(){gl_FragColor=vec4(sin(v.x*7.3)*.5+.5,cos(v.y*5.1)*.5+.5,fract(v.x*v.y*13.7),1.);}'); gl.compileShader(fs);
+  const p = gl.createProgram(); gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p); gl.useProgram(p);
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-.9, -.9, .95, -.7, -.2, .93, .8, .8]), gl.STATIC_DRAW);
+  const l = gl.getAttribLocation(p, 'p'); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 0, 0);
+  gl.clearColor(0.1, 0.2, 0.3, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  const px = new Uint8Array(256 * 128 * 4); gl.readPixels(0, 0, 256, 128, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const e = gl.getExtension('WEBGL_debug_renderer_info');
+  return { px, renderer: e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER), vendor: e ? gl.getParameter(e.UNMASKED_VENDOR_WEBGL) : '' , samples: gl.getParameter(gl.SAMPLES) };
+}
+(async () => {
+  const q = new URLSearchParams(location.search); const out = { label: q.get('label'), rep: q.get('rep'), ua: navigator.userAgent, dpr: devicePixelRatio };
+  const step = async (k, f) => { try { await f(); } catch (e) { out[k + '.error'] = String(e); } };
+  try { await document.fonts.ready; } catch {}
+  await step('fpjs', async () => {
+    const t1 = fpjsText(), t2 = fpjsText();
+    out['fpjs.text'] = await sha(t1); out['fpjs.stable'] = t1 === t2; out['fpjs.geometry'] = await sha(fpjsGeometry());
+  });
+  await step('canvas', async () => {
+    const a = text300(false), o = text300(true);
+    out['text300'] = await sha(a); out['text300.ink'] = inkStats(a);
+    out['opaque300'] = await sha(o);
+    const bw = bwText(); out['bw16'] = await sha(bw); out['bw16.ink'] = inkStats(bw);
+    const bo = bwTextOpaque(); out['bw16opaque'] = await sha(bo); out['bw16opaque.ink'] = inkStats(bo);
+    out['emoji'] = await sha(emoji());
+  });
+  await step('text', async () => {
+    const m = metrics(); out['textMetrics'] = await sha(JSON.stringify(m)); out['textMetrics.arialCwm'] = m['Arial|Cwm '];
+    const d = domText(); out['domText'] = await sha(JSON.stringify(d)); out['domText.arial'] = d['Arial'];
+  });
+  await step('webgl', async () => {
+    const w = webgl(); if (!w) { out['webgl'] = 'none'; return; }
+    out['webgl.image'] = await sha(w.px); out['webgl.renderer'] = w.renderer; out['webgl.vendor'] = w.vendor; out['webgl.samples'] = w.samples;
+  });
+  await fetch('/result', { method: 'POST', body: JSON.stringify(out) });
+  document.title = 'done';
+})();
+</script></body></html>
