@@ -2,6 +2,7 @@ import { accessSync, constants, createWriteStream, existsSync, mkdirSync, mkdtem
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { browserEnvText, sha256File, windowsSystemTool } from "./browser-install.ts";
+import { systemProxyFetch } from "./system-proxy.ts";
 
 export interface FirefoxRuntimeBuild {
   platform: NodeJS.Platform;
@@ -106,7 +107,7 @@ export async function installFirefox(
   const cwd = resolve(options.cwd ?? process.cwd());
   const downloaded = options.archive
     ? undefined
-    : await downloadFirefoxArchive(build, cwd, dependencies.fetch ?? fetch);
+    : await downloadFirefoxArchive(build, cwd, dependencies.fetch ?? systemProxyFetch);
   const archive = options.archive ? resolve(options.archive) : downloaded!.archive;
   try {
     if (await sha256File(archive) !== build.archiveSha256) {
