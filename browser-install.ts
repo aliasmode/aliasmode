@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -52,6 +53,33 @@ export async function sha256File(path: string): Promise<string> {
     stream.on("end", resolveDone);
   });
   return hash.digest("hex");
+}
+
+const fileHashes = new Map<string, { identity: string; sha256: string }>();
+
+function fileIdentity(path: string): { identity: string; ctimeMs: number } {
+  const stat = statSync(path);
+  return { identity: [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":"), ctimeMs: stat.ctimeMs };
+}
+
+/**
+ * sha256File, read again only when the file's identity changes: path, device and inode, size,
+ * mtime and ctime. A replaced file gets a new inode; any write in place updates ctime, which
+ * programs cannot set back. A file changed in the last 2 s is not remembered, because a second
+ * write in the same timestamp tick could keep the identity.
+ */
+export async function sha256FileCached(path: string, hashFile = sha256File): Promise<string> {
+  const before = fileIdentity(path);
+  const known = fileHashes.get(path);
+  if (known?.identity === before.identity) return known.sha256;
+  const startedAt = Date.now();
+  const sha256 = await hashFile(path);
+  if (fileIdentity(path).identity === before.identity && startedAt - before.ctimeMs >= 2000) {
+    fileHashes.set(path, { identity: before.identity, sha256 });
+  } else {
+    fileHashes.delete(path);
+  }
+  return sha256;
 }
 
 // Antivirus can briefly hold freshly extracted files open, so Windows refuses the rename.

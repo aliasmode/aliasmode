@@ -14,7 +14,6 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import {
   closeSync,
   copyFileSync,
-  createReadStream,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -66,7 +65,7 @@ import {
   chromiumFontconfigFile, ensureFirefoxFontPack, FIREFOX_FONT_PACKS, firefoxFontPackFor, firefoxFontPackPrefs, pruneFirefoxFontPacks,
   type FirefoxFontPack,
 } from "./firefox-fonts.ts";
-import { renameWhenUnlocked, windowsSystemTool } from "./browser-install.ts";
+import { renameWhenUnlocked, sha256FileCached, windowsSystemTool } from "./browser-install.ts";
 import {
   ALIASMODE_CHROMIUM_EXECUTABLE_SHA256,
   ALIASMODE_CHROMIUM_HOST_SCALE,
@@ -470,16 +469,6 @@ function isHttpUrl(raw: string): boolean {
   } catch {
     return false;
   }
-}
-
-function sha256File(path: string): Promise<string> {
-  return new Promise((resolveHash, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(path);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => resolveHash(hash.digest("hex")));
-  });
 }
 
 const TELEGRAM_PLATFORM_ALIASES = new Set(["telegram.org", "telegram", "web.telegram.org"]);
@@ -1281,16 +1270,17 @@ export class Launcher {
     }
     if (!stat.isFile()) throw new Error(`${engine} binary is not a regular file`);
 
-    const key = [expected, path, stat.dev, stat.ino, stat.size, stat.mtimeMs].join(":");
+    const key = [expected, path, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
     if (!forceHash && this.verifiedBinaryCache?.key === key) return this.verifiedBinaryCache;
     if (!forceHash && this.binaryVerificationInFlight?.key === key) return this.binaryVerificationInFlight.promise;
 
     let promise!: Promise<{ key: string; path: string; sha256: string }>;
-    promise = sha256File(path)
+    promise = sha256FileCached(path)
       .then((actual) => {
         // Detect an updater replacing the executable while it is being read.
         // The forced pre-spawn pass below also closes the longer preflight
         // window between the initial approval check and process creation.
+        // It reads the file again only when its identity (inode, size, mtime, ctime) changed.
         let finalPath: string;
         let finalStat: ReturnType<typeof statSync>;
         try {
@@ -1302,7 +1292,7 @@ export class Launcher {
             (error instanceof Error ? error.message : String(error)),
           );
         }
-        const finalKey = [expected, finalPath, finalStat.dev, finalStat.ino, finalStat.size, finalStat.mtimeMs].join(":");
+        const finalKey = [expected, finalPath, finalStat.dev, finalStat.ino, finalStat.size, finalStat.mtimeMs, finalStat.ctimeMs].join(":");
         if (finalPath !== path || finalKey !== key || !finalStat.isFile()) {
           throw new Error("approved CloakBrowser binary changed while it was being verified; refusing to launch");
         }

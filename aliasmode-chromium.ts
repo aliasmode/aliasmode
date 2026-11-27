@@ -9,7 +9,7 @@ import { cp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import {
   CLOAKBROWSER_MACOS_VERSION, CLOAKBROWSER_VERSION, CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256,
-  CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256, renameWhenUnlocked, sha256File, windowsSystemTool,
+  CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256, renameWhenUnlocked, sha256File, sha256FileCached, windowsSystemTool,
 } from "./browser-install.ts";
 import { trackRuntimeDownload } from "./runtime-download.ts";
 import { runCurlDirectFirst } from "./system-proxy.ts";
@@ -419,7 +419,8 @@ async function install(spec: PinnedRuntime, root: string, deps: AliasmodeChromiu
   const hashFile = deps.hashFile ?? sha256File;
   const target = join(root, spec.dir);
   const executable = join(target, spec.executable);
-  if (existsSync(executable) && await hashFile(executable) === spec.executableSha256) {
+  // Every open checks the installed runtime; hash it again only when the file changed.
+  if (existsSync(executable) && await (deps.hashFile ?? sha256FileCached)(executable) === spec.executableSha256) {
     await prepareWindowsAccess(target, deps, platform);
     return executable;
   }
