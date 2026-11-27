@@ -122,17 +122,18 @@ jobs:
           echo "FIREFOX_BIN=$RUNNER_TEMP/firefox-159/Firefox.app/Contents/MacOS/firefox" >> "$GITHUB_ENV"
       - name: Gates
         shell: bash
+        # GATES_ names only: the lab's run.mjs reads ONLY as its probe filter.
         env:
-          ENGINE_BUILD: ${{ needs.spec.outputs.engine_build }}
-          ONLY: ${{ needs.spec.outputs.only }}
-          SWITCHES: ${{ needs.spec.outputs.switches }}
+          GATES_ENGINE_BUILD: ${{ needs.spec.outputs.engine_build }}
+          GATES_ONLY: ${{ needs.spec.outputs.only }}
+          GATES_SWITCHES: ${{ needs.spec.outputs.switches }}
         run: |
-          proxy=(); case ",$ONLY," in *,c,*) proxy=(--proxy env:GATES_PROXY);; esac
-          switches=(); for s in ${SWITCHES//,/ }; do switches+=(--switch "$s=off"); done
+          proxy=(); case ",$GATES_ONLY," in *,c,*) proxy=(--proxy env:GATES_PROXY);; esac
+          switches=(); for s in ${GATES_SWITCHES//,/ }; do switches+=(--switch "$s=off"); done
           out="results/gates-${{ matrix.os }}"; mkdir -p "$out"
           # The log names our engines' tells: it goes into the encrypted artifact, only the verdict is printed.
           set +e
-          bun scripts/gates/gates.mjs "$ENGINE_BUILD" ${{ matrix.os }} --only "$ONLY" --site site "${proxy[@]}" "${switches[@]}" --out "$out" >"$out/log.txt" 2>&1
+          bun scripts/gates/gates.mjs "$GATES_ENGINE_BUILD" ${{ matrix.os }} --only "$GATES_ONLY" --site site "${proxy[@]}" "${switches[@]}" --out "$out" >"$out/log.txt" 2>&1
           code=$?
           tail -n 1 "$out/log.txt" | sed 's#: .*summary.md#: summary.md#'
           exit $code

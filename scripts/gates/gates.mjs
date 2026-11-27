@@ -336,7 +336,8 @@ async function gateA(E) {
     ...(E.chromium ? ["--chromium-build", E.chromium] : []), ...(E.firefox ? ["--firefox-build", E.firefox.path] : []),
     ...(existsSync(join(site, "dist", "check", "index.html")) ? [] : ["--skip-check"])];
   log(`A: ${labels.join(", ") || "stock only"}`);
-  spawnSync(process.execPath, args, { stdio: "inherit", env: { ...process.env, CHROME_BIN: STOCK.chrome, FIREFOX_BIN: STOCK.firefox } });
+  // ONLY would filter the lab's probe files (run.mjs ?only=).
+  spawnSync(process.execPath, args, { stdio: "inherit", env: { ...process.env, ONLY: "", CHROME_BIN: STOCK.chrome, FIREFOX_BIN: STOCK.firefox } });
   const expected = readJson(join(HERE, "expected.json")).probes;
   const blockers = [], allowed = [], rows = [];
   for (const label of labels) {
@@ -352,7 +353,9 @@ async function gateA(E) {
     }
     const lab = (l) => existsSync(join(dir, "lab", `${l}.json`)) ? readJson(join(dir, "lab", `${l}.json`)) : undefined;
     const o = lab(label), s = lab(stockLabel), s2 = lab(`${stockLabel}-2`);
-    if (!o || !s) { blockers.push({ run: label, kind: "lab", id: "(no result)", detail: "the lab produced no result", switchHint: "none" }); continue; }
+    if (!o || !s || !Object.keys(o.results).length || !Object.keys(s.results).length) {
+      blockers.push({ run: label, kind: "lab", id: "(no result)", detail: "the lab produced no result or ran no probes", switchHint: "none" }); continue;
+    }
     const noise = new Set(s2 ? differing(s, s2) : []);
     let unexplained = 0;
     for (const id of differing(s, o).filter((id) => !noise.has(id))) {
