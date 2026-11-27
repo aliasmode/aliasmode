@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   CLOAKBROWSER_WINDOWS_X64_EXECUTABLE_SHA256,
   CLOAKBROWSER_WRAPPER_VERSION,
   installCloakBrowser,
+  sha256FileCached,
   windowsSystemTool,
 } from "./browser-install.ts";
 
@@ -110,3 +111,30 @@ test("Windows system tools start by full path, also when PATH has no System32", 
     else process.env.SystemRoot = saved;
   }
 });
+
+test("a cached file hash is read again only when the file changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hash-cache-"));
+  dirs.push(dir);
+  const file = join(dir, "chrome");
+  writeFileSync(file, "approved");
+  let reads = 0;
+  const hash = async (path: string) => { reads++; return readFileSync(path, "utf8"); };
+
+  // A file changed in the last 2 s is never remembered.
+  expect(await sha256FileCached(file, hash)).toBe("approved");
+  expect(await sha256FileCached(file, hash)).toBe("approved");
+  expect(reads).toBe(2);
+
+  await Bun.sleep(2100);
+  expect(await sha256FileCached(file, hash)).toBe("approved");
+  expect(await sha256FileCached(file, hash)).toBe("approved");
+  expect(reads).toBe(3);
+
+  // An in-place write of the same size and a swapped file are both caught.
+  writeFileSync(file, "swapped!");
+  expect(await sha256FileCached(file, hash)).toBe("swapped!");
+  writeFileSync(join(dir, "other"), "replaced");
+  renameSync(join(dir, "other"), file);
+  expect(await sha256FileCached(file, hash)).toBe("replaced");
+  expect(reads).toBe(5);
+}, 10_000);
