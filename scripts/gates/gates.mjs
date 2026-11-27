@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { ensureAliasmodeChromium, linuxChromiumSandboxBlocked } from "../../aliasmode-chromium.ts";
+import { defaultChromiumRuntime, ensureAliasmodeChromium, linuxChromiumSandboxBlocked } from "../../aliasmode-chromium.ts";
 import { sha256File, windowsSystemTool } from "../../browser-install.ts";
 import { firefoxBuildForHost } from "../../firefox-install.ts";
 import { buildProfile, HOST_OS, installFirefoxRelease, PINNED_FIREFOX_RELEASE } from "../engine-audit/audit.ts";
@@ -79,6 +79,7 @@ const DRIVER = WIN ? ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypas
   : MAC ? ["osascript", "-l", "JavaScript", join(HERE, "input", "mac-input.js")] : ["bash", join(HERE, "input", "linux.sh")];
 function input(...args) {
   const r = spawnSync(DRIVER[0], [...DRIVER.slice(1), ...args.map(String)], { encoding: "utf8", timeout: 120_000, env: process.env });
+  if (r.status !== 0) log(`input ${args[0]} failed (${r.status ?? r.error?.message}): ${(r.stderr ?? "").trim().slice(-400)}`);
   return (r.stdout ?? "").trim();
 }
 if (!WIN && !MAC) {
@@ -129,7 +130,9 @@ async function releaseAsset(engine, tag) {
     asset = `aliasmode-${version}-${WIN ? "win.x86_64" : MAC ? `mac.${arch === "arm64" ? "arm64" : "x86_64"}` : "lin.x86_64"}.zip`;
   }
   const base = `https://github.com/aliasmode/${repo}/releases/download/${tag}`;
-  const sums = await (await fetch(`${base}/SHA256SUMS`)).text();
+  // aliasmode-chromium publishes SHA256SUMS.txt, aliasmode-firefox SHA256SUMS.
+  let sums = "";
+  for (const name of ["SHA256SUMS.txt", "SHA256SUMS"]) { const r = await fetch(`${base}/${name}`); if (r.ok) { sums = await r.text(); break; } }
   const sha = sums.split("\n").find((l) => l.trim().endsWith(asset))?.split(/\s+/)[0];
   if (!sha) throw new Error(`${asset} is not in ${tag}'s SHA256SUMS`);
   return { url: `${base}/${asset}`, sha };
@@ -159,9 +162,11 @@ async function engines() {
   const out = {};
   if (engineBuild === "released") {
     // Hosts without an AliasMode Chromium build (Intel Macs before 159) test Firefox only.
-    out.chromium = await ensureAliasmodeChromium(RUNTIMES).catch((error) => { log(`no AliasMode Chromium on this host: ${error.message}`); return undefined; });
+    out.chromium = defaultChromiumRuntime() === "aliasmode" ? await ensureAliasmodeChromium(RUNTIMES) : undefined;
     out.firefox = await installFirefoxRelease(RUNTIMES, PINNED_FIREFOX_RELEASE);
-    out.versions = { chromium: out.chromium ? basename(dirname(out.chromium)) : "none for this host", firefox: `${basename(dirname(out.firefox.path))}` };
+    // The runtime folder's name (chromium-<version>-<release>, firefox-<version>-<rN>), also inside a Mac .app.
+    const folder = (exe, prefix) => exe.split(/[\\/]/).find((part) => part.startsWith(prefix)) ?? basename(dirname(exe));
+    out.versions = { chromium: out.chromium ? folder(out.chromium, "chromium-") : "none for this host", firefox: folder(out.firefox.path, "firefox-") };
     return out;
   }
   out.versions = {};
@@ -262,6 +267,7 @@ function openOurs(E, engine, mode, profile, dir, url, extra = {}) {
   let err = ""; child.stderr.on("data", (d) => { err = (err + d).slice(-2000); });
   const exited = new Promise((r) => child.on("exit", r));
   return {
+    exited,
     error: () => err,
     stop: async () => {
       writeFileSync(`${spec.pidFile}.stop`, "");
@@ -400,7 +406,8 @@ async function gateB(E) {
         if (pass === 1) rmSync(dir, { recursive: true, force: true });
         const pending = server.wait(run, 180_000);
         const browser = openOurs(E, engine, "app", profile, dir, server.url("probe.html", run));
-        runs[run] = await pending;
+        // A launch that fails ends the open command; stop waiting for the page then.
+        runs[run] = await Promise.race([pending, browser.exited.then(() => sleep(3000)).then(() => undefined)]);
         await browser.stop();
         log(`B: ${run} ${runs[run] ? "ok" : `no result ${browser.error().slice(-300)}`}`);
       }
@@ -419,13 +426,13 @@ async function gateB(E) {
     for (const key of linking.mustDiffer) {
       const first = [...Array(n).keys()].map((i) => value(`${engine}-${i}-1`, key));
       const distinct = new Set(first).size;
-      const stable = passes.length < 2 || [...Array(n).keys()].every((i) => value(`${engine}-${i}-1`, key) === value(`${engine}-${i}-2`, key));
+      const stable = passes.length < 2 ? null : [...Array(n).keys()].every((i) => value(`${engine}-${i}-1`, key) === value(`${engine}-${i}-2`, key));
       table[key] = { distinct, stable };
       if (opts.buckets) continue;
       if (first.every((v) => v === "null")) table[key].na = true; // not readable on this host (e.g. no WebGL): cannot link
       else if (first.includes("<no run>")) result.blockers.push({ engine, key, detail: "a profile produced no result" });
-      else if (distinct < n) result.blockers.push({ engine, key, detail: `${distinct} distinct values across ${n} profiles (linkable)` });
-      if (!stable) result.blockers.push({ engine, key, detail: "changes across restarts" });
+      else if (distinct < n) result.blockers.push({ engine, key, detail: `${distinct} distinct values across ${n} profiles (linkable)`, values: first.map((v) => v.slice(0, 60)) });
+      if (stable === false) result.blockers.push({ engine, key, detail: "changes across restarts", values: [...Array(n).keys()].flatMap((i) => [1, 2].map((p) => value(`${engine}-${i}-${p}`, key).slice(0, 60))) });
     }
     result.engines[engine] = table;
   }
@@ -591,7 +598,8 @@ if (only.has("a")) summary.gates.A = await gateA(E);
 if (only.has("b")) summary.gates.B = await gateB(E);
 if (only.has("c")) summary.gates.C = await gateC(E);
 const ran = Object.values(summary.gates).filter((g) => g.status !== "skipped" && g.status !== "info");
-summary.pass = ran.length > 0 && ran.every((g) => g.status === "pass");
+// An info-only run (--buckets) passes when it ran.
+summary.pass = ran.every((g) => g.status === "pass") && Object.values(summary.gates).some((g) => g.status !== "skipped");
 // Page texts can echo addresses (block pages, checkers): the summaries keep none, and only they are kept in git.
 // (Version numbers stay: they have an octet over 255, end in .0.0.0, or follow a "/".)
 const redact = (text) => text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (ip, at, all) =>

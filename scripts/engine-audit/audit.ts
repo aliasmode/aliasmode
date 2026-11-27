@@ -27,7 +27,7 @@ import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, r
 import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
-import { ensureAliasmodeChromium, linuxChromiumSandboxBlocked } from "../../aliasmode-chromium.ts";
+import { defaultChromiumRuntime, ensureAliasmodeChromium, linuxChromiumSandboxBlocked } from "../../aliasmode-chromium.ts";
 import { AutofillBridge } from "../../autofill-bridge.ts";
 import { sha256File, windowsSystemTool } from "../../browser-install.ts";
 import { buildNewProfile, withDefaultBrowser } from "../../create.ts";
@@ -199,8 +199,8 @@ async function main(): Promise<void> {
   const only = arg("only")?.split(",");
   for (const sub of ["check", "lab", "targets"]) mkdirSync(join(out, sub), { recursive: true });
 
-  // Empty when this host has no AliasMode Chromium build (Intel Macs before 159): Firefox only.
-  const chromium = arg("chromium-build") ? resolve(arg("chromium-build")!) : await ensureAliasmodeChromium(runtimes).catch(() => "");
+  // Empty when the app gives this host no AliasMode Chromium (Intel Macs before 159): Firefox only.
+  const chromium = arg("chromium-build") ? resolve(arg("chromium-build")!) : defaultChromiumRuntime() === "aliasmode" ? await ensureAliasmodeChromium(runtimes) : "";
   const firefoxTag = arg("firefox-build") ? "local" : arg("firefox-release") ?? PINNED_FIREFOX_RELEASE;
   const firefox = arg("firefox-build")
     ? { path: resolve(arg("firefox-build")!), sha256: await sha256File(resolve(arg("firefox-build")!)) }

@@ -16,8 +16,9 @@ function front() { return se.processes.whose({ frontmost: true })[0]; }
 function press(combo) {
   const parts = combo.split("+"), key = parts.pop();
   const using = parts.map((p) => MODS[p]).filter(Boolean);
-  if (key in CODES) se.keyCode(CODES[key], { using });
-  else se.keystroke(key.toLowerCase(), { using });
+  const opts = using.length ? { using } : {};
+  if (key in CODES) se.keyCode(CODES[key], opts);
+  else se.keystroke(key.toLowerCase(), opts);
   delay(0.08);
 }
 function typeText(text) { for (const ch of text) { se.keystroke(ch); delay(0.04); } }
