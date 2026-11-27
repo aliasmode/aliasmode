@@ -8,7 +8,7 @@ ObjC.import("CoreGraphics");
 const se = Application("System Events");
 const app = Application.currentApplication();
 app.includeStandardAdditions = true;
-const delay = (s) => $.NSThread.sleepForTimeInterval(s);
+const pause = (s) => $.NSThread.sleepForTimeInterval(s);
 const CODES = { Return: 36, enter: 36, Tab: 48, space: 49, Escape: 53, BackSpace: 51, Left: 123, Right: 124, Down: 125, Up: 126 };
 const MODS = { ctrl: "command down", control: "command down", cmd: "command down", shift: "shift down", alt: "option down" };
 
@@ -19,16 +19,16 @@ function press(combo) {
   const opts = using.length ? { using } : {};
   if (key in CODES) se.keyCode(CODES[key], opts);
   else se.keystroke(key.toLowerCase(), opts);
-  delay(0.08);
+  pause(0.08);
 }
-function typeText(text) { for (const ch of text) { se.keystroke(ch); delay(0.04); } }
+function typeText(text) { for (const ch of text) { se.keystroke(ch); pause(0.04); } }
 function mouse(type, x, y) {
   const e = $.CGEventCreateMouseEvent(null, type, { x, y }, $.kCGMouseButtonLeft);
   $.CGEventPost($.kCGHIDEventTap, e);
-  delay(0.05);
+  pause(0.05);
 }
 function clickAt(x, y) {
-  mouse($.kCGEventMouseMoved, x, y); delay(0.2);
+  mouse($.kCGEventMouseMoved, x, y); pause(0.2);
   mouse($.kCGEventLeftMouseDown, x, y); mouse($.kCGEventLeftMouseUp, x, y);
 }
 function geometry() {
@@ -46,10 +46,10 @@ function run(argv) {
       if (!procs.length) return "none";
       const p = procs.sort((a, b) => a.unixId() - b.unixId()).at(-1);
       p.frontmost = true;
-      delay(0.3);
+      pause(0.3);
       return String(p.unixId());
     }
-    case "open": press("ctrl+l"); delay(0.5); typeText(rest[0]); delay(0.3); press("Return"); return "";
+    case "open": press("ctrl+l"); pause(0.5); typeText(rest[0]); pause(0.3); press("Return"); return "";
     case "type": typeText(rest.join(" ")); return "";
     case "key": rest.forEach(press); return "";
     case "click": clickAt(Number(rest[0]), Number(rest[1])); return "";
@@ -59,8 +59,8 @@ function run(argv) {
       const g = geometry(), board = $.NSPasteboard.generalPasteboard;
       board.clearContents;
       const x = g.x + g.width * Number(fx) + 2, y = g.y + g.height * Number(fy);
-      clickAt(x, y); delay(0.3);
-      press("ctrl+a"); delay(0.3); press("ctrl+c"); delay(0.7);
+      clickAt(x, y); pause(0.3);
+      press("ctrl+a"); pause(0.3); press("ctrl+c"); pause(0.7);
       const text = board.stringForType($.NSPasteboardTypeString);
       $(text.isNil() ? "" : text.js).writeToFileAtomicallyEncodingError(out, true, $.NSUTF8StringEncoding, null);
       mouse($.kCGEventLeftMouseDown, x, y); mouse($.kCGEventLeftMouseUp, x, y);
