@@ -49,7 +49,9 @@ switch ($Command) {
       Sort-Object StartTime | Select-Object -Last 1
     if (-not $w) { 'none'; break }
     # An Alt tap lets this process move the foreground window (Windows refuses it to background processes otherwise).
-    [GatesInput]::Key(0x12, $false); [GatesInput]::Key(0x12, $true)
+    # Only when the browser is not in front yet: an Alt tap into Firefox opens its menu bar, and the URL typed next
+    # then picks menu items (h, t = Help > Troubleshooting Information).
+    if ([GatesInput]::GetForegroundWindow() -ne $w.MainWindowHandle) { [GatesInput]::Key(0x12, $false); [GatesInput]::Key(0x12, $true) }
     [void][GatesInput]::ShowWindow($w.MainWindowHandle, 5); [void][GatesInput]::SetForegroundWindow($w.MainWindowHandle)
     "$($w.MainWindowHandle)"
   }
