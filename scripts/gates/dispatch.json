@@ -1,7 +1,8 @@
 {
-  "_notes": "Run spec for .github/workflows/gates.yml when the branch gates/dispatch is pushed: commit a change here on gates/dispatch (based on the branch under test) and push it. Same fields as the manual inputs: engine_build (released | chromium:<tag or URL>,firefox:<tag or URL>), only (p,a,b,c; c needs the GATES_PROXY secret and runs the OSes one at a time), switches (comma separated, turned off), os (runners: windows, macos, macos-intel; default all three).",
+  "_notes": "Run spec for .github/workflows/gates.yml when the branch gates/dispatch is pushed: commit a change here on gates/dispatch (based on the branch under test) and push it. Same fields as the manual inputs: engine_build (released | chromium:<tag or URL>,firefox:<tag or URL>), only (p,a,b,c; c needs the GATES_PROXY secret and runs the OSes one at a time), switches (comma separated, turned off), sites (Gate C site ids, comma separated; empty = all), os (runners: windows, macos, macos-intel; default all three).",
   "engine_build": "released",
   "only": "p,a,b",
   "switches": "",
+  "sites": "",
   "os": "windows,macos,macos-intel"
 }

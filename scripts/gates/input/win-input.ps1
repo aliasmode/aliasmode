@@ -64,7 +64,9 @@ switch ($Command) {
     $out = $Rest[0]; $fx = if ($Rest.Count -gt 1) { [double]$Rest[1] } else { 0.004 }; $fy = if ($Rest.Count -gt 2) { [double]$Rest[2] } else { 0.7 }
     $r = Geometry
     [System.Windows.Forms.Clipboard]::Clear()
-    ClickAt ([int]($r.Left + ($r.Right - $r.Left) * $fx + 2)) ([int]($r.Top + ($r.Bottom - $r.Top) * $fy)); Start-Sleep -Milliseconds 300
+    # +14 px: the window rectangle includes Windows 11's invisible resize border, where a click does not reach the page
+    # (a focused form field then keeps the focus and select-all copies only the field).
+    ClickAt ([int]($r.Left + ($r.Right - $r.Left) * $fx + 14)) ([int]($r.Top + ($r.Bottom - $r.Top) * $fy)); Start-Sleep -Milliseconds 300
     Press 'ctrl+a'; Start-Sleep -Milliseconds 300; Press 'ctrl+c'; Start-Sleep -Milliseconds 700
     [System.IO.File]::WriteAllText($out, [System.Windows.Forms.Clipboard]::GetText(), (New-Object System.Text.UTF8Encoding $false))
     [GatesInput]::Click()

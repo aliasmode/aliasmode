@@ -25,6 +25,11 @@ on:
         required: false
         default: ""
         type: string
+      sites:
+        description: "Gate C sites (ids in scripts/gates/sites.json, comma separated; empty = all)"
+        required: false
+        default: ""
+        type: string
       os:
         description: "Runners: windows, macos, macos-intel (comma separated)"
         required: false
@@ -45,6 +50,7 @@ jobs:
       switches: ${{ steps.spec.outputs.switches }}
       parallel: ${{ steps.spec.outputs.parallel }}
       matrix: ${{ steps.spec.outputs.matrix }}
+      sites: ${{ steps.spec.outputs.sites }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,19 +64,20 @@ jobs:
           IN_ONLY: ${{ inputs.only }}
           IN_SWITCHES: ${{ inputs.switches }}
           IN_OS: ${{ inputs.os }}
+          IN_SITES: ${{ inputs.sites }}
         run: |
           if [ "$EVENT" = push ]; then
             f=scripts/gates/dispatch.json
             engine=$(jq -r '.engine_build // "released"' $f); only=$(jq -r '.only // "p,a,b"' $f); switches=$(jq -r '.switches // ""' $f)
-            os=$(jq -r '.os // ""' $f)
+            os=$(jq -r '.os // ""' $f); sites=$(jq -r '.sites // ""' $f)
           else
-            engine=$IN_ENGINE; only=$IN_ONLY; switches=$IN_SWITCHES; os=$IN_OS
+            engine=$IN_ENGINE; only=$IN_ONLY; switches=$IN_SWITCHES; os=$IN_OS; sites=$IN_SITES
           fi
           matrix=$(jq -cn --arg os "${os:-windows,macos,macos-intel}" '{windows: "windows-latest", macos: "macos-15", "macos-intel": "macos-15-intel"} as $r
             | [$os | split(",")[] | select($r[.]) | {os: ., runner: $r[.]}]')
           case ",$only," in *,c,*) parallel=1;; *) parallel=3;; esac
-          echo "engine_build=$engine only=$only switches=$switches parallel=$parallel matrix=$matrix"
-          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "parallel=$parallel"; echo "matrix=$matrix"; } >> "$GITHUB_OUTPUT"
+          echo "engine_build=$engine only=$only switches=$switches sites=$sites parallel=$parallel matrix=$matrix"
+          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "sites=$sites"; echo "parallel=$parallel"; echo "matrix=$matrix"; } >> "$GITHUB_OUTPUT"
 
   gates:
     needs: spec
@@ -140,13 +147,15 @@ jobs:
           GATES_ENGINE_BUILD: ${{ needs.spec.outputs.engine_build }}
           GATES_ONLY: ${{ needs.spec.outputs.only }}
           GATES_SWITCHES: ${{ needs.spec.outputs.switches }}
+          GATES_SITES: ${{ needs.spec.outputs.sites }}
         run: |
           proxy=(); case ",$GATES_ONLY," in *,c,*) proxy=(--proxy env:GATES_PROXY);; esac
           switches=(); for s in ${GATES_SWITCHES//,/ }; do switches+=(--switch "$s=off"); done
+          sites=(); if [ -n "$GATES_SITES" ]; then sites=(--sites "$GATES_SITES"); fi
           out="results/gates-${{ matrix.os }}"; mkdir -p "$out"
           # The log names our engines' tells: it goes into the encrypted artifact, only the verdict is printed.
           set +e
-          bun scripts/gates/gates.mjs "$GATES_ENGINE_BUILD" ${{ matrix.os }} --only "$GATES_ONLY" --site site "${proxy[@]}" "${switches[@]}" --out "$out" >"$out/log.txt" 2>&1
+          bun scripts/gates/gates.mjs "$GATES_ENGINE_BUILD" ${{ matrix.os }} --only "$GATES_ONLY" --site site "${proxy[@]}" "${switches[@]}" "${sites[@]}" --out "$out" >"$out/log.txt" 2>&1
           code=$?
           tail -n 1 "$out/log.txt" | sed 's#: .*summary.md#: summary.md#'
           exit $code
