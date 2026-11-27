@@ -25,6 +25,11 @@ on:
         required: false
         default: ""
         type: string
+      os:
+        description: "Runners: windows, macos, macos-intel (comma separated)"
+        required: false
+        default: windows,macos,macos-intel
+        type: string
   push:
     branches: [gates/dispatch]
 
@@ -39,6 +44,7 @@ jobs:
       only: ${{ steps.spec.outputs.only }}
       switches: ${{ steps.spec.outputs.switches }}
       parallel: ${{ steps.spec.outputs.parallel }}
+      matrix: ${{ steps.spec.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,16 +57,20 @@ jobs:
           IN_ENGINE: ${{ inputs.engine_build }}
           IN_ONLY: ${{ inputs.only }}
           IN_SWITCHES: ${{ inputs.switches }}
+          IN_OS: ${{ inputs.os }}
         run: |
           if [ "$EVENT" = push ]; then
             f=scripts/gates/dispatch.json
             engine=$(jq -r '.engine_build // "released"' $f); only=$(jq -r '.only // "p,a,b"' $f); switches=$(jq -r '.switches // ""' $f)
+            os=$(jq -r '.os // ""' $f)
           else
-            engine=$IN_ENGINE; only=$IN_ONLY; switches=$IN_SWITCHES
+            engine=$IN_ENGINE; only=$IN_ONLY; switches=$IN_SWITCHES; os=$IN_OS
           fi
+          matrix=$(jq -cn --arg os "${os:-windows,macos,macos-intel}" '{windows: "windows-latest", macos: "macos-15", "macos-intel": "macos-15-intel"} as $r
+            | [$os | split(",")[] | select($r[.]) | {os: ., runner: $r[.]}]')
           case ",$only," in *,c,*) parallel=1;; *) parallel=3;; esac
-          echo "engine_build=$engine only=$only switches=$switches parallel=$parallel"
-          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "parallel=$parallel"; } >> "$GITHUB_OUTPUT"
+          echo "engine_build=$engine only=$only switches=$switches parallel=$parallel matrix=$matrix"
+          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "parallel=$parallel"; echo "matrix=$matrix"; } >> "$GITHUB_OUTPUT"
 
   gates:
     needs: spec
@@ -68,13 +78,7 @@ jobs:
       fail-fast: false
       max-parallel: ${{ fromJSON(needs.spec.outputs.parallel) }}
       matrix:
-        include:
-          - runner: windows-latest
-            os: windows
-          - runner: macos-15
-            os: macos
-          - runner: macos-15-intel
-            os: macos-intel
+        include: ${{ fromJSON(needs.spec.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 340
     env:
