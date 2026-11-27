@@ -12,7 +12,10 @@
  *
  * Usage (from the app checkout, after `bun install --frozen-lockfile`):
  *   bun scripts/engine-audit/audit.ts --site <aliasmode-site checkout with a built dist/> [--out <dir>]
- *     [--firefox-release r12] [--runtimes <cache dir>] [--only <label,label>] [--skip-check] [--skip-lab]
+ *     [--firefox-release <rN>] [--runtimes <cache dir>] [--only <label,label>] [--skip-check] [--skip-lab]
+ *     [--chromium-build <executable>] [--firefox-build <executable>]
+ * Engines: the app's pinned builds unless --chromium-build/--firefox-build name an unpacked build's executable
+ * (scripts/gates/gates.mjs unpacks release tags, archives and URLs). --firefox-release defaults to the app's pin.
  * Stock browsers: $CHROME_BIN and $FIREFOX_BIN (Windows defaults: the Program Files installs).
  * Output: <out>/summary.md, check/fpcheck-<label>.json, lab/<label>.json and lab/<label>.diff.txt
  * (diff vs the stock browser of the same engine), targets/<label>/ (profile, argv or Firefox config).
@@ -30,7 +33,7 @@ import { sha256File, windowsSystemTool } from "../../browser-install.ts";
 import { buildNewProfile, withDefaultBrowser } from "../../create.ts";
 import { completeProfileFingerprint, firefoxLaunchConfig, firefoxStartupPrefs, FIREFOX_RUNTIME_VERSION } from "../../firefox-config.ts";
 import { firefoxFontPackFontsDir, firefoxFontPackFor, firefoxFontPackPrefs } from "../../firefox-fonts.ts";
-import { firefoxBuildForHost } from "../../firefox-install.ts";
+import { firefoxBuildForHost, firefoxReleaseArchiveUrl } from "../../firefox-install.ts";
 import { firefoxLaunchOptions } from "../../firefox-worker.mjs";
 import { Launcher } from "../../launcher.ts";
 import { ensureDuckDuckGoDefault } from "../../search-provider.ts";
@@ -43,13 +46,19 @@ const LOCALE = "en-US";
 // Outside the app's own range (9333-9999), so a real AliasMode on the same computer keeps its ports.
 const PORTS = { start: 19400, end: 19499 };
 const WIN = process.platform === "win32";
-const HOST_OS = WIN ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+export const HOST_OS = WIN ? "windows" : process.platform === "darwin" ? "macos" : "linux";
 
-interface Spec { label: string; mode: "app" | "plain" | "attached"; profile: Profile; runtimes: string; firefox?: { path: string; sha256: string }; baseArgs: string[]; pidFile: string }
+export interface Spec {
+  label: string; mode: "app" | "plain" | "attached"; profile: Profile; runtimes: string; chromium: string;
+  firefox?: { path: string; sha256: string }; baseArgs: string[]; pidFile: string;
+  /** The proxy's exit address for a plain launch, as the app passes it to --fingerprint-webrtc-ip. */
+  webRtcIp?: string;
+}
 
 function launcher(store: ProfileStore, spec: Spec, dataRoot: string, autofill?: AutofillBridge): Launcher {
   return new Launcher({
     store, ...(autofill ? { autofill } : {}), dataRoot, chromiumRuntimeRoot: spec.runtimes, portRange: PORTS,
+    ensureAliasmodeChromium: async () => spec.chromium,
     ...(spec.firefox ? { firefoxBinaryPath: spec.firefox.path, expectedFirefoxBinarySha256: spec.firefox.sha256 } : {}),
     baseArgs: spec.baseArgs, chromiumSandboxBlocked: () => false, ensureSearchProvider: ensureDuckDuckGoDefault,
     gracefulStopMs: 1000, teardownTimeoutMs: 1500, log: () => {},
@@ -57,7 +66,7 @@ function launcher(store: ProfileStore, spec: Spec, dataRoot: string, autofill?: 
 }
 
 /** The browser command the site runners start: opens the profile as the app does and stays until SIGTERM. */
-async function open(specFile: string, dir: string, url: string): Promise<void> {
+export async function open(specFile: string, dir: string, url: string): Promise<void> {
   const spec: Spec = JSON.parse(readFileSync(specFile, "utf8"));
   const store = new ProfileStore(join(dir, "profiles.sqlite"));
   store.upsertProfile(spec.profile);
@@ -65,9 +74,8 @@ async function open(specFile: string, dir: string, url: string): Promise<void> {
   let stop: () => Promise<void>;
   if (spec.mode === "plain") {
     const l = launcher(store, spec, join(dir, "profiles"));
-    const binary = await ensureAliasmodeChromium(spec.runtimes);
-    const args = l.buildArgs(spec.profile, PORTS.end, l.userDataDir(id), [], undefined, false);
-    const child = spawn(binary, [...args, url], { stdio: "ignore", detached: !WIN });
+    const args = l.buildArgs(spec.profile, PORTS.end, l.userDataDir(id), [], undefined, false, false, spec.webRtcIp);
+    const child = spawn(spec.chromium, [...args, url], { stdio: "ignore", detached: !WIN });
     writeFileSync(spec.pidFile, JSON.stringify([child.pid]));
     stop = async () => { killTree(child.pid!); };
   } else {
@@ -88,7 +96,8 @@ async function open(specFile: string, dir: string, url: string): Promise<void> {
   const quit = () => { void stop().finally(() => process.exit(0)); };
   process.on("SIGTERM", quit);
   process.on("SIGINT", quit);
-  setInterval(() => {}, 60_000);
+  // Windows has no SIGTERM for a child process, so a "<pidFile>.stop" file also stops the browser the app's way.
+  setInterval(() => { if (existsSync(`${spec.pidFile}.stop`)) quit(); }, 500);
 }
 
 function killTree(pid: number): void {
@@ -118,10 +127,10 @@ function seeded<T>(seed: number, fn: () => T): T {
   try { return fn(); } finally { Math.random = real; }
 }
 
-function buildProfile(engine: "chromium" | "firefox", os: string, id: string): Profile {
-  return seeded(SEED, () => {
+export function buildProfile(engine: "chromium" | "firefox", os: string, id: string, seed = SEED, timezone = TIMEZONE): Profile {
+  return seeded(seed, () => {
     const created = buildNewProfile({ engine, ...(engine === "chromium" ? { chromiumRuntime: "aliasmode" } : {}), screen: "1920x1080", platformOs: os, name: id }, () => false);
-    const profile: Profile = { ...created, id, fingerprintSeed: SEED, timezone: TIMEZONE, locale: LOCALE };
+    const profile: Profile = { ...created, id, fingerprintSeed: seed, timezone, locale: LOCALE };
     // The Firefox identity is generated again from the fixed seed instead of the random id's.
     return engine === "firefox" ? withDefaultBrowser({ ...profile, firefox: undefined }) : completeProfileFingerprint(profile);
   });
@@ -133,8 +142,11 @@ async function download(url: string, file: string): Promise<void> {
   await pipeline(response.body as any, createWriteStream(file));
 }
 
-/** AliasMode Firefox from a release tag (r11 = the app's pin), checked against the release's SHA256SUMS. */
-async function installFirefoxRelease(root: string, tag: string): Promise<{ path: string; sha256: string }> {
+/** The app's pinned AliasMode Firefox release suffix (rN). */
+export const PINNED_FIREFOX_RELEASE = firefoxReleaseArchiveUrl(firefoxBuildForHost()).split("/").at(-2)!.split("-").at(-1)!;
+
+/** AliasMode Firefox from a release tag, checked against the release's SHA256SUMS. */
+export async function installFirefoxRelease(root: string, tag: string): Promise<{ path: string; sha256: string }> {
   const build = firefoxBuildForHost();
   const dir = join(root, `firefox-${FIREFOX_RUNTIME_VERSION}-${tag}`);
   const exe = join(dir, build.executablePath);
@@ -181,15 +193,18 @@ function node(args: string[], env: Record<string, string> = {}): string {
 async function main(): Promise<void> {
   const site = resolve(arg("site") ?? "");
   const dist = join(site, "dist");
-  if (!existsSync(join(dist, "check", "index.html"))) throw new Error("--site must be an aliasmode-site checkout with a built dist/ (npm run build)");
+  if (!process.argv.includes("--skip-check") && !existsSync(join(dist, "check", "index.html"))) throw new Error("--site must be an aliasmode-site checkout with a built dist/ (npm run build)");
   const out = resolve(arg("out") ?? join(tmpdir(), `engine-audit-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "")}`));
   const runtimes = resolve(arg("runtimes") ?? join(tmpdir(), "aliasmode-engine-audit"));
   const only = arg("only")?.split(",");
   for (const sub of ["check", "lab", "targets"]) mkdirSync(join(out, sub), { recursive: true });
 
-  const chromium = await ensureAliasmodeChromium(runtimes);
-  const firefoxTag = arg("firefox-release") ?? "r12";
-  const firefox = await installFirefoxRelease(runtimes, firefoxTag);
+  // Empty when this host has no AliasMode Chromium build (Intel Macs before 159): Firefox only.
+  const chromium = arg("chromium-build") ? resolve(arg("chromium-build")!) : await ensureAliasmodeChromium(runtimes).catch(() => "");
+  const firefoxTag = arg("firefox-build") ? "local" : arg("firefox-release") ?? PINNED_FIREFOX_RELEASE;
+  const firefox = arg("firefox-build")
+    ? { path: resolve(arg("firefox-build")!), sha256: await sha256File(resolve(arg("firefox-build")!)) }
+    : await installFirefoxRelease(runtimes, firefoxTag);
   const noSandbox = process.platform === "linux" && linuxChromiumSandboxBlocked();
   const baseArgs = [`--aliasmode-launcher-pid=${process.pid}`, ...(noSandbox ? ["--no-sandbox"] : [])];
   const stockChrome = process.env.CHROME_BIN ?? (WIN ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" : "google-chrome");
@@ -205,13 +220,13 @@ async function main(): Promise<void> {
   targets.push({ ...targets[0]!, label: "stock-chrome-2" }, { ...targets[1]!, label: "stock-firefox-2" });
   const chromiumVersion = basename(dirname(chromium));
   for (const os of [...new Set(["windows", HOST_OS])]) {
-    for (const engine of ["chromium", "firefox"] as const) {
+    for (const engine of chromium ? ["chromium", "firefox"] as const : ["firefox"] as const) {
       const profile = buildProfile(engine, os, `engaudit-${engine}-${os}`);
       for (const mode of engine === "chromium" ? ["app", "plain", "attached"] as const : ["app"] as const) {
         const label = `aliasmode-${engine}-${os}${mode === "app" ? "" : `-${mode}`}`;
         const dir = join(out, "targets", label);
         mkdirSync(dir, { recursive: true });
-        const spec: Spec = { label, mode, profile, runtimes, baseArgs, pidFile: join(dir, "pids.json"), ...(engine === "firefox" ? { firefox } : {}) };
+        const spec: Spec = { label, mode, profile, runtimes, chromium, baseArgs, pidFile: join(dir, "pids.json"), ...(engine === "firefox" ? { firefox } : {}) };
         writeFileSync(join(dir, "spec.json"), JSON.stringify(spec, null, 1));
         // The exact launch inputs, with this run's profile folder and port as placeholders.
         const store = new ProfileStore(":memory:");
@@ -294,4 +309,4 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[2] === "open") await open(process.argv[3]!, process.argv[4]!, process.argv[5]!);
-else await main();
+else if (import.meta.main) await main();
