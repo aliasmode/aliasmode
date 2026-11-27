@@ -1,7 +1,7 @@
 #!/bin/bash
 # OS-level input for the gates on Linux/X11 (XTest through xdotool; no automation in the browser).
 # Usage: DISPLAY=:N linux.sh <command> [args]
-#   display-start N | display-stop N     rootless Xvfb 1920x1080x24 + openbox
+#   display-start N | display-stop N     rootless Xvfb 1920x1080x24 + openbox (refuses a display in use)
 #   activate                             raise and focus the newest browser window
 #   open <url>                           Ctrl+L, type the URL, Enter
 #   type <text> | key <combo...> | click <x> <y>
@@ -13,15 +13,15 @@ win() { xdotool getactivewindow 2>/dev/null; }
 case $cmd in
 display-start)
   N=$1; run=${GATES_RUN:-/tmp/gates-run}; mkdir -p "$run"
-  if ! DISPLAY=:$N xdpyinfo >/dev/null 2>&1; then
-    rm -f /tmp/.X$N-lock /tmp/.X11-unix/X$N
-    LD_PRELOAD=$XVFB_SHIM setsid nohup Xvfb ":$N" -screen 0 1920x1080x24 -nolisten tcp -xkbdir "$XKB_DIR" +extension GLX \
-      >"$run/xvfb$N.log" 2>&1 </dev/null & echo $! >"$run/xvfb$N.pid"
-    for _ in $(seq 50); do DISPLAY=:$N xdpyinfo >/dev/null 2>&1 && break; sleep 0.2; done
-    DISPLAY=:$N xdpyinfo >/dev/null 2>&1 || { echo "Xvfb :$N failed"; cat "$run/xvfb$N.log"; exit 1; }
-    DISPLAY=:$N setsid nohup openbox >"$run/wm$N.log" 2>&1 </dev/null & echo $! >"$run/wm$N.pid"; sleep 1
-    DISPLAY=:$N xsetroot -solid '#303030' 2>/dev/null
-  fi
+  # A display that answers belongs to another run: refuse it, so no input reaches that run's browser.
+  if DISPLAY=:$N xdpyinfo >/dev/null 2>&1; then echo "display :$N is in use" >&2; exit 1; fi
+  rm -f /tmp/.X$N-lock /tmp/.X11-unix/X$N
+  LD_PRELOAD=$XVFB_SHIM setsid nohup Xvfb ":$N" -screen 0 1920x1080x24 -nolisten tcp -xkbdir "$XKB_DIR" +extension GLX \
+    >"$run/xvfb$N.log" 2>&1 </dev/null & echo $! >"$run/xvfb$N.pid"
+  for _ in $(seq 50); do DISPLAY=:$N xdpyinfo >/dev/null 2>&1 && break; sleep 0.2; done
+  DISPLAY=:$N xdpyinfo >/dev/null 2>&1 || { echo "Xvfb :$N failed"; cat "$run/xvfb$N.log"; exit 1; }
+  DISPLAY=:$N setsid nohup openbox >"$run/wm$N.log" 2>&1 </dev/null & echo $! >"$run/wm$N.pid"; sleep 1
+  DISPLAY=:$N xsetroot -solid '#303030' 2>/dev/null
   echo "display :$N up";;
 display-stop)
   N=$1; run=${GATES_RUN:-/tmp/gates-run}

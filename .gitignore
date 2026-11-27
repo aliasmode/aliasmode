@@ -33,3 +33,6 @@ extensions/
 
 # Per-install device identity
 .operator-id
+
+# Gate results (scripts/gates): never in git, the repo is public
+/results/

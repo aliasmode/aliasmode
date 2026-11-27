@@ -3,31 +3,47 @@
 # the browsers' system libraries (extracted from Ubuntu packages), plus the stock controls: Google Chrome stable
 # (the official google-chrome-stable deb, not Chrome for Testing) and Firefox from Mozilla's release archive.
 # Idempotent; run again to refresh. Writes $GATES_TOOLS/env.sh, which gates.mjs sources on Linux.
-# Usage: bash scripts/gates/linux-setup.sh [--firefox 159.0.1] [--chrome-channel stable|beta] [--refresh-libs]
-#   --chrome-channel beta: Google's own beta deb, for a Chrome major that is stable on Windows/Mac but not yet on Linux.
-#   $GATES_TOOLS/stock/chrome points at the last channel installed; older versions stay next to it.
+# Usage: bash scripts/gates/linux-setup.sh [--firefox 159.0.1] [--chrome-major 159 | --chrome-channel stable|beta] [--refresh-libs]
+#   --chrome-major N: the control is the first of Google's stable, beta and dev debs whose major is N, so it matches
+#     the engine under test (for a major that is stable on Windows/Mac but not yet on Linux this is the beta deb).
+#   --chrome-channel: that channel's newest deb, whatever its major.
+#   Without either, $GATES_TOOLS/stock/chrome keeps pointing at the control installed last (stable on a first run);
+#   older versions stay next to it.
 # Env: GATES_TOOLS (default ~/tools/gates).
 set -euo pipefail
 T=${GATES_TOOLS:-$HOME/tools/gates}
-FIREFOX=159.0.1 CHANNEL=stable REFRESH=
-while [ $# -gt 0 ]; do case $1 in --firefox) FIREFOX=$2; shift 2;; --chrome-channel) CHANNEL=$2; shift 2;; --refresh-libs) REFRESH=1; shift;; *) echo "unknown option $1" >&2; exit 2;; esac; done
+FIREFOX=159.0.1 CHANNEL= MAJOR= REFRESH=
+while [ $# -gt 0 ]; do case $1 in --firefox) FIREFOX=$2; shift 2;; --chrome-channel) CHANNEL=$2; shift 2;; --chrome-major) MAJOR=$2; shift 2;;
+  --refresh-libs) REFRESH=1; shift;; *) echo "unknown option $1" >&2; exit 2;; esac; done
 mkdir -p "$T/root" "$T/stock" "$T/debs"
 work=$(mktemp -d /tmp/gates-setup.XXXXXX); trap 'rm -rf "$work"' EXIT
 
-# Stock Google Chrome: newest deb of the channel from Google's apt repository.
+# Stock Google Chrome: a deb from Google's apt repository (google-chrome-<channel>, newest version of the channel).
 repo=https://dl.google.com/linux/chrome/deb
-line=$(curl -fsS "$repo/dists/stable/main/binary-amd64/Packages" | awk -v p="google-chrome-$CHANNEL" '/^Package:/{n=$2} /^Version:/{v=$2} /^Filename:/{if (n==p) print v, $2}')
-cver=${line%% *}; cver=${cver%-*}; cfile=${line#* }
-if [ ! -x "$T/stock/chrome-$cver/opt/google/chrome/chrome" ]; then
-  echo "Chrome $CHANNEL $cver"
-  curl -fsS -o "$work/chrome.deb" "$repo/$cfile"
-  rm -rf "$T/stock/chrome-$cver.tmp"; dpkg-deb -x "$work/chrome.deb" "$T/stock/chrome-$cver.tmp"
-  dpkg-deb -f "$work/chrome.deb" Depends >"$T/stock/chrome-$cver.tmp/DEPENDS"
-  # The beta deb installs to opt/google/chrome-beta; one path for every channel.
-  [ -e "$T/stock/chrome-$cver.tmp/opt/google/chrome" ] || ln -s "$(basename "$(dirname "$(ls "$T/stock/chrome-$cver.tmp"/opt/google/*/chrome)")")" "$T/stock/chrome-$cver.tmp/opt/google/chrome"
-  mv "$T/stock/chrome-$cver.tmp" "$T/stock/chrome-$cver"
+packages=$(curl -fsS "$repo/dists/stable/main/binary-amd64/Packages")
+deb() { awk -v p="google-chrome-$1" '/^Package:/{n=$2} /^Version:/{v=$2} /^Filename:/{if (n==p) print v, $2}' <<<"$packages"; }
+line=
+if [ -n "$MAJOR" ]; then
+  for c in stable beta unstable; do l=$(deb $c); [ "${l%%.*}" = "$MAJOR" ] && { line=$l; CHANNEL=$c; break; }; done
+  [ -n "$line" ] || { echo "no Google Chrome deb with major $MAJOR (stable $(deb stable | cut -d' ' -f1), beta $(deb beta | cut -d' ' -f1))" >&2; exit 1; }
+elif [ -z "$CHANNEL" ] && [ -x "$T/stock/chrome/opt/google/chrome/chrome" ]; then
+  echo "keeping the Chrome control $(readlink "$T/stock/chrome") (--chrome-major N to change it)"
+else
+  CHANNEL=${CHANNEL:-stable}; line=$(deb "$CHANNEL")
 fi
-ln -sfn "chrome-$cver" "$T/stock/chrome"
+if [ -n "$line" ]; then
+  cver=${line%% *}; cver=${cver%-*}; cfile=${line#* }
+  if [ ! -x "$T/stock/chrome-$cver/opt/google/chrome/chrome" ]; then
+    echo "Chrome $CHANNEL $cver"
+    curl -fsS -o "$work/chrome.deb" "$repo/$cfile"
+    rm -rf "$T/stock/chrome-$cver.tmp"; dpkg-deb -x "$work/chrome.deb" "$T/stock/chrome-$cver.tmp"
+    dpkg-deb -f "$work/chrome.deb" Depends >"$T/stock/chrome-$cver.tmp/DEPENDS"
+    # The beta deb installs to opt/google/chrome-beta; one path for every channel.
+    [ -e "$T/stock/chrome-$cver.tmp/opt/google/chrome" ] || ln -s "$(basename "$(dirname "$(ls "$T/stock/chrome-$cver.tmp"/opt/google/*/chrome)")")" "$T/stock/chrome-$cver.tmp/opt/google/chrome"
+    mv "$T/stock/chrome-$cver.tmp" "$T/stock/chrome-$cver"
+  fi
+  ln -sfn "chrome-$cver" "$T/stock/chrome"
+fi
 
 # Stock Firefox, read-only so it cannot stage an update (a policies.json would switch on enterprise mode).
 if [ ! -x "$T/stock/firefox-$FIREFOX/firefox/firefox" ]; then
@@ -104,4 +120,4 @@ export FIREFOX_BIN=$T/stock/firefox/firefox/firefox
 EOF
 . "$T/env.sh"
 command -v ffmpeg >/dev/null || echo "note: ffmpeg is not on PATH; screenshots are skipped"
-echo "OK: $T (Chrome $("$CHROME_BIN" --version 2>/dev/null | grep -o "[0-9.]*[0-9]"), $CHANNEL, Firefox $FIREFOX, $(du -sh "$T" | cut -f1))"
+echo "OK: $T (Chrome control $("$CHROME_BIN" --version 2>/dev/null | grep -o "[0-9.]*[0-9]"), Firefox $FIREFOX, $(du -sh "$T" | cut -f1))"

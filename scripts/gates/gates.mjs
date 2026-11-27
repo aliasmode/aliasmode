@@ -18,15 +18,16 @@
  *     release tag (v158.0.8127.90-aliasmode.1, aliasmode-runtime-159.0-beta.43-r1; checked against SHA256SUMS).
  *   <os>: linux | windows | macos | macos-intel, and it must be this computer's OS (personas follow the host OS).
  *   --switch name=off turns one internal switch off for bisecting (the app code reads ALIASMODE_SWITCHES_OFF=name,...).
- * Output: <out>/summary.json and summary.md (default results/gates-<date>-<engine>-<os>/). Proxy addresses never
- * reach the output: an exit IP appears only as a short hash. Exit code 0 only when every gate that ran passed.
+ * Output: <out>/summary.json and summary.md (default $GATES_RESULTS or ~/gates-results, /gates-<date>-<engine>-<os>/;
+ * never commit them: the repo is public). Proxy addresses never reach the output: an exit IP appears only as a short
+ * hash. Every blocker names the switch to bisect with (switches.json). Exit code 0 only when every gate that ran passed.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createTcpServer, connect } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -43,6 +44,9 @@ const HOST = WIN ? "windows" : MAC ? (process.arch === "arm64" ? "macos" : "maco
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
+// The internal switch a blocker names for bisecting (switches.json).
+const HINTS = readJson(join(HERE, "switches.json")).hints;
+const switchHint = (id) => HINTS.find((h) => new RegExp(h.match).test(id))?.switch ?? "none";
 const short = (v) => { const s = JSON.stringify(v) ?? "undefined"; return s.length > 160 ? `${s.slice(0, 157)}...` : s; };
 
 // ---------- arguments ----------
@@ -61,10 +65,13 @@ const switchesOff = opts.switch.map((s) => s.replace(/=off$/, ""));
 if (switchesOff.length) process.env.ALIASMODE_SWITCHES_OFF = [process.env.ALIASMODE_SWITCHES_OFF, ...switchesOff].filter(Boolean).join(",");
 const date = new Date().toISOString().slice(0, 10);
 const engineLabel = engineBuild.replace(/[^A-Za-z0-9.]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
-const OUT = resolve(opts.out ?? join(ROOT, "results", `gates-${date}-${engineLabel}-${os}`));
+// Results stay outside git: the repo is public and they name our engines' exact tells.
+const OUT = resolve(opts.out ?? join(process.env.GATES_RESULTS ?? join(homedir(), "gates-results"), `gates-${date}-${engineLabel}-${os}`));
 const RUNTIMES = resolve(opts.runtimes ?? join(tmpdir(), "aliasmode-engine-audit"));
 const WORK = join(OUT, "work");
 mkdirSync(WORK, { recursive: true });
+// At once, so a crashed run inside a checkout never leaves work files (proxy exit IP, page texts) unignored.
+writeFileSync(join(OUT, ".gitignore"), "*\n");
 
 // Linux: the rootless X server, libraries and stock browsers from linux-setup.sh.
 if (!WIN && !MAC) {
@@ -84,10 +91,13 @@ function input(...args) {
 }
 let stopDisplay = () => {};
 if (!WIN && !MAC) {
-  const display = 160 + (process.pid % 30);
+  // A display that is already in use belongs to another run: input there could reach its browser.
+  const inUse = (n) => existsSync(`/tmp/.X${n}-lock`) || existsSync(`/tmp/.X11-unix/X${n}`);
+  const display = [...Array(30).keys()].map((i) => 160 + ((process.pid + i) % 30)).find((n) => !inUse(n));
+  if (display === undefined) { console.error("no free X display in :160-:189"); process.exit(2); }
   process.env.DISPLAY = `:${display}`;
   process.env.GATES_RUN = join(WORK, "x");
-  input("display-start", display);
+  if (!/up$/.test(input("display-start", display))) { console.error(`could not start X display :${display}`); process.exit(2); }
   process.on("exit", () => input("display-stop", display));
   stopDisplay = () => input("display-stop", display);
 }
@@ -246,7 +256,7 @@ async function startForwarder(raw) {
   const info = await (await fetch("https://ipinfo.io/json", { proxy: `http://127.0.0.1:${port}`, signal: AbortSignal.timeout(30_000) })).json();
   return {
     port, close: () => server.close(), ip: info.ip, timezone: info.timezone ?? "UTC",
-    id: createHash("sha256").update(String(info.ip)).digest("hex").slice(0, 10), where: `${info.country ?? "?"} ${info.org ?? ""}`.trim(),
+    id: createHash("sha256").update(String(info.ip)).digest("hex").slice(0, 10),
   };
 }
 
@@ -337,12 +347,12 @@ async function gateA(E) {
     if (ours) {
       const stockIds = new Set((stock?.findings ?? []).filter((f) => f.status !== "pass" && f.status !== "info").map((f) => f.id));
       for (const f of ours.findings) {
-        if (f.status === "fail" || (f.status === "warn" && !stockIds.has(f.id))) blockers.push({ run: label, kind: "check", id: f.id, detail: `${f.status}: ${f.detail ?? ""}`.slice(0, 200) });
+        if (f.status === "fail" || (f.status === "warn" && !stockIds.has(f.id))) blockers.push({ run: label, kind: "check", id: f.id, detail: `${f.status}: ${f.detail ?? ""}`.slice(0, 200), switchHint: switchHint(f.id) });
       }
     }
     const lab = (l) => existsSync(join(dir, "lab", `${l}.json`)) ? readJson(join(dir, "lab", `${l}.json`)) : undefined;
     const o = lab(label), s = lab(stockLabel), s2 = lab(`${stockLabel}-2`);
-    if (!o || !s) { blockers.push({ run: label, kind: "lab", id: "(no result)", detail: "the lab produced no result" }); continue; }
+    if (!o || !s) { blockers.push({ run: label, kind: "lab", id: "(no result)", detail: "the lab produced no result", switchHint: "none" }); continue; }
     const noise = new Set(s2 ? differing(s, s2) : []);
     let unexplained = 0;
     for (const id of differing(s, o).filter((id) => !noise.has(id))) {
@@ -351,7 +361,7 @@ async function gateA(E) {
       if (!e || (e.engines && !e.engines.includes(engine))) why = "differs from stock";
       else if (e.compare) { const p = e.compare.find((path) => JSON.stringify(at(sv, path)) !== JSON.stringify(at(ov, path))); if (p) why = `robust signal ${p} differs from stock`; }
       else if (e.match && !new RegExp(e.match).test(JSON.stringify(ov))) why = `value does not match ${e.match}`;
-      if (why) { unexplained++; blockers.push({ run: label, kind: "lab", id, detail: why, stock: short(s.results[id]?.error ?? sv), ours: short(o.results[id]?.error ?? ov) }); }
+      if (why) { unexplained++; blockers.push({ run: label, kind: "lab", id, detail: why, stock: short(s.results[id]?.error ?? sv), ours: short(o.results[id]?.error ?? ov), switchHint: switchHint(id) }); }
       else allowed.push({ run: label, id, reason: e.reason });
     }
     rows.push({ run: label, ua: o.ua, probes: Object.keys(o.results).length, noise: noise.size, unexplained, check: ours ? ours.identity ?? ours.summary : "skipped" });
@@ -415,6 +425,15 @@ async function gateB(E) {
         log(`B: ${run} ${runs[run] ? "ok" : `no result ${browser.error().slice(-300)}`}`);
       }
     }
+    // One stock run: a signal stock reads but ours never does is an API we broke, not a host without it.
+    const stockName = engine === "chromium" ? "chrome" : "firefox", stockRun = `stock-${engine}`;
+    if (!opts.buckets) {
+      const pending = server.wait(stockRun, 180_000);
+      const browser = openStock(stockName, join(WORK, "B", stockRun), server.url("probe.html", stockRun));
+      runs[stockRun] = await pending;
+      await browser.stop();
+      log(`B: ${stockRun} ${runs[stockRun] ? "ok" : "no result"}`);
+    }
     mkdirSync(join(OUT, "B"), { recursive: true });
     writeFileSync(join(OUT, "B", `${engine}-runs.json`), JSON.stringify(runs));
     const value = (run, key) => runs[run] ? JSON.stringify(at(runs[run], key) ?? runs[run][key] ?? null) : "<no run>";
@@ -432,10 +451,17 @@ async function gateB(E) {
       const stable = passes.length < 2 ? null : [...Array(n).keys()].every((i) => value(`${engine}-${i}-1`, key) === value(`${engine}-${i}-2`, key));
       table[key] = { distinct, stable };
       if (opts.buckets) continue;
-      if (first.every((v) => v === "null")) table[key].na = true; // not readable on this host (e.g. no WebGL): cannot link
-      else if (first.includes("<no run>")) result.blockers.push({ engine, key, detail: "a profile produced no result" });
-      else if (distinct < n) result.blockers.push({ engine, key, detail: `${distinct} distinct values across ${n} profiles (linkable)`, values: first.map((v) => v.slice(0, 60)) });
-      if (stable === false) result.blockers.push({ engine, key, detail: "changes across restarts", values: [...Array(n).keys()].flatMap((i) => [1, 2].map((p) => value(`${engine}-${i}-${p}`, key).slice(0, 60))) });
+      const hint = switchHint(key);
+      if (first.every((v) => v === "null")) {
+        // Null everywhere passes only when this host cannot read it (stock reads null too) and no probe step failed.
+        const errors = [...new Set(Object.values(runs).filter(Boolean).flatMap((r) => Object.keys(r).filter((k) => k.endsWith(".error") && key.startsWith(k.slice(0, -5) + ".")).map((k) => `${k}: ${r[k]}`)))];
+        const stockValue = value(stockRun, key);
+        if (errors.length) result.blockers.push({ engine, key, detail: `not measured: ${errors.join("; ").slice(0, 200)}`, switchHint: hint });
+        else if (stockValue !== "null" && stockValue !== "<no run>") result.blockers.push({ engine, key, detail: `stock reads a value, ours reads null`, stock: stockValue.slice(0, 60), switchHint: hint });
+        else table[key].na = true; // not readable on this host (e.g. no WebGL): cannot link
+      } else if (first.includes("<no run>")) result.blockers.push({ engine, key, detail: "a profile produced no result", switchHint: "none" });
+      else if (distinct < n) result.blockers.push({ engine, key, detail: `${distinct} distinct values across ${n} profiles (linkable)`, values: first.map((v) => v.slice(0, 60)), switchHint: hint });
+      if (stable === false) result.blockers.push({ engine, key, detail: "changes across restarts", values: [...Array(n).keys()].flatMap((i) => [1, 2].map((p) => value(`${engine}-${i}-${p}`, key).slice(0, 60))), switchHint: hint });
     }
     result.engines[engine] = table;
   }
@@ -574,27 +600,30 @@ async function gateC(E) {
     for (const [stockT, oursT] of [["stock-chrome", "ours-chromium"], ["stock-firefox", "ours-firefox"]]) {
       const r = results[site.id], stock = r[stockT], ours = r[oursT];
       if (!stock) continue;
-      let verdict;
+      let verdict, retry, spareStock;
       if (stock.status !== "pass") {
         if (spareRaw && ours) {
           const spare = await startForwarder(spareRaw);
           const s2 = await visit(E, stockT, site, spare, server);
-          if (s2.status === "pass") { const o2 = await visit(E, oursT, site, spare, server); verdict = compare(site, s2, o2) ? `BLOCKER (spare IP): ${compare(site, s2, o2)}` : "pass (spare IP)"; }
+          spareStock = s2.status;
+          if (s2.status === "pass") { retry = await visit(E, oursT, site, spare, server); verdict = compare(site, s2, retry) ? `BLOCKER (spare IP): ${compare(site, s2, retry)}` : "pass (spare IP)"; }
           spare.close();
         }
         verdict ??= "dropped (host/IP)";
       } else if (!ours) verdict = "stock pass";
       else {
         let why = compare(site, stock, ours);
-        if (why) { const again = await visit(E, oursT, site, proxy, server); r[`${oursT}-retry`] = again; why = compare(site, stock, again); }
+        if (why) { retry = await visit(E, oursT, site, proxy, server); why = compare(site, stock, retry); }
         verdict = why ? `BLOCKER: ${why}` : "pass";
       }
-      if (verdict.startsWith("BLOCKER")) blockers.push({ site: site.id, engine: oursT.slice(5), detail: verdict, switchHint: site.switch_hint });
-      rows.push({ site: site.id, vendor: site.vendor, pair: oursT.slice(5), stock: stock.status, stockMetrics: stock.metrics, ours: ours?.status, oursMetrics: ours?.metrics, verdict });
+      if (verdict.startsWith("BLOCKER")) blockers.push({ site: site.id, engine: oursT.slice(5), detail: verdict, switchHint: site.switch_hint ?? "none" });
+      // A retry decides the verdict, so the row shows both visits.
+      rows.push({ site: site.id, vendor: site.vendor, pair: oursT.slice(5), stock: stock.status, stockMetrics: stock.metrics, ours: ours?.status, oursMetrics: ours?.metrics,
+        ...(spareStock ? { spareStock } : {}), ...(retry ? { retry: retry.status, retryMetrics: retry.metrics } : {}), verdict });
     }
   }
   proxy.close(); server.close();
-  return { status: blockers.length ? "fail" : "pass", ip: proxy.id, where: proxy.where, timezone: proxy.timezone, rows, blockers };
+  return { status: blockers.length ? "fail" : "pass", ip: proxy.id, timezone: proxy.timezone, rows, blockers };
 }
 
 // ---------- main ----------
@@ -603,7 +632,11 @@ const summary = {
   date: new Date().toISOString(), engineBuild, os, host: `${process.platform} ${process.arch}`, switches: opts.switch,
   engines: E.versions, stock: { chrome: stockVersion("chrome"), firefox: stockVersion("firefox") }, gates: {},
 };
-log(`engines ${JSON.stringify(E.versions)}, stock ${JSON.stringify(summary.stock)}`);
+// The stock control should be the engine's major; a different one shows as version differences in Gate A.
+const major = (v) => String(v ?? "").match(/\b(\d{2,3})\.\d+\.\d+/)?.[1];
+summary.majors = { chromium: { engine: major(E.versions.chromium), control: major(summary.stock.chrome) }, firefox: { engine: major(E.versions.firefox), control: major(summary.stock.firefox) } };
+const mismatch = Object.entries(summary.majors).filter(([, m]) => m.engine && m.control && m.engine !== m.control).map(([e, m]) => `${e} ${m.engine} vs control ${m.control}`);
+log(`engines ${JSON.stringify(E.versions)}, stock ${JSON.stringify(summary.stock)}${mismatch.length ? `; major differs: ${mismatch.join(", ")}` : ""}`);
 if (only.has("p")) { const server = await probeServer(); summary.gates.P = await preflight(server); server.close(); }
 if (only.has("a")) summary.gates.A = await gateA(E);
 if (only.has("b")) summary.gates.B = await gateB(E);
@@ -611,21 +644,21 @@ if (only.has("c")) summary.gates.C = await gateC(E);
 const ran = Object.values(summary.gates).filter((g) => g.status !== "skipped" && g.status !== "info");
 // An info-only run (--buckets) passes when it ran.
 summary.pass = ran.every((g) => g.status === "pass") && Object.values(summary.gates).some((g) => g.status !== "skipped");
-// Page texts can echo addresses (block pages, checkers): the summaries keep none, and only they are kept in git.
+// Page texts can echo addresses (block pages, checkers): the summaries keep none.
 // (Version numbers stay: they have an octet over 255, end in .0.0.0, or follow a "/".)
 const redact = (text) => text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (ip, at, all) =>
   ip.split(".").some((o) => Number(o) > 255) || ip.endsWith(".0.0.0") || all[at - 1] === "/" || /^(127|10|0)\.|^192\.168\./.test(ip) ? ip : "[ip]");
-writeFileSync(join(OUT, ".gitignore"), "*\n!.gitignore\n!summary.json\n!summary.md\n");
 writeFileSync(join(OUT, "summary.json"), redact(JSON.stringify(summary, null, 1)));
-const md = [`# Gates ${summary.date}`, "", `Engine build: ${engineBuild} on ${os} (${summary.host}). Engines: ${JSON.stringify(E.versions)}. Stock: Chrome ${summary.stock.chrome}, Firefox ${summary.stock.firefox}.${opts.switch.length ? ` Switches: ${opts.switch.join(", ")}.` : ""}`, ""];
+const md = [`# Gates ${summary.date}`, "", `Engine build: ${engineBuild} on ${os} (${summary.host}). Engines: ${JSON.stringify(E.versions)}. Stock: Chrome ${summary.stock.chrome}, Firefox ${summary.stock.firefox}.${mismatch.length ? ` Major differs from the control: ${mismatch.join(", ")}.` : ""}${opts.switch.length ? ` Switches: ${opts.switch.join(", ")}.` : ""}`, ""];
 for (const [name, g] of Object.entries(summary.gates)) {
   md.push(`## Gate ${name}: ${g.status}${g.reason ? ` (${g.reason})` : ""}`, "");
   if (name === "A" && g.rows) { md.push("| Run | Probes | Stock noise | Unexplained diffs | Checker | UA |", "|---|---|---|---|---|---|", ...g.rows.map((r) => `| ${r.run} | ${r.probes} | ${r.noise} | ${r.unexplained} | ${r.check} | ${r.ua} |`), "", `Allowed by expected.json: ${g.allowed}.`, ""); }
   if (name === "B" && g.engines) for (const [engine, table] of Object.entries(g.engines)) {
     md.push(`${engine}:`, "", "| Signal | Distinct | Stable |", "|---|---|---|", ...Object.entries(table).map(([k, v]) => `| ${k} | ${v.distinct} | ${v.na ? "n/a" : v.stable ?? "-"} |`), "");
   }
-  if (name === "C" && g.rows) { md.push(`Proxy IP id ${g.ip} (${g.where}, ${g.timezone}).`, "", "| Site | Vendor | Engine | Stock | Ours | Verdict | Stock metrics | Our metrics |", "|---|---|---|---|---|---|---|---|", ...g.rows.map((r) => `| ${r.site} | ${r.vendor ?? ""} | ${r.pair} | ${r.stock} | ${r.ours ?? "-"} | ${r.verdict} | ${short(r.stockMetrics)} | ${short(r.oursMetrics ?? {})} |`), ""); }
-  for (const b of g.blockers ?? []) md.push(`- BLOCKER ${Object.values(b).filter((v) => typeof v === "string").join(" | ")}${b.switchHint ? ` (bisect: --switch ${b.switchHint}=off)` : ""}`);
+  if (name === "C" && g.rows) { md.push(`Proxy IP id ${g.ip} (${g.timezone}).`, "", "| Site | Vendor | Engine | Stock | Ours (retry) | Verdict | Stock metrics | Our metrics (retry) |", "|---|---|---|---|---|---|---|---|",
+    ...g.rows.map((r) => `| ${r.site} | ${r.vendor ?? ""} | ${r.pair} | ${r.stock}${r.spareStock ? ` (spare IP: ${r.spareStock})` : ""} | ${r.ours ?? "-"}${r.retry ? ` (${r.spareStock ? "spare IP" : "retry"}: ${r.retry})` : ""} | ${r.verdict} | ${short(r.stockMetrics)} | ${short(r.oursMetrics ?? {})}${r.retry ? ` (retry: ${short(r.retryMetrics)})` : ""} |`), ""); }
+  for (const b of g.blockers ?? []) md.push(`- BLOCKER ${Object.entries(b).filter(([k, v]) => k !== "switchHint" && typeof v === "string").map(([, v]) => v).join(" | ")}${b.switchHint && b.switchHint !== "none" ? ` (bisect: --switch ${b.switchHint}=off)` : " (bisect: no switch covers this; compare engine builds)"}`);
   md.push("");
 }
 writeFileSync(join(OUT, "summary.md"), redact(md.join("\n")));

@@ -1,5 +1,5 @@
 {
-  "_notes": "Gate C sites (extends adbench gates.json). Logged out, no purchases, no accounts, never solve image puzzles. wait = s before the first text copy; the page text is copied every 5 s until `ready` (regex, multiline + dotall) or max_wait. steps (form sites) start from the page's own focus right after the URL is opened, with no ready poll and no click: type ({email}, {email_gmail}, {username} = unregistered random placeholders), key (xdotool key names: Tab, Return, space, Escape) with optional repeat, wait s; then the text is polled until `after`. Verdict: `block` regex wins, else `pass` regex, else ready = pass. metrics: regex with one capture group. rule: per metric, ours vs stock on the same IP: min = ours >= stock - n, max = ours <= stock + n, same = equal to stock (or equal to `good`). copy_at = [x, y] fractions of a blank point clicked before select-all.",
+  "_notes": "Gate C sites (extends adbench gates.json). Logged out, no purchases, no accounts, never solve image puzzles. wait = s before the first text copy; the page text is copied every 5 s until `ready` (regex, multiline + dotall) or max_wait. steps (form sites) start from the page's own focus right after the URL is opened, with no ready poll and no click: type ({email}, {email_gmail}, {username} = unregistered random placeholders), key (xdotool key names: Tab, Return, space, Escape) with optional repeat, wait s; then the text is polled until `after`. Verdict: `block` regex wins, else `pass` regex, else ready = pass. metrics: regex with one capture group. rule: per metric, ours vs stock on the same IP: min = ours >= stock - n, max = ours <= stock + n, same = equal to stock (or equal to `good`). copy_at = [x, y] fractions of a blank point clicked before select-all. switch_hint: the internal switch to turn off first when ours fails (see switches.json); every site reads the WebGL renderer, so today that is gpu-family.",
   "sites": [
     {
       "id": "datadome",
@@ -9,7 +9,8 @@
       "max_wait": 25,
       "ready": "Access is temporarily restricted|Create your free account|Create your account|Sign up for GitHub|Enter your email",
       "block": "Access is temporarily restricted|unusual activity from your device",
-      "pass": "Create your free account|Create your account|Sign up for GitHub|Enter your email"
+      "pass": "Create your free account|Create your account|Sign up for GitHub|Enter your email",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "cloudflare",
@@ -19,7 +20,8 @@
       "max_wait": 30,
       "ready": "You bypassed|bypassed the Cloudflare",
       "pass": "bypassed the Cloudflare",
-      "block": "Performing security verification|Verify you are human"
+      "block": "Performing security verification|Verify you are human",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "cloudflare2",
@@ -28,7 +30,8 @@
       "wait": 8,
       "max_wait": 30,
       "ready": "You passed Cloudflare.s Managed Challenge",
-      "pass": "You passed Cloudflare.s Managed Challenge"
+      "pass": "You passed Cloudflare.s Managed Challenge",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "cloudflare3",
@@ -37,7 +40,8 @@
       "wait": 8,
       "max_wait": 30,
       "ready": "You passed the Cloudflare managed challenge",
-      "pass": "You passed the Cloudflare managed challenge"
+      "pass": "You passed the Cloudflare managed challenge",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "recaptcha",
@@ -54,7 +58,8 @@
           "min": 0.1
         }
       },
-      "notes": "Google's own reCAPTCHA v3 demo; the page prints the verify JSON with \"score\". (antcpt.com/score_detector failed with a PHP error on 2026-11-27.)"
+      "notes": "Google's own reCAPTCHA v3 demo; the page prints the verify JSON with \"score\". (antcpt.com/score_detector failed with a PHP error on 2026-11-27.)",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "fingerprintpro",
@@ -81,7 +86,8 @@
           "same": true,
           "good": "Not detected"
         }
-      }
+      },
+      "switch_hint": "gpu-family"
     },
     {
       "id": "creepjs",
@@ -105,7 +111,8 @@
         "stealth": {
           "max": 0
         }
-      }
+      },
+      "switch_hint": "gpu-family"
     },
     {
       "id": "browserscan",
@@ -121,7 +128,8 @@
         "authenticity": {
           "min": 5
         }
-      }
+      },
+      "switch_hint": "gpu-family"
     },
     {
       "id": "pixelscan",
@@ -139,7 +147,8 @@
           "same": true,
           "good": "No masking detected"
         }
-      }
+      },
+      "switch_hint": "gpu-family"
     },
     {
       "id": "iphey",
@@ -156,7 +165,8 @@
           "same": true,
           "good": "Trustworthy"
         }
-      }
+      },
+      "switch_hint": "gpu-family"
     },
     {
       "id": "akamai-bestbuy",
@@ -166,7 +176,8 @@
       "max_wait": 45,
       "ready": "Access Denied|Best Buy|Top Deals|Deal of the Day",
       "block": "Access Denied|don't have permission to access",
-      "pass": "Top Deals|Deal of the Day|Best Buy"
+      "pass": "Top Deals|Deal of the Day|Best Buy",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "nike-home",
@@ -177,7 +188,8 @@
       "ready": "Access Denied|Nike\\. Just Do It|Find a Store",
       "block": "Access Denied|unusual activity",
       "pass": "Nike\\. Just Do It|Find a Store|Join Us",
-      "notes": "nike.com home page loads (Akamai Bot Manager edge)."
+      "notes": "nike.com home page loads (Akamai Bot Manager edge).",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "nike-signin",
@@ -204,7 +216,8 @@
       "after": "encountered a problem|Reference Error|make you a Nike Member|Create your|password|code",
       "block": "encountered a problem|Reference Error|Access Denied",
       "pass": "make you a Nike Member|Create your|[Pp]assword|code",
-      "notes": "accounts.nike.com email lookup with an unregistered address. The email field is the 2nd Tab stop. A block shows 'We have encountered a problem. Please try again later. Reference Error: ...'. Nike answers a reserved domain (example.com) with the same error, so this site types an unregistered random @gmail.com address ({email_gmail}); Nike then sends a sign-up code that bounces. 2026-11-27: stock Chrome passed with it on a spare bench IP."
+      "notes": "accounts.nike.com email lookup with an unregistered address. The email field is the 2nd Tab stop. A block shows 'We have encountered a problem. Please try again later. Reference Error: ...'. Nike answers a reserved domain (example.com) with the same error, so this site types an unregistered random @gmail.com address ({email_gmail}); Nike then sends a sign-up code that bounces. 2026-11-27: stock Chrome passed with it on a spare bench IP.",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "amazon-signin",
@@ -228,7 +241,8 @@
       "after": "cannot find an account|new to Amazon|Create account|Looks like you.re new|Enter the characters|Solve this puzzle|Access restricted|continue shopping|Something went wrong",
       "block": "Enter the characters you see|Solve this puzzle|Type the characters|Access restricted|unauthorized AI agent|Click the button below to continue shopping|Something went wrong on our end",
       "pass": "cannot find an account|new to Amazon|Looks like you.re new|Create account",
-      "notes": "Unregistered address on /ap/signin (FWCIM runs on this page). 2026-11-27 dev box, bench IP: stock Chrome got the 'Click the button below to continue shopping' interstitial and then 'Access restricted ... unauthorized AI agent'; both count as blocks. 'Sorry! Something went wrong on our end' (the dogs page) right after the email step is a block too."
+      "notes": "Unregistered address on /ap/signin (FWCIM runs on this page). 2026-11-27 dev box, bench IP: stock Chrome got the 'Click the button below to continue shopping' interstitial and then 'Access restricted ... unauthorized AI agent'; both count as blocks. 'Sorry! Something went wrong on our end' (the dogs page) right after the email step is a block too.",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "px-walmart",
@@ -238,7 +252,8 @@
       "max_wait": 45,
       "ready": "Robot or human|Press & Hold|results for|Results for|Price when purchased online",
       "block": "Robot or human|Press & Hold|Activate and hold",
-      "pass": "results for|Results for|Price when purchased online"
+      "pass": "results for|Results for|Price when purchased online",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "hcaptcha",
@@ -286,7 +301,8 @@
           "good": "\"success\": true"
         }
       },
-      "notes": "Keyboard only: Tab to the checkbox, Space, wait, Escape closes an image challenge unsolved (never solve images), Tab x4 to Submit, Enter. 'Please solve the challenge' = the checkbox led to a challenge; a passive pass submits a token. Stock Chrome on the dev box gets a challenge, so the rule is: same outcome as stock."
+      "notes": "Keyboard only: Tab to the checkbox, Space, wait, Escape closes an image challenge unsolved (never solve images), Tab x4 to Submit, Enter. 'Please solve the challenge' = the checkbox led to a challenge; a passive pass submits a token. Stock Chrome on the dev box gets a challenge, so the rule is: same outcome as stock.",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "x-username",
@@ -314,7 +330,8 @@
         0.5,
         0.25
       ],
-      "notes": "Unregistered username; X answers 'We couldn't find an active X account with that username.' The login modal closes on a click outside it, so the text is copied by clicking inside the modal (copy_at)."
+      "notes": "Unregistered username; X answers 'We couldn't find an active X account with that username.' The login modal closes on a click outside it, so the text is copied by clicking inside the modal (copy_at).",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "google-signin",
@@ -338,7 +355,8 @@
       "after": "Couldn.t find (this|your Google) account|Enter a valid email|not be secure|Couldn.t sign you in|unusual traffic|Type the text you hear or see",
       "block": "browser or app may not be secure|Couldn.t sign you in|unusual traffic|Type the text you hear or see",
       "pass": "Couldn.t find (this|your Google) account|Enter a valid email",
-      "notes": "Unregistered address; Google answers 'Couldn't find this account'. Insecure-browser and captcha pages are blocks."
+      "notes": "Unregistered address; Google answers 'Couldn't find this account'. Insecure-browser and captcha pages are blocks.",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "meta-login",
@@ -348,7 +366,8 @@
       "max_wait": 40,
       "ready": "Log in to Facebook|Log into Facebook|Forgot password|Forgotten password|temporarily blocked",
       "block": "temporarily blocked|unusual activity|Something went wrong",
-      "pass": "Log in to Facebook|Log into Facebook|Forgot password|Forgotten password"
+      "pass": "Log in to Facebook|Log into Facebook|Forgot password|Forgotten password",
+      "switch_hint": "gpu-family"
     },
     {
       "id": "tiktok-login",
@@ -358,7 +377,8 @@
       "max_wait": 40,
       "ready": "Log in|Forgot password|Access Denied",
       "block": "Access Denied|Maximum number of attempts|Something went wrong",
-      "pass": "Forgot password|Email or username"
+      "pass": "Forgot password|Email or username",
+      "switch_hint": "gpu-family"
     }
   ]
 }

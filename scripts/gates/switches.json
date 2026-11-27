@@ -1,0 +1,9 @@
+{
+  "_notes": "Bisect hints. Every gate blocker names the internal switch to turn off first: gates.mjs --switch <name>=off sets ALIASMODE_SWITCHES_OFF=<name>, which the app reads with switchOff() (fingerprint.ts). hints: the first entry whose regex matches a Gate A probe id or a Gate B signal names the switch; Gate C sites name theirs in sites.json switch_hint. 'none' = no switch covers it yet: bisect by engine build (gates on the released build against the candidate). Add a switch here when the app or an engine gains one.",
+  "switches": {
+    "gpu-family": "New profiles keep the host GPU family (app feat/undetect-159): off = no stored host GPU, no Chromium GPU-family flags (--fingerprint-anchor), no Firefox card filter."
+  },
+  "hints": [
+    { "match": "webgl|webgpu|gpu|renderer|w\\.webgl", "switch": "gpu-family" }
+  ]
+}

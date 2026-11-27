@@ -117,8 +117,11 @@ async function audio() {
   const an = a.createAnalyser(); an.fftSize = 2048;
   o2.connect(g); g.connect(an); an.connect(a.destination); o2.start(0);
   const freq = new Float32Array(an.frequencyBinCount); const time = new Float32Array(an.fftSize);
-  a.suspend(0.5).then(() => { an.getFloatFrequencyData(freq); an.getFloatTimeDomainData(time); a.resume(); });
+  // Firefox's OfflineAudioContext has no suspend(): there the analyser is read after rendering ends.
+  const read = () => { an.getFloatFrequencyData(freq); an.getFloatTimeDomainData(time); };
+  if (typeof a.suspend === 'function') a.suspend(0.5).then(() => { read(); a.resume(); });
   const b2 = await a.startRendering();
+  if (typeof a.suspend !== 'function') read();
   out['audio.analyserFreq'] = await sha(freq);
   out['audio.analyserTime'] = await sha(time);
   out['audio.biquadHash'] = await sha(b2.getChannelData(0));
