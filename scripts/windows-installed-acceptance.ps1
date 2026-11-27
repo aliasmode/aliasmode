@@ -105,8 +105,9 @@ function Install-AcceptanceArtifact(
   if ($null -ne $metadata.executable -or $null -ne $metadata.sha256) {
     throw "candidate browser metadata still names a bundled CloakBrowser"
   }
+  # TODO-PIN-FINAL: Firefox 159 pin (see firefox-install.ts).
   if (
-    $metadata.firefox.version -ne "156.0.1-beta.36" -or
+    $metadata.firefox.version -ne "159.0-beta.43" -or
     [string]$metadata.firefox.executable -notmatch '(?i)(?:^|[\\/])aliasmode\.exe$' -or
     [string]$metadata.firefox.sha256 -notmatch '^[a-f0-9]{64}$'
   ) {

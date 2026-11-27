@@ -181,8 +181,9 @@ export function intelMacGraphicsVendor(report: string): MacGraphicsVendor | unde
   return undefined;
 }
 
-export const FIREFOX_RUNTIME_VERSION = "156.0.1-beta.36";
-const FIREFOX_UA_MAJOR_VERSION = "156";
+// TODO-PIN-FINAL: Firefox 159 pin (see firefox-install.ts).
+export const FIREFOX_RUNTIME_VERSION = "159.0-beta.43";
+const FIREFOX_UA_MAJOR_VERSION = "159";
 
 /**
  * Generate an OS-matched identity once, for durable profile storage. With a seed the

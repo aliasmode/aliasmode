@@ -235,7 +235,7 @@ test("a proxied Firefox profile whose timezone is this computer's opens with a w
 
 test.each([false, true])("legacy Firefox keeps its old digest until confirmed close (stale=%s)", async (stale) => {
   const f = fixture();
-  const legacyConfig = { version: 1 as const, runtimeVersion: "156.0.1-beta.36", config: { "navigator.userAgent": "Mozilla/5.0 Firefox/156.0" } };
+  const legacyConfig = { version: 1 as const, runtimeVersion: "159.0-beta.43", config: { "navigator.userAgent": "Mozilla/5.0 Firefox/159.0" } };
   (f.store as any).db.query("UPDATE profiles SET locale = '', firefox_config_json = ? WHERE id = ?")
     .run(JSON.stringify(legacyConfig), f.profile.id);
   const legacy = f.store.getProfile(f.profile.id)!;

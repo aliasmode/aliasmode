@@ -152,7 +152,7 @@ test("Windows bundle preparation packages owned Firefox with verified hashes and
       firefox: {
         executable: "firefox/aliasmode.exe",
         sha256: firefox.executableSha256,
-        version: "156.0.1-beta.36",
+        version: "159.0-beta.43",
         archiveSha256: firefox.archiveSha256,
       },
     });

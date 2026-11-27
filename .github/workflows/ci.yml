@@ -24,13 +24,15 @@ permissions:
 # The aliasmode/aliasmode-firefox build.yml run that built the Windows engine, and the release
 # whose archive the installer bundles. The release carries that run's archives, which hold no
 # fonts of other operating systems; the app downloads those as font packs when a profile needs them.
+# TODO-PIN-FINAL: build run 46028990365 (engine/159-port bdefc97); release aliasmode-runtime-159.0-beta.43-r1
+# is not published yet. Swap in the published release's values.
 env:
-  ALIASMODE_FIREFOX_RELEASE: aliasmode-runtime-156.0.1-beta.36-r14
-  ALIASMODE_FIREFOX_RELEASE_ARCHIVE_SHA256: 23d2531f5a72dbfde049319259bcee55407a2ba7afc570398446da5c1f20cfcb
-  ALIASMODE_FIREFOX_BUILD_RUN_ID: "42258259106"
+  ALIASMODE_FIREFOX_RELEASE: aliasmode-runtime-159.0-beta.43-r1
+  ALIASMODE_FIREFOX_RELEASE_ARCHIVE_SHA256: 0342b417d14c39dda3488dcdcbdadfc677568a100ba4c7d2c7a00acb0348b9e4
+  ALIASMODE_FIREFOX_BUILD_RUN_ID: "46028990365"
   ALIASMODE_FIREFOX_BUILD_EVENT: workflow_dispatch
-  ALIASMODE_FIREFOX_BUILD_BRANCH: fix/canvas-noise-audit
-  ALIASMODE_FIREFOX_BUILD_SHA: 7eeccbdf0b2c7562dce9d11175c35667b9025a7f
+  ALIASMODE_FIREFOX_BUILD_BRANCH: engine/159-port
+  ALIASMODE_FIREFOX_BUILD_SHA: bdefc97d3792f9bc28e53d2187247311fc1f9712
 
 concurrency:
   group: >-
@@ -99,8 +101,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path "artifacts/firefox" | Out-Null
-          gh release download $env:ALIASMODE_FIREFOX_RELEASE --repo aliasmode/aliasmode-firefox --pattern "aliasmode-156.0.1-beta.36-win.x86_64.zip" --dir "artifacts/firefox"
-          $sha = (Get-FileHash -LiteralPath "artifacts/firefox/aliasmode-156.0.1-beta.36-win.x86_64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          gh release download $env:ALIASMODE_FIREFOX_RELEASE --repo aliasmode/aliasmode-firefox --pattern "aliasmode-159.0-beta.43-win.x86_64.zip" --dir "artifacts/firefox"
+          $sha = (Get-FileHash -LiteralPath "artifacts/firefox/aliasmode-159.0-beta.43-win.x86_64.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($sha -cne $env:ALIASMODE_FIREFOX_RELEASE_ARCHIVE_SHA256) { throw "released AliasMode Firefox archive SHA-256 mismatch: $sha" }
       - name: Verify owned AliasMode Firefox artifact
         id: verify
@@ -109,7 +111,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $root = Resolve-Path ".\artifacts\firefox"
           $entries = @(Get-ChildItem -LiteralPath $root -Force)
-          $archiveName = "aliasmode-156.0.1-beta.36-win.x86_64.zip"
+          $archiveName = "aliasmode-159.0-beta.43-win.x86_64.zip"
           if (
             $entries.Count -ne 1 -or
             $entries[0].PSIsContainer -or
@@ -132,10 +134,10 @@ jobs:
           $stderrPath = Join-Path $env:RUNNER_TEMP "firefox-version-stderr.txt"
           $process = Start-Process -FilePath $executable -ArgumentList "--version" -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
           $version = [IO.File]::ReadAllText($stdoutPath)
-          if ($process.ExitCode -ne 0 -or $version -notmatch '156\.0\.1') {
+          if ($process.ExitCode -ne 0 -or $version -notmatch '159\.0') {
             Write-Host "Firefox version probe exited $($process.ExitCode): $version"
             Write-Host ([IO.File]::ReadAllText($stderrPath))
-            throw "owned AliasMode Firefox did not report Firefox 156.0.1"
+            throw "owned AliasMode Firefox did not report Firefox 159.0"
           }
           "archive_sha256=$archiveSha" | Add-Content $env:GITHUB_OUTPUT
           "executable_sha256=$executableSha" | Add-Content $env:GITHUB_OUTPUT
@@ -227,7 +229,7 @@ jobs:
           $externalIdentity = @(
             "node-win-x64=22.23.2:1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
             "aliasmode-firefox-source=aliasmode/aliasmode-firefox@$env:ALIASMODE_FIREFOX_BUILD_SHA"
-            "aliasmode-firefox-version=156.0.1-beta.36"
+            "aliasmode-firefox-version=159.0-beta.43"
             "aliasmode-firefox-archive-sha256=$env:FIREFOX_ARCHIVE_SHA256"
             "aliasmode-firefox-executable-sha256=$env:FIREFOX_EXECUTABLE_SHA256"
           ) -join "`n"
@@ -413,7 +415,7 @@ jobs:
           WINDOWS_PRODUCT_KEY: ${{ needs.windows_cache.outputs.product_key }}
           WINDOWS_SOURCE: ${{ needs.windows_cache.outputs.source }}
           WINDOWS_VERSION: ${{ needs.windows_cache.outputs.version }}
-          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-156.0.1-beta.36-win.x86_64.zip
+          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-159.0-beta.43-win.x86_64.zip
           ALIASMODE_FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_cache.outputs.firefox_archive_sha256 }}
           ALIASMODE_FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_cache.outputs.firefox_executable_sha256 }}
         run: |
@@ -556,7 +558,7 @@ jobs:
         shell: pwsh
         env:
           EXPECTED_BASELINE_SHA: ${{ needs.windows_cache.outputs.baseline_bun_sha }}
-          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-156.0.1-beta.36-win.x86_64.zip
+          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-159.0-beta.43-win.x86_64.zip
           ALIASMODE_FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_cache.outputs.firefox_archive_sha256 }}
           ALIASMODE_FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_cache.outputs.firefox_executable_sha256 }}
         run: |
@@ -651,7 +653,7 @@ jobs:
         shell: pwsh
         env:
           EXPECTED_BASELINE_SHA: ${{ needs.windows_cache.outputs.baseline_bun_sha }}
-          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-156.0.1-beta.36-win.x86_64.zip
+          ALIASMODE_FIREFOX_ARCHIVE: ${{ github.workspace }}\artifacts\firefox\aliasmode-159.0-beta.43-win.x86_64.zip
           ALIASMODE_FIREFOX_ARCHIVE_SHA256: ${{ needs.windows_cache.outputs.firefox_archive_sha256 }}
           ALIASMODE_FIREFOX_EXECUTABLE_SHA256: ${{ needs.windows_cache.outputs.firefox_executable_sha256 }}
         run: |
@@ -836,7 +838,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $metadata = Get-Content ".\src-tauri\generated\browser.json" -Raw | ConvertFrom-Json
           if (
-            $metadata.firefox.version -cne "156.0.1-beta.36" -or
+            $metadata.firefox.version -cne "159.0-beta.43" -or
             [string]$metadata.firefox.sha256 -notmatch '^[a-f0-9]{64}$' -or
             [string]$metadata.firefox.archiveSha256 -notmatch '^[a-f0-9]{64}$' -or
             [string]::IsNullOrWhiteSpace([string]$metadata.firefox.executable)
@@ -852,10 +854,10 @@ jobs:
           $stderrPath = Join-Path $env:RUNNER_TEMP "firefox-version-stderr.txt"
           $process = Start-Process -FilePath $firefox.Path -ArgumentList "--version" -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
           $version = [IO.File]::ReadAllText($stdoutPath)
-          if ($process.ExitCode -ne 0 -or $version -notmatch '156\.0\.1') {
+          if ($process.ExitCode -ne 0 -or $version -notmatch '159\.0') {
             Write-Host "Firefox version probe exited $($process.ExitCode): $version"
             Write-Host ([IO.File]::ReadAllText($stderrPath))
-            throw "owned AliasMode Firefox did not report Firefox 156.0.1"
+            throw "owned AliasMode Firefox did not report Firefox 159.0"
           }
       - name: Prove packaged Firefox Launcher persistence and portable handoff
         shell: pwsh
