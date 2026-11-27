@@ -108,7 +108,7 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
 }
 
 /** Pages find the Local API, the debug ports and remote-desktop servers closed (ports.ts closedLoopbackPorts). */
-const BANNED_PORTS = { "network.security.ports.banned": "50400,9333-9999,3389,5900-5903,5938-5939,7070" };
+const BANNED_PORTS = { "network.security.ports.banned": "50400,3389,5900-5903,5938-5939,7070" };
 
 test("Firefox launches one saved persona and retains ownership across manager restart", async () => {
   const f = fixture();

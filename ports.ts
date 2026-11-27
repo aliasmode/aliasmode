@@ -20,11 +20,11 @@ export const REMOTE_DESKTOP_PORTS = ["3389", "5900-5903", "5938-5939", "7070"];
  * proxy relay and the autofill bridge, and remote-desktop servers.
  */
 export function closedLoopbackPorts(opts: {
-  apiPort: number; debugPorts: { start: number; end: number }; relayPort?: number; autofillPort?: number;
+  apiPort: number; debugPorts?: { start: number; end: number }; relayPort?: number; autofillPort?: number;
 }): string {
   return [
     String(opts.apiPort),
-    `${opts.debugPorts.start}-${opts.debugPorts.end}`,
+    ...opts.debugPorts ? [`${opts.debugPorts.start}-${opts.debugPorts.end}`] : [],
     ...opts.relayPort ? [String(opts.relayPort)] : [],
     ...opts.autofillPort ? [String(opts.autofillPort)] : [],
     ...REMOTE_DESKTOP_PORTS,

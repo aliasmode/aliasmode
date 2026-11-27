@@ -51,4 +51,5 @@ test("closedLoopbackPorts lists the Local API, the debug range, this launch's re
     .toBe("50400,9333-9999,61234,61235,3389,5900-5903,5938-5939,7070");
   expect(closedLoopbackPorts({ apiPort: 50400, debugPorts: { start: 9333, end: 9999 }, autofillPort: 0 }))
     .toBe("50400,9333-9999,3389,5900-5903,5938-5939,7070");
+  expect(closedLoopbackPorts({ apiPort: 50400, relayPort: 61234 })).toBe("50400,61234,3389,5900-5903,5938-5939,7070");
 });

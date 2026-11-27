@@ -1460,8 +1460,10 @@ export class Launcher {
   }
 
   /** The loopback ports this launch's pages must find closed (ports.ts closedLoopbackPorts). */
-  private closedLoopbackPorts(relayPort?: number): string {
-    return closedLoopbackPorts({ apiPort: ALIASMODE_PORT, debugPorts: this.portRange, relayPort, autofillPort: this.autofill?.port });
+  private closedLoopbackPorts(relayPort?: number, withDebugPorts = true): string {
+    return closedLoopbackPorts({
+      apiPort: ALIASMODE_PORT, debugPorts: withDebugPorts ? this.portRange : undefined, relayPort, autofillPort: this.autofill?.port,
+    });
   }
 
   /** Where the profile's pages are, from the same proxy exit lookup as its timezone. Nothing without a proxy. */
@@ -2750,8 +2752,9 @@ export class Launcher {
         prefs: {
           ...firefoxStartupPrefs(profile, this.hostPlatform, this.hostArch),
           // Pages find the app's own local services and remote-desktop servers on this computer closed.
-          // Firefox applies the list to every host; it reaches the proxy relay as a proxy, not through a URL.
-          "network.security.ports.banned": this.closedLoopbackPorts(launch.relayPort),
+          // Firefox applies the list to every host, so it leaves out the debug range (9443 is a common site
+          // port). It reaches the proxy relay as a proxy, not through a URL.
+          "network.security.ports.banned": this.closedLoopbackPorts(launch.relayPort, false),
           ...(fontsDir ? firefoxFontPackPrefs(fontsDir, this.hostPlatform) : {}),
           // Firefox outlives its last window on macOS anyway; elsewhere the engine keeps running for this pref.
           ...(opts.keepAliveWithoutWindows && this.hostPlatform !== "darwin" ? { "aliasmode.keepAliveWithoutWindows": true } : {}),
