@@ -139,16 +139,21 @@ async function installFirefoxRuntime(
 
 export const WINDOWS_SIDECAR_TARGET = "bun-windows-x64-baseline";
 
+/** Bundler flags of the compiled sidecar; a test bundles with them to catch startup hangs. */
+export const SIDECAR_BUILD_FLAGS = [
+  "--define=ALIASMODE_COMPILED=true",
+  "--external=playwright-core",
+  "--external=chromium-bidi",
+  "--external=electron",
+];
+
 export async function compileSidecar(cwd: string, output: string, target = WINDOWS_SIDECAR_TARGET): Promise<void> {
   const child = Bun.spawn([
     process.execPath,
     "build",
     "--compile",
     `--target=${target}`,
-    "--define=ALIASMODE_COMPILED=true",
-    "--external=playwright-core",
-    "--external=chromium-bidi",
-    "--external=electron",
+    ...SIDECAR_BUILD_FLAGS,
     // One program for the sidecar and the MCP helper; Cargo builds the aliasmode-mcp launcher.
     "sidecar-entry.ts",
     "--outfile",

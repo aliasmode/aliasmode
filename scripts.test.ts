@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentControlSession } from "./agent-control.ts";
-import { LOG_READ_BYTES, ScriptLibrary, ScriptSupervisor, resolveScriptRunner, verifyScriptRuntime, type ScriptExecution } from "./scripts.ts";
+import { LOG_READ_BYTES } from "./script-secrets.ts";
+import { ScriptLibrary, ScriptSupervisor, resolveScriptRunner, verifyScriptRuntime, type ScriptExecution } from "./scripts.ts";
 import { handleUiRequest } from "./ui.ts";
 import { serveAutomationApi } from "./web.ts";
 import { Scheduler } from "./scheduler.ts";

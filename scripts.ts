@@ -9,6 +9,7 @@ import { CloudClient } from "./cloud-client.ts";
 import type { ScriptInput, ScriptLanguage, ScriptRecord, ScriptSummary, PublishedScript, PublishScriptInput, PublishedScriptsQuery, ListPublishedScriptsResponse } from "./contracts/cloud-v1.ts";
 import { resolvePlaywrightRuntime, type PlaywrightRuntimeLayout } from "./playwright-runtime.ts";
 import { PYTHON_RUNTIME_FAILED, type PythonRuntime } from "./python-runtime.ts";
+import { CREDENTIAL_FIELDS, LOG_READ_BYTES } from "./script-secrets.ts";
 
 export class ScriptError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -290,29 +291,6 @@ export const executeScript: ScriptExecution = async ({ scriptPath, language, inp
     child.stdin!.destroy();
   }
 };
-
-export const CREDENTIAL_FIELDS = ["username", "password", "email", "emailPassword", "twofa"] as const;
-/** The most bytes one log read returns. */
-export const LOG_READ_BYTES = 64 * 1024;
-
-/** The saved login values worth masking (4+ characters), longest first, so a value inside another is not left half shown. */
-export function maskableSecrets(values: Iterable<string>): string[] {
-  return [...new Set(values)].filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
-}
-
-/** Replaces each saved login value in `text` with ***. */
-export function maskSecrets(text: string, values: Iterable<string>): string {
-  return maskableSecrets(values).reduce((masked, secret) => masked.split(secret).join("***"), text);
-}
-
-export function maskProfiles<T extends { error?: string; warning?: string }>(profiles: T[], values: Iterable<string>): T[] {
-  const secrets = maskableSecrets(values);
-  return profiles.map(({ error, warning, ...item }) => ({
-    ...item,
-    ...(error === undefined ? {} : { error: maskSecrets(error, secrets) }),
-    ...(warning === undefined ? {} : { warning: maskSecrets(warning, secrets) }),
-  }) as T);
-}
 
 interface ActiveRun {
   view: ScriptRun;

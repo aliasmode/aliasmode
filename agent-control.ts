@@ -24,7 +24,8 @@ import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
-import { CREDENTIAL_FIELDS, LOG_READ_BYTES, maskProfiles, maskSecrets, maskableSecrets, type ScriptLibrary, type ScriptRun, type ScriptSupervisor } from "./scripts.ts";
+import { CREDENTIAL_FIELDS, LOG_READ_BYTES, maskProfiles, maskSecrets, maskableSecrets } from "./script-secrets.ts";
+import type { ScriptLibrary, ScriptRun, ScriptSupervisor } from "./scripts.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
