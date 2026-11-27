@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "./i18n.tsx";
-import { RunOnOpenField, ScriptAiCard, ScriptRunPanel, ScriptsPage, fixScriptPrompt } from "./scripts.tsx";
+import { OfficialBadge, RunOnOpenField, ScriptAiCard, ScriptRunPanel, ScriptsPage, fixScriptPrompt } from "./scripts.tsx";
 
 test("script run panel defaults to 10 parallel browsers without an upper limit", () => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -62,4 +62,10 @@ test("the AI card shows the credits hint", () => {
   expect(card).toContain("Customize with AI");
   expect(card).toContain("Ask the agent");
   expect(card).toContain("Uses your free monthly credits, then your workspace balance.");
+});
+
+test("official public scripts get a badge with a check icon", () => {
+  const badge = renderToStaticMarkup(<I18nProvider><OfficialBadge /></I18nProvider>);
+  expect(badge).toContain("Official");
+  expect(badge).toContain("<svg");
 });

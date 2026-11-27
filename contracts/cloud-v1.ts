@@ -670,6 +670,8 @@ export interface PublishedScriptSummary {
   sourceRevision: number;
   publishedAt: string;
   updatedAt: string;
+  /** Published from the site-admin account; Cloud lists these first. Absent means false. */
+  official?: boolean;
 }
 
 export interface PublishedScript extends PublishedScriptSummary {

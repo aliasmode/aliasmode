@@ -105,6 +105,12 @@ export function ScriptAiCard({ busy, onAsk }: { busy: boolean; onAsk: (change: s
   </form>;
 }
 
+/** Marks a public script published by AliasMode. */
+export function OfficialBadge() {
+  const { t } = useTranslation();
+  return <span className="chip official"><Glyph name="check" />{t("Official")}</span>;
+}
+
 function FixWithAiButton({ onClick }: { onClick: () => void }) {
   const { t } = useTranslation();
   return <button className="btn accent sm script-ai-fix" type="button" onClick={onClick}><Glyph name="sparkle" />{t("Ask AI to fix this script")}</button>;
@@ -492,14 +498,14 @@ function PublicLibrary({ mine, onImported, onAskAgent }: { mine: ScriptSummary[]
       <div className="scripts-list" aria-label={t("Public scripts")}>
         {busy && scripts.length === 0 ? <p className="formnote">{t("Loading scripts…")}</p> : scripts.length === 0 ? <p className="formnote">{t("No public scripts found.")}</p> : scripts.map((item) => (
           <button className={`script-row${script?.id === item.id ? " active" : ""}`} type="button" key={item.id} disabled={busy} onClick={() => void select(item.id)}>
-            <b>{item.name}</b><span>{item.authorName} · {languageName(item.language)} · {new Date(item.updatedAt).toLocaleDateString()}</span>
+            <b>{item.name}{item.official && <OfficialBadge />}</b><span>{item.authorName} · {languageName(item.language)} · {new Date(item.updatedAt).toLocaleDateString()}</span>
             {item.description && <small>{item.description}</small>}
           </button>
         ))}
         <div className="script-library-pager"><button className="btn" type="button" disabled={busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>{t("Previous")}</button><button className="btn" type="button" disabled={busy || nextOffset === null} onClick={() => setOffset(nextOffset ?? offset)}>{t("Next")}</button></div>
       </div>
       {script ? <section className="settings-card script-detail">
-        <header><h2>{script.name}</h2><span className="chip">{languageName(script.language)}</span></header>
+        <header><h2>{script.name}{script.official && <OfficialBadge />}</h2><span className="chip">{languageName(script.language)}</span></header>
         <div className="card-body">
           <p>{script.description || t("No description")}</p>
           <p className="formnote">{t("By {authorName}", { authorName: script.authorName })}{script.authorEmail && <> · {script.authorEmail}</>} · {new Date(script.updatedAt).toLocaleDateString()}</p>

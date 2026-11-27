@@ -1724,6 +1724,7 @@ td.col-tags .chip + .chip { margin-left: 4px; }
 .script-ai-body textarea { width: 100%; resize: vertical; }
 .script-ai-body small { color: var(--muted); font-size: var(--t-xs); }
 .script-ai-fix { grid-column: 1 / -1; justify-self: start; }
+.chip.official { margin-left: 6px; vertical-align: middle; color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent-line); }
 .script-publication { display: grid; gap: 10px; padding-top: 2px; }
 .script-publication-preview { display: grid; gap: 2px; padding: 10px; color: var(--muted); background: var(--surface-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); font-size: var(--t-sm); }
 .script-publication-preview b { color: var(--ink); }
