@@ -245,7 +245,7 @@ async function openCdp(endpoint: string, timeout: number): Promise<CdpConnection
     return Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out`)), timeout); })])
       .finally(() => clearTimeout(timer));
   };
-  return {
+  const connection: CdpConnection = {
     send(method, params = {}, sessionId) {
       const id = ++lastId;
       const reply = new Promise<any>((resolve, reject) => calls.set(id, { resolve, reject }));
@@ -259,10 +259,11 @@ async function openCdp(endpoint: string, timeout: number): Promise<CdpConnection
     },
     once(method, sessionId) {
       let off: (() => void) | undefined;
-      return within(new Promise((resolve) => { off = this.on(method, sessionId, resolve); }), method).finally(() => off?.());
+      return within(new Promise((resolve) => { off = connection.on(method, sessionId, resolve); }), method).finally(() => off?.());
     },
     close() { socket.close(); },
   };
+  return connection;
 }
 
 const FINGERPRINT_URL = "https://fingerprint.aliasmode.invalid/?__aliasmode_fingerprint__=1";
