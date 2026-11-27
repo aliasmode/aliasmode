@@ -59,7 +59,7 @@ function firefoxProfile(s: ProfileStore, id: string): Profile {
 }
 
 /** One exit lookup asks GeoJS (MaxMind's data) and ip-api.com at once. */
-const EXIT_LOOKUP_CALLS = [["https://get.geojs.io/v1/ip/geo.json"], ["http://ip-api.com/json/?fields=status,timezone,countryCode,query"]];
+const EXIT_LOOKUP_CALLS = [["https://get.geojs.io/v1/ip/geo.json"], ["http://ip-api.com/json/?fields=status,timezone,countryCode,query,lat,lon,city"]];
 
 function timezoneFetch(timezones: Record<string, string>, calls?: string[][]) {
   return async (url: string, _init: RequestInit) => {

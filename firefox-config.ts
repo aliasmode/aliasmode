@@ -14,6 +14,7 @@ import fonts from "camoufox-js/dist/mappings/fonts.config.js";
 import { deterministicSeed, launchWindowSize, platformFromUA, seedFraction } from "./fingerprint.ts";
 import { localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
 import { firefoxMediaDevices, firefoxVoices, type PersonaOs } from "./firefox-media.ts";
+import type { ProfileGeolocation } from "./geoip.ts";
 
 const generatorAssetInputs = [
   ["fingerprint-network-definition.zip", fingerprintNetworkDefinitionPath],
@@ -312,7 +313,7 @@ const DROPPED_LAUNCH_KEYS = [
  */
 export function firefoxLaunchConfig(
   profile: Profile, windowLabel?: string, fontsDir?: string, webRtcIp?: string, intelMac?: { vendor?: MacGraphicsVendor },
-  hostAvail?: { width: number; height: number }, hostCores = availableParallelism(),
+  hostAvail?: { width: number; height: number }, hostCores = availableParallelism(), geolocation?: ProfileGeolocation,
 ): Record<string, JsonValue> {
   const config = { ...profile.firefox!.config };
   for (const key of DROPPED_LAUNCH_KEYS) delete config[key];
@@ -353,6 +354,12 @@ export function firefoxLaunchConfig(
   // Behind a proxy the engine shows the proxy's exit IP as WebRTC's public address, as a browser
   // at that exit would, in place of no address. The current exit replaces any stored one.
   if (profile.proxy && webRtcIp) config[isIP(webRtcIp) === 6 ? "webrtc:ipv6" : "webrtc:ipv4"] = webRtcIp;
+  // navigator.geolocation answers with a place near the proxy exit (profileGeolocation), never this computer's.
+  if (geolocation) {
+    config["geolocation:latitude"] = geolocation.latitude;
+    config["geolocation:longitude"] = geolocation.longitude;
+    config["geolocation:accuracy"] = geolocation.accuracy;
+  }
   // Without a proxy, the computer's IPv6 address is the same for every profile on it.
   if (!profile.proxy) config["network:ipv4Only"] ??= true;
   fitDesktopPersona(config, os);

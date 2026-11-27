@@ -1,7 +1,8 @@
 /**
  * Profiles made before a change keep their stored identity, so a new engine or app version must
  * launch them with the same arguments. The snapshot was recorded with the app before the GPU-family
- * rule (origin/main 3a5a843). Only a Firefox runtime pin may change it (its version numbers).
+ * rule (origin/main 3a5a843). Only a Firefox runtime pin may change it (its version numbers), and a
+ * launch switch that is no stored value (--aliasmode-closed-loopback-ports).
  */
 import { expect, test } from "bun:test";
 import { firefoxLaunchConfig } from "./firefox-config.ts";

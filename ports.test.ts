@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { allocatePort, probePortFree } from "./ports.ts";
+import { allocatePort, closedLoopbackPorts, probePortFree } from "./ports.ts";
 
 function canBindLoopback(): boolean {
   try {
@@ -44,4 +44,11 @@ bindTest("probePortFree reports a bound port as not free", () => {
   } finally {
     server.stop(true);
   }
+});
+
+test("closedLoopbackPorts lists the Local API, the debug range, this launch's relay and autofill ports, and remote desktops", () => {
+  expect(closedLoopbackPorts({ apiPort: 50400, debugPorts: { start: 9333, end: 9999 }, relayPort: 61234, autofillPort: 61235 }))
+    .toBe("50400,9333-9999,61234,61235,3389,5900-5903,5938-5939,7070");
+  expect(closedLoopbackPorts({ apiPort: 50400, debugPorts: { start: 9333, end: 9999 }, autofillPort: 0 }))
+    .toBe("50400,9333-9999,3389,5900-5903,5938-5939,7070");
 });

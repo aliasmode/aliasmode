@@ -7,7 +7,7 @@ import { ProfileStore } from "./store.ts";
 import { AutofillBridge } from "./autofill-bridge.ts";
 import { CloudBrowserCoordinator } from "./cloud-browser.ts";
 import { PendingSyncQueue } from "./pending-sync.ts";
-import type { ExitLocation } from "./geoip.ts";
+import { profileGeolocation, type ExitLocation } from "./geoip.ts";
 import { autofillExtensionDir } from "./autofill-extension.ts";
 import {
   BrowserLaunchError,
@@ -5629,6 +5629,38 @@ test("a Windows profile of Chromium 155 on Linux gets the Windows font pack thro
   // Without the fonts the profile does not open with this computer's fonts.
   await expect(launch("linux", "aliasmode", "windows", async () => { throw new Error("offline"); }))
     .rejects.toEqual(new BrowserLaunchError("preflight", "firefox_fonts_download"));
+});
+
+test("AliasMode Chromium gets a location near the proxy exit and closed loopback ports; CloakBrowser gets neither", async () => {
+  const proxy = { type: "http" as const, host: "proxy.example", port: "8080", user: "", pass: "" };
+  const launch = async (engine: "aliasmode" | "cloakbrowser", profileProxy: typeof proxy | null) => {
+    const store = new ProfileStore(":memory:");
+    const own = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy: profileProxy };
+    const { chromiumRuntime: _runtime, ...cloakbrowser } = own;
+    store.upsertProfile(engine === "aliasmode" ? own : cloakbrowser);
+    const spawnedArgs: string[][] = [];
+    const exit = { timezone: own.timezone, ip: "203.0.113.7", latitude: 40.7128, longitude: -74.006, cityLevel: true };
+    const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
+      hostPlatform: "win32",
+      hostArch: "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
+      chromiumSandboxBlocked: () => false,
+      captureFingerprint: async () => null,
+      lookupExitLocation: async () => exit,
+    });
+    await launcher.start(own.id);
+    await launcher.stop(own.id);
+    store.close();
+    return { own, exit, args: spawnedArgs[0]!.filter((arg) => /^--(fingerprint-geolocation|aliasmode-closed-loopback-ports)=/.test(arg)) };
+  };
+  const proxied = await launch("aliasmode", proxy);
+  const geo = profileGeolocation(proxied.exit, proxied.own.timezone, proxied.own.fingerprintSeed)!;
+  expect(proxied.args[0]).toBe(`--fingerprint-geolocation=${geo.latitude},${geo.longitude},${geo.accuracy}`);
+  expect(proxied.args[1]).toMatch(/^--aliasmode-closed-loopback-ports=50400,9333-9999,(\d+,)*3389,5900-5903,5938-5939,7070$/);
+  // Without a proxy the engine keeps its own answer; the ports stay closed.
+  expect((await launch("aliasmode", null)).args).toEqual(["--aliasmode-closed-loopback-ports=50400,9333-9999,3389,5900-5903,5938-5939,7070"]);
+  expect((await launch("cloakbrowser", proxy)).args).toEqual([]);
 });
 
 test("Chromium 155 shows the proxy exit IP to WebRTC; CloakBrowser does not", async () => {

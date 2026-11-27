@@ -1,8 +1,8 @@
 import { test, expect, spyOn } from "bun:test";
-import { lookupExitLocation, lookupExitTimezone, attachTimezones, lookupProxyExitLocation } from "./geoip.ts";
+import { lookupExitLocation, lookupExitTimezone, attachTimezones, lookupProxyExitLocation, profileGeolocation } from "./geoip.ts";
 
 const GEOJS = "https://get.geojs.io/v1/ip/geo.json";
-const IP_API = "http://ip-api.com/json/?fields=status,timezone,countryCode,query";
+const IP_API = "http://ip-api.com/json/?fields=status,timezone,countryCode,query,lat,lon,city";
 const IPINFO = "https://v6.ipinfo.io/json";
 
 /** Answers per service: GeoJS (MaxMind data), ip-api.com and v6.ipinfo.io. A service without a row fails. */
@@ -205,4 +205,65 @@ test("a slow proxy exit lookup stops waiting and its late answer serves the next
   answer();
   expect((await lookupProxyExitLocation(gateway, { fetchFn, waitMs: 1_000 }))?.ip).toBe("203.0.113.10");
   expect(calls).toBe(1);
+});
+
+test("exit location carries coordinates from each service and tells a city from a country default", async () => {
+  const city = { timezone: "America/New_York", country: "US", latitude: 40.7128, longitude: -74.006, cityLevel: true };
+  for (const rows of [
+    { geojs: { timezone: "America/New_York", country_code: "US", latitude: "40.7128", longitude: "-74.006", city: "New York", accuracy: 20 } },
+    { ipApi: { status: "success", timezone: "America/New_York", countryCode: "US", lat: 40.7128, lon: -74.006, city: "New York" } },
+    { ipinfo: { timezone: "America/New_York", country: "US", loc: "40.7128,-74.006", city: "New York" } },
+  ]) {
+    expect(await lookupExitLocation(null, services(rows))).toEqual(city);
+  }
+  for (const geojs of [
+    { latitude: "37.751", longitude: "-97.822", city: "Somewhere", accuracy: 20 }, // MaxMind's US default
+    { latitude: "40.7128", longitude: "-74.006", accuracy: 1000 }, // no city, country radius
+    { latitude: "40.7128", longitude: "-74.006", city: "New York", accuracy: 1000 },
+  ]) {
+    const found = await lookupExitLocation(null, services({ geojs: { timezone: "America/New_York", country_code: "US", ...geojs } }));
+    expect(found?.cityLevel).toBe(false);
+  }
+  const none = await lookupExitLocation(null, services({ geojs: { timezone: "America/New_York", latitude: "", longitude: "nope" } }));
+  expect(none).toStrictEqual({ timezone: "America/New_York", country: undefined });
+});
+
+/** Great-circle distance in metres. */
+function metres(a: [number, number], b: [number, number]): number {
+  const rad = Math.PI / 180;
+  const h = Math.sin((b[0] - a[0]) * rad / 2) ** 2 + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin((b[1] - a[1]) * rad / 2) ** 2;
+  return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
+}
+
+test("profile location is 1-5 km from the exit's city, fixed per seed, with a whole-metre accuracy of 20-150", () => {
+  const exit = { timezone: "Europe/Berlin", latitude: 52.52, longitude: 13.405, cityLevel: true };
+  const seen = new Set<string>();
+  for (let seed = 1; seed < 400; seed += 7) {
+    const geo = profileGeolocation(exit, "Europe/Berlin", seed)!;
+    expect(profileGeolocation(exit, "Europe/Berlin", seed)).toEqual(geo);
+    const distance = metres([52.52, 13.405], [geo.latitude, geo.longitude]);
+    expect(distance).toBeGreaterThanOrEqual(999);
+    expect(distance).toBeLessThanOrEqual(5_001);
+    expect(Number.isInteger(geo.accuracy) && geo.accuracy >= 20 && geo.accuracy <= 150).toBe(true);
+    seen.add(`${geo.latitude},${geo.longitude}`);
+  }
+  expect(seen.size).toBe(57);
+  // Not rounded to a grid: full double precision.
+  expect(String(profileGeolocation(exit, "Europe/Berlin", 1)!.latitude).split(".")[1]!.length).toBeGreaterThan(8);
+});
+
+test("a country-level exit, or one in another timezone than the profile's, uses the timezone's main city, never a centroid", () => {
+  const near = (geo: { latitude: number; longitude: number } | null, at: [number, number]) =>
+    metres(at, [geo!.latitude, geo!.longitude]) <= 5_001;
+  const centroid = { timezone: "America/Chicago", latitude: 37.751, longitude: -97.822, cityLevel: false };
+  expect(near(profileGeolocation(centroid, "America/Chicago", 9), [41.85, -87.65])).toBe(true);
+  expect(near(profileGeolocation({ timezone: "America/Chicago" }, "America/Chicago", 9), [41.85, -87.65])).toBe(true);
+  // A link name takes its target's city.
+  expect(near(profileGeolocation({ timezone: "Asia/Calcutta" }, "Asia/Calcutta", 9), [22.5333, 88.3667])).toBe(true);
+  // The user typed another timezone: the location follows the timezone pages see.
+  const paris = { timezone: "Europe/Paris", latitude: 48.85, longitude: 2.35, cityLevel: true };
+  expect(near(profileGeolocation(paris, "Asia/Tokyo", 9), [35.6544, 139.7447])).toBe(true);
+  // No city for the zone and no city-level exit, or no exit: nothing.
+  expect(profileGeolocation({ timezone: "UTC" }, "UTC", 9)).toBeNull();
+  expect(profileGeolocation(null, "Europe/Berlin", 9)).toBeNull();
 });

@@ -95,6 +95,14 @@ test("a proxied Firefox launch shows the proxy exit IP as WebRTC's public addres
   expect(proxied.firefox!.config["webrtc:ipv4"]).toBe("198.51.100.1");
 });
 
+test("a launch with a location gives the engine Camoufox's geolocation keys", () => {
+  const geolocation = { latitude: 52.53012345678901, longitude: 13.41234567890123, accuracy: 87 };
+  expect(firefoxLaunchConfig(profile(9), undefined, undefined, undefined, undefined, undefined, undefined, geolocation)).toMatchObject({
+    "geolocation:latitude": 52.53012345678901, "geolocation:longitude": 13.41234567890123, "geolocation:accuracy": 87,
+  });
+  expect(firefoxLaunchConfig(profile(9))).not.toHaveProperty("geolocation:latitude");
+});
+
 test("a Firefox launch without a proxy keeps the computer's IPv6 address from pages", () => {
   const proxy = { type: "http" as const, host: "gate.example.net", port: "8080", user: "", pass: "" };
   expect(firefoxLaunchConfig(profile(9))["network:ipv4Only"]).toBe(true);

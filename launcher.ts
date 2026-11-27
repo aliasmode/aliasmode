@@ -35,12 +35,12 @@ import { dlopen, ptr } from "bun:ffi";
 import type { CookieRecord, LaunchInfo, LaunchPersona, Profile, ProxySpec } from "./types.ts";
 import { cookiesForEngine } from "./parse.ts";
 import type { ProfileStore } from "./store.ts";
-import { lookupProxyExitLocation, type ExitLocation } from "./geoip.ts";
+import { lookupProxyExitLocation, profileGeolocation, type ExitLocation, type ProfileGeolocation } from "./geoip.ts";
 import { localeAfterProxyExit } from "./profile-locale.ts";
 import type { AutofillBridge } from "./autofill-bridge.ts";
 import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-extension.ts";
 import { isFirefoxAddonId } from "./extensions.ts";
-import { allocatePort } from "./ports.ts";
+import { allocatePort, closedLoopbackPorts } from "./ports.ts";
 import {
   DEFAULT_WINDOW_HEIGHT_SCALE, DEFAULT_WINDOW_WIDTH_SCALE, deriveFingerprintFlags, isMobileUserAgent, launchWindowSize,
   platformFromUA, proxyServerFlag,
@@ -1459,6 +1459,16 @@ export class Launcher {
     return ip;
   }
 
+  /** The loopback ports this launch's pages must find closed (ports.ts closedLoopbackPorts). */
+  private closedLoopbackPorts(relayPort?: number): string {
+    return closedLoopbackPorts({ apiPort: ALIASMODE_PORT, debugPorts: this.portRange, relayPort, autofillPort: this.autofill?.port });
+  }
+
+  /** Where the profile's pages are, from the same proxy exit lookup as its timezone. Nothing without a proxy. */
+  private exitGeolocation(profile: Profile, exit: ExitLocation | null): ProfileGeolocation | undefined {
+    return profile.proxy ? profileGeolocation(exit, profile.timezone, profile.fingerprintSeed) ?? undefined : undefined;
+  }
+
   /**
    * Build the full CloakBrowser argv for a launch. Identity flags come from
    * the stored profile; `port`/`userDataDir` are per-launch session detail;
@@ -1474,6 +1484,7 @@ export class Launcher {
     restoreLastSession = false,
     webRtcIp?: string,
     keepAlive = false,
+    geolocation?: ProfileGeolocation,
   ): string[] {
     const { chromeArgs } = splitLaunchUrls(launchArgs);
     const forwardedArgs = validateForwardedLaunchArgs(chromeArgs);
@@ -1539,6 +1550,12 @@ export class Launcher {
     // The engine sends no WebRTC packet behind the proxy, and shows a page the proxy's exit IP as
     // its public address, as a browser at that exit would, in place of no candidate at all.
     if (webRtcIp && this.chromiumWebRtcIp(profile)) args.push(`--fingerprint-webrtc-ip=${webRtcIp}`);
+    // navigator.geolocation answers with a place near the proxy exit (profileGeolocation), never this computer's.
+    if (geolocation && profile.chromiumRuntime) {
+      args.push(`--fingerprint-geolocation=${geolocation.latitude},${geolocation.longitude},${geolocation.accuracy}`);
+    }
+    // Pages find the app's own local services and remote-desktop servers on this computer closed.
+    if (profile.chromiumRuntime) args.push(`--aliasmode-closed-loopback-ports=${this.closedLoopbackPorts(relayPort)}`);
     // We launch the raw stealth chromium binary, which behaves like stock
     // Chromium: the PRESENCE of --headless (any value, even "false") turns
     // headless ON. So headful = omit the flag entirely; headless = pass it.
@@ -2147,6 +2164,7 @@ export class Launcher {
       return this.startFreshFirefox(profile, startupUrls, opts, pendingSession, exit);
     }
     const webRtcIp = this.chromiumWebRtcIp(profile) ? this.webRtcExitIp(profile, exit) : undefined;
+    const geolocation = profile.chromiumRuntime ? this.exitGeolocation(profile, exit) : undefined;
     // Without the fonts of its OS, the browser shows this computer's fonts in place of them.
     const fontPack = this.fontPack(profile);
     const fontconfigFile = fontPack
@@ -2269,7 +2287,7 @@ export class Launcher {
         profile = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy relay startup");
       }
       const args = this.buildArgs(
-        profile, port, userDataDir, chromeArgs, relayPort, headless, restoreLastSession, webRtcIp, opts.keepAliveWithoutWindows,
+        profile, port, userDataDir, chromeArgs, relayPort, headless, restoreLastSession, webRtcIp, opts.keepAliveWithoutWindows, geolocation,
       );
       this.log(`launching ${profileId} on port ${port} (seed ${profile.fingerprintSeed})`);
       launchStartedAt = Date.now();
@@ -2727,9 +2745,13 @@ export class Launcher {
       const windowLabel = buildWindowLabel(profile.name, profileDisplayNo(profile.customNo, this.store.getSerial(profileId))).replace(/ \u2014 $/, "");
       const running = await this.firefoxRuntime.start({
         profileId, executablePath: binary.path, executableSha256: binary.sha256,
-        userDataDir, config: firefoxLaunchConfig(profile, windowLabel, fontsDir, webRtcIp, intelMac, hostAvail), proxy, headless,
+        userDataDir, proxy, headless,
+        config: firefoxLaunchConfig(profile, windowLabel, fontsDir, webRtcIp, intelMac, hostAvail, undefined, this.exitGeolocation(profile, exit)),
         prefs: {
           ...firefoxStartupPrefs(profile, this.hostPlatform, this.hostArch),
+          // Pages find the app's own local services and remote-desktop servers on this computer closed.
+          // Firefox applies the list to every host; it reaches the proxy relay as a proxy, not through a URL.
+          "network.security.ports.banned": this.closedLoopbackPorts(launch.relayPort),
           ...(fontsDir ? firefoxFontPackPrefs(fontsDir, this.hostPlatform) : {}),
           // Firefox outlives its last window on macOS anyway; elsewhere the engine keeps running for this pref.
           ...(opts.keepAliveWithoutWindows && this.hostPlatform !== "darwin" ? { "aliasmode.keepAliveWithoutWindows": true } : {}),

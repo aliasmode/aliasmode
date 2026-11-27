@@ -7,6 +7,7 @@ import { firefoxLaunchConfig, firefoxStartupPrefs, graphicsIdentity, syncFirefox
 import { FIREFOX_FONT_PACKS, firefoxFontPackPrefs, type FirefoxFontPack } from "./firefox-fonts.ts";
 import { Launcher, BrowserLaunchError, decodeMozLz4, type HostProcessSnapshot, type LauncherOptions } from "./launcher.ts";
 import { FirefoxOwnerError } from "./firefox-runtime.ts";
+import { profileGeolocation } from "./geoip.ts";
 import { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
 
@@ -106,6 +107,9 @@ function fixture(hostPlatform: NodeJS.Platform = "win32", hostArch = "x64") {
   };
 }
 
+/** Pages find the Local API, the debug ports and remote-desktop servers closed (ports.ts closedLoopbackPorts). */
+const BANNED_PORTS = { "network.security.ports.banned": "50400,9333-9999,3389,5900-5903,5938-5939,7070" };
+
 test("Firefox launches one saved persona and retains ownership across manager restart", async () => {
   const f = fixture();
   const opened = await f.launcher.start(f.profile.id);
@@ -114,7 +118,7 @@ test("Firefox launches one saved persona and retains ownership across manager re
   // The launch adds the per-profile seed, voices, devices and window label; the saved identity stays as it was.
   expect(f.config()).toEqual(firefoxLaunchConfig(f.profile, LABEL));
   expect(f.config()).toMatchObject({ "aliasmode:windowLabel": LABEL, "voices:blockIfNotDefined": true, "mediaDevices:enabled": true });
-  expect(f.prefs()).toEqual(firefoxStartupPrefs(f.profile));
+  expect(f.prefs()).toEqual({ ...firefoxStartupPrefs(f.profile), ...BANNED_PORTS });
   expect(f.store.getProfile(f.profile.id)!.firefox!.config).not.toHaveProperty("audio:seed");
   expect(f.store.getLaunch(f.profile.id)?.engine).toBe("firefox");
   const restarted = new Launcher(f.options);
@@ -163,7 +167,11 @@ test("a proxied Firefox launch gives the engine the proxy exit IP for WebRTC, an
     });
     await launcher.start(profile.id);
     expect(asked).toEqual(exitIp ? [proxy] : [proxy, proxy]);
-    expect(f.config()).toEqual(firefoxLaunchConfig(profile, LABEL, undefined, exitIp ?? undefined));
+    // The exit is known only to its timezone here, so the location is near London, the zone's city.
+    const geolocation = exitIp ? profileGeolocation({ timezone: "Europe/London" }, "Europe/London", profile.fingerprintSeed)! : undefined;
+    expect(f.config()).toEqual(firefoxLaunchConfig(profile, LABEL, undefined, exitIp ?? undefined, undefined, undefined, undefined, geolocation));
+    if (geolocation) expect(Math.abs(geolocation.latitude - 51.5083)).toBeLessThan(0.05);
+    else expect(f.config()).not.toHaveProperty("geolocation:latitude");
     expect((f.config() as Record<string, unknown>)["webrtc:ipv4"]).toBe(exitIp ?? undefined);
     expect(f.store.getProfile(profile.id)!.firefox!.config).not.toHaveProperty("webrtc:ipv4");
     expect(await launcher.stop(profile.id)).toBe(true);
@@ -841,7 +849,7 @@ test("a Firefox profile of this computer's own OS opens without a font pack", as
   await f.launcher.start(f.profile.id);
   expect(f.fontPacks).toEqual([]);
   expect(f.config()).not.toHaveProperty("aliasmode:fontsDir");
-  expect(f.prefs()).toEqual(firefoxStartupPrefs(f.profile, "win32", "x64"));
+  expect(f.prefs()).toEqual({ ...firefoxStartupPrefs(f.profile, "win32", "x64"), ...BANNED_PORTS });
 });
 
 test("a Firefox profile of another OS opens with that OS's font pack", async () => {
@@ -852,7 +860,7 @@ test("a Firefox profile of another OS opens with that OS's font pack", async () 
   const fontsDir = join(f.options.chromiumRuntimeRoot!, "firefox-fonts", "macos", "fonts");
   expect(f.config()).toEqual(firefoxLaunchConfig(profile, LABEL, fontsDir));
   expect(f.config()).toMatchObject({ "aliasmode:fontsDir": fontsDir });
-  expect(f.prefs()).toEqual({ ...firefoxStartupPrefs(profile, "win32", "x64"), ...firefoxFontPackPrefs(fontsDir, "win32") });
+  expect(f.prefs()).toEqual({ ...firefoxStartupPrefs(profile, "win32", "x64"), ...firefoxFontPackPrefs(fontsDir, "win32"), ...BANNED_PORTS });
   // The profile gets the stock fonts of macOS, not the ones of this Windows computer.
   expect(f.prefs()).toMatchObject({ "font.name-list.emoji": "Apple Color Emoji", "font.name-list.serif.x-western": "Times, Times New Roman" });
   // The saved identity never stores the folder of this computer.

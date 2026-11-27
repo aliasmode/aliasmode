@@ -5,6 +5,8 @@ import { startProxyRelay, type ProxyRelay } from "./proxy-relay.ts";
 import type { ProxySpec } from "./types.ts";
 import { localeForCountry, localeForTimezone } from "./profile-locale.ts";
 import { canonicalIp } from "./ip.ts";
+import { deterministicSeed, seedFraction } from "./fingerprint.ts";
+import { TIMEZONE_CITIES } from "./timezone-cities.ts";
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<{ json(): Promise<any> }>;
 
@@ -120,7 +122,14 @@ export async function openSocks5Tunnel(
   }
 }
 
-export type ExitLocation = { timezone: string; country?: string; ip?: string };
+/**
+ * Where the exit IP is. `latitude`/`longitude` come with the answer when the service has them;
+ * `cityLevel` is false when they are only the country's (no city, a 1000 km radius or more, or a
+ * known country default such as MaxMind's 37.751,-97.822 for the US).
+ */
+export type ExitLocation = {
+  timezone: string; country?: string; ip?: string; latitude?: number; longitude?: number; cityLevel?: boolean;
+};
 
 /** Location and address of the connection's exit IP, using the profile proxy when present. */
 export async function lookupExitLocation(
@@ -154,15 +163,21 @@ export async function lookupExitLocation(
     // City data, keyless over HTTPS, so both are asked at once and GeoJS's zone wins when it has
     // one. Its shorter timeout leaves a launch's 5 s wait for ip-api.com's answer if GeoJS hangs.
     const maxMind = ask("https://get.geojs.io/v1/ip/geo.json", AbortSignal.timeout(4_000), (row) =>
-      typeof row?.timezone === "string" && row.timezone ? withIp({ timezone: row.timezone, country: row.country_code }, row.ip) : null);
-    const ipApi = ask("http://ip-api.com/json/?fields=status,timezone,countryCode,query", init.signal!, (row) =>
-      row?.status === "success" && row.timezone ? withIp({ timezone: row.timezone, country: row.countryCode }, row.query) : null);
+      typeof row?.timezone === "string" && row.timezone
+        ? withCoords(withIp({ timezone: row.timezone, country: row.country_code }, row.ip), row.latitude, row.longitude, row.city, row.accuracy)
+        : null);
+    const ipApi = ask("http://ip-api.com/json/?fields=status,timezone,countryCode,query,lat,lon,city", init.signal!, (row) =>
+      row?.status === "success" && row.timezone
+        ? withCoords(withIp({ timezone: row.timezone, country: row.countryCode }, row.query), row.lat, row.lon, row.city)
+        : null);
     const found = await maxMind ?? await ipApi;
     if (found) return found;
     // ip-api.com is IPv4-only; an IPv6-only exit falls through to v6.ipinfo.io.
     const res = await fetchFn("https://v6.ipinfo.io/json", { ...init, signal: AbortSignal.timeout(10_000) });
-    const row = (await res.json()) as { timezone?: string; country?: string; ip?: string } | null;
-    return typeof row?.timezone === "string" && row.timezone ? withIp({ timezone: row.timezone, country: row.country }, row.ip) : null;
+    const row = (await res.json()) as { timezone?: string; country?: string; ip?: string; loc?: string; city?: string } | null;
+    if (typeof row?.timezone !== "string" || !row.timezone) return null;
+    const [lat, lon] = typeof row.loc === "string" ? row.loc.split(",") : [];
+    return withCoords(withIp({ timezone: row.timezone, country: row.country }, row.ip), lat, lon, row.city);
   } catch {
     return null;
   } finally {
@@ -173,6 +188,47 @@ export async function lookupExitLocation(
 function withIp<T extends object>(location: T, raw: unknown): T & { ip?: string } {
   const ip = typeof raw === "string" ? canonicalIp(raw) : null;
   return ip ? { ...location, ip } : location;
+}
+
+/** Coordinates the services give when they know only the country, never a place a person is. */
+const COUNTRY_DEFAULTS = [[37.751, -97.822]];
+
+function withCoords(location: ExitLocation, rawLat: unknown, rawLon: unknown, city: unknown, radiusKm?: unknown): ExitLocation {
+  const latitude = rawLat === "" || rawLat === null ? NaN : Number(rawLat);
+  const longitude = rawLon === "" || rawLon === null ? NaN : Number(rawLon);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return location;
+  const cityLevel = typeof city === "string" && !!city.trim() && !(Number(radiusKm) >= 1000)
+    && !COUNTRY_DEFAULTS.some(([lat, lon]) => lat === latitude && lon === longitude);
+  return { ...location, latitude, longitude, cityLevel };
+}
+
+export type ProfileGeolocation = { latitude: number; longitude: number; accuracy: number };
+
+const EARTH_RADIUS_M = 6_371_008.8;
+
+/**
+ * The location a profile shows pages: 1-5 km from its exit's city, in a direction and at a distance
+ * fixed by the profile seed, with an accuracy of 20-150 m from the same seed. An exit known only to
+ * its country, or one in another timezone than the profile shows, uses the main city of the
+ * profile's timezone, so the location agrees with the timezone and is never a country's centre.
+ * Null when neither is known.
+ */
+export function profileGeolocation(exit: ExitLocation | null, timezone: string, seed: number): ProfileGeolocation | null {
+  if (!exit) return null;
+  const exitCity = exit.cityLevel && exit.timezone === timezone && exit.latitude !== undefined && exit.longitude !== undefined
+    ? [exit.latitude, exit.longitude] as const
+    : undefined;
+  const base = exitCity ?? TIMEZONE_CITIES[timezone];
+  if (!base) return null;
+  const fraction = (key: string) => seedFraction(deterministicSeed(`${seed}:geolocation:${key}`));
+  const distance = (1_000 + fraction("distance") * 4_000) / EARTH_RADIUS_M;
+  const bearing = fraction("bearing") * 2 * Math.PI;
+  const lat1 = base[0] * Math.PI / 180;
+  const lon1 = base[1] * Math.PI / 180;
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distance) + Math.cos(lat1) * Math.sin(distance) * Math.cos(bearing));
+  const lon2 = lon1 + Math.atan2(Math.sin(bearing) * Math.sin(distance) * Math.cos(lat1), Math.cos(distance) - Math.sin(lat1) * Math.sin(lat2));
+  const longitude = ((lon2 * 180 / Math.PI + 540) % 360) - 180;
+  return { latitude: lat2 * 180 / Math.PI, longitude, accuracy: 20 + Math.floor(fraction("accuracy") * 131) };
 }
 
 // Profiles that share a proxy often open together, and ip-api.com answers 45 requests a minute
