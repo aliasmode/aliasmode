@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { withCdpPage } from "./cdp.ts";
+import { openChromiumPages, withCdpPage } from "./cdp.ts";
 
 function stalledBrowser() {
   const never = new Promise<void>(() => {});
@@ -303,4 +303,82 @@ test("mandatory CDP probe preserves its operation error over cleanup failure", a
 
   await expect(within(probe)).rejects.toBe(original);
   expect(fake.closeCalls()).toEqual({ page: 0, browser: 1 });
+});
+
+/** A browser over plain CDP with the given page targets; it records every command. */
+function fakeChromium(pages: Array<{ targetId: string; url: string; browserContextId?: string }>, failUrl?: string) {
+  const calls: string[] = [];
+  let created = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request, srv) => srv.upgrade(request) ? undefined : new Response("", { status: 400 }),
+    websocket: {
+      message(ws, raw) {
+        const { id, method, params, sessionId } = JSON.parse(String(raw));
+        const reply = (result: object = {}) => void ws.send(JSON.stringify({ id, result, ...(sessionId ? { sessionId } : {}) }));
+        calls.push(`${method}${params?.targetId ? ` ${params.targetId}` : ""}${params?.url ? ` ${params.url}` : ""}`);
+        if (method === "Target.getBrowserContexts") return reply({ browserContextIds: ["isolated"] });
+        if (method === "Target.getTargets") return reply({ targetInfos: [...pages.map((page) => ({ type: "page", ...page })), { targetId: "sw", type: "service_worker", url: "https://a.example/sw.js" }] });
+        if (method === "Target.createTarget") return reply({ targetId: `new${++created}` });
+        if (method === "Target.attachToTarget") return reply({ sessionId: `s-${params.targetId}` });
+        if (method === "Page.navigate") {
+          if (params.url === failUrl) return reply({ frameId: "f", errorText: "net::ERR_PROXY_CONNECTION_FAILED" });
+          const loaderId = `l-${params.url}`;
+          // DOMContentLoaded of the old document first, then of the new one after the reply.
+          ws.send(JSON.stringify({ method: "Page.lifecycleEvent", params: { name: "DOMContentLoaded", loaderId: "old", frameId: "f" }, sessionId }));
+          reply({ frameId: "f", loaderId });
+          return void setTimeout(() => ws.send(JSON.stringify({ method: "Page.lifecycleEvent", params: { name: "DOMContentLoaded", loaderId, frameId: "f" }, sessionId })), 20);
+        }
+        return reply();
+      },
+    },
+  });
+  return { calls, endpoint: `ws://127.0.0.1:${server.port}/devtools/browser/x`, stop: () => server.stop(true) };
+}
+
+test("raw CDP opens the first page in the empty tab and the others in new tabs", async () => {
+  const browser = fakeChromium([
+    { targetId: "ext", url: "chrome-extension://abc/options.html" },
+    { targetId: "blank", url: "about:blank" },
+    { targetId: "other-context", url: "about:blank", browserContextId: "isolated" },
+  ]);
+  try {
+    await openChromiumPages(browser.endpoint, ["https://a.example/", "chrome://settings/", "https://b.example/"]);
+    const navigated = browser.calls.filter((call) => call.startsWith("Page.navigate") || call.startsWith("Target.attachToTarget") || call.startsWith("Target.createTarget"));
+    expect(navigated.sort()).toEqual([
+      "Page.navigate https://a.example/",
+      "Page.navigate https://b.example/",
+      "Target.attachToTarget blank",
+      "Target.attachToTarget new1",
+      "Target.createTarget about:blank",
+    ]);
+  } finally {
+    browser.stop();
+  }
+});
+
+test("raw CDP keeps open user pages and closes a stray first-run tab", async () => {
+  const browser = fakeChromium([
+    { targetId: "user", url: "https://x.com/home" },
+    { targetId: "blank", url: "about:blank" },
+    { targetId: "first-run", url: "chrome://ungoogled-first-run/" },
+  ]);
+  try {
+    await openChromiumPages(browser.endpoint, ["https://a.example/"]);
+    expect(browser.calls).toContain("Target.closeTarget first-run");
+    expect(browser.calls).toContain("Target.attachToTarget new1");
+    expect(browser.calls.some((call) => call.endsWith(" blank") || call.includes(" user"))).toBe(false);
+  } finally {
+    browser.stop();
+  }
+});
+
+test("raw CDP loads every page and then reports the first failed one", async () => {
+  const browser = fakeChromium([{ targetId: "blank", url: "chrome://newtab/" }], "https://a.example/");
+  try {
+    await expect(openChromiumPages(browser.endpoint, ["https://a.example/", "https://b.example/"])).rejects.toThrow("ERR_PROXY_CONNECTION_FAILED");
+    expect(browser.calls).toContain("Page.navigate https://b.example/");
+  } finally {
+    browser.stop();
+  }
 });

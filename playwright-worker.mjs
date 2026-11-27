@@ -1304,98 +1304,11 @@ export async function operatePersistentContext(browser, context, operation, payl
   throw typed("invalid_request");
 }
 
-/** A plain CDP connection. Unlike Playwright's connectOverCDP it attaches to no tab by itself. */
-async function openCdp(endpoint, timeout) {
-  const url = /^https?:/.test(endpoint)
-    ? (await (await fetch(new URL("/json/version", endpoint), { signal: AbortSignal.timeout(timeout) })).json()).webSocketDebuggerUrl
-    : endpoint;
-  const socket = new WebSocket(url);
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("CDP connection timed out")), timeout);
-    socket.onopen = () => { clearTimeout(timer); resolve(); };
-    socket.onerror = () => { clearTimeout(timer); reject(new Error("CDP connection failed")); };
-  });
-  let lastId = 0;
-  const calls = new Map();
-  const listeners = new Set();
-  socket.onmessage = ({ data }) => {
-    const message = JSON.parse(String(data));
-    const call = calls.get(message.id);
-    if (!call) return void listeners.forEach((listener) => listener(message));
-    calls.delete(message.id);
-    if (message.error) call.reject(new Error(message.error.message || "CDP call failed"));
-    else call.resolve(message.result ?? {});
-  };
-  socket.onclose = () => { for (const call of calls.values()) call.reject(new Error("CDP connection closed")); calls.clear(); };
-  const within = (promise, what) => {
-    let timer;
-    return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out`)), timeout); })])
-      .finally(() => clearTimeout(timer));
-  };
-  return {
-    send(method, params = {}, sessionId) {
-      const id = ++lastId;
-      const reply = new Promise((resolve, reject) => calls.set(id, { resolve, reject }));
-      socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-      return within(reply, method);
-    },
-    on(method, sessionId, listener) {
-      const filtered = (message) => { if (message.method === method && message.sessionId === sessionId) listener(message.params); };
-      listeners.add(filtered);
-      return () => listeners.delete(filtered);
-    },
-    once(method, sessionId) {
-      let off;
-      return within(new Promise((resolve) => { off = this.on(method, sessionId, resolve); }), method).finally(() => off());
-    },
-    close() { socket.close(); },
-  };
-}
-
-const FINGERPRINT_URL = "https://fingerprint.aliasmode.invalid/?__aliasmode_fingerprint__=1";
-
-/**
- * The launch-time fingerprint capture of a Chromium browser, in its own background tab. Playwright's
- * connectOverCDP would attach to every tab (Runtime.enable, Page.enable), and a tab that loads
- * meanwhile, such as one the browser restores at startup, then plays unmuted media and runs audio
- * without a click, as under automation. This connection attaches to the capture tab only.
- */
-export async function chromiumFingerprint(endpoint, script, timeout) {
-  const cdp = await openCdp(endpoint, timeout);
-  let targetId;
-  try {
-    ({ targetId } = await cdp.send("Target.createTarget", { url: "about:blank", background: true }));
-    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
-    const page = (method, params) => cdp.send(method, params, sessionId);
-    let intercepted = false;
-    cdp.on("Fetch.requestPaused", sessionId, ({ requestId, request }) => {
-      if (request.url !== FINGERPRINT_URL) return void page("Fetch.failRequest", { requestId, errorReason: "Aborted" }).catch(() => {});
-      intercepted = true;
-      const body = Buffer.from("<!doctype html><title>Fingerprint</title>").toString("base64");
-      void page("Fetch.fulfillRequest", { requestId, responseCode: 200, responseHeaders: [{ name: "Content-Type", value: "text/html" }], body }).catch(() => {});
-    });
-    await page("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
-    await page("Page.enable");
-    const loaded = cdp.once("Page.domContentEventFired", sessionId);
-    loaded.catch(() => {});
-    if ((await page("Page.navigate", { url: FINGERPRINT_URL })).errorText) throw new Error("fingerprint navigation failed");
-    await loaded;
-    if (!intercepted) throw new Error("fingerprint document was not fulfilled locally");
-    const { result, exceptionDetails } = await page("Runtime.evaluate", { expression: script, awaitPromise: true, returnByValue: true });
-    if (exceptionDetails) throw new Error("fingerprint probe failed");
-    return result?.value;
-  } finally {
-    if (targetId) await cdp.send("Target.closeTarget", { targetId }).catch(() => {});
-    cdp.close();
-  }
-}
-
 async function operate(chromium, operation, payload) {
   if (operation === "search-provider") return searchProvider(chromium, payload);
   const endpoint = payload.endpoint;
   if (typeof endpoint !== "string" || !/^https?:\/\/|^wss?:\/\//.test(endpoint)) throw typed("invalid_request");
   const timeout = Math.max(1, Math.min(Number(payload.connectTimeoutMs) || 30_000, 120_000));
-  if (operation === "page" && payload.kind === "fingerprint") return chromiumFingerprint(endpoint, payload.fingerprintScript, timeout);
   return withBrowser(chromium, endpoint, timeout, operation, async (browser, context) => {
     if (operation === "session-capture") return captureSession(browser, payload);
     if (operation === "session-restore") return restoreSession(browser, context, payload);

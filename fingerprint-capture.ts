@@ -10,6 +10,7 @@
  */
 
 import { runPlaywrightWorker, type PlaywrightWorkerOptions } from "./playwright-runtime.ts";
+import { chromiumFingerprint } from "./cdp.ts";
 import { fingerprintProbe, type FingerprintSample } from "./diagnose.ts";
 import { compareAttestation, observedFromSample, VERDICT_FIELDS } from "./fingerprint-attestation.ts";
 import type { FingerprintVerdict, ObservedFingerprint, Profile } from "./types.ts";
@@ -22,6 +23,8 @@ export async function captureFingerprint(
   opts: PlaywrightWorkerOptions = {},
 ): Promise<FingerprintSample | null> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_CAPTURE_TIMEOUT_MS;
+  // Chromium answers raw CDP from this process; a Node worker would add its start-up to every open.
+  if (!ws.startsWith("firefox://")) return chromiumFingerprint<FingerprintSample>(ws, `(${fingerprintProbe.toString()})()`, timeoutMs);
   return runPlaywrightWorker<FingerprintSample>("page", {
     endpoint: ws,
     kind: "fingerprint",
