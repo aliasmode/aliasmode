@@ -1,0 +1,93 @@
+name: Release gates
+
+# Manual only. Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (the runner
+# image's) and stock Firefox 159.0.1. Gate A needs the detection lab from the private site repo (secret
+# GATES_SITE_TOKEN, read access); without it Gate A is skipped. Gate C runs only when the secret GATES_PROXY
+# (an http:// proxy URL) exists, because runner IPs are datacenter IPs.
+on:
+  workflow_dispatch:
+    inputs:
+      engine_build:
+        description: "released | chromium:<tag or URL>,firefox:<tag or URL> (see scripts/gates/gates.mjs)"
+        required: true
+        default: released
+        type: string
+      only:
+        description: "Gates to run: p (host check), a, b; c is added when GATES_PROXY exists"
+        required: true
+        default: p,a,b
+        type: string
+      switches:
+        description: "Internal switches to turn off, comma separated (bisecting)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            os: windows
+          - runner: macos-15
+            os: macos
+          - runner: macos-15-intel
+            os: macos-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    env:
+      SITE_TOKEN: ${{ secrets.GATES_SITE_TOKEN }}
+      GATES_PROXY: ${{ secrets.GATES_PROXY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - run: bun install --frozen-lockfile
+      - name: Detection lab (private site repo)
+        if: env.SITE_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: aliasmode/aliasmode-site
+          token: ${{ secrets.GATES_SITE_TOKEN }}
+          path: site
+          sparse-checkout: tests
+      - name: Stock Firefox 159.0.1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\firefox-159"
+          Invoke-WebRequest "https://ftp.mozilla.org/pub/firefox/releases/159.0.1/win64/en-US/Firefox%20Setup%20159.0.1.exe" -OutFile "$env:RUNNER_TEMP\ff.exe"
+          7z x "$env:RUNNER_TEMP\ff.exe" "-o$dir" -y | Out-Null
+          "FIREFOX_BIN=$dir\core\firefox.exe" >> $env:GITHUB_ENV
+      - name: Stock Firefox 159.0.1 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/ff.dmg" "https://ftp.mozilla.org/pub/firefox/releases/159.0.1/mac/en-US/Firefox%20159.0.1.dmg"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/ffmnt" "$RUNNER_TEMP/ff.dmg"
+          mkdir -p "$RUNNER_TEMP/firefox-159" && cp -R "$RUNNER_TEMP/ffmnt/Firefox.app" "$RUNNER_TEMP/firefox-159/"
+          hdiutil detach "$RUNNER_TEMP/ffmnt"
+          echo "FIREFOX_BIN=$RUNNER_TEMP/firefox-159/Firefox.app/Contents/MacOS/firefox" >> "$GITHUB_ENV"
+      - name: Gates
+        shell: bash
+        env:
+          ENGINE_BUILD: ${{ inputs.engine_build }}
+          ONLY: ${{ inputs.only }}
+          SWITCHES: ${{ inputs.switches }}
+        run: |
+          only=$ONLY; proxy=()
+          if [ -n "$GATES_PROXY" ]; then only="$only,c"; proxy=(--proxy env:GATES_PROXY); fi
+          switches=(); for s in ${SWITCHES//,/ }; do switches+=(--switch "$s=off"); done
+          bun scripts/gates/gates.mjs "$ENGINE_BUILD" ${{ matrix.os }} --only "$only" --site site "${proxy[@]}" "${switches[@]}" \
+            --out "results/gates-${{ matrix.os }}"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gates-${{ matrix.os }}
+          path: results/gates-${{ matrix.os }}
+          if-no-files-found: warn

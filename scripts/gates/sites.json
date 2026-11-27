@@ -1,0 +1,364 @@
+{
+  "_notes": "Gate C sites (extends adbench gates.json). Logged out, no purchases, no accounts, never solve image puzzles. wait = s before the first text copy; the page text is copied every 5 s until `ready` (regex, multiline + dotall) or max_wait. steps (form sites) start from the page's own focus right after the URL is opened, with no ready poll and no click: type ({email}, {email_gmail}, {username} = unregistered random placeholders), key (xdotool key names: Tab, Return, space, Escape) with optional repeat, wait s; then the text is polled until `after`. Verdict: `block` regex wins, else `pass` regex, else ready = pass. metrics: regex with one capture group. rule: per metric, ours vs stock on the same IP: min = ours >= stock - n, max = ours <= stock + n, same = equal to stock (or equal to `good`). copy_at = [x, y] fractions of a blank point clicked before select-all.",
+  "sites": [
+    {
+      "id": "datadome",
+      "vendor": "DataDome",
+      "url": "https://github.com/signup",
+      "wait": 8,
+      "max_wait": 25,
+      "ready": "Access is temporarily restricted|Create your free account|Create your account|Sign up for GitHub|Enter your email",
+      "block": "Access is temporarily restricted|unusual activity from your device",
+      "pass": "Create your free account|Create your account|Sign up for GitHub|Enter your email"
+    },
+    {
+      "id": "cloudflare",
+      "vendor": "Cloudflare",
+      "url": "https://www.scrapingcourse.com/cloudflare-challenge",
+      "wait": 10,
+      "max_wait": 30,
+      "ready": "You bypassed|bypassed the Cloudflare",
+      "pass": "bypassed the Cloudflare",
+      "block": "Performing security verification|Verify you are human"
+    },
+    {
+      "id": "cloudflare2",
+      "vendor": "Cloudflare",
+      "url": "https://zerocaptcha.io/captcha-test/cloudflare-managed-challenge",
+      "wait": 8,
+      "max_wait": 30,
+      "ready": "You passed Cloudflare.s Managed Challenge",
+      "pass": "You passed Cloudflare.s Managed Challenge"
+    },
+    {
+      "id": "cloudflare3",
+      "vendor": "Cloudflare",
+      "url": "https://capskip.com/captcha-demo/cloudflare-challenge/",
+      "wait": 8,
+      "max_wait": 30,
+      "ready": "You passed the Cloudflare managed challenge",
+      "pass": "You passed the Cloudflare managed challenge"
+    },
+    {
+      "id": "recaptcha",
+      "vendor": "reCAPTCHA v3",
+      "url": "https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php",
+      "wait": 10,
+      "max_wait": 40,
+      "ready": "\"score\": *[0-9.]+",
+      "metrics": {
+        "score": "\"score\": *([01](?:\\.[0-9]+)?)"
+      },
+      "rule": {
+        "score": {
+          "min": 0.1
+        }
+      },
+      "notes": "Google's own reCAPTCHA v3 demo; the page prints the verify JSON with \"score\". (antcpt.com/score_detector failed with a PHP error on 2026-11-27.)"
+    },
+    {
+      "id": "fingerprintpro",
+      "vendor": "Fingerprint Pro",
+      "url": "https://demo.fingerprint.com/playground",
+      "wait": 10,
+      "max_wait": 45,
+      "ready": "Browser Tampering\\s*\\n\\s*\\S+",
+      "metrics": {
+        "bot": "^Bot\\s*\\n\\s*(.+)$",
+        "tampering": "^Browser Tampering\\s*\\n\\s*(.+)$",
+        "vm": "^Virtual Machine\\s*\\n\\s*(.+)$"
+      },
+      "rule": {
+        "bot": {
+          "same": true,
+          "good": "Not detected"
+        },
+        "tampering": {
+          "same": true,
+          "good": "Not detected"
+        },
+        "vm": {
+          "same": true,
+          "good": "Not detected"
+        }
+      }
+    },
+    {
+      "id": "creepjs",
+      "vendor": "CreepJS",
+      "url": "https://abrahamjuliot.github.io/creepjs/",
+      "wait": 15,
+      "max_wait": 60,
+      "ready": "Navigator[0-9a-f]{8}",
+      "metrics": {
+        "lies": "lies ?\\(([0-9]+)\\)",
+        "headless": "([0-9]+)% headless",
+        "stealth": "([0-9]+)% stealth"
+      },
+      "rule": {
+        "lies": {
+          "max": 0
+        },
+        "headless": {
+          "max": 0
+        },
+        "stealth": {
+          "max": 0
+        }
+      }
+    },
+    {
+      "id": "browserscan",
+      "vendor": "BrowserScan",
+      "url": "https://www.browserscan.net/",
+      "wait": 15,
+      "max_wait": 45,
+      "ready": "Browser fingerprint authenticity: *[0-9]+%",
+      "metrics": {
+        "authenticity": "Browser fingerprint authenticity: *([0-9]+)%"
+      },
+      "rule": {
+        "authenticity": {
+          "min": 5
+        }
+      }
+    },
+    {
+      "id": "pixelscan",
+      "vendor": "Pixelscan",
+      "url": "https://pixelscan.net/fingerprint-check",
+      "wait": 15,
+      "max_wait": 60,
+      "ready": "Your Browser Fingerprint is",
+      "metrics": {
+        "masking": "(Masking detected|No masking detected)",
+        "consistency": "Your Browser Fingerprint is (consistent|inconsistent)"
+      },
+      "rule": {
+        "masking": {
+          "same": true,
+          "good": "No masking detected"
+        }
+      }
+    },
+    {
+      "id": "iphey",
+      "vendor": "iphey",
+      "url": "https://iphey.com/",
+      "wait": 20,
+      "max_wait": 90,
+      "ready": "\\A(?!.*Temporary value).*MX Score",
+      "metrics": {
+        "trust": "Looks (Trustworthy|Suspicious|Unreliable)"
+      },
+      "rule": {
+        "trust": {
+          "same": true,
+          "good": "Trustworthy"
+        }
+      }
+    },
+    {
+      "id": "akamai-bestbuy",
+      "vendor": "Akamai",
+      "url": "https://www.bestbuy.com/",
+      "wait": 12,
+      "max_wait": 45,
+      "ready": "Access Denied|Best Buy|Top Deals|Deal of the Day",
+      "block": "Access Denied|don't have permission to access",
+      "pass": "Top Deals|Deal of the Day|Best Buy"
+    },
+    {
+      "id": "nike-home",
+      "vendor": "Akamai (Nike)",
+      "url": "https://www.nike.com/",
+      "wait": 12,
+      "max_wait": 45,
+      "ready": "Access Denied|Nike\\. Just Do It|Find a Store",
+      "block": "Access Denied|unusual activity",
+      "pass": "Nike\\. Just Do It|Find a Store|Join Us",
+      "notes": "nike.com home page loads (Akamai Bot Manager edge)."
+    },
+    {
+      "id": "nike-signin",
+      "vendor": "Kasada (Nike accounts)",
+      "url": "https://www.nike.com/login",
+      "steps": [
+        {
+          "wait": 14
+        },
+        {
+          "key": "Tab",
+          "repeat": 2
+        },
+        {
+          "type": "{email_gmail}"
+        },
+        {
+          "key": "Return"
+        },
+        {
+          "wait": 6
+        }
+      ],
+      "after": "encountered a problem|Reference Error|make you a Nike Member|Create your|password|code",
+      "block": "encountered a problem|Reference Error|Access Denied",
+      "pass": "make you a Nike Member|Create your|[Pp]assword|code",
+      "notes": "accounts.nike.com email lookup with an unregistered address. The email field is the 2nd Tab stop. A block shows 'We have encountered a problem. Please try again later. Reference Error: ...'. Nike answers a reserved domain (example.com) with the same error, so this site types an unregistered random @gmail.com address ({email_gmail}); Nike then sends a sign-up code that bounces. 2026-11-27: stock Chrome passed with it on a spare bench IP."
+    },
+    {
+      "id": "amazon-signin",
+      "vendor": "Amazon FWCIM",
+      "max_wait": 40,
+      "url": "https://www.amazon.com/ap/signin?openid.pape.max_auth_age=0&openid.return_to=https%3A%2F%2Fwww.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=usflex&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0",
+      "steps": [
+        {
+          "wait": 10
+        },
+        {
+          "type": "{email}"
+        },
+        {
+          "key": "Return"
+        },
+        {
+          "wait": 6
+        }
+      ],
+      "after": "cannot find an account|new to Amazon|Create account|Looks like you.re new|Enter the characters|Solve this puzzle|Access restricted|continue shopping",
+      "block": "Enter the characters you see|Solve this puzzle|Type the characters|Access restricted|unauthorized AI agent|Click the button below to continue shopping",
+      "pass": "cannot find an account|new to Amazon|Looks like you.re new|Create account",
+      "notes": "Unregistered address on /ap/signin (FWCIM runs on this page). 2026-11-27 dev box, bench IP: stock Chrome got the 'Click the button below to continue shopping' interstitial and then 'Access restricted ... unauthorized AI agent'; both count as blocks."
+    },
+    {
+      "id": "px-walmart",
+      "vendor": "HUMAN (PerimeterX)",
+      "url": "https://www.walmart.com/search?q=usb+c+cable",
+      "wait": 12,
+      "max_wait": 45,
+      "ready": "Robot or human|Press & Hold|results for|Results for|Price when purchased online",
+      "block": "Robot or human|Press & Hold|Activate and hold",
+      "pass": "results for|Results for|Price when purchased online"
+    },
+    {
+      "id": "hcaptcha",
+      "vendor": "hCaptcha",
+      "url": "https://accounts.hcaptcha.com/demo",
+      "max_wait": 30,
+      "steps": [
+        {
+          "wait": 10
+        },
+        {
+          "key": "Tab"
+        },
+        {
+          "key": "space"
+        },
+        {
+          "wait": 8
+        },
+        {
+          "key": "Escape"
+        },
+        {
+          "wait": 1
+        },
+        {
+          "key": "Tab",
+          "repeat": 4
+        },
+        {
+          "key": "Return"
+        },
+        {
+          "wait": 5
+        }
+      ],
+      "after": "Please solve the challenge|success|error",
+      "pass": "Please solve the challenge|success",
+      "metrics": {
+        "outcome": "(Please solve the challenge|\"?success\"?:\\s*true)"
+      },
+      "rule": {
+        "outcome": {
+          "same": true,
+          "good": "\"success\": true"
+        }
+      },
+      "notes": "Keyboard only: Tab to the checkbox, Space, wait, Escape closes an image challenge unsolved (never solve images), Tab x4 to Submit, Enter. 'Please solve the challenge' = the checkbox led to a challenge; a passive pass submits a token. Stock Chrome on the dev box gets a challenge, so the rule is: same outcome as stock."
+    },
+    {
+      "id": "x-username",
+      "vendor": "X",
+      "url": "https://x.com/i/flow/login",
+      "max_wait": 40,
+      "steps": [
+        {
+          "wait": 12
+        },
+        {
+          "type": "{username}"
+        },
+        {
+          "key": "Return"
+        },
+        {
+          "wait": 5
+        }
+      ],
+      "after": "find an active X account|could not find your account|Could not log you in|try again later|Enter your password",
+      "block": "Could not log you in now|try again later|unusual login activity|Something went wrong",
+      "pass": "find an active X account|could not find your account",
+      "copy_at": [
+        0.5,
+        0.25
+      ],
+      "notes": "Unregistered username; X answers 'We couldn't find an active X account with that username.' The login modal closes on a click outside it, so the text is copied by clicking inside the modal (copy_at)."
+    },
+    {
+      "id": "google-signin",
+      "vendor": "Google",
+      "url": "https://accounts.google.com/signin/v2/identifier?hl=en&flowName=GlifWebSignIn",
+      "max_wait": 40,
+      "steps": [
+        {
+          "wait": 10
+        },
+        {
+          "type": "{email}"
+        },
+        {
+          "key": "Return"
+        },
+        {
+          "wait": 6
+        }
+      ],
+      "after": "Couldn.t find (this|your Google) account|Enter a valid email|not be secure|Couldn.t sign you in|unusual traffic|Type the text you hear or see",
+      "block": "browser or app may not be secure|Couldn.t sign you in|unusual traffic|Type the text you hear or see",
+      "pass": "Couldn.t find (this|your Google) account|Enter a valid email",
+      "notes": "Unregistered address; Google answers 'Couldn't find this account'. Insecure-browser and captcha pages are blocks."
+    },
+    {
+      "id": "meta-login",
+      "vendor": "Meta",
+      "url": "https://www.facebook.com/login/",
+      "wait": 8,
+      "max_wait": 40,
+      "ready": "Log in to Facebook|Log into Facebook|Forgot password|Forgotten password|temporarily blocked",
+      "block": "temporarily blocked|unusual activity|Something went wrong",
+      "pass": "Log in to Facebook|Log into Facebook|Forgot password|Forgotten password"
+    },
+    {
+      "id": "tiktok-login",
+      "vendor": "TikTok",
+      "url": "https://www.tiktok.com/login/phone-or-email/email",
+      "wait": 10,
+      "max_wait": 40,
+      "ready": "Log in|Forgot password|Access Denied",
+      "block": "Access Denied|Maximum number of attempts|Something went wrong",
+      "pass": "Forgot password|Email or username"
+    }
+  ]
+}

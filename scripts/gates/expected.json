@@ -1,0 +1,21 @@
+{
+  "_notes": "Gate A. Lab probes that may differ from stock of the same version on the same computer, each with the reason. compare: only these sub-paths of the value must equal stock (robust sub-signals of hashed probes). match: our value (as JSON) must match this regex. engines: limits the entry to chromium or firefox. Keep this list short: a difference that is not caused by a per-profile seed is a tell to fix, not an entry.",
+  "probes": {
+    "antibot-re/canvas-main-vs-worker": {
+      "reason": "Per-profile canvas noise changes the shape and text hashes; main thread and worker must still agree.",
+      "compare": ["shapesEqual", "textEqual"]
+    },
+    "antidetect-tells/canvas-main-worker-sandbox": {
+      "reason": "Per-profile canvas noise changes the hash; main, worker and sandboxed iframe must still agree.",
+      "compare": ["equal"]
+    },
+    "creepjs/cross-realm-render-and-screen-equality": {
+      "reason": "Per-profile canvas noise changes the render hash; all realms must still agree and the screen must not differ between them.",
+      "compare": ["equal", "screenDiff", "dpr"]
+    },
+    "creepjs/emoji-glyph-metrics-vs-os": {
+      "reason": "Per-profile canvas noise changes the emoji pixel hash; the glyph metrics themselves must equal stock.",
+      "compare": ["smile", "melting", "newest", "colour"]
+    }
+  }
+}
