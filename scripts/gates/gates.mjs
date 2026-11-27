@@ -370,6 +370,7 @@ async function probeServer() {
       req.on("end", () => { res.end("ok"); waiters.get(run)?.(JSON.parse(body)); waiters.delete(run); });
       return;
     }
+    if (url.pathname === "/blank") { res.setHeader("content-type", "text/html"); res.end("<title>New Tab</title>"); return; }
     if (url.pathname === "/hdr") { res.setHeader("content-type", "application/json"); res.end(JSON.stringify(req.rawHeaders.filter((_, i) => i % 2 === 0))); return; }
     if (url.pathname === "/focus") {
       res.setHeader("content-type", "text/html");
@@ -492,16 +493,24 @@ async function visit(E, target, site, proxy, server) {
   const shots = join(OUT, "C", target);
   mkdirSync(shots, { recursive: true });
   let browser;
-  if (target.startsWith("stock-")) browser = openStock(target.slice(6), dir, "about:blank", proxy);
+  // The app opens only http(s) start pages, so every browser starts on the same empty local page.
+  const start = server.url("blank", "c");
+  if (target.startsWith("stock-")) browser = openStock(target.slice(6), dir, start, proxy);
   else {
     const engine = target.slice(5);
     const profile = buildProfile(engine, HOST_OS, `gates-c-${engine}`, 104729, proxy.timezone);
     profile.proxy = { type: "http", host: "127.0.0.1", port: String(proxy.port), user: "", pass: "" };
-    browser = openOurs(E, engine, engine === "chromium" ? "plain" : "app", profile, dir, "about:blank", engine === "chromium" ? { webRtcIp: proxy.ip } : {});
+    browser = openOurs(E, engine, engine === "chromium" ? "plain" : "app", profile, dir, start, engine === "chromium" ? { webRtcIp: proxy.ip } : {});
   }
   const t0 = Date.now();
-  let win = "none";
-  while (Date.now() - t0 < 90_000 && (win = input("activate")) === "none") await sleep(2000);
+  let win = "none", gone = false;
+  browser.exited?.then(() => { gone = true; });
+  while (!gone && Date.now() - t0 < 90_000 && (win = input("activate")) === "none") await sleep(2000);
+  if (win === "none") {
+    log(`C: ${target}-${site.id}: no browser window ${browser.error().slice(-300)}`);
+    await browser.stop();
+    return { status: "no window", metrics: {}, ready: false, seconds: Math.round((Date.now() - t0) / 1000), window: false };
+  }
   await sleep(3000);
   input("activate");
   input("open", site.url);
