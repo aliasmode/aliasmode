@@ -2114,6 +2114,9 @@ export class Launcher {
     // the profile, so pages see the timezone of the IP they come from. Without an answer the saved
     // timezone stays, and so does one the user typed. The language follows only while it is still the
     // default of the saved timezone. The exit IP is WebRTC's public address below.
+    // Chromium's binary check (a download, or a full hash on the first open) runs during the lookup.
+    const earlyBinary = profile.engine === "firefox" ? undefined : this.verifyConfiguredBinary(false, binaryKind(profile));
+    earlyBinary?.catch(() => {});
     const proxy = profile.proxy;
     const lookupExit = () => proxy && this.lookupExitLocationFn ? this.lookupExitLocationFn(proxy).catch(() => null) : Promise.resolve(null);
     let exit = await lookupExit();
@@ -2121,7 +2124,7 @@ export class Launcher {
     const needsExitTimezone = !!proxy && !!this.lookupExitLocationFn && !profile.timezoneManual && (!profile.timezone || profile.timezone === this.hostTimezone);
     // Without the exit IP, WebRTC behind the proxy finds no address at all, which a real browser
     // never shows, and a timezone that is still this computer's would show next to the proxy's IP.
-    // A slow lookup gets more time and a failed one a second try, both through the proxy.
+    // A slow lookup gets more time through the proxy; a failed one is asked again after a minute.
     if ((needsExitIp && !exit?.ip) || (needsExitTimezone && !exit?.timezone)) exit = await lookupExit();
     if (exit?.timezone && exit.timezone !== profile.timezone && !profile.timezoneManual) {
       const unchanged = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup");
@@ -2148,7 +2151,7 @@ export class Launcher {
     // been canonicalized and matched byte-for-byte against the deployment pin.
     let verifiedBinary: { path: string; sha256: string };
     try {
-      verifiedBinary = await this.verifyConfiguredBinary(false, binaryKind(profile));
+      verifiedBinary = await (earlyBinary ?? this.verifyConfiguredBinary(false, binaryKind(profile)));
     } catch (error) {
       if (error instanceof BrowserLaunchError) throw error;
       throw new BrowserLaunchError("binary_verification");
