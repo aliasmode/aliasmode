@@ -455,6 +455,8 @@ async function gateB(E) {
       table[key] = { distinct, stable };
       if (opts.buckets) continue;
       const hint = switchHint(key);
+      // Named runs instead of a "<no run>" marker search: runners reported missing runs that the saved runs held.
+      const missing = [...Array(n).keys()].map((i) => `${engine}-${i}-1`).filter((run) => !runs[run]);
       if (first.every((v) => v === "null")) {
         // Null everywhere passes only when this host cannot read it (stock reads null too) and no probe step failed.
         const errors = [...new Set(Object.values(runs).filter(Boolean).flatMap((r) => Object.keys(r).filter((k) => k.endsWith(".error") && key.startsWith(k.slice(0, -5) + ".")).map((k) => `${k}: ${r[k]}`)))];
@@ -462,7 +464,7 @@ async function gateB(E) {
         if (errors.length) result.blockers.push({ engine, key, detail: `not measured: ${errors.join("; ").slice(0, 200)}`, switchHint: hint });
         else if (stockValue !== "null" && stockValue !== "<no run>") result.blockers.push({ engine, key, detail: `stock reads a value, ours reads null`, stock: stockValue.slice(0, 60), switchHint: hint });
         else table[key].na = true; // not readable on this host (e.g. no WebGL): cannot link
-      } else if (first.includes("<no run>")) result.blockers.push({ engine, key, detail: "a profile produced no result", switchHint: "none" });
+      } else if (missing.length) result.blockers.push({ engine, key, detail: `no result from ${missing.join(", ")}`, switchHint: "none" });
       else if (distinct < n) result.blockers.push({ engine, key, detail: `${distinct} distinct values across ${n} profiles (linkable)`, values: first.map((v) => v.slice(0, 60)), switchHint: hint });
       if (stable === false) result.blockers.push({ engine, key, detail: "changes across restarts", values: [...Array(n).keys()].flatMap((i) => [1, 2].map((p) => value(`${engine}-${i}-${p}`, key).slice(0, 60))), switchHint: hint });
     }
