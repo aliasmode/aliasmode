@@ -304,6 +304,7 @@ const ALIAS_TOOLS = [
         profileIds: { type: "array", minItems: 1, items: PROFILE_ID },
         inputs: { type: "object", description: "JSON inputs passed to the script." },
         headless: { type: "boolean", description: "Run the browsers hidden." },
+        useCredentials: { type: "boolean", default: false, description: "Give the script the saved login details of each profile. They are shown as *** in the status and log." },
       },
       required: ["scriptId", "profileIds"],
       additionalProperties: false,
@@ -334,6 +335,58 @@ const ALIAS_TOOLS = [
     description: "Stop the running script and close its browsers. Returns the final run state.",
     annotations: toolAnnotations("Stop the AliasMode script run", { destructive: true }),
     inputSchema: EMPTY_SCHEMA,
+  },
+  {
+    name: "aliasmode_scripts_on_open",
+    description: "Set the script that runs each time a profile is opened from the AliasMode app, or omit scriptId to clear it.",
+    annotations: toolAnnotations("Set an AliasMode run-on-open script"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        profileId: PROFILE_ID,
+        scriptId: { type: "string", minLength: 1, description: "Omit to clear the profile's run-on-open script." },
+      },
+      required: ["profileId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aliasmode_schedules_list",
+    description: "List script schedules (jobs with their next and last run), the recent schedule run history, and the run-on-open script of each profile.",
+    annotations: toolAnnotations("List AliasMode script schedules", { readOnly: true }),
+    inputSchema: EMPTY_SCHEMA,
+  },
+  {
+    name: "aliasmode_schedules_save",
+    description: "Create a schedule that runs a library script on profiles every few hours or daily at a set time, or update one by passing its scheduleId. On update, omitted fields keep their current value. Schedules run only while the AliasMode app is open.",
+    annotations: toolAnnotations("Save an AliasMode script schedule"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        scheduleId: { type: "string", minLength: 1, description: "Omit to create a new schedule." },
+        name: { type: "string" },
+        scriptId: { type: "string", minLength: 1 },
+        profileIds: { type: "array", minItems: 1, items: PROFILE_ID },
+        everyHours: { type: "number", exclusiveMinimum: 0, description: "Run every this many hours. Set this or dailyAt." },
+        dailyAt: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", description: "Run daily at HH:MM in the computer's local time. Set this or everyHours." },
+        inputs: { type: "object", description: "JSON inputs passed to the script." },
+        headless: { type: "boolean", description: "Run the browsers hidden." },
+        useCredentials: { type: "boolean", default: false, description: "Give the script the saved login details of each profile." },
+        enabled: { type: "boolean", default: true },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "aliasmode_schedules_delete",
+    description: "Delete a script schedule. The script itself stays in the library.",
+    annotations: toolAnnotations("Delete an AliasMode script schedule", { destructive: true }),
+    inputSchema: {
+      type: "object",
+      properties: { scheduleId: { type: "string", minLength: 1 } },
+      required: ["scheduleId"],
+      additionalProperties: false,
+    },
   },
   {
     name: "browser_close",
@@ -529,6 +582,18 @@ export async function createAliasModeMcp(options = {}) {
       }
       if (name === "aliasmode_scripts_stop") {
         return toolResult(await runtime.call("scripts.stop"));
+      }
+      if (name === "aliasmode_scripts_on_open") {
+        return toolResult(await runtime.call("scripts.onOpen", args));
+      }
+      if (name === "aliasmode_schedules_list") {
+        return toolResult(await runtime.call("schedules.list"));
+      }
+      if (name === "aliasmode_schedules_save") {
+        return toolResult(await runtime.call("schedules.save", args));
+      }
+      if (name === "aliasmode_schedules_delete") {
+        return toolResult(await runtime.call("schedules.delete", args));
       }
       if (name === "aliasmode_browser_select") {
         return toolResult(await selectBrowser(args.profileId));

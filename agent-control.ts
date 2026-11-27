@@ -24,7 +24,7 @@ import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
-import type { ScriptLibrary, ScriptSupervisor } from "./scripts.ts";
+import type { ScriptLibrary, ScriptRun, ScriptSupervisor } from "./scripts.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
@@ -55,7 +55,7 @@ export interface AgentControlDeps {
   remote?: RemoteCoordinator | null;
   cloudBrowser?: CloudBrowserLifecycle;
   cloudConnection?: CloudConnectionRuntime;
-  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; scheduler?: Pick<Scheduler, "list"> };
+  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; scheduler?: Pick<Scheduler, "list" | "save" | "remove" | "setOnOpen"> };
   log?: (message: string) => void;
 }
 
@@ -178,6 +178,11 @@ export function parseAgentControlRequest(raw: string | Uint8Array): AgentControl
   return request as unknown as AgentControlRequest;
 }
 
+/** Replaces each value with ***; `secrets` are sorted longest first, so a value inside another is not left half shown. */
+export function maskSecrets(text: string, secrets: readonly string[]): string {
+  return secrets.reduce((masked, secret) => masked.split(secret).join("***"), text);
+}
+
 export function validAgentAuthorization(header: string | null, nonce: string): boolean {
   return /^[a-f0-9]{64}$/.test(nonce) && header === `Bearer ${nonce}`;
 }
@@ -272,16 +277,26 @@ export class AgentControlSession {
           scriptId: stringParam(params, "scriptId"),
           profileIds: Array.isArray(params.profileIds) ? params.profileIds as string[] : [],
           inputs: params.inputs === undefined ? {} : object(params.inputs),
-          // Saved logins stay out of reach of MCP clients and the agent; only the dashboard Run panel can pass them.
-          useCredentials: false,
+          useCredentials: params.useCredentials === undefined ? false : params.useCredentials as boolean,
           ...(params.headless === undefined ? {} : { headless: params.headless as boolean }),
         }) };
       case "scripts.status":
-        return { run: this.scriptTools().runner.status() };
+        return { run: this.maskedRun(this.scriptTools().runner.status()) };
       case "scripts.log":
-        return this.scriptTools().runner.log(stringParam(params, "runId"), params.offset === undefined ? 0 : Number(params.offset));
+        return this.scriptLog(stringParam(params, "runId"), params.offset === undefined ? 0 : Number(params.offset));
       case "scripts.stop":
-        return { run: await this.scriptTools().runner.stop() };
+        return { run: this.maskedRun(await this.scriptTools().runner.stop()) };
+      case "scripts.onOpen":
+        return await this.setScriptOnOpen(params);
+      case "schedules.list":
+        return this.schedules().list();
+      case "schedules.save":
+        return await this.saveSchedule(params);
+      case "schedules.delete": {
+        const scheduleId = stringParam(params, "scheduleId");
+        this.schedules().remove(scheduleId);
+        return { scheduleId, deleted: true as const };
+      }
       case "mcp.connectors.create":
         return await this.createMcpConnector(stringParam(params, "label"));
       case "mcp.connectors.list":
@@ -298,25 +313,75 @@ export class AgentControlSession {
     return this.deps.scripts;
   }
 
-  /**
-   * Creates a script, or updates the one named by scriptId; omitted fields keep their current value.
-   * A schedule or run-on-open runs a script's saved source with no click, so an edit of such a script is saved as a copy.
-   */
+  /** Creates a script, or updates the one named by scriptId; omitted fields keep their current value. */
   private async saveScript(params: Record<string, unknown>) {
-    const { library, scheduler } = this.scriptTools();
+    const { library } = this.scriptTools();
     const current = params.scriptId === undefined ? undefined : await library.get(stringParam(params, "scriptId"));
     const field = (name: "name" | "description" | "language" | "source") => params[name] ?? current?.[name] ?? (name === "description" ? "" : undefined);
-    const state = current && scheduler?.list();
-    const scheduled = !!state && (state.jobs.some((job) => job.scriptId === current!.id) || Object.values(state.onOpen).includes(current!.id));
-    const name = field("name");
     const { source: _source, ...saved } = await library.save(
-      { name: scheduled && typeof name === "string" && !name.trim().endsWith("(AI edit)") ? `${name.trim()} (AI edit)` : name, description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
-      scheduled ? undefined : current?.id,
-      scheduled ? undefined : current && (params.expectedRevision === undefined ? current.revision : Number(params.expectedRevision)),
+      { name: field("name"), description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
+      current?.id,
+      current && (params.expectedRevision === undefined ? current.revision : Number(params.expectedRevision)),
     );
-    return scheduled
-      ? { script: saved, note: "This script is used by a schedule or run-on-open, so the change was saved as a copy. Switch the schedule to the copy on the Scripts page." }
-      : { script: saved };
+    return { script: saved };
+  }
+
+  /** The saved login values of the run's profiles, which AI clients never see. */
+  private secrets(runId: string): string[] {
+    return this.scriptTools().runner.secrets(runId).filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
+  }
+
+  private maskedRun(run: ScriptRun | null): ScriptRun | null {
+    if (!run) return run;
+    const secrets = this.secrets(run.id);
+    return { ...run, profiles: run.profiles.map(({ error, warning, ...item }) => ({
+      ...item,
+      ...(error === undefined ? {} : { error: maskSecrets(error, secrets) }),
+      ...(warning === undefined ? {} : { warning: maskSecrets(warning, secrets) }),
+    })) };
+  }
+
+  private scriptLog(runId: string, offset: number) {
+    const { runner } = this.scriptTools();
+    const log = runner.log(runId, offset);
+    const secrets = this.secrets(runId);
+    const text = maskSecrets(log.text, secrets);
+    if (runner.status()?.status === "finished") return { text, nextOffset: log.nextOffset };
+    // A value cut off at the end of the output so far is held back, so the next read masks it whole.
+    const held = Math.max(0, ...secrets.map((secret) => {
+      for (let length = secret.length - 1; length > 0; length--) if (text.endsWith(secret.slice(0, length))) return length;
+      return 0;
+    }));
+    return { text: text.slice(0, text.length - held), nextOffset: log.nextOffset - Buffer.byteLength(text.slice(text.length - held)) };
+  }
+
+  private schedules(): NonNullable<NonNullable<AgentControlDeps["scripts"]>["scheduler"]> {
+    const scheduler = this.deps.scripts?.scheduler;
+    if (!scheduler) throw agentError("schedules_unavailable", "Schedules are not available here; use the AliasMode desktop app");
+    return scheduler;
+  }
+
+  /** Creates a schedule, or updates the one named by scheduleId; omitted fields keep their current value. */
+  private async saveSchedule(params: Record<string, unknown>) {
+    const scheduler = this.schedules();
+    const { scheduleId, ...fields } = params;
+    const current = scheduleId === undefined ? undefined : scheduler.list().jobs.find((job) => job.id === scheduleId);
+    if (scheduleId !== undefined && !current) throw agentError("schedule_not_found", "Schedule not found");
+    const { id: _id, nextRun: _nextRun, lastRun: _lastRun, everyHours, dailyAt, ...kept } = current ?? {};
+    // A new cadence replaces the old one; only one of everyHours and dailyAt may be set.
+    const cadence = fields.everyHours !== undefined || fields.dailyAt !== undefined ? {} : { ...(everyHours === undefined ? {} : { everyHours }), ...(dailyAt === undefined ? {} : { dailyAt }) };
+    const job = { inputs: {}, ...kept, ...cadence, ...fields };
+    if (typeof job.scriptId === "string") await this.scriptTools().library.get(job.scriptId);
+    return { job: scheduler.save(job, current?.id) };
+  }
+
+  private async setScriptOnOpen(params: Record<string, unknown>) {
+    const profileId = stringParam(params, "profileId");
+    const scriptId = params.scriptId === undefined || params.scriptId === null ? null : stringParam(params, "scriptId");
+    const scheduler = this.schedules();
+    if (scriptId) await this.scriptTools().library.get(scriptId);
+    scheduler.setOnOpen(profileId, scriptId);
+    return { profileId, scriptId };
   }
 
   private cloudMcpConnection(): { connection: CloudConnectionRuntime; deviceId: string } {

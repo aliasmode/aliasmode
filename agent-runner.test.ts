@@ -209,24 +209,56 @@ describe("AgentRunner", () => {
 
   test("refuses hidden tools even when the model names them", async () => {
     const calls: string[] = [];
+    const requests: Parameters<AgentChat>[0][] = [];
     let step = 0;
-    const { agent } = runner(async () => ({
-      message: [
-        toolCall("h1", "aliasmode_scripts_run", { scriptId: "s", profileIds: ["a"] }),
-        toolCall("h2", "browser_run_code", { code: "1" }),
-        toolCall("h3", "aliasmode_profile_new_identity", { profileId: "a" }),
-        { role: "assistant", content: "done" },
-      ][step++]! as AgentMessage,
-    }), {
+    const { agent } = runner(async (request) => {
+      requests.push(request);
+      return { message: [toolCall("h1", "browser_run_code", { code: "1" }), { role: "assistant", content: "done" }][step++]! as AgentMessage };
+    }, {
       openTools: () => ({
-        listTools: async () => [{ name: "aliasmode_scripts_run" }, { name: "browser_run_code" }, { name: "aliasmode_profile_new_identity" }],
+        listTools: async () => [{ name: "browser_run_code" }, { name: "aliasmode_scripts_run" }],
         callTool: async (name) => { calls.push(name); return "ran"; },
         close: () => {},
       }),
     });
     const done = await settled(agent, agent.start("run it").id);
-    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)).toEqual(Array(3).fill("Error: this tool is not available."));
+    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)).toEqual(["Error: this tool is not available."]);
+    expect(requests[0]!.tools.map((tool) => tool.function.name)).toEqual(["aliasmode_scripts_run", "aliasmode_trash_list", "aliasmode_trash_restore"]);
     expect(calls).toEqual([]);
+  });
+
+  test("runs New identity only on a profile the user named by id or exact name", async () => {
+    const calls: { name: string; args: Record<string, unknown> }[] = [];
+    let step = 0;
+    const requests: Parameters<AgentChat>[0][] = [];
+    const { agent } = runner(async (request) => {
+      requests.push(request);
+      return {
+        message: [
+          toolCall("n1", "aliasmode_profile_new_identity", { profileId: "p-shop" }),
+          toolCall("n2", "aliasmode_profile_new_identity", { profileId: "p-12" }),
+          toolCall("n3", "aliasmode_profile_new_identity", { profileId: "p-other" }),
+          toolCall("n4", "aliasmode_profile_new_identity", { profileId: "p-id-typed" }),
+          { role: "assistant", content: "done" },
+        ][step++]! as AgentMessage,
+      };
+    }, {
+      openTools: () => ({
+        listTools: async () => [{ name: "aliasmode_profile_new_identity" }, { name: "aliasmode_profiles_list" }],
+        callTool: async (name, args) => {
+          calls.push({ name, args });
+          return name === "aliasmode_profiles_list"
+            ? JSON.stringify({ profiles: [{ id: "p-shop", name: "Shop 1" }, { id: "p-12", name: "Shop 12" }, { id: "p-other", name: "Other" }, { id: "p-id-typed", name: "Typed" }] })
+            : "reset";
+        },
+        close: () => {},
+      }),
+    });
+    const done = await settled(agent, agent.start("Give Shop 1 and p-id-typed a new identity").id);
+    expect(requests[0]!.tools.map((tool) => tool.function.name)).toContain("aliasmode_profile_new_identity");
+    const refused = "Error: New identity deletes a profile's data. Ask the user to name the profile they want reset.";
+    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)).toEqual(["reset", refused, refused, "reset"]);
+    expect(calls.filter((call) => call.name === "aliasmode_profile_new_identity").map((call) => call.args.profileId)).toEqual(["p-shop", "p-id-typed"]);
   });
 
   test("keeps the newest chats and prunes the files folder to its size cap", async () => {

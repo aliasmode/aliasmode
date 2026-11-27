@@ -92,10 +92,8 @@ const HELPER_IDLE_MS = 30 * 60_000;
 const COMPACTED = "[Older tool output removed to save space. Call the tool again if you need it.]";
 /** Tools that return files or images the agent cannot use. */
 /** Tools that return files or images the agent cannot use, and browser_run_code: it runs in a Node `vm`,
-    which is no sandbox, so a page that talks the agent into calling it could run code on this computer.
-    Running a library script is the same risk, so the user presses Run on the Scripts page. New identity
-    cannot be undone, and only the user deletes things for good. */
-const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code", "aliasmode_scripts_run", "aliasmode_profile_new_identity"]);
+    which is no sandbox, so a page that talks the agent into calling it could run code on this computer. */
+const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code"]);
 /** Downloads and upload files live in one folder; above this size the oldest files are deleted after a run. */
 export const AGENT_FILES_MAX_BYTES = 1024 ** 3;
 /** Older chats beyond this many are deleted when a new chat starts. */
@@ -110,6 +108,8 @@ How to work:
 - Use aliasmode_profiles_list to find profiles by name, group, or proxy. When you create profiles that reuse proxies from other profiles, copy those proxy settings.
 - Deleting a profile moves it to Trash. You can list Trash and restore profiles from it. You cannot empty Trash; only the user can.
 - Close browsers you opened when the task no longer needs them, unless the user wants them open.
+- You can run library scripts on profiles. Pass useCredentials when a script needs the profiles' saved logins. You can also create schedules and set a profile's run-on-open script.
+- Use New identity only when the user asks for it and names the profile.
 - When you write posts or messages, write natural text that fits the site and the account. Follow any SOP the user gives step by step.
 - Finish with a brief report: the result first, then only what matters (findings, failures). Use a few short lines or a compact table; skip filler, step-by-step narration, side notes that do not change the result, and offers of further help.`;
 
@@ -436,6 +436,9 @@ export class AgentRunner {
       else if (name === "aliasmode_trash_restore") {
         const ids = Array.isArray(args.profileIds) ? args.profileIds.filter((id): id is string => typeof id === "string") : [];
         text = JSON.stringify(await this.options.trash("restore", ids));
+      } else if (name === "aliasmode_profile_new_identity") {
+        if (!(await namedByUser(tools, args.profileId, messages))) return "Error: New identity deletes a profile's data. Ask the user to name the profile they want reset.";
+        text = await tools.callTool(name, args);
       } else if (name === "browser_file_upload" && args.paths !== undefined) {
         const paths = uploadPaths(args.paths, this.filesDir(), messages);
         if (!paths) return `Error: upload only files the user named in this chat, or files inside ${this.filesDir()}.`;
@@ -460,6 +463,30 @@ function answerOpenToolCalls(messages: AgentMessage[]): void {
   for (const call of messages[index]!.tool_calls!) {
     if (!answered.has(call.id)) messages.push({ role: "tool", tool_call_id: call.id, content: "Stopped before this tool finished." });
   }
+}
+
+/**
+ * New identity deletes a profile's data, so it runs only on a profile whose id or exact name the user typed
+ * in one of their own messages; a web page cannot add to those.
+ */
+async function namedByUser(tools: AgentToolSession, profileId: unknown, messages: AgentMessage[]): Promise<boolean> {
+  if (typeof profileId !== "string" || !profileId) return false;
+  const typed = messages.filter((message) => message.role === "user").map((message) => message.content ?? "");
+  let name: unknown;
+  try {
+    name = (JSON.parse(await tools.callTool("aliasmode_profiles_list", {})) as { profiles?: { id: string; name: string }[] })
+      .profiles?.find((profile) => profile.id === profileId)?.name;
+  } catch { /* an error text, not a list */ }
+  return [profileId, ...(typeof name === "string" && name ? [name] : [])].some((value) => typed.some((text) => standsAlone(text, value)));
+}
+
+/** True when `value` appears in `text` with no letter or digit right before or after it ("Profile 1" is not in "Profile 12"). */
+function standsAlone(text: string, value: string): boolean {
+  const word = /[\p{L}\p{N}]/u;
+  for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
+    if (!word.test(text[at - 1] ?? "") && !word.test(text[at + value.length] ?? "")) return true;
+  }
+  return false;
 }
 
 /**

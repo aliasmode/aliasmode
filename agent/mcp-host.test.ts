@@ -437,7 +437,7 @@ test("MCP host lists and runs library scripts through the runtime", async () => 
   expect(script("aliasmode_scripts_run")?.annotations?.readOnlyHint).toBe(false);
   expect(script("aliasmode_scripts_stop")?.annotations?.readOnlyHint).toBe(false);
   expect(script("aliasmode_scripts_run")?.inputSchema).toMatchObject({ required: ["scriptId", "profileIds"] });
-  const args = { scriptId: "s1", profileIds: ["p1"], inputs: { a: 1 }, headless: true };
+  const args = { scriptId: "s1", profileIds: ["p1"], inputs: { a: 1 }, headless: true, useCredentials: true };
   await client.callTool({ name: "aliasmode_scripts_run", arguments: args });
   expect(runtime.calls.at(-1)).toEqual({ method: "scripts.run", params: args });
   const save = { scriptId: "s1", source: "export default async () => {};" };
@@ -452,6 +452,21 @@ test("MCP host lists and runs library scripts through the runtime", async () => 
   for (const name of ["list", "status", "stop"]) {
     await client.callTool({ name: `aliasmode_scripts_${name}`, arguments: {} });
     expect(runtime.calls.at(-1)?.method).toBe(`scripts.${name}`);
+  }
+
+  expect(script("aliasmode_schedules_list")?.annotations?.readOnlyHint).toBe(true);
+  for (const name of ["aliasmode_schedules_save", "aliasmode_schedules_delete", "aliasmode_scripts_on_open"]) {
+    expect(script(name)?.annotations?.readOnlyHint).toBe(false);
+  }
+  const calls: [string, Record<string, unknown>, string][] = [
+    ["aliasmode_schedules_list", {}, "schedules.list"],
+    ["aliasmode_schedules_save", { scriptId: "s1", profileIds: ["p1"], dailyAt: "09:00", useCredentials: true }, "schedules.save"],
+    ["aliasmode_schedules_delete", { scheduleId: "j1" }, "schedules.delete"],
+    ["aliasmode_scripts_on_open", { profileId: "p1", scriptId: "s1" }, "scripts.onOpen"],
+  ];
+  for (const [name, params, method] of calls) {
+    await client.callTool({ name, arguments: params });
+    expect(runtime.calls.at(-1)).toEqual({ method, params });
   }
 
   await client.close();

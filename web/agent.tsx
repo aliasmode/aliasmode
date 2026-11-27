@@ -119,6 +119,11 @@ export function describeStep(step: { name: string; args: string }, t: Translate)
     case "aliasmode_scripts_status": return { label: t("Checked the script run"), icon: "clock" };
     case "aliasmode_scripts_log": return { label: t("Read the script log"), icon: "eye" };
     case "aliasmode_scripts_stop": return { label: t("Stopped the script run"), icon: "window" };
+    case "aliasmode_scripts_on_open": return { label: t("Set a run-on-open script"), icon: "tool" };
+    case "aliasmode_schedules_list": return { label: t("Listed schedules"), icon: "list" };
+    case "aliasmode_schedules_save": return { label: t("Saved a schedule"), icon: "clock" };
+    case "aliasmode_schedules_delete": return { label: t("Deleted a schedule"), icon: "trash" };
+    case "aliasmode_profile_new_identity": return { label: t("Gave a profile a new identity"), icon: "user" };
     case "aliasmode_browser_open": return { label: t("Opened profile"), icon: "window" };
     case "aliasmode_browser_select": return { label: t("Switched browser"), icon: "window" };
     case "aliasmode_browser_status": return { label: t("Checked browser"), icon: "window" };

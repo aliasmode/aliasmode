@@ -812,10 +812,9 @@ test("agent control lists, runs, follows and stops library scripts", async () =>
   await call("scripts.run", { scriptId: script.id, profileIds: ["a"], headless: false });
   await h.supervisor.settled();
   expect(h.startOptions.at(-1)).toEqual({ headless: false });
-  // MCP clients never get saved logins, even when they ask for them.
   await call("scripts.run", { scriptId: script.id, profileIds: ["a"], useCredentials: true });
   await h.supervisor.settled();
-  expect(credentials).toEqual([null, null, null]);
+  expect(credentials).toEqual([null, null, expect.objectContaining({ username: "user-a", password: "test-password-a" })]);
   expect((await call("scripts.stop")).run.status).toBe("finished");
 });
 
@@ -851,42 +850,85 @@ test("agent control reads, creates and updates library scripts", async () => {
   expect(await call("scripts.get", { scriptId: "missing" })).toMatchObject({ message: "Script not found" });
 });
 
-test("an agent edit of a scheduled or run-on-open script is saved as a copy, and the dashboard still saves in place", async () => {
+test("AI clients get script logs and errors with saved login values masked; the dashboard log is not", async () => {
+  const h = harness(async ({ logFd }) => {
+    writeFileSync(logFd, "signed in as user-a with test-password-a, then user-b\n");
+    throw new Error("login failed for user-a");
+  }, { profileIds: ["a", "b"] });
+  const script = await h.library.save(input);
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
+  const call = async (method: string, params: Record<string, unknown> = {}) =>
+    (await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method, params }))).result as any;
+  const started = await call("scripts.run", { scriptId: script.id, profileIds: ["a"], useCredentials: true });
+  await h.supervisor.settled();
+  const log = await call("scripts.log", { runId: started.run.id });
+  expect(log.text).toContain("signed in as *** with ***, then user-b");
+  expect(log.text).not.toContain("test-password");
+  expect((await call("scripts.status")).run.profiles[0].error).toBe("login failed for ***");
+  expect((await call("scripts.stop")).run.profiles[0].error).toBe("login failed for ***");
+  expect(h.supervisor.log(started.run.id, 0).text).toContain("test-password-a");
+  expect(h.supervisor.status()!.profiles[0]!.error).toBe("login failed for user-a");
+});
+
+test("a saved login value cut at the end of a live log is held back until it is whole", async () => {
+  const release = Promise.withResolvers<void>();
+  let fd = 0;
+  const h = harness(async ({ logFd }) => {
+    fd = logFd;
+    writeFileSync(logFd, "password: test-pass");
+    await release.promise;
+  });
+  const script = await h.library.save(input);
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
+  const call = async (method: string, params: Record<string, unknown> = {}) =>
+    (await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method, params }))).result as any;
+  const run = (await call("scripts.run", { scriptId: script.id, profileIds: ["a"] })).run;
+  while (!fd) await Bun.sleep(5);
+  const first = await call("scripts.log", { runId: run.id });
+  expect(first.text).toEndWith("password: ");
+  writeFileSync(fd, "word-a done\n");
+  release.resolve();
+  await h.supervisor.settled();
+  expect((await call("scripts.log", { runId: run.id, offset: first.nextOffset })).text).toBe("*** done\n");
+});
+
+test("an agent edit of a scheduled script saves in place", async () => {
   const h = harness();
   const scheduler = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope() });
   const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor, scheduler } } as any);
-  const save = async (params: Record<string, unknown>) => (await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "scripts.save", params }))).result as any;
   const scheduled = await h.library.save(input);
-  const onOpen = await h.library.save({ ...input, name: "Greet" });
-  const free = await h.library.save({ ...input, name: "Free" });
   scheduler.save({ scriptId: scheduled.id, profileIds: ["a"], inputs: {}, useCredentials: true, everyHours: 6 });
-  scheduler.setOnOpen("b", onOpen.id);
+  const result = (await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "scripts.save", params: { scriptId: scheduled.id, source: "export default async () => { /* agent */ };" } }))).result as any;
+  expect(result).toEqual({ script: expect.objectContaining({ id: scheduled.id, name: "Visit", revision: 2 }) });
+  expect((await h.library.get(scheduled.id)).source).toContain("agent");
+});
 
-  for (const original of [scheduled, onOpen]) {
-    const result = await save({ scriptId: original.id, source: "export default async () => { /* agent */ };" });
-    expect(result.note).toContain("saved as a copy");
-    expect(result.script).toMatchObject({ name: `${original.name} (AI edit)`, description: "Example", revision: 1 });
-    expect(result.script.id).not.toBe(original.id);
-    expect((await h.library.get(original.id)).source).toBe(input.source);
-    expect((await h.library.get(result.script.id)).source).toContain("agent");
-  }
-  expect(scheduler.list().jobs[0]!.scriptId).toBe(scheduled.id);
-  expect(scheduler.list().onOpen).toEqual({ b: onOpen.id });
-  // A copy that is scheduled too gets another copy, without a second suffix.
-  const copy = (await h.library.list()).find((item) => item.name === "Visit (AI edit)")!;
-  scheduler.setOnOpen("c", copy.id);
-  expect((await save({ scriptId: copy.id, source: "export default async () => { /* again */ };" })).script.name).toBe("Visit (AI edit)");
-
-  const edited = await save({ scriptId: free.id, source: "export default async () => { /* agent */ };" });
-  expect(edited).toEqual({ script: expect.objectContaining({ id: free.id, revision: 2 }) });
-
-  const nonce = "f".repeat(64);
-  const response = await handleUiRequest(new Request(`http://127.0.0.1/ui/api/scripts/${scheduled.id}`, {
-    method: "PATCH", headers: { authorization: `Bearer ${nonce}`, "content-type": "application/json" },
-    body: JSON.stringify({ ...input, source: "export default async () => { /* user */ };", expectedRevision: 1 }),
-  }), {} as any, {} as any, null, { scripts: { library: h.library, runner: h.supervisor, scheduler, nonce } });
-  expect(response?.status).toBe(200);
-  expect((await h.library.get(scheduled.id)).source).toContain("user");
+test("agent control creates, updates, lists and deletes schedules and run-on-open scripts", async () => {
+  const h = harness();
+  const scheduler = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope() });
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor, scheduler } } as any);
+  const call = async (method: string, params: Record<string, unknown> = {}) => {
+    const response = await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method, params }));
+    return response.ok ? response.result as any : response.error!;
+  };
+  const script = await h.library.save(input);
+  const created = (await call("schedules.save", { scriptId: script.id, profileIds: ["a"], everyHours: 6, useCredentials: true, headless: true })).job;
+  expect(created).toMatchObject({ scriptId: script.id, profileIds: ["a"], inputs: {}, everyHours: 6, useCredentials: true, headless: true, enabled: true });
+  // An update keeps omitted fields, and a new cadence replaces the old one.
+  const updated = (await call("schedules.save", { scheduleId: created.id, dailyAt: "09:30", enabled: false })).job;
+  expect(updated).toMatchObject({ id: created.id, scriptId: script.id, profileIds: ["a"], dailyAt: "09:30", useCredentials: true, headless: true, enabled: false });
+  expect(updated.everyHours).toBeUndefined();
+  expect(await call("schedules.save", { scheduleId: "missing", everyHours: 1 })).toMatchObject({ code: "schedule_not_found" });
+  expect(await call("schedules.save", { scriptId: "missing", profileIds: ["a"], everyHours: 1 })).toMatchObject({ message: "Script not found" });
+  expect(await call("schedules.save", { scriptId: script.id, profileIds: ["a"], everyHours: 1, dailyAt: "09:00" })).toMatchObject({ message: expect.stringContaining("either") });
+  expect(await call("scripts.onOpen", { profileId: "b", scriptId: script.id })).toEqual({ profileId: "b", scriptId: script.id });
+  expect(await call("scripts.onOpen", { profileId: "c", scriptId: "missing" })).toMatchObject({ message: "Script not found" });
+  expect(await call("schedules.list")).toMatchObject({ jobs: [{ id: created.id }], onOpen: { b: script.id } });
+  expect(await call("scripts.onOpen", { profileId: "b" })).toEqual({ profileId: "b", scriptId: null });
+  expect(await call("schedules.delete", { scheduleId: created.id })).toEqual({ scheduleId: created.id, deleted: true });
+  expect(await call("schedules.list")).toMatchObject({ jobs: [], onOpen: {} });
+  const bare = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor } } as any);
+  expect(await bare.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "schedules.list" }))).toMatchObject({ ok: false, error: { code: "schedules_unavailable" } });
 });
 
 test("schedule and run-on-open routes save, list, and delete under the nonce", async () => {

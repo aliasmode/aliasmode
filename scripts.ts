@@ -291,6 +291,8 @@ export const executeScript: ScriptExecution = async ({ scriptPath, language, inp
   }
 };
 
+const CREDENTIAL_FIELDS = ["username", "password", "email", "emailPassword", "twofa"] as const;
+
 interface ActiveRun {
   view: ScriptRun;
   scope: string;
@@ -298,6 +300,8 @@ interface ActiveRun {
   logPath: string;
   abort: AbortController;
   done: Promise<void>;
+  /** Saved login values of the profiles the run reached; AI clients get the log and errors with these masked. */
+  secrets: Set<string>;
 }
 
 export class ScriptSupervisor {
@@ -342,7 +346,7 @@ export class ScriptSupervisor {
     const directory = mkdtempSync(join(this.options.library.directory, "run-"));
     const run: ActiveRun = {
       view: { id: randomUUID(), scriptId: request.scriptId, scriptName: "Script", useCredentials: request.useCredentials, status: "running", profiles: [...new Set(request.profileIds)].map((id) => ({ id, name: id, status: "queued" })) },
-      scope, directory, logPath: join(directory, "output.log"), abort: new AbortController(), done: Promise.resolve(),
+      scope, directory, logPath: join(directory, "output.log"), abort: new AbortController(), done: Promise.resolve(), secrets: new Set(),
     };
     writeFileSync(run.logPath, "", { mode: 0o600 });
     this.active = run;
@@ -361,6 +365,11 @@ export class ScriptSupervisor {
   }
 
   settled(): Promise<void> { return this.active?.done ?? Promise.resolve(); }
+
+  /** The saved login values of the run's profiles; empty for an unknown run. */
+  secrets(id: string): string[] {
+    return this.active?.view.id === id ? [...this.active.secrets] : [];
+  }
 
   /** True while a run has this profile queued or running, in any account. */
   usesProfile(profileId: string): boolean {
@@ -480,13 +489,17 @@ export class ScriptSupervisor {
           this.options.library.assertScope(run.scope);
           const profile = this.options.store.getProfile(item.id) ?? cloudProfile;
           if (!profile) throw new ScriptError("Profile not found", 404);
+          for (const key of CREDENTIAL_FIELDS) {
+            const value = (profile as unknown as Record<string, unknown>)[key];
+            if (typeof value === "string" && value) run.secrets.add(value);
+          }
           item.name = profile.name;
           writeFileSync(fd, `\n--- ${profile.name || item.id} ---\n`);
           if (opened.warning) writeFileSync(fd, `Warning: ${opened.warning}\n`);
           const input = {
             profile: { id: item.id, name: profile.name, group: profile.group, platform: profile.platform ?? "" },
             inputs: request.inputs,
-            credentials: request.useCredentials ? Object.fromEntries(["username", "password", "email", "emailPassword", "twofa"].map((key) => [key, (profile as unknown as Record<string, string>)[key] ?? ""])) : null,
+            credentials: request.useCredentials ? Object.fromEntries(CREDENTIAL_FIELDS.map((key) => [key, (profile as unknown as Record<string, string>)[key] ?? ""])) : null,
           };
           if (opened.engine === "firefox") {
             const launch = this.options.store.getLaunch(item.id) as { firefoxOwner?: FirefoxOwner } | null;
