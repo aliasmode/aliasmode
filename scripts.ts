@@ -360,6 +360,13 @@ export class ScriptSupervisor {
 
   settled(): Promise<void> { return this.active?.done ?? Promise.resolve(); }
 
+  /** True while a run has this profile queued or running, in any account. */
+  usesProfile(profileId: string): boolean {
+    const run = this.active?.view;
+    return !!run && run.status !== "finished"
+      && run.profiles.some((item) => item.id === profileId && (item.status === "queued" || item.status === "running"));
+  }
+
   async shutdown(): Promise<void> {
     this.closing = true;
     const run = this.active;

@@ -691,6 +691,7 @@ export class AgentControlSession {
           remote: this.deps.remote,
           cloudBrowser: this.deps.cloudBrowser,
           cloudClient: this.deps.cloudConnection?.client,
+          scriptBusy: (id) => this.deps.scripts?.runner.usesProfile(id) ?? false,
         }, profileId);
       } catch (error) {
         if (error instanceof CloudApiError) throw agentError(error.code, error.message);

@@ -1702,6 +1702,7 @@ export async function handleUiRequest(
         launcher, store, remote,
         cloudBrowser: options.cloudBrowser,
         cloudClient: options.cloudConnection?.client,
+        scriptBusy: (id) => options.scripts?.runner.usesProfile(id) ?? false,
       }, decodeURIComponent(newIdentity[1]!));
       return Response.json({ ok: true, ...result });
     } catch (error) {

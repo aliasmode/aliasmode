@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { AgentControlSession } from "./agent-control.ts";
 import { ScriptLibrary, ScriptSupervisor, resolveScriptRunner, verifyScriptRuntime, type ScriptExecution } from "./scripts.ts";
 import { handleUiRequest } from "./ui.ts";
+import { serveAutomationApi } from "./web.ts";
 import { Scheduler } from "./scheduler.ts";
 import { CloudClient } from "./cloud-client.ts";
 import { LifecycleAdmissionController } from "./lifecycle-admission.ts";
@@ -484,6 +485,36 @@ test("an open warning is kept on the run, in its log, and in the schedule histor
   expect(run.profiles[0]).toMatchObject({ status: "succeeded", warning });
   expect(h.supervisor.log(run.id, 0).text).toContain(`--- a ---\nWarning: ${warning}\n`);
   expect(scheduler.list().history[0]!.profiles).toEqual([{ id: "a", name: "a", status: "succeeded", warning }]);
+});
+
+test("New identity is refused while a script run has the profile queued or running", async () => {
+  const release = Promise.withResolvers<void>();
+  const h = harness(async () => { await release.promise; });
+  const script = await h.library.save(input);
+  h.supervisor.start({ scriptId: script.id, profileIds: ["a", "b"], inputs: {}, useCredentials: false, concurrency: 1 });
+  await until(() => h.supervisor.status()?.profiles[0]?.status === "running");
+  expect(["a", "b", "c"].map((id) => h.supervisor.usesProfile(id))).toEqual([true, true, false]);
+  const refusal = "A script is using this profile; stop it first";
+  const store = { getProfile: () => null, getLaunch: () => null } as any;
+  const scripts = { library: h.library, runner: h.supervisor };
+
+  const ui = await handleUiRequest(new Request("http://x/ui/api/profiles/b/new-identity", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }), {} as any, store, null, { scripts: scripts as any });
+  expect(ui!.status).toBe(409);
+  expect((await ui!.json()).error).toBe(refusal);
+  const session = new AgentControlSession({ store, admission: { run: async (_: unknown, work: () => Promise<unknown>) => work() }, scripts } as any);
+  expect(await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "profiles.newIdentity", params: { profileId: "a" } })))
+    .toMatchObject({ ok: false, error: { code: "conflict", message: refusal } });
+  const server = serveAutomationApi({ port: 0, launcher: {} as any, store, scriptBusy: (id) => h.supervisor.usesProfile(id), log: () => {} });
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/v2/browser-profile/new-identity`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ profile_id: "a" }),
+    });
+    expect(await response.json()).toMatchObject({ code: -1, msg: refusal });
+  } finally { await server.stop(true); }
+
+  release.resolve();
+  await h.supervisor.settled();
+  expect(h.supervisor.usesProfile("a")).toBe(false);
 });
 
 test("saved login fields require opt-in and never enter status or cached scripts", async () => {

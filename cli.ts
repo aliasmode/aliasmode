@@ -2761,6 +2761,7 @@ async function main() {
               remote: coord,
               lifecycleAdmission: lifecycleAdmission!,
               appConfig,
+              scriptBusy: (id) => server.scriptBusy(id),
             })
           : undefined;
         const server = serveDashboard({
@@ -2857,6 +2858,7 @@ async function main() {
               cloudConnection,
               lifecycleAdmission: lifecycleAdmission!,
               appConfig,
+              scriptBusy: (id) => server.scriptBusy(id),
             })
           : undefined;
         const server = serveDashboard({
@@ -2915,6 +2917,7 @@ async function main() {
             store,
             lifecycleAdmission: lifecycleAdmission!,
             appConfig,
+            scriptBusy: (id) => server.scriptBusy(id),
           })
         : undefined;
       const server = serveDashboard({

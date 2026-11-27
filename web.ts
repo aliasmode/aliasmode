@@ -82,6 +82,8 @@ export interface DashboardServerOptions {
   health?: UiHealthMetadata | null;
   /** Desktop-generated nonce used by the installed agent adapter. */
   agentNonce?: string;
+  /** True while a script run uses the profile; the desktop automation API asks the dashboard's runner. */
+  scriptBusy?: (profileId: string) => boolean;
 }
 
 type AgentSocketData = {
@@ -233,6 +235,7 @@ async function handleAutomationRequest(
       launcher, store, remote: opts.remote,
       cloudBrowser: opts.cloudBrowser,
       cloudClient: opts.cloudConnection?.client,
+      scriptBusy: opts.scriptBusy,
     });
   }
   if (opts.remote && isAdsPowerBrowserControl(pathname)) {
@@ -309,6 +312,8 @@ export function serveDashboard(opts: DashboardServerOptions) {
     root: opts.paths!.root, library, launcher, store, admission, python,
     remote: opts.remote, cloudBrowser: opts.cloudBrowser, cloudConnection: opts.cloudConnection, log,
   }) : undefined;
+  const scriptBusy = (profileId: string) => runner?.usesProfile(profileId) ?? false;
+  const automationOpts = { ...opts, scriptBusy };
   const scheduler = library && runner ? new Scheduler({ root: opts.paths!.root, runner, scope: () => library.scope(), isOpen: opts.remote ? undefined : (id) => launcher.certifiedActive(id), log }) : undefined;
   scheduler?.start();
   const scripts = library && agentNonce && runner ? { library, nonce: agentNonce, python, runner, scheduler } : undefined;
@@ -435,13 +440,14 @@ export function serveDashboard(opts: DashboardServerOptions) {
         // Per-profile identity "card" (AdsPower-style landing page). Opened as a tab and
         // pointed to by the bookmark, so an operator can always see which account a window is.
         if (reqUrl.pathname === "/card") return renderProfileCard(store, reqUrl.searchParams.get("id") ?? "");
-        return handleAutomationRequest(req, opts, lifecycle);
+        return handleAutomationRequest(req, automationOpts, lifecycle);
       });
     },
   });
   void agentHub?.cleanupTemporaryProfiles();
   log(`dashboard + API on http://${hostname}:${server.port}  (UI at /, AliasMode Local API under /api; AdsPower-compatible)`);
   return Object.assign(server, {
+    scriptBusy,
     stopScripts: () => Promise.all([scheduler ? scheduler.shutdown() : scripts?.runner.shutdown(), agent?.shutdown()]).then(() => {}),
   });
 }

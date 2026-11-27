@@ -21,6 +21,8 @@ export interface NewIdentityDeps {
   cloudBrowser?: Pick<CloudBrowserLifecycle, "open" | "close" | "newIdentityBlocked" | "discardSessions">;
   cloudClient?: CloudProfileEditorClient;
   remote?: unknown;
+  /** True while a script run has the profile queued or running. */
+  scriptBusy?: (profileId: string) => boolean;
 }
 
 export interface NewIdentityResult {
@@ -48,6 +50,8 @@ export async function startNewIdentity(deps: NewIdentityDeps, profileId: string)
     throw new NewIdentityError(error instanceof Error ? error.message : String(error), 400);
   }
   if (deps.remote) throw new NewIdentityError("New identity is unavailable in legacy Remote mode", 400);
+  // The run owns that browser; closing it under the script would leave its next open unowned.
+  if (deps.scriptBusy?.(profileId)) throw new NewIdentityError("A script is using this profile; stop it first", 409);
   const launch = store.getLaunch(profileId);
   const headless = launch?.headless !== undefined ? { headless: launch.headless } : {};
   const seeds = new Set(store.listProfiles().map((profile) => profile.fingerprintSeed));
