@@ -466,27 +466,52 @@ function answerOpenToolCalls(messages: AgentMessage[]): void {
 }
 
 /**
- * New identity deletes a profile's data, so it runs only on a profile whose id or exact name the user typed
- * in one of their own messages; a web page cannot add to those.
+ * New identity deletes a profile's data, so it runs only on a profile whose id or name the user typed in one
+ * of their own messages; a web page cannot add to those. A name the agent gave in this chat does not count:
+ * it could be any word the user typed.
  */
 async function namedByUser(tools: AgentToolSession, profileId: unknown, messages: AgentMessage[]): Promise<boolean> {
-  if (typeof profileId !== "string" || !profileId) return false;
-  const typed = messages.filter((message) => message.role === "user").map((message) => message.content ?? "");
-  let name: unknown;
+  if (typeof profileId !== "string" || !profileId || renamedHere(profileId, messages)) return false;
+  let profiles: { id: string; name: string }[] = [];
   try {
-    name = (JSON.parse(await tools.callTool("aliasmode_profiles_list", {})) as { profiles?: { id: string; name: string }[] })
-      .profiles?.find((profile) => profile.id === profileId)?.name;
+    const listed = (JSON.parse(await tools.callTool("aliasmode_profiles_list", {})) as { profiles?: unknown }).profiles;
+    if (Array.isArray(listed)) profiles = listed;
   } catch { /* an error text, not a list */ }
-  return [profileId, ...(typeof name === "string" && name ? [name] : [])].some((value) => typed.some((text) => standsAlone(text, value)));
+  const name = profiles.find((profile) => profile.id === profileId)?.name;
+  const candidates = [profileId, ...profiles.flatMap((profile) => [profile.id, profile.name])].filter((value) => typeof value === "string" && value);
+  const named = new Set(messages.filter((message) => message.role === "user").flatMap((message) => namesIn(message.content ?? "", candidates)));
+  return named.has(normalized(profileId)) || (typeof name === "string" && !!name && named.has(normalized(name)));
 }
 
-/** True when `value` appears in `text` with no letter or digit right before or after it ("Profile 1" is not in "Profile 12"). */
-function standsAlone(text: string, value: string): boolean {
+function renamedHere(profileId: string, messages: AgentMessage[]): boolean {
+  return messages.some((message) => message.tool_calls?.some((call) => {
+    if (call.function.name !== "aliasmode_profile_update") return false;
+    try {
+      const args = JSON.parse(call.function.arguments || "{}");
+      return args?.profileId === profileId && !!args.set && typeof args.set === "object" && "name" in args.set;
+    } catch { return false; }
+  }));
+}
+
+function normalized(text: string): string {
+  return text.normalize("NFKC").toLowerCase();
+}
+
+/**
+ * The profile names and ids in `text`, compared case-insensitively. At each place only the longest one counts,
+ * and only with no letter or digit right before or after it: "Shop 1" names Shop 1, not Shop, and nothing in "Shop 12".
+ */
+function namesIn(text: string, candidates: string[]): string[] {
   const word = /[\p{L}\p{N}]/u;
-  for (let at = text.indexOf(value); at >= 0; at = text.indexOf(value, at + 1)) {
-    if (!word.test(text[at - 1] ?? "") && !word.test(text[at + value.length] ?? "")) return true;
+  const source = normalized(text);
+  const values = [...new Set(candidates.map(normalized))].sort((a, b) => b.length - a.length);
+  const found: string[] = [];
+  for (let at = 0; at < source.length; at++) {
+    if (word.test(source[at - 1] ?? "")) continue;
+    const value = values.find((candidate) => source.startsWith(candidate, at));
+    if (value && !word.test(source[at + value.length] ?? "")) found.push(value);
   }
-  return false;
+  return found;
 }
 
 /**

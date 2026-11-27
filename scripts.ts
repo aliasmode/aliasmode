@@ -292,6 +292,27 @@ export const executeScript: ScriptExecution = async ({ scriptPath, language, inp
 };
 
 export const CREDENTIAL_FIELDS = ["username", "password", "email", "emailPassword", "twofa"] as const;
+/** The most bytes one log read returns. */
+export const LOG_READ_BYTES = 64 * 1024;
+
+/** The saved login values worth masking (4+ characters), longest first, so a value inside another is not left half shown. */
+export function maskableSecrets(values: Iterable<string>): string[] {
+  return [...new Set(values)].filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
+}
+
+/** Replaces each saved login value in `text` with ***. */
+export function maskSecrets(text: string, values: Iterable<string>): string {
+  return maskableSecrets(values).reduce((masked, secret) => masked.split(secret).join("***"), text);
+}
+
+export function maskProfiles<T extends { error?: string; warning?: string }>(profiles: T[], values: Iterable<string>): T[] {
+  const secrets = maskableSecrets(values);
+  return profiles.map(({ error, warning, ...item }) => ({
+    ...item,
+    ...(error === undefined ? {} : { error: maskSecrets(error, secrets) }),
+    ...(warning === undefined ? {} : { warning: maskSecrets(warning, secrets) }),
+  }) as T);
+}
 
 interface ActiveRun {
   view: ScriptRun;
@@ -366,6 +387,15 @@ export class ScriptSupervisor {
 
   settled(): Promise<void> { return this.active?.done ?? Promise.resolve(); }
 
+  /** Up to `length` raw bytes of a run's log from `start`; for finding saved login values around an offset. */
+  logBytes(id: string, start: number, length: number): Buffer {
+    const fd = openSync(this.logRun(id, start).logPath, "r");
+    try {
+      const buffer = Buffer.alloc(Math.max(0, length));
+      return buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, start));
+    } finally { closeSync(fd); }
+  }
+
   /** The saved login values of the run's profiles; empty for an unknown run. */
   secrets(id: string): string[] {
     return this.active?.view.id === id ? [...this.active.secrets] : [];
@@ -384,13 +414,18 @@ export class ScriptSupervisor {
     if (run) { run.abort.abort(); await run.done; rmSync(run.directory, { recursive: true, force: true }); }
   }
 
-  log(id: string, offset: number): { text: string; nextOffset: number } {
+  private logRun(id: string, offset: number): ActiveRun {
     const run = this.active;
     if (!run || run.scope !== this.options.library.scope() || run.view.id !== id) throw new ScriptError("Run not found", 404);
     if (!Number.isSafeInteger(offset) || offset < 0) throw new ScriptError("Invalid log offset");
+    return run;
+  }
+
+  log(id: string, offset: number): { text: string; nextOffset: number } {
+    const run = this.logRun(id, offset);
     const fd = openSync(run.logPath, "r");
     try {
-      const buffer = Buffer.alloc(64 * 1024);
+      const buffer = Buffer.alloc(LOG_READ_BYTES);
       const length = readSync(fd, buffer, 0, buffer.length, offset);
       // Keep an incomplete UTF-8 character for the next poll.
       let end = length;

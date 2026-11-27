@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ScriptError, type ScriptRun } from "./scripts.ts";
+import { ScriptError, maskProfiles, type ScriptRun } from "./scripts.ts";
 
 export interface ScheduleJob {
   id: string;
@@ -47,6 +47,8 @@ export interface ScheduleRunner {
   start(request: { scriptId: string; profileIds: string[]; inputs: Record<string, unknown>; useCredentials: boolean; headless?: boolean }): ScriptRun;
   settled(): Promise<void>;
   status(): ScriptRun | null;
+  /** The saved login values of a run's profiles; history keeps them masked. */
+  secrets?(id: string): string[];
   /** Abort any run and refuse new ones. */
   shutdown(): Promise<void>;
 }
@@ -244,7 +246,7 @@ export class Scheduler {
     if (due.job) this.update(scope, due.job.id, (job) => ({ ...job, nextRun: nextAfter(job, now) }));
     this.inflight = this.options.runner.settled().then(() => {
       const { status, profiles } = summarize(this.options.runner.status());
-      this.record(scope, due.job, { jobId: id, at: this.now(), status, profiles, runId: view.id, scriptId: request.scriptId, useCredentials: request.useCredentials });
+      this.record(scope, due.job, { jobId: id, at: this.now(), status, profiles: maskProfiles(profiles, this.options.runner.secrets?.(view.id) ?? []), runId: view.id, scriptId: request.scriptId, useCredentials: request.useCredentials });
     }).finally(() => { this.inflight = undefined; });
     await this.inflight;
   }

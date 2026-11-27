@@ -24,7 +24,7 @@ import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
-import { CREDENTIAL_FIELDS, type ScriptLibrary, type ScriptRun, type ScriptSupervisor } from "./scripts.ts";
+import { CREDENTIAL_FIELDS, LOG_READ_BYTES, maskProfiles, maskSecrets, maskableSecrets, type ScriptLibrary, type ScriptRun, type ScriptSupervisor } from "./scripts.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
@@ -176,19 +176,6 @@ export function parseAgentControlRequest(raw: string | Uint8Array): AgentControl
   }
   if (request.params !== undefined) object(request.params);
   return request as unknown as AgentControlRequest;
-}
-
-/** Replaces each value with ***; `secrets` are sorted longest first, so a value inside another is not left half shown. */
-export function maskSecrets(text: string, secrets: readonly string[]): string {
-  return secrets.reduce((masked, secret) => masked.split(secret).join("***"), text);
-}
-
-function maskProfiles<T extends { error?: string; warning?: string }>(profiles: T[], secrets: readonly string[]): T[] {
-  return profiles.map(({ error, warning, ...item }) => ({
-    ...item,
-    ...(error === undefined ? {} : { error: maskSecrets(error, secrets) }),
-    ...(warning === undefined ? {} : { warning: maskSecrets(warning, secrets) }),
-  }) as T);
 }
 
 export function validAgentAuthorization(header: string | null, nonce: string): boolean {
@@ -346,7 +333,7 @@ export class AgentControlSession {
       const profile = this.deps.store?.getProfile(id) as unknown as Record<string, unknown> | null | undefined;
       for (const key of CREDENTIAL_FIELDS) if (typeof profile?.[key] === "string") values.add(profile[key] as string);
     }
-    return [...values].filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
+    return maskableSecrets(values);
   }
 
   private maskedRun(run: ScriptRun | null): ScriptRun | null {
@@ -355,11 +342,27 @@ export class AgentControlSession {
 
   private scriptLog(runId: string, offset: number) {
     const { runner } = this.scriptTools();
-    const log = runner.log(runId, offset);
+    // Read before the log, so output written after this check is never taken for the end.
+    const finished = runner.status()?.status === "finished";
     const secrets = this.secrets(runId);
+    const longest = Math.max(0, ...secrets.map((secret) => Buffer.byteLength(secret)));
+    // An offset inside a saved value moves back to the value's start, so no part of it is returned.
+    let start = offset;
+    for (let moved = longest > 1; moved;) {
+      moved = false;
+      const from = Math.max(0, start - longest + 1);
+      const around = runner.logBytes(runId, from, start - from + longest - 1);
+      for (const secret of secrets.map((value) => Buffer.from(value))) {
+        for (let at = around.indexOf(secret); at >= 0; at = around.indexOf(secret, at + 1)) {
+          if (from + at < start && from + at + secret.length > start) { start = from + at; moved = true; }
+        }
+      }
+    }
+    const log = runner.log(runId, start);
     const text = maskSecrets(log.text, secrets);
-    if (runner.status()?.status === "finished") return { text, nextOffset: log.nextOffset };
-    // A value cut off at the end of the output so far is held back, so the next read masks it whole.
+    // UTF-8 trimming can end a full read up to 3 bytes early.
+    if (finished && log.nextOffset - start <= LOG_READ_BYTES - 4) return { text, nextOffset: log.nextOffset };
+    // A value cut off at the end of this read is held back, so the next read masks it whole.
     const held = Math.max(0, ...secrets.map((secret) => {
       for (let length = secret.length - 1; length > 0; length--) if (text.endsWith(secret.slice(0, length))) return length;
       return 0;

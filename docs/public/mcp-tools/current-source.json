@@ -766,12 +766,11 @@
           },
           "useCredentials": {
             "type": "boolean",
-            "default": false,
-            "description": "Give the script the saved login details of each profile."
+            "description": "Give the script the saved login details of each profile. Off for a new schedule."
           },
           "enabled": {
             "type": "boolean",
-            "default": true
+            "description": "On for a new schedule."
           }
         },
         "additionalProperties": false

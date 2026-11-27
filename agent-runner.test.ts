@@ -261,6 +261,61 @@ describe("AgentRunner", () => {
     expect(calls.filter((call) => call.name === "aliasmode_profile_new_identity").map((call) => call.args.profileId)).toEqual(["p-shop", "p-id-typed"]);
   });
 
+  async function newIdentityResults(prompt: string, targets: string[]) {
+    const calls: string[] = [];
+    let step = 0;
+    const { agent } = runner(async () => ({
+      message: (step < targets.length ? toolCall(`n${step}`, "aliasmode_profile_new_identity", { profileId: targets[step++] }) : { role: "assistant", content: "done" }) as AgentMessage,
+    }), {
+      openTools: () => ({
+        listTools: async () => [{ name: "aliasmode_profile_new_identity" }],
+        callTool: async (name, args) => {
+          if (name === "aliasmode_profiles_list") {
+            return JSON.stringify({ profiles: [["p-shop", "Shop"], ["p-shop1", "Shop 1"], ["p-b", "B"], ["p-bob", "Bob"], ["p-full", "ＭＡＲＫＥＴ"]].map(([id, name]) => ({ id, name })) });
+          }
+          calls.push(String(args.profileId));
+          return "reset";
+        },
+        close: () => {},
+      }),
+    });
+    const conversation = await settled(agent, agent.start(prompt).id);
+    return { results: conversation.messages.filter((message) => message.role === "tool").map((message) => message.content === "reset"), calls };
+  }
+
+  test("New identity counts only the longest profile name at each place, ignores case, and matches one-letter names as words", async () => {
+    expect((await newIdentityResults("reset Shop 1", ["p-shop1", "p-shop"])).results).toEqual([true, false]);
+    expect((await newIdentityResults("reset Shop and Shop 12", ["p-shop", "p-shop1"])).results).toEqual([true, false]);
+    expect((await newIdentityResults("reset shop 1 please", ["p-shop1"])).results).toEqual([true]);
+    expect((await newIdentityResults("reset market", ["p-full"])).results).toEqual([true]);
+    expect((await newIdentityResults("reset b", ["p-b", "p-bob"])).results).toEqual([true, false]);
+    expect((await newIdentityResults("reset Bob", ["p-b", "p-bob"])).results).toEqual([false, true]);
+  });
+
+  test("refuses New identity for a profile the agent renamed in this chat", async () => {
+    let step = 0;
+    const calls: string[] = [];
+    const { agent } = runner(async () => ({
+      message: [
+        toolCall("r1", "aliasmode_profile_update", { profileId: "p-victim", set: { name: "Shop 1" } }),
+        toolCall("r2", "aliasmode_profile_new_identity", { profileId: "p-victim" }),
+        { role: "assistant", content: "done" },
+      ][step++]! as AgentMessage,
+    }), {
+      openTools: () => ({
+        listTools: async () => [{ name: "aliasmode_profile_new_identity" }, { name: "aliasmode_profile_update" }],
+        callTool: async (name, args) => {
+          calls.push(name);
+          return name === "aliasmode_profiles_list" ? JSON.stringify({ profiles: [{ id: "p-victim", name: "Shop 1" }] }) : `ok ${args.profileId}`;
+        },
+        close: () => {},
+      }),
+    });
+    const done = await settled(agent, agent.start("Give Shop 1 a new identity").id);
+    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)[1]).toContain("Ask the user to name the profile");
+    expect(calls).not.toContain("aliasmode_profile_new_identity");
+  });
+
   test("keeps the newest chats and prunes the files folder to its size cap", async () => {
     const { agent, root } = runner(async () => ({ message: { role: "assistant", content: "ok" } }));
     const dir = join(root, "agent", "local", "conversations");
