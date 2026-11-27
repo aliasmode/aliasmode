@@ -1,9 +1,12 @@
 name: Release gates
 
-# Manual only. Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (Google's
-# current stable) and stock Firefox 159.0.1. Gate A needs the detection lab from the private site repo (secret
-# GATES_SITE_TOKEN, read access); without it Gate A is skipped. Gate C runs only when the secret GATES_PROXY
-# (an http:// proxy URL) exists, because runner IPs are datacenter IPs.
+# Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (Google's current stable)
+# and stock Firefox 159.0.1. Start it by hand (inputs below) or, from any branch, by pushing the branch
+# gates/dispatch with scripts/gates/dispatch.json as the run spec. Gate A needs the detection lab: it comes from
+# scripts/gates/lab.enc with the secret GATES_LAB_KEY (without it Gate A is skipped). Gate C needs the secret
+# GATES_PROXY (an http:// proxy URL; runner IPs are datacenter IPs) and then runs one OS at a time, so one IP never
+# sees two runs at once. This repo is public: the results and the log leave the runner only encrypted with
+# GATES_LAB_KEY (artifact gates-<os>; bun scripts/gates/lab.mjs open gates-<os>.enc <dir>).
 on:
   workflow_dispatch:
     inputs:
@@ -13,7 +16,7 @@ on:
         default: released
         type: string
       only:
-        description: "Gates to run: p (host check), a, b; c is added when GATES_PROXY exists"
+        description: "Gates to run: p (host check), a, b, c (c needs GATES_PROXY)"
         required: true
         default: p,a,b
         type: string
@@ -22,14 +25,48 @@ on:
         required: false
         default: ""
         type: string
+  push:
+    branches: [gates/dispatch]
 
 permissions:
   contents: read
 
 jobs:
+  spec:
+    runs-on: ubuntu-latest
+    outputs:
+      engine_build: ${{ steps.spec.outputs.engine_build }}
+      only: ${{ steps.spec.outputs.only }}
+      switches: ${{ steps.spec.outputs.switches }}
+      parallel: ${{ steps.spec.outputs.parallel }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/gates/dispatch.json
+          sparse-checkout-cone-mode: false
+      - id: spec
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_ENGINE: ${{ inputs.engine_build }}
+          IN_ONLY: ${{ inputs.only }}
+          IN_SWITCHES: ${{ inputs.switches }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            f=scripts/gates/dispatch.json
+            engine=$(jq -r '.engine_build // "released"' $f); only=$(jq -r '.only // "p,a,b"' $f); switches=$(jq -r '.switches // ""' $f)
+          else
+            engine=$IN_ENGINE; only=$IN_ONLY; switches=$IN_SWITCHES
+          fi
+          case ",$only," in *,c,*) parallel=1;; *) parallel=3;; esac
+          echo "engine_build=$engine only=$only switches=$switches parallel=$parallel"
+          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "parallel=$parallel"; } >> "$GITHUB_OUTPUT"
+
   gates:
+    needs: spec
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.spec.outputs.parallel) }}
       matrix:
         include:
           - runner: windows-latest
@@ -39,9 +76,9 @@ jobs:
           - runner: macos-15-intel
             os: macos-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 300
+    timeout-minutes: 340
     env:
-      SITE_TOKEN: ${{ secrets.GATES_SITE_TOKEN }}
+      GATES_LAB_KEY: ${{ secrets.GATES_LAB_KEY }}
       GATES_PROXY: ${{ secrets.GATES_PROXY }}
     steps:
       - uses: actions/checkout@v4
@@ -49,15 +86,9 @@ jobs:
         with:
           bun-version: 1.2.21
       - run: bun install --frozen-lockfile
-      - name: Detection lab (private site repo)
-        if: env.SITE_TOKEN != ''
-        uses: actions/checkout@v4
-        with:
-          repository: aliasmode/aliasmode-site
-          token: ${{ secrets.GATES_SITE_TOKEN }}
-          path: site
-          sparse-checkout: tests
-      # Runner images lag behind Chrome stable (macos-15-intel had 151): install Google's current stable build.
+      - name: Detection lab (encrypted in scripts/gates/lab.enc)
+        if: env.GATES_LAB_KEY != ''
+        run: bun scripts/gates/lab.mjs unpack site
       - name: Stock Chrome stable (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -92,18 +123,26 @@ jobs:
       - name: Gates
         shell: bash
         env:
-          ENGINE_BUILD: ${{ inputs.engine_build || 'released' }}
-          ONLY: ${{ inputs.only || 'p,a,b' }}
-          SWITCHES: ${{ inputs.switches }}
+          ENGINE_BUILD: ${{ needs.spec.outputs.engine_build }}
+          ONLY: ${{ needs.spec.outputs.only }}
+          SWITCHES: ${{ needs.spec.outputs.switches }}
         run: |
-          only=$ONLY; proxy=()
-          if [ -n "$GATES_PROXY" ]; then only="$only,c"; proxy=(--proxy env:GATES_PROXY); fi
+          proxy=(); case ",$ONLY," in *,c,*) proxy=(--proxy env:GATES_PROXY);; esac
           switches=(); for s in ${SWITCHES//,/ }; do switches+=(--switch "$s=off"); done
-          bun scripts/gates/gates.mjs "$ENGINE_BUILD" ${{ matrix.os }} --only "$only" --site site "${proxy[@]}" "${switches[@]}" \
-            --out "results/gates-${{ matrix.os }}"
+          out="results/gates-${{ matrix.os }}"; mkdir -p "$out"
+          # The log names our engines' tells: it goes into the encrypted artifact, only the verdict is printed.
+          set +e
+          bun scripts/gates/gates.mjs "$ENGINE_BUILD" ${{ matrix.os }} --only "$ONLY" --site site "${proxy[@]}" "${switches[@]}" --out "$out" >"$out/log.txt" 2>&1
+          code=$?
+          tail -n 1 "$out/log.txt" | sed 's#: .*summary.md#: summary.md#'
+          exit $code
+      - name: Seal results
+        if: always() && env.GATES_LAB_KEY != ''
+        shell: bash
+        run: bun scripts/gates/lab.mjs seal "results/gates-${{ matrix.os }}" "gates-${{ matrix.os }}.enc"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gates-${{ matrix.os }}
-          path: results/gates-${{ matrix.os }}
+          path: gates-${{ matrix.os }}.enc
           if-no-files-found: warn
