@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildNewProfile, withDefaultBrowser } from "./create.ts";
+import { buildNewProfile, freshIdentity, withDefaultBrowser } from "./create.ts";
 import { chromiumGpuArgs, deriveFingerprintFlags, hostPlatformOs, newProfileGpuIdentity, normalizeProfileIdentity } from "./fingerprint.ts";
 import { createFirefoxProfileConfig } from "./firefox-config.ts";
-import { detectHostGpu, hostGpuVendor, linuxGpuVendor, resetHostGpuForTest, waitForHostGpu, windowsGpuVendor } from "./host-gpu.ts";
+import { detectHostGpu, hostGpuVendor, linuxGpuVendor, resetHostGpuForTest, spawnText, waitForHostGpu, windowsGpuVendor } from "./host-gpu.ts";
 import { parseExport, serializeAdsTxt, serializeXlsxRows } from "./parse.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import { ProfileStore } from "./store.ts";
@@ -67,6 +67,47 @@ test("the host GPU is read once without blocking, and a timed-out read is not ke
   expect(await pending).toBe("intel");
   expect(hostGpuVendor()).toBe("intel");
   resetHostGpuForTest();
+});
+
+test("a detection command that exits with an error is a failed read, never 'no GPU'", async () => {
+  expect(await spawnText([process.execPath, "-e", "process.stdout.write('ok')"])).toBe("ok");
+  await expect(spawnText([process.execPath, "-e", "process.exit(3)"])).rejects.toThrow("code 3");
+  const failing = () => spawnText([process.execPath, "-e", "process.exit(1)"]);
+  await expect(detectHostGpu("win32", "x64", failing)).rejects.toThrow();
+  await expect(detectHostGpu("darwin", "x64", failing)).rejects.toThrow();
+  resetHostGpuForTest();
+  let calls = 0;
+  const failedRead = () => { calls++; return detectHostGpu("win32", "x64", failing); };
+  expect(await waitForHostGpu(failedRead)).toBeUndefined();
+  expect(await waitForHostGpu(failedRead)).toBeUndefined();
+  expect(calls).toBe(2);
+  expect(await waitForHostGpu(async () => "intel")).toBe("intel");
+  resetHostGpuForTest();
+});
+
+test("New identity makes the GPU decision again on this computer and drops the old identity", () => {
+  const host = hostPlatformOs();
+  const old = {
+    ...buildNewProfile({ engine: "chromium", chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, undefined),
+    identity: { gpu: { vendor: "intel", anchor: `${host}-other-computer-dead` }, mediaCatalogue: 2 },
+  };
+  const expected = newProfileGpuIdentity(host, host, "nvidia");
+  expect(freshIdentity(old, () => false, "nvidia").identity).toEqual(expected ? { gpu: expected } : undefined);
+  // This computer's GPU is not read: the profile stores no decision, not the old one.
+  expect(freshIdentity(old, () => false, undefined)).not.toHaveProperty("identity");
+  // A profile made before identities existed gets this computer's decision.
+  const { identity: _identity, ...older } = old;
+  expect(freshIdentity(older, () => false, "nvidia").identity).toEqual(expected ? { gpu: expected } : undefined);
+  // The store forgets the old decision too, here and on every computer that applies the new identity.
+  const store = new ProfileStore(":memory:");
+  store.upsertProfile(old);
+  store.resetIdentity(freshIdentity(store.getProfile(old.id)!, () => false, undefined));
+  expect(store.getProfile(old.id)).not.toHaveProperty("identity");
+  store.resetIdentity(freshIdentity(store.getProfile(old.id)!, () => false, "nvidia"));
+  expect(store.getProfile(old.id)?.identity).toEqual(expected ? { gpu: expected } : undefined);
+  // CloakBrowser stores no GPU decision.
+  const cloak = { ...buildNewProfile({ engine: "chromium", chromiumRuntime: "cloakbrowser", platformOs: host }, () => false), identity: old.identity };
+  expect(freshIdentity(cloak, () => false, "nvidia")).not.toHaveProperty("identity");
 });
 
 test("a new profile stores its GPU decision: the engine's family where it has one, else the host GPU switch, on the host's own system only", () => {

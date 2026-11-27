@@ -179,10 +179,15 @@ export function buildNewProfile(
 /**
  * "New identity": the profile with the fingerprint a new profile on the same system, engine and
  * runtime gets: a random seed that `taken` does not use, a new screen and new hardware. Its
- * cookies, display scale and measured or imported fingerprints go. Name, folder, proxy, login
+ * cookies, display scale, stored identity and measured or imported fingerprints go; the GPU decision
+ * is made again on this computer. Name, folder, proxy, login
  * details, notes, tags and extensions stay.
  */
-export function freshIdentity(profile: Profile, taken: (seed: number) => boolean = () => false): Profile {
+export function freshIdentity(
+  profile: Profile,
+  taken: (seed: number) => boolean = () => false,
+  gpuVendor = newProfileGpuVendor(),
+): Profile {
   let seed: number;
   do seed = crypto.getRandomValues(new Uint32Array(1))[0]!;
   while (seed === 0 || seed === profile.fingerprintSeed || taken(seed));
@@ -191,8 +196,9 @@ export function freshIdentity(profile: Profile, taken: (seed: number) => boolean
     engine,
     ...(engine === "chromium" ? { chromiumRuntime: profile.chromiumRuntime ?? "cloakbrowser" } : {}),
     platformOs: engine === "firefox" ? firefoxPersonaOs(profile) : profile.platformOs,
-  }, () => false, () => seed);
-  const { displayScale: _scale, fpObserved: _observed, fpExpected: _expected, fpVerdict: _verdict, hardware, ...kept } = profile;
+  }, () => false, () => seed, gpuVendor);
+  // The stored identity goes too: the new one takes this computer's GPU decision, as a new profile does.
+  const { displayScale: _scale, fpObserved: _observed, fpExpected: _expected, fpVerdict: _verdict, hardware, identity: _identity, ...kept } = profile;
   const next: Profile = {
     ...kept,
     // The old identity's language, never this computer's.
@@ -200,6 +206,7 @@ export function freshIdentity(profile: Profile, taken: (seed: number) => boolean
     ...(fresh.firefox ? { firefox: fresh.firefox, ua: fresh.ua, platformOs: fresh.platformOs } : {}),
     // Without stored hardware, the engine draws it from the seed.
     ...(hardware && fresh.hardware ? { hardware: fresh.hardware } : {}),
+    ...(fresh.identity ? { identity: fresh.identity } : {}),
     screenWidth: fresh.screenWidth,
     screenHeight: fresh.screenHeight,
     fingerprintSeed: seed,

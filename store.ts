@@ -456,13 +456,14 @@ export class ProfileStore {
   /**
    * "New identity": save the profile's fresh fingerprint and forget what the old one left here:
    * the saved session, cookies, cookies for the next start, the pinned display scale, stored
-   * hardware and measured or imported fingerprints. An upsert alone keeps those it is not given.
+   * hardware, the stored identity and measured or imported fingerprints. An upsert alone keeps those it
+   * is not given.
    */
   resetIdentity(p: Profile): void {
     this.transaction(() => {
       this.db.query(
         `UPDATE profiles SET session_json = '', session_restore_pending = 0, cookies_json = '[]', pending_cookies_json = '[]',
-           seeded = 0, display_scale = 0, hardware_json = '', fp_observed_json = '', fp_expected_json = '', fp_verdict_json = ''
+           seeded = 0, display_scale = 0, hardware_json = '', identity_json = '', fp_observed_json = '', fp_expected_json = '', fp_verdict_json = ''
          WHERE id = ?`,
       ).run(p.id);
       this.upsertProfile(p);

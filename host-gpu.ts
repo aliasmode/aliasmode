@@ -53,12 +53,13 @@ export function linuxGpuVendor(drm = "/sys/class/drm", read = (path: string) => 
 /** How long one detection command may run before the vendor counts as not read yet. */
 const DETECT_TIMEOUT_MS = 15_000;
 
-/** A command's output, without blocking the event loop. Throws when it runs out of time. */
-async function spawnText(command: string[]): Promise<string> {
+/** A command's output, without blocking the event loop. Throws when it runs out of time or fails. */
+export async function spawnText(command: string[]): Promise<string> {
   const child = Bun.spawn(command, { stdout: "pipe", stderr: "ignore", windowsHide: true, timeout: DETECT_TIMEOUT_MS });
   const [text, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
   if (child.signalCode) throw new Error("GPU detection timed out");
-  return code === 0 ? text : "";
+  if (code !== 0) throw new Error(`GPU detection exited with code ${code}`);
+  return text;
 }
 
 /** Detect this computer's GPU vendor. Undefined when it has none that a GPU family covers; rejects when it could not be read. */
