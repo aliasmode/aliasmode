@@ -16,7 +16,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function root() { const dir = mkdtempSync(join(tmpdir(), "aliasmode-scripts-")); roots.push(dir); return dir; }
 const input = { name: "Visit", description: "Example", language: "javascript" as const, source: "export default async () => {};" };
 
-function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; profileIds?: string[]; admission?: LifecycleAdmissionController; close?: (id: string) => Promise<void>; cloud?: any; firefoxOwner?: any; realExecute?: boolean; python?: PythonRuntime } = {}) {
+function harness(execute: ScriptExecution = async () => {}, options: { active?: string[]; profileIds?: string[]; admission?: LifecycleAdmissionController; close?: (id: string) => Promise<void>; cloud?: any; firefoxOwner?: any; realExecute?: boolean; python?: PythonRuntime; openWarning?: string } = {}) {
   const directory = root();
   const events: string[] = [];
   const startOptions: unknown[] = [];
@@ -31,7 +31,7 @@ function harness(execute: ScriptExecution = async () => {}, options: { active?: 
     store: { getProfile: (id: string) => profiles.find((p) => p.id === id), getLaunch: (id: string) => launches.get(id), listAgentTemporary: () => [] } as any,
     launcher: {
       certifiedActive: async (id: string) => launches.has(id),
-      start: async (id: string, _urls?: string[], opened?: unknown) => { events.push(`open:${id}`); startOptions.push(opened); const value = launch(id); launches.set(id, value); return { ws: value.ws, port: 9000 }; },
+      start: async (id: string, _urls?: string[], opened?: unknown) => { events.push(`open:${id}`); startOptions.push(opened); const value = launch(id); launches.set(id, value); return { ws: value.ws, port: 9000, ...(options.openWarning ? { warning: options.openWarning } : {}) }; },
       stop: async (id: string) => { await options.close?.(id); events.push(`close:${id}`); launches.delete(id); return true; },
     } as any,
     admission: options.admission ?? { run: async (_: unknown, work: () => Promise<unknown>) => work() } as any,
@@ -469,6 +469,21 @@ test("a browser reopened outside the run is not closed by script cleanup", async
   expect(h.events).toEqual(["open:a"]);
   expect(h.launches.get("a")?.ws).toBe("ws://test/replacement");
   expect(h.supervisor.status()?.profiles[0]?.warning).toContain("left open");
+});
+
+test("an open warning is kept on the run, in its log, and in the schedule history", async () => {
+  const warning = "This profile shows your computer's timezone because the proxy location lookup failed. Set a timezone in the profile settings.";
+  const h = harness(async () => {}, { openWarning: warning });
+  const script = await h.library.save(input);
+  let now = Date.now();
+  const scheduler = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope(), now: () => now });
+  scheduler.save({ scriptId: script.id, profileIds: ["a"], inputs: {}, headless: true, everyHours: 1 });
+  now += 3_600_000;
+  await scheduler.tick();
+  const run = h.supervisor.status()!;
+  expect(run.profiles[0]).toMatchObject({ status: "succeeded", warning });
+  expect(h.supervisor.log(run.id, 0).text).toContain(`--- a ---\nWarning: ${warning}\n`);
+  expect(scheduler.list().history[0]!.profiles).toEqual([{ id: "a", name: "a", status: "succeeded", warning }]);
 });
 
 test("saved login fields require opt-in and never enter status or cached scripts", async () => {

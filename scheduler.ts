@@ -28,7 +28,7 @@ export interface ScheduleHistoryEntry {
   jobId: string;
   at: number;
   status: HistoryStatus;
-  profiles: { id: string; name: string; status: string; error?: string }[];
+  profiles: { id: string; name: string; status: string; error?: string; warning?: string }[];
   runId: string;
   error?: string;
 }
@@ -98,7 +98,7 @@ function jobInput(value: any): Pick<ScheduleJob, "name" | "scriptId" | "profileI
 }
 
 function summarize(view: ScriptRun | null): { status: HistoryStatus; profiles: ScheduleHistoryEntry["profiles"] } {
-  const profiles = (view?.profiles ?? []).map(({ id, name, status, error }) => ({ id, name, status, ...(error ? { error } : {}) }));
+  const profiles = (view?.profiles ?? []).map(({ id, name, status, error, warning }) => ({ id, name, status, ...(error ? { error } : {}), ...(warning ? { warning } : {}) }));
   const status = !view || profiles.some((item) => item.status === "failed") ? "failed"
     : profiles.some((item) => item.status === "cancelled") ? "cancelled" : "succeeded";
   return { status, profiles };

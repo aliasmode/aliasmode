@@ -436,6 +436,7 @@ export class ScriptSupervisor {
       const runProfile = async (item: ScriptRun["profiles"][number]) => {
         if (signal.aborted) { item.status = "cancelled"; return; }
         const session = new AgentControlSession(this.options, signal);
+        const warn = (text: string) => { item.warning = item.warning ? `${item.warning}; ${text}` : text; };
         let owned = false;
         let endpoint: string | undefined;
         const call = async (method: string) => {
@@ -461,15 +462,18 @@ export class ScriptSupervisor {
           signal.throwIfAborted();
           this.options.library.assertScope(run.scope);
           item.status = "running";
-          const opened = await call("browser.open") as { ws?: string; engine?: string; ownedByConnection: boolean };
+          const opened = await call("browser.open") as { ws?: string; engine?: string; ownedByConnection: boolean; warning?: string };
           owned = opened.ownedByConnection;
           endpoint = opened.ws;
+          // A hidden run shows no window, so the run keeps what the open warned about, such as a failed proxy timezone lookup.
+          if (opened.warning) warn(opened.warning);
           signal.throwIfAborted();
           this.options.library.assertScope(run.scope);
           const profile = this.options.store.getProfile(item.id) ?? cloudProfile;
           if (!profile) throw new ScriptError("Profile not found", 404);
           item.name = profile.name;
           writeFileSync(fd, `\n--- ${profile.name || item.id} ---\n`);
+          if (opened.warning) writeFileSync(fd, `Warning: ${opened.warning}\n`);
           const input = {
             profile: { id: item.id, name: profile.name, group: profile.group, platform: profile.platform ?? "" },
             inputs: request.inputs,
@@ -498,9 +502,9 @@ export class ScriptSupervisor {
           if (owned) {
             try {
               const closed = await call("browser.close");
-              if (closed.sync && closed.sync !== "complete") item.warning = `Profile session save: ${closed.sync}`;
+              if (closed.sync && closed.sync !== "complete") warn(`Profile session save: ${closed.sync}`);
             } catch (error) {
-              item.warning = error instanceof Error ? error.message : "Browser cleanup was not confirmed";
+              warn(error instanceof Error ? error.message : "Browser cleanup was not confirmed");
               // Durable browser ownership remains with the launcher; do not retry against a replacement browser.
               await call("browser.detach").catch(() => {});
             }

@@ -574,6 +574,7 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
           <div key={`${entry.runId}-${entry.at}`} className={`script-profile ${entry.status}`}>
             <span>{new Date(entry.at).toLocaleString()} · {jobLabel(entry.jobId)}</span><span>{entry.status}</span>
             {(entry.error || entry.profiles.some((item) => item.error)) && <small>{entry.error ?? entry.profiles.filter((item) => item.error).map((item) => `${item.name}: ${item.error}`).join("; ")}</small>}
+            {entry.profiles.some((item) => item.warning) && <small className="warning">{entry.profiles.filter((item) => item.warning).map((item) => `${item.name}: ${item.warning}`).join("; ")}</small>}
           </div>
         ))}
       </div>
