@@ -177,17 +177,27 @@ test("proxy exit location is asked through the proxy and reused per proxy for a 
   expect(lookups).toBe(3);
 });
 
-test("a failed proxy exit lookup reports none and is asked again next time", async () => {
+test("a failed proxy exit lookup reports none for a minute and is then asked again", async () => {
+  let clock = 0;
   let fail = true;
+  let calls = 0;
   const answer = services({ ipApi: { status: "success", timezone: "Europe/Berlin", query: "203.0.113.9" } });
   const fetchFn = async (url: string, init: RequestInit) => {
+    calls++;
     if (fail) throw new Error("proxy down");
     return answer(url, init);
   };
+  const opts = { fetchFn, now: () => clock };
   const gateway = proxy("down.example.net");
-  expect(await lookupProxyExitLocation(gateway, { fetchFn })).toBeNull();
+  expect(await lookupProxyExitLocation(gateway, opts)).toBeNull();
+  const failedCalls = calls;
   fail = false;
-  expect((await lookupProxyExitLocation(gateway, { fetchFn }))?.ip).toBe("203.0.113.9");
+  clock = 59_000;
+  // A dead lookup service does not make every open wait again.
+  expect(await lookupProxyExitLocation(gateway, opts)).toBeNull();
+  expect(calls).toBe(failedCalls);
+  clock = 60_000;
+  expect((await lookupProxyExitLocation(gateway, opts))?.ip).toBe("203.0.113.9");
 });
 
 test("a slow proxy exit lookup stops waiting and its late answer serves the next launch", async () => {
