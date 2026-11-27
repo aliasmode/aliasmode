@@ -8,7 +8,6 @@ import { promisify } from "node:util";
 import { createRequire } from "node:module";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { connectOfficial, nonClosingContext } from "./agent/playwright-proxy.mjs";
 import { MAX_BYTES, VERSION, operatePersistentContext } from "./playwright-worker.mjs";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
@@ -436,6 +435,8 @@ async function run() {
   };
   const initializeOfficial = async () => {
     if (official) return official;
+    // Loaded on first use: @playwright/mcp and the MCP SDK cost about 0.8 s at worker start.
+    const { connectOfficial, nonClosingContext } = await import("./agent/playwright-proxy.mjs");
     official = await connectOfficial("aliasmode-firefox-owner", async () => nonClosingContext(context));
     await updateNetworkDetail();
     return official;
