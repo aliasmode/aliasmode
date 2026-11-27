@@ -310,7 +310,7 @@
               },
               "blockMedia": {
                 "type": "boolean",
-                "description": "Save proxy traffic: block images and stop video autoplay (takes effect at next open)"
+                "description": "Block images to save proxy traffic (Firefox profiles also stop video autoplay). Takes effect at next open."
               },
               "extensions": {
                 "type": "array",

@@ -3,12 +3,12 @@
   "productVersion": "0.1.0-beta.75",
   "openapi": {
     "path": "local-api.openapi.json",
-    "sha256": "385665f149913cd6f1c0c5fbb33c0f207078418408cc8287e26dad2f205f88a1"
+    "sha256": "9a5fce6daa8603a9fc1a5b18d37d243c7bc9e400262110915a360bd296f13449"
   },
   "mcpCatalogs": {
     "current-source": {
       "path": "mcp-tools/current-source.json",
-      "sha256": "84968555a863cb6c89bc8fc0ad6f1821151a3a17da5f52b68661e87b1ec8b674"
+      "sha256": "3ad7d101e6116fed419e3478c00519dd9ef3e0855516fa70781179dbaa0f3ef0"
     },
     "0.1.0-beta.42": {
       "path": "mcp-tools/0.1.0-beta.42.json",

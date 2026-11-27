@@ -1135,7 +1135,7 @@
           },
           "warning": {
             "type": "string",
-            "description": "Present in AliasMode Cloud mode when the launch succeeded but another writer holds the profile lease, so this session will not be checkpointed."
+            "description": "Present when the browser opened but something needs attention. For example, the proxy location lookup failed, so the profile shows this computer's timezone until you set a timezone in the profile settings. In AliasMode Cloud mode it is also present when another writer holds the profile lease, so this session will not be checkpointed."
           },
           "engine": {
             "type": "string",
