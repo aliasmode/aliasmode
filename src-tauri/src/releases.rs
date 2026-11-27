@@ -260,12 +260,22 @@ where
 struct SystemProxy {
     host: String,
     port: u16,
+    /// URL-encoded `user:password` from an environment proxy URL.
+    auth: Option<String>,
     bypass: Vec<String>,
 }
 
 impl SystemProxy {
     fn url(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        match &self.auth {
+            Some(auth) => format!("http://{auth}@{host}:{}", self.port),
+            None => format!("http://{host}:{}", self.port),
+        }
     }
 }
 
@@ -303,7 +313,7 @@ fn proxy_applies_to(host: &str, proxy: &SystemProxy) -> bool {
     !is_loopback_host(host) && !matches_bypass(host, &proxy.bypass)
 }
 
-fn normalize_proxy_address(raw: &str) -> Option<(String, u16)> {
+fn normalize_proxy_address(raw: &str) -> Option<(String, u16, Option<String>)> {
     let mut value = raw.trim().to_string();
     if value.is_empty() {
         return None;
@@ -341,7 +351,11 @@ fn normalize_proxy_address(raw: &str) -> Option<(String, u16)> {
     if host.is_empty() {
         return None;
     }
-    Some((host, parsed.port().unwrap_or(80)))
+    let auth = (!parsed.username().is_empty()).then(|| match parsed.password() {
+        Some(password) => format!("{}:{password}", parsed.username()),
+        None => parsed.username().to_string(),
+    });
+    Some((host, parsed.port().unwrap_or(80), auth))
 }
 
 #[derive(Debug, Default)]
@@ -436,9 +450,10 @@ fn read_windows_proxy() -> WindowsProxy {
         return WindowsProxy::Missing;
     };
     match normalize_proxy_address(&raw) {
-        Some((host, port)) => WindowsProxy::Found(SystemProxy {
+        Some((host, port, auth)) => WindowsProxy::Found(SystemProxy {
             host,
             port,
+            auth,
             bypass: settings.bypass,
         }),
         None => WindowsProxy::Missing,
@@ -456,7 +471,7 @@ fn detect_system_proxy() -> Option<SystemProxy> {
         .or_else(|_| std::env::var("HTTP_PROXY"))
         .or_else(|_| std::env::var("http_proxy"))
         .unwrap_or_default();
-    let (host, port) = normalize_proxy_address(&raw)?;
+    let (host, port, auth) = normalize_proxy_address(&raw)?;
     let bypass = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default()
@@ -464,7 +479,12 @@ fn detect_system_proxy() -> Option<SystemProxy> {
         .map(|entry| entry.trim().to_string())
         .filter(|entry| !entry.is_empty())
         .collect();
-    Some(SystemProxy { host, port, bypass })
+    Some(SystemProxy {
+        host,
+        port,
+        auth,
+        bypass,
+    })
 }
 
 fn releases_client(proxy: Option<&SystemProxy>, timeout: Duration) -> Result<Client, String> {
@@ -1050,11 +1070,19 @@ mod tests {
     fn system_proxy_addresses_normalize_like_the_sidecar() {
         assert_eq!(
             normalize_proxy_address(" http://proxy.example:8080 "),
-            Some(("proxy.example".to_string(), 8080))
+            Some(("proxy.example".to_string(), 8080, None))
         );
         assert_eq!(
             normalize_proxy_address("http=old.example:80; https=new.example:443"),
-            Some(("new.example".to_string(), 443))
+            Some(("new.example".to_string(), 443, None))
+        );
+        assert_eq!(
+            normalize_proxy_address("http://user%40corp:p%3Ass@proxy.example:3128"),
+            Some((
+                "proxy.example".to_string(),
+                3128,
+                Some("user%40corp:p%3Ass".to_string())
+            ))
         );
         assert_eq!(normalize_proxy_address("broken"), None);
         assert_eq!(normalize_proxy_address(""), None);
@@ -1065,6 +1093,7 @@ mod tests {
         let proxy = SystemProxy {
             host: "proxy.example".to_string(),
             port: 20122,
+            auth: None,
             bypass: vec!["*.example.test".to_string(), "<local>".to_string()],
         };
         assert!(proxy_applies_to("api.github.com", &proxy));
