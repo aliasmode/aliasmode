@@ -705,7 +705,8 @@ pub fn run() {
                     .permission("allow-runtime-ready")
                     .permission("allow-script-capability")
                     .permission("allow-update-bridge")
-                    .permission("allow-raise-window"),
+                    .permission("allow-raise-window")
+                    .permission("allow-close-to-tray"),
             ) {
                 return Err(error.into());
             }

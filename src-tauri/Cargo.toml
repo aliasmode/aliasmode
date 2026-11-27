@@ -57,6 +57,7 @@ windows = { version = "0.62.2", features = [
 # The Linux update unpacks the app folder itself; the updater already uses both crates.
 [target.'cfg(target_os = "linux")'.dependencies]
 flate2 = "1.1.9"
+libc = "0.2.189"
 tar = "0.4.46"
 
 [patch.crates-io]

@@ -294,6 +294,9 @@ try {
     }
   }
   $acceptanceStateOwned = $true
+  # Closing the window must quit; without this the first close asks to keep running in the tray.
+  New-Item -ItemType Directory -Force $defaultDataRoot | Out-Null
+  @{ version = 1; closeToTray = $false } | ConvertTo-Json -Compress | Set-Content (Join-Path $defaultDataRoot "tray.json")
   $install = Start-Process -PassThru $oldInstaller -ArgumentList @("/S", "/D=$installRoot")
   if (-not $install.WaitForExit(300000)) {
     Stop-ProcessTree $install

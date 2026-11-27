@@ -7,7 +7,9 @@ use std::sync::{
 };
 use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
 
 #[derive(Default)]
 struct CloseState {
@@ -194,22 +196,26 @@ fn ask_keep_in_tray(
     state: Arc<CloseState>,
     origin: String,
 ) {
+    const KEEP: &str = "Keep running in the tray";
     app.dialog()
         .message("Keep AliasMode running in the tray so schedules and scripts continue? You can change this later in Settings.")
         .title("Close AliasMode?")
         .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Keep running in the tray".to_owned(),
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            KEEP.to_owned(),
             "Quit".to_owned(),
+            "Cancel".to_owned(),
         ))
-        .show(move |keep| {
-            let _ = app.state::<TrayState>().save_preference(Some(keep));
-            if keep {
+        .show_with_result(move |result| match result {
+            MessageDialogResult::Custom(label) if label == KEEP => {
+                let _ = app.state::<TrayState>().save_preference(Some(true));
                 let _ = window.hide();
                 state.in_progress.store(false, Ordering::Release);
-            } else {
+            }
+            MessageDialogResult::Custom(label) if label == "Quit" => {
                 close_with_cleanup(app, window, sidecar, state, origin);
             }
+            _ => state.in_progress.store(false, Ordering::Release),
         });
 }
 

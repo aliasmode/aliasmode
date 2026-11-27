@@ -2114,7 +2114,7 @@ function App() {
     void invoke("get_close_to_tray")
       .then((value) => setCloseToTray(value === true ? "tray" : value === false ? "quit" : "ask"))
       .catch(() => {});
-  }, []);
+  }, [view, settingsTab]);
 
   const changeCloseToTray = async (choice: "ask" | "tray" | "quit") => {
     const previous = closeToTray;

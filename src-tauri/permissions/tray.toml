@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-close-to-tray"
+description = "Allows the AliasMode UI to read and change whether closing the window keeps the app in the tray."
+commands.allow = ["get_close_to_tray", "set_close_to_tray"]

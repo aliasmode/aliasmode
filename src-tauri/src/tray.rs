@@ -52,6 +52,12 @@ fn parse_preference(bytes: &[u8]) -> Option<bool> {
 }
 
 pub fn show_window(window: &WebviewWindow) {
+    // A --background start hides itself on each page load until a reveal is requested.
+    window
+        .app_handle()
+        .state::<crate::RevealRequested>()
+        .0
+        .store(true, Ordering::Release);
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
@@ -63,7 +69,31 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// The appindicator library is loaded when the tray is built and panics if it is missing.
+#[cfg(target_os = "linux")]
+fn appindicator_installed() -> bool {
+    ["libayatana-appindicator3.so.1", "libappindicator3.so.1"]
+        .iter()
+        .any(|name| {
+            let name = std::ffi::CString::new(*name).expect("library name");
+            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY) };
+            if !handle.is_null() {
+                unsafe { libc::dlclose(handle) };
+            }
+            !handle.is_null()
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn appindicator_installed() -> bool {
+    true
+}
+
 pub fn install(app: &AppHandle) {
+    if !appindicator_installed() {
+        eprintln!("AliasMode could not create the tray icon: no appindicator library is installed");
+        return;
+    }
     match build(app) {
         Ok(()) => app
             .state::<TrayState>()

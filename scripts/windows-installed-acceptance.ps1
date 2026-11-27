@@ -690,6 +690,8 @@ try {
     @{ version = 1; mode = "local"; localAnalytics = $false } |
       ConvertTo-Json -Compress |
       Set-Content (Join-Path $appDataRoot "config.json")
+    # Closing the window must quit; without this the first close asks to keep running in the tray.
+    @{ version = 1; closeToTray = $false } | ConvertTo-Json -Compress | Set-Content (Join-Path $appDataRoot "tray.json")
     $descriptorPath = Join-Path $appDataRoot "agent-runtime.json"
     $bundleVersion = $installation.Version
     $appPath = $installation.AppPath
@@ -1665,6 +1667,7 @@ public static class AliasModeAcceptanceCredentials {
         throw "installed Cloud acceptance state root was not clean"
       }
       New-Item -ItemType Directory -Force $isolatedState | Out-Null
+      @{ version = 1; closeToTray = $false } | ConvertTo-Json -Compress | Set-Content (Join-Path $isolatedState "tray.json")
       $config = @{
         version = 1
         mode = "cloud"

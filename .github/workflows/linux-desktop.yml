@@ -162,6 +162,9 @@ jobs:
           set -euo pipefail
           root="$HOME/.local/share/aliasmode"
           data="$HOME/.local/share/com.aliasmode.desktop"
+          # Closing the window must quit; the first close would otherwise ask to keep running in the tray.
+          mkdir -p "$data"
+          printf '{"version":1,"closeToTray":false}\n' > "$data/tray.json"
           helper="$root/bin/aliasmode-mcp"
           evidence="$RUNNER_TEMP/evidence"
           mkdir -p "$evidence" "$data"
@@ -391,6 +394,9 @@ jobs:
           set -euo pipefail
           root="$HOME/.local/share/aliasmode"
           data="$HOME/.local/share/com.aliasmode.desktop"
+          # Closing the window must quit; the first close would otherwise ask to keep running in the tray.
+          mkdir -p "$data"
+          printf '{"version":1,"closeToTray":false}\n' > "$data/tray.json"
           evidence="$RUNNER_TEMP/evidence"
           sudo apt-get install -y -q webkit2gtk-driver
           # The app opens outside links with xdg-open; this one records the address instead.
@@ -569,6 +575,9 @@ jobs:
           root="$HOME/.local/share/aliasmode"
           helper="$root/bin/aliasmode-mcp"
           data="$HOME/.local/share/com.aliasmode.desktop"
+          # Closing the window must quit; the first close would otherwise ask to keep running in the tray.
+          mkdir -p "$data"
+          printf '{"version":1,"closeToTray":false}\n' > "$data/tray.json"
           mkdir -p "$data"
           printf '{"version":1,"mode":"local","localAnalytics":false}\n' > "$data/config.json"
           Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp > "$evidence/xvfb.log" 2>&1 &
