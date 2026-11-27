@@ -50,6 +50,7 @@ import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "
 import { assertSafeProfileId } from "./profile-id.ts";
 import { dpapiKeysReadable, localStateDpapiKey } from "./dpapi.ts";
 import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
+import { openChromiumPages } from "./cdp.ts";
 import type { FingerprintSample } from "./diagnose.ts";
 import { claimedScreenArea, watchWindowFit } from "./window-fit.ts";
 import { applySessionToEndpoint, bundleTabUrls, canonicalUserPageUrl, parseCapturedSessionBundle, readSessionInSubprocess, sessionCaptureSeed, SessionRestoreError, telegramHomeClient } from "./session.ts";
@@ -5734,6 +5735,9 @@ async function writeFileAtomic(path: string, data: string): Promise<void> {
 }
 
 const defaultNavigate: LaunchNavigator = async (ws, urls, replacePages = false) => {
+  // Chromium opens pages over raw CDP from this process: a Playwright worker costs 0.6-1.4 s per open
+  // and attaches to every tab.
+  if (!replacePages && !ws.startsWith("firefox://")) return openChromiumPages(ws, urls);
   await runPlaywrightWorker("navigate", {
     endpoint: ws,
     urls,

@@ -1,8 +1,5 @@
 import { test, expect } from "bun:test";
 import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { ProfileStore } from "./store.ts";
 import { parseExport, serializeAdsTxt } from "./parse.ts";
 import type { FingerprintVerdict, ObservedFingerprint, Profile } from "./types.ts";
@@ -15,8 +12,7 @@ function profile(overrides: Partial<Profile> = {}): Profile {
   };
 }
 
-test("capture entrypoint runs the Node worker in its own tab only and persists exportable observations", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aliasmode-fingerprint-worker-"));
+test("capture entrypoint runs over raw CDP in its own tab only and persists exportable observations", async () => {
   const store = new ProfileStore(":memory:");
   const events: string[] = [];
   // A browser over plain CDP: one restored user tab is open, and the capture must never attach to it.
@@ -55,15 +51,8 @@ test("capture entrypoint runs the Node worker in its own tab only and persists e
     },
   });
   try {
-    await mkdir(join(root, "node_modules", "playwright-core"), { recursive: true });
-    await writeFile(join(root, "worker.mjs"), await Bun.file(join(import.meta.dir, "playwright-worker.mjs")).text());
-    await writeFile(join(root, "node_modules", "playwright-core", "index.mjs"),
-      `export const chromium = { async connectOverCDP() { throw new Error("Playwright attaches to every tab"); } };\n`);
-    const options = {
-      runtimeRoot: root,
-      timeoutMs: 5_000,
-      spawn: (argv: string[]) => Bun.spawn(["node", ...argv.slice(1)], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
-    };
+    // No Node worker starts: a spawn would fail the capture.
+    const options = { timeoutMs: 5_000, spawn: () => { throw new Error("worker spawned"); } };
     const p = profile();
     store.upsertProfile(p);
     const logs: string[] = [];
@@ -92,7 +81,6 @@ test("capture entrypoint runs the Node worker in its own tab only and persists e
   } finally {
     server.stop(true);
     store.close();
-    await rm(root, { recursive: true, force: true });
   }
 });
 
