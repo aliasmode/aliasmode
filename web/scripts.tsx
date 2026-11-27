@@ -483,6 +483,8 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
   }, []);
 
   const scriptName = (id: string) => scripts.find((item) => item.id === id)?.name ?? t("Missing script");
+  const statusText = (status: string) => ({ succeeded: t("Succeeded"), failed: t("Failed"), cancelled: t("Canceled"), skipped: t("Skipped") } as Record<string, string>)[status] ?? status;
+  const historyError = (error: string) => error === "skipped: profile closed" ? t("skipped: profile closed") : error;
   const cadence = (job: ScheduleState["jobs"][number]) => job.dailyAt
     ? t("Daily at {time}", { time: job.dailyAt })
     : t("Every {n} hours", { n: String(job.everyHours) });
@@ -558,7 +560,7 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
         <div className="script-row" key={job.id}>
           <b>{job.name || scriptName(job.scriptId)}</b>
           <span>{scriptName(job.scriptId)} · {t("{n} profiles", { n: String(job.profileIds.length) })} · {cadence(job)}</span>
-          <small>{job.enabled ? t("Next run: {time}", { time: new Date(job.nextRun).toLocaleString() }) : t("Off")}{job.lastRun ? ` · ${t("Last run: {status}", { status: job.lastRun.status })} ${new Date(job.lastRun.at).toLocaleString()}` : ""}</small>
+          <small>{job.enabled ? t("Next run: {time}", { time: new Date(job.nextRun).toLocaleString() }) : t("Off")}{job.lastRun ? ` · ${t("Last run: {status}", { status: statusText(job.lastRun.status) })} ${new Date(job.lastRun.at).toLocaleString()}` : ""}</small>
           <div className="script-actions">
             <button className="btn" type="button" disabled={busy} onClick={() => edit(job)}>{t("Edit")}</button>
             <button className="btn" type="button" disabled={busy} onClick={() => void run(() => saveSchedule({ ...job, enabled: !job.enabled }, job.id))}>{job.enabled ? t("Turn off") : t("Turn on")}</button>
@@ -572,8 +574,8 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
       <div className="card-body">
         {state.history.length === 0 ? <p className="formnote">{t("Nothing has run yet.")}</p> : state.history.map((entry) => (
           <div key={`${entry.runId}-${entry.at}`} className={`script-profile ${entry.status}`}>
-            <span>{new Date(entry.at).toLocaleString()} · {jobLabel(entry.jobId)}</span><span>{entry.status}</span>
-            {(entry.error || entry.profiles.some((item) => item.error)) && <small>{entry.error ?? entry.profiles.filter((item) => item.error).map((item) => `${item.name}: ${item.error}`).join("; ")}</small>}
+            <span>{new Date(entry.at).toLocaleString()} · {jobLabel(entry.jobId)}</span><span>{statusText(entry.status)}</span>
+            {(entry.error || entry.profiles.some((item) => item.error)) && <small>{entry.error ? historyError(entry.error) : entry.profiles.filter((item) => item.error).map((item) => `${item.name}: ${item.error}`).join("; ")}</small>}
             {entry.profiles.some((item) => item.warning) && <small className="warning">{entry.profiles.filter((item) => item.warning).map((item) => `${item.name}: ${item.warning}`).join("; ")}</small>}
           </div>
         ))}
