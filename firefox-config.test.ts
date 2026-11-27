@@ -111,6 +111,9 @@ test("a Firefox launch shows the window label in the native title and starts in 
     // Site caches stay across closes, up to 35 MB.
     "browser.cache.disk.smart_size.enabled": false,
     "browser.cache.disk.capacity": 35 * 1024,
+    // No OS or network location provider.
+    "geo.provider.use_corelocation": false, "geo.provider.ms-windows-location": false, "geo.provider.use_geoclue": false,
+    "geo.provider.network.url": "",
   });
   expect(firefoxStartupPrefs(profile(5))["intl.locale.requested"]).toBe("en-US");
 });
