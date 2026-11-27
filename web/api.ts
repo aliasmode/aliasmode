@@ -606,6 +606,11 @@ export async function restartProfile(id: string): Promise<any> {
   return opened?.ok === false || opened?.warning ? opened : closed;
 }
 export const raiseProfile = (id: string) => post(`/ui/api/profiles/${encodeURIComponent(id)}/raise`);
+/** Delete a profile's cookies, logins and history and give it a new fingerprint. An open profile opens again. */
+export async function newProfileIdentity(id: string): Promise<any> {
+  const path = `/ui/api/profiles/${encodeURIComponent(id)}/new-identity`;
+  return apiJson(await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }), path);
+}
 /** Opens the AliasMode fingerprint test (`page`: en, ru or zh-cn) in a new tab of a running profile. */
 export async function checkFingerprint(id: string, page: string): Promise<any> {
   const path = `/ui/api/profiles/${encodeURIComponent(id)}/check-fingerprint`;

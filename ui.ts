@@ -71,6 +71,7 @@ import { AgentError, type AgentRunner } from "./agent-runner.ts";
 import type { PythonRuntime } from "./python-runtime.ts";
 import { runtimeDownloads } from "./runtime-download.ts";
 import { loadServices } from "./services-directory.ts";
+import { newIdentityErrorStatus, startNewIdentity } from "./new-identity.ts";
 
 /** Readiness metadata supplied by the desktop parent process. */
 export interface UiHealthMetadata {
@@ -1509,7 +1510,7 @@ export async function handleUiRequest(
     (pathname === "/ui/api/import/upload" && req.method === "POST") ||
     (pathname === "/ui/api/groups/rename" && req.method === "POST") ||
     (req.method === "POST" &&
-      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session|check-fingerprint)$/.test(pathname)) ||
+      /^\/ui\/api\/profiles\/[^/]+\/(open|close|clear-cache|raise|cookies|restore-session|check-fingerprint|new-identity)$/.test(pathname)) ||
     (pathname === "/ui/api/profiles/cookies" && req.method === "POST");
   const cloudEditorRoute =
     (req.method === "GET" && /^\/ui\/api\/profiles\/[^/]+$/.test(pathname)) ||
@@ -1689,6 +1690,22 @@ export async function handleUiRequest(
       return Response.json({ ok: true, deleted, locked: [] });
     } catch (e) {
       return Response.json({ ok: false, error: msg(e) }, { status: 500 });
+    }
+  }
+
+  const newIdentity = pathname.match(/^\/ui\/api\/profiles\/([^/]+)\/new-identity$/);
+  if (newIdentity && req.method === "POST") {
+    const rejected = rejectUntrustedJsonMutation(req);
+    if (rejected) return rejected;
+    try {
+      const result = await startNewIdentity({
+        launcher, store, remote,
+        cloudBrowser: options.cloudBrowser,
+        cloudClient: options.cloudConnection?.client,
+      }, decodeURIComponent(newIdentity[1]!));
+      return Response.json({ ok: true, ...result });
+    } catch (error) {
+      return Response.json({ ok: false, error: msg(error) }, { status: newIdentityErrorStatus(error) });
     }
   }
 

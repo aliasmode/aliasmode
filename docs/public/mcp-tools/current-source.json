@@ -365,6 +365,29 @@
       }
     },
     {
+      "name": "aliasmode_profile_new_identity",
+      "description": "Give an AliasMode profile a new identity, like Mullvad Browser's New Identity: delete its whole browser data on this computer (cookies, logins, history, bookmarks, saved passwords, site data and add-ons installed inside the browser) and give it a new fingerprint on the same system and browser. Name, folder, proxy, login details, tags and extensions assigned in AliasMode stay. An open profile is closed and opened again. There is no undo.",
+      "annotations": {
+        "title": "Start a new identity for an AliasMode profile",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      },
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "profileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "aliasmode_browser_open",
       "description": "Open an AliasMode browser and select it for Playwright actions.",
       "annotations": {

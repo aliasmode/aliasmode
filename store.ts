@@ -448,6 +448,27 @@ export class ProfileStore {
     this.onProfileSaved?.(p);
   }
 
+  /**
+   * "New identity": save the profile's fresh fingerprint and forget what the old one left here:
+   * the saved session, cookies, cookies for the next start, the pinned display scale, stored
+   * hardware and measured or imported fingerprints. An upsert alone keeps those it is not given.
+   */
+  resetIdentity(p: Profile): void {
+    this.transaction(() => {
+      this.db.query(
+        `UPDATE profiles SET session_json = '', session_restore_pending = 0, cookies_json = '[]', pending_cookies_json = '[]',
+           seeded = 0, display_scale = 0, hardware_json = '', fp_observed_json = '', fp_expected_json = '', fp_verdict_json = ''
+         WHERE id = ?`,
+      ).run(p.id);
+      this.upsertProfile(p);
+    })();
+  }
+
+  /** Whether another profile, in Trash or not, has this id in other letter case. */
+  hasCaseVariant(id: string): boolean {
+    return !!this.db.query(`SELECT 1 FROM profiles WHERE lower(id) = lower(?) AND id <> ?`).get(id, id);
+  }
+
   /** Pins the display scale a Chromium 155 profile's pages draw at. */
   setDisplayScale(id: string, scale: number): void {
     this.db.query("UPDATE profiles SET display_scale = ? WHERE id = ?").run(scale, id);

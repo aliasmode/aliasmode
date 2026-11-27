@@ -4,7 +4,7 @@
     "title": "AliasMode Local API",
     "version": "0.1.0-beta.75",
     "summary": "AliasMode Local API: an AdsPower-compatible loopback HTTP API served by a running AliasMode.",
-    "description": "AliasMode serves this API on the loopback interface only (http://127.0.0.1:50400). It has no authentication by design: any process on the same machine can call it. Never expose the listener beyond loopback with a reverse proxy, port forward, or tunnel. A browser connection URL returned by `browserStart` or `browserActive` (`ws.puppeteer` for Chromium, `ws.playwright` for Firefox) grants full control of that browser and its logged-in sessions; treat it like a credential.\n\nThe API is a compatibility subset of the AdsPower local API, so an AdsPower REST client migrates by changing its base URL. Only the 13 operations in this document exist. Do not assume that any other AdsPower route is available. Two routes are AliasMode extensions: `browserCookies` and the `fp_verdict`/`fp_captured_at` fields of `userList`. `userCreate` also accepts the AliasMode fields `engine` and `chromium_runtime`.\n\nEvery response uses HTTP status 200 and the JSON envelope `{ code, msg, data }`. `code` is `0` with `msg` `\"success\"` on success and `-1` with a reason in `msg` on failure, including unknown routes. Inspect `code`, not the HTTP status. The browser-control routes ignore the HTTP method; the group and user routes require the documented method and fall through to `unknown route` otherwise.\n\nEach operation carries `x-aliasmode-version-introduced`: the oldest AliasMode release these public contracts cover in which the route exists. All 13 routes exist in 0.1.0-beta.42 and in the current source; they may also exist in earlier builds.\n\nIn AliasMode Cloud mode the same routes are served, with `browserStart`, `browserStop`, and `browserActive` routed through the cloud coordinator and the group and user routes reading the shared workspace roster. The wire shapes do not change.",
+    "description": "AliasMode serves this API on the loopback interface only (http://127.0.0.1:50400). It has no authentication by design: any process on the same machine can call it. Never expose the listener beyond loopback with a reverse proxy, port forward, or tunnel. A browser connection URL returned by `browserStart` or `browserActive` (`ws.puppeteer` for Chromium, `ws.playwright` for Firefox) grants full control of that browser and its logged-in sessions; treat it like a credential.\n\nThe API is a compatibility subset of the AdsPower local API, so an AdsPower REST client migrates by changing its base URL. Only the 14 operations in this document exist. Do not assume that any other AdsPower route is available. AliasMode extensions: `browserCookies`, `browserProfileNewIdentity`, and the `fp_verdict`/`fp_captured_at` fields of `userList`. `userCreate` also accepts the AliasMode fields `engine` and `chromium_runtime`.\n\nEvery response uses HTTP status 200 and the JSON envelope `{ code, msg, data }`. `code` is `0` with `msg` `\"success\"` on success and `-1` with a reason in `msg` on failure, including unknown routes. Inspect `code`, not the HTTP status. The browser-control routes ignore the HTTP method; the group and user routes require the documented method and fall through to `unknown route` otherwise.\n\nEach operation carries `x-aliasmode-version-introduced`: the oldest AliasMode release these public contracts cover in which the route exists. 13 routes exist in 0.1.0-beta.42 and in the current source; they may also exist in earlier builds. `browserProfileNewIdentity` is new in 0.1.0-beta.76.\n\nIn AliasMode Cloud mode the same routes are served, with `browserStart`, `browserStop`, `browserActive`, and `browserProfileNewIdentity` routed through the cloud coordinator and the group and user routes reading the shared workspace roster. The wire shapes do not change.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -347,6 +347,68 @@
                     "value": {
                       "code": 0,
                       "msg": "success",
+                      "data": {}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/browser-profile/new-identity": {
+      "post": {
+        "operationId": "browserProfileNewIdentity",
+        "tags": [
+          "browser"
+        ],
+        "summary": "Give a profile a new identity",
+        "description": "Like Mullvad Browser's New Identity. Deletes the profile's whole browser data folder on this computer: cookies, logins, history, bookmarks, saved passwords, cache, site data and add-ons installed inside the browser. Then it gives the profile a new fingerprint (seed, screen and hardware) on the same operating system, engine and browser runtime. Name, group, proxy, notes, tags, login details and extensions assigned in AliasMode stay; those extensions load again at launch. An open profile is closed, reset and opened again; `reopened` says whether it is open now. There is no undo. AliasMode Cloud profiles must be closed on every other device; other devices restore the empty session at their next open, which clears their cookies, while their other site data stays. The request must be `application/json`, and a request with a non-loopback `Origin` (a web page) is refused. Legacy Remote mode refuses it.",
+        "x-aliasmode-version-introduced": "0.1.0-beta.76",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewIdentityRequest"
+              },
+              "example": {
+                "profile_id": "k1d0cd11"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success envelope, or a failure envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NewIdentityResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Failure"
+                    }
+                  ]
+                },
+                "examples": {
+                  "success": {
+                    "value": {
+                      "code": 0,
+                      "msg": "success",
+                      "data": {
+                        "profile_id": "k1d0cd11",
+                        "reopened": true
+                      }
+                    }
+                  },
+                  "failure": {
+                    "value": {
+                      "code": -1,
+                      "msg": "no such profile",
                       "data": {}
                     }
                   }
@@ -1201,6 +1263,60 @@
             "description": "AdsPower cache categories such as `image_file`. Accepted for compatibility and ignored; AliasMode clears its disk caches."
           }
         }
+      },
+      "NewIdentityRequest": {
+        "type": "object",
+        "required": [
+          "profile_id"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "description": "The profile id."
+          }
+        }
+      },
+      "NewIdentityData": {
+        "type": "object",
+        "required": [
+          "profile_id",
+          "reopened"
+        ],
+        "properties": {
+          "profile_id": {
+            "type": "string"
+          },
+          "reopened": {
+            "type": "boolean",
+            "description": "True when the profile was open and is open again with its new identity."
+          },
+          "warning": {
+            "type": "string",
+            "description": "Present when the profile was open but did not open again, or opened with a problem."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NewIdentityResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Envelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "const": 0
+              },
+              "msg": {
+                "const": "success"
+              },
+              "data": {
+                "$ref": "#/components/schemas/NewIdentityData"
+              }
+            }
+          }
+        ]
       },
       "Cookie": {
         "type": "object",

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import { ProfileStore } from "./store.ts";
+import { CloudApiError } from "./cloud-client.ts";
 import { buildNewProfile } from "./create.ts";
 import { decodePortableProfile, encodePortableProfile } from "./portable-profile.ts";
 import {
@@ -425,6 +426,42 @@ test("Cloud folder and profile errors never fall back to the local store", async
     }
     expect(store.count()).toBe(0);
     expect(store.listGroups()).toEqual([]);
+  } finally {
+    await server.stop(true);
+    store.close();
+  }
+});
+
+test("the Local API gives a closed Cloud profile a new identity through Cloud", async () => {
+  const store = new ProfileStore(":memory:");
+  const profile = buildNewProfile({ engine: "chromium", chromiumRuntime: "cloakbrowser", name: "cloud" }, () => false);
+  const updates: any[] = [];
+  const resets: string[] = [];
+  let signedIn = true;
+  const server = serveAutomationApi({
+    port: 0, launcher: { resetUserDataRefusal: () => undefined, resetUserData: async (id: string) => { resets.push(id); } } as any, store,
+    appConfig: { read: () => ({ mode: "cloud" }) } as any,
+    cloudConnection: { client: {
+      getProfile: async () => {
+        if (!signedIn) throw new CloudApiError("AliasMode Cloud authentication is required", "authentication_required", 401);
+        return { ok: true, profile: { id: profile.id, version: 3, activeOpens: [], permission: "edit" }, payload: encodePortableProfile(profile) };
+      },
+      updateProfile: async (_id: string, request: any) => { updates.push(request); return { ok: true }; },
+    } } as any,
+    cloudBrowser: {} as any,
+    log: () => {},
+  });
+  const post = async () => (await fetch(`http://127.0.0.1:${server.port}/api/v2/browser-profile/new-identity`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ profile_id: profile.id }),
+  })).json();
+  try {
+    expect(await post()).toEqual({ code: 0, msg: "success", data: { profile_id: profile.id, reopened: false } });
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ expectedVersion: 3, payload: { session: { cookies: [] } } });
+    expect(resets).toEqual([profile.id]);
+    expect(store.getProfile(profile.id)!.fingerprintSeed).toBe(updates[0].payload.profile.fingerprintSeed);
+    signedIn = false;
+    expect(await post()).toEqual({ code: -1, msg: "AliasMode Cloud authentication is required", data: {} });
   } finally {
     await server.stop(true);
     store.close();

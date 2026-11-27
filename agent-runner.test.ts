@@ -214,17 +214,18 @@ describe("AgentRunner", () => {
       message: [
         toolCall("h1", "aliasmode_scripts_run", { scriptId: "s", profileIds: ["a"] }),
         toolCall("h2", "browser_run_code", { code: "1" }),
+        toolCall("h3", "aliasmode_profile_new_identity", { profileId: "a" }),
         { role: "assistant", content: "done" },
       ][step++]! as AgentMessage,
     }), {
       openTools: () => ({
-        listTools: async () => [{ name: "aliasmode_scripts_run" }, { name: "browser_run_code" }],
+        listTools: async () => [{ name: "aliasmode_scripts_run" }, { name: "browser_run_code" }, { name: "aliasmode_profile_new_identity" }],
         callTool: async (name) => { calls.push(name); return "ran"; },
         close: () => {},
       }),
     });
     const done = await settled(agent, agent.start("run it").id);
-    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)).toEqual(["Error: this tool is not available.", "Error: this tool is not available."]);
+    expect(done.messages.filter((message) => message.role === "tool").map((message) => message.content)).toEqual(Array(3).fill("Error: this tool is not available."));
     expect(calls).toEqual([]);
   });
 

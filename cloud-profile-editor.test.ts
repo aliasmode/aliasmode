@@ -5,6 +5,7 @@ import type { PortableProfileV1, PortableProfileV2 } from "./contracts/cloud-v1.
 import { completeProfileFingerprint } from "./firefox-config.ts";
 import { decodePortableProfile } from "./portable-profile.ts";
 import { localeForTimezone } from "./profile-locale.ts";
+import { sessionBundleSignature } from "./session.ts";
 
 function payload(): PortableProfileV1 {
   return {
@@ -521,4 +522,50 @@ test("cookies added to a closed Cloud profile join its Cloud session with the ve
 
   const open = new CloudProfileEditor({ getProfile: async () => ({ ...response(7, [{}]), payload: payload() }), updateProfile: async () => { throw new Error("must not write"); } } as any, readOnlyStore());
   await expect(open.addSessionCookies("cloud1", [{ name: "a", value: "b", domain: "x.com", path: "/" }])).rejects.toMatchObject({ status: 409 });
+});
+
+test("a new identity saves an empty Cloud session and the fresh fingerprint with the version check", async () => {
+  const authoritative = { ...response(7), payload: payload() };
+  const updates: any[] = [];
+  const editor = new CloudProfileEditor({
+    getProfile: async () => authoritative,
+    updateProfile: async (_id: string, request: any) => { updates.push(request); },
+  } as any, readOnlyStore());
+  const order: string[] = [];
+  const saved = await editor.newIdentity(
+    "cloud1",
+    (profile) => ({ ...profile, fingerprintSeed: 98765, screenWidth: 1920, screenHeight: 1080, cookies: [] }),
+    async (next) => { order.push(`prepare:${next.fingerprintSeed}:${updates.length}`); },
+  );
+  // This device is reset before Cloud is written, and a refusal there writes nothing.
+  expect(order).toEqual(["prepare:98765:0"]);
+  await expect(editor.newIdentity("cloud1", (profile) => profile, async () => { throw new Error("folder busy"); })).rejects.toThrow("folder busy");
+  expect(updates).toHaveLength(1);
+  expect(updates[0].expectedVersion).toBe(7);
+  expect(updates[0].payload.session).toEqual({ cookies: [] });
+  expect(updates[0].payload.profile).toMatchObject({
+    fingerprintSeed: 98765, screenWidth: 1920, screenHeight: 1080,
+    name: "Cloud profile", group: "group-1", username: "account-user", password: "account-password", tags: ["tag-1"],
+    extensionAssignments: ["ext-1"], proxy: authoritative.payload.profile.proxy,
+  });
+  expect(saved.fingerprintSeed).toBe(98765);
+  // Another device's copy no longer matches, so it restores this empty session.
+  expect(sessionBundleSignature(JSON.stringify(updates[0].payload.session)))
+    .not.toBe(sessionBundleSignature(JSON.stringify(authoritative.payload.session)));
+
+  const conflict = (code: string) => new CloudProfileEditor({
+    getProfile: async () => authoritative,
+    updateProfile: async () => { throw new CloudApiError("conflict", code as any, 409); },
+  } as any, readOnlyStore());
+  await expect(conflict("version_conflict").newIdentity("cloud1", (profile) => profile))
+    .rejects.toMatchObject({ status: 409, message: "Cloud profile changed; reload it and try again" });
+  await expect(conflict("profile_open").newIdentity("cloud1", (profile) => profile))
+    .rejects.toMatchObject({ status: 409, message: expect.stringContaining("currently open") });
+
+  const noWrite = { updateProfile: async () => { throw new Error("must not write"); } };
+  const fresh = () => { throw new Error("must not build an identity for an open profile"); };
+  await expect(new CloudProfileEditor({ ...noWrite, getProfile: async () => ({ ...response(7, [{}]), payload: payload() }) } as any, readOnlyStore())
+    .newIdentity("cloud1", fresh)).rejects.toMatchObject({ status: 409 });
+  await expect(new CloudProfileEditor({ ...noWrite, getProfile: async () => authoritative } as any, readOnlyStore({ profileId: "cloud1" }))
+    .newIdentity("cloud1", fresh)).rejects.toMatchObject({ status: 409 });
 });

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Launcher } from "../launcher.ts";
 import { ProfileStore } from "../store.ts";
-import { handleRequest } from "../server.ts";
+import { handleNewIdentityRequest, handleRequest } from "../server.ts";
 import { handleUserApi } from "../adspower-users.ts";
 import {
   CURRENT_CATALOG_PATH,
@@ -33,6 +33,7 @@ const DOCUMENTED_ROUTES = [
   "get /api/v1/browser/stop",
   "get /api/v1/browser/active",
   "post /api/v2/browser-profile/delete-cache",
+  "post /api/v2/browser-profile/new-identity",
   "get /api/v1/browser/cookies",
   "get /api/v1/group/list",
   "post /api/v1/group/create",
@@ -66,15 +67,15 @@ function documentedDataKeys(op: any): string[] {
   return Object.keys(schema(dataRef).properties ?? {});
 }
 
-test("OpenAPI document is 3.1 and lists exactly the 13 public loopback routes", () => {
+test("OpenAPI document is 3.1 and lists exactly the 14 public loopback routes", () => {
   expect(openapi.openapi.startsWith("3.1")).toBe(true);
   expect(openapi.servers[0].url).toBe("http://127.0.0.1:50400");
   const ops = operations();
   expect(ops.map((o) => `${o.method} ${o.path}`).sort()).toEqual([...DOCUMENTED_ROUTES].sort());
-  expect(new Set(ops.map((o) => o.op.operationId)).size).toBe(13);
+  expect(new Set(ops.map((o) => o.op.operationId)).size).toBe(14);
   for (const { path, op } of ops) {
     expect(path).not.toMatch(/\/ui\/api|\/api\/agent\/|\/api\/xactions\//);
-    expect(op["x-aliasmode-version-introduced"]).toBe("0.1.0-beta.42");
+    expect(op["x-aliasmode-version-introduced"]).toBe(path.endsWith("/new-identity") ? "0.1.0-beta.76" : "0.1.0-beta.42");
   }
 });
 
@@ -97,6 +98,8 @@ function fakes() {
     certifiedActive: async () => true,
     clearCache: async () => {},
     removeUserDataDir: () => true,
+    resetUserData: async () => {},
+    resetUserDataRefusal: () => undefined,
     userDataDir: (id: string) => `/tmp/aliasmode-public-docs-test/${id}`,
   } as unknown as Launcher;
   return { store, launcher };
@@ -108,7 +111,11 @@ test("every documented operation is recognised by the real handlers with the doc
   const call = async (operationId: string, req: Request) => {
     const users = await handleUserApi(req, launcher, store);
     const handler = users ? "handleUserApi" : "handleRequest";
-    const body = await (users ?? await handleRequest(req, launcher, store)).json();
+    // The dashboard server routes new-identity with its Cloud context before handleRequest.
+    const browser = new URL(req.url).pathname.endsWith("/new-identity")
+      ? handleNewIdentityRequest(req, { launcher, store })
+      : handleRequest(req, launcher, store);
+    const body = await (users ?? await browser).json();
     expect(body.msg, operationId).not.toMatch(/^unknown route/);
     const op = byId.get(operationId);
     expect(op, operationId).toBeDefined();
@@ -132,6 +139,7 @@ test("every documented operation is recognised by the real handlers with the doc
   expect((await call("browserStop", get(`/api/v1/browser/stop?user_id=${id}`))).code).toBe(0);
   expect((await call("browserProfileDeleteCache", post("/api/v2/browser-profile/delete-cache", { profile_id: [id], type: ["image_file"] }))).code).toBe(0);
   expect((await call("browserCookies", get(`/api/v1/browser/cookies?user_id=${id}`))).msg).toBe(`profile not running: ${id}`);
+  expect((await call("browserProfileNewIdentity", post("/api/v2/browser-profile/new-identity", { profile_id: id }))).data).toEqual({ profile_id: id, reopened: false });
   expect((await call("groupList", get("/api/v1/group/list?page=1&page_size=100"))).data.list).toEqual([{ group_id: "research", group_name: "research" }]);
   expect((await call("groupCreate", post("/api/v1/group/create", { group_name: "outreach" }))).data.group_id).toBe("outreach");
   expect((await call("userList", get(`/api/v1/user/list?page=1&page_size=100&user_sort=${sort}`))).data.list[0].user_id).toBe(id);
@@ -162,7 +170,7 @@ test("MCP catalogs list the expected tools", () => {
   expect(released.aliasModeTools.map((tool: any) => tool.name)).toEqual(BETA42_ALIASMODE_TOOLS);
   expect(current.status).toBe("source");
   expect(current.playwrightToolAvailability).toBe("listed-before-selection");
-  expect(current.aliasModeTools.length).toBe(17);
+  expect(current.aliasModeTools.length).toBe(18);
   expect(current.aliasModeTools.map((tool: any) => tool.name)).toContain("aliasmode_profiles_replace_proxies");
   expect(current.aliasModeTools.map((tool: any) => tool.name)).toContain("aliasmode_profile_update");
   for (const catalog of [current, released]) {

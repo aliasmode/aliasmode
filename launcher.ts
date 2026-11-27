@@ -105,6 +105,8 @@ function needsProxyRelay(profile: Profile): boolean {
 const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 2;
 const SEARCH_PROVIDER_BOOTSTRAP_MARKER = `.aliasmode-search-bootstrap-v${SEARCH_PROVIDER_BOOTSTRAP_REVISION}`;
 const CLOUD_SESSION_AUTHORITY_MARKER = ".aliasmode-cloud-session-authority-v1";
+/** App folders that can sit in the profile data root (see profileDataPaths). No profile may use their name. */
+const RESERVED_DATA_DIRS = new Set(["cloud-cache"]);
 const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
 const NATIVE_SESSION_ARTIFACTS = [
   "Default/Sessions",
@@ -4459,6 +4461,8 @@ export class Launcher {
    */
   private containedUserDataDir(profileId: string, op: string): string | null {
     try {
+      // The Cloud profile folder sits inside a custom profile folder; a profile named after it would hold every Cloud profile.
+      if (RESERVED_DATA_DIRS.has(profileId.toLowerCase())) throw new Error("the name of an app folder");
       return this.userDataDir(profileId);
     } catch (error) {
       this.log(`${op}: refusing unsafe/out-of-root path for ${JSON.stringify(profileId)} (${error instanceof Error ? error.message : error})`);
@@ -4477,6 +4481,32 @@ export class Launcher {
     if (!dir) return false;
     rmSync(dir, { recursive: true, force: true });
     return true;
+  }
+
+  /**
+   * "New identity": delete a closed profile's whole user-data dir (cookies, history, cache, site
+   * storage, service workers). Waits for the cache delete that runs on after a stop and refuses
+   * while any lifecycle can still use the dir. The shared Chromium components live beside the
+   * browser, not here, so they stay.
+   */
+  async resetUserData(profileId: string): Promise<void> {
+    await this.cacheCleanupSettled(profileId);
+    if (this.profileDeletionBlocked(profileId)) throw new Error("close the profile before starting a new identity");
+    const refusal = this.resetUserDataRefusal(profileId);
+    if (refusal) throw new Error(refusal);
+    const dir = this.userDataDir(profileId);
+    // A leaked browser would hold its files open; on Windows the delete then fails partway.
+    if (existsSync(dir)) await this.reapForeignProfileDirHolders(profileId, dir);
+    // Async, as in clearCacheDirs: a synchronous delete of a large profile stalls every proxy relay.
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  /** Why resetUserData refuses this profile whether it is open or not; callers check it before they close it. */
+  resetUserDataRefusal(profileId: string): string | undefined {
+    // Windows and macOS folders ignore letter case: "Ab1" and "ab1" are one folder, and the other may be open.
+    if (this.store.hasCaseVariant(profileId)) return "another profile's id differs from this one only in letter case; they share one folder";
+    if (!this.containedUserDataDir(profileId, "resetUserData")) return `refusing unsafe profile id ${JSON.stringify(profileId)}`;
+    return undefined;
   }
 
   async reconcileOrphan(

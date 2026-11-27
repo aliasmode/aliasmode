@@ -5085,3 +5085,46 @@ test("a Cloud capture keeps the checkpoint storage of an origin the worker could
   state.queue.close();
   state.store.close();
 });
+
+test("a saved session Cloud refused does not block a new identity here, an upload still under way does, and discarding drops only the refused one", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  expect(state.coordinator.newIdentityBlocked("profile1")).toBeUndefined();
+  const uploading = state.queue.enqueue({ accountId: "account1", profileId: "profile1", registrationId: "r2", expectedVersion: 4, payload: payload(), readyToSubmit: true });
+  expect(state.coordinator.newIdentityBlocked("profile1")).toContain("still saving");
+  state.coordinator.discardSessions("profile1");
+  expect(state.queue.get(parked.id, "account1")).toBeNull();
+  expect(state.queue.get(uploading, "account1")).not.toBeNull();
+  state.queue.close();
+  state.store.close();
+});
+
+test("an open profile's own checkpoint does not block a new identity before its close", async () => {
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.queue.list("account1").some((pending) => !pending.readyToSubmit)).toBe(true);
+  expect(state.coordinator.newIdentityBlocked("profile1")).toBeUndefined();
+  await state.coordinator.close("profile1");
+  expect(state.coordinator.newIdentityBlocked("profile1")).toBeUndefined();
+  state.queue.close();
+  state.store.close();
+});
+
+test("a saved session from before a new identity cannot be restored onto the new fingerprint", async () => {
+  const state = setup({ closeConflict: true });
+  const parked = await parkRejectedSession(state);
+  cloudMovedOn(state);
+  const options = (state.coordinator as any).options;
+  const open = options.cloud.openProfile;
+  options.cloud.openProfile = async () => {
+    const opened = await open();
+    return { ...opened, payload: { ...opened.payload, profile: { ...opened.payload.profile, fingerprintSeed: 2 } } };
+  };
+  options.cloud.closeOpen = async () => { throw new Error("must not upload the old session"); };
+  const result = await state.coordinator.restoreParkedSession("profile1");
+  expect(result).toMatchObject({ ok: false, error: expect.stringContaining("new fingerprint") });
+  expect(state.queue.get(parked.id, "account1")?.status).toBe("conflict");
+  expect(state.events.at(-1)).toBe("abandon");
+  state.queue.close();
+  state.store.close();
+});

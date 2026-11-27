@@ -82,6 +82,7 @@ import {
   raiseProfile,
   checkFingerprint,
   restoreParkedSession,
+  newProfileIdentity,
   fetchExtensions,
   extensionEngine,
   installWebStoreExtension,
@@ -2618,6 +2619,11 @@ function App() {
     void act(profile.id, restoreParkedSession);
   };
 
+  const startNewIdentity = (profile: UiProfile) => {
+    if (!confirm(t("Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser on this computer, and gives it a new fingerprint. Extensions assigned in AliasMode stay."))) return;
+    void act(profile.id, newProfileIdentity);
+  };
+
   const openCookie = (targets: UiProfile[]) => {
     setCookieTargets(targets);
     setCookieForm({ ...BLANK_COOKIE_FORM, domain: targets.length === 1 ? targets[0]!.platform : "" });
@@ -4204,6 +4210,15 @@ function App() {
                           <button className="iconbtn tip" data-tip={t("Edit profile")} aria-label={`Edit ${p.name}`} onClick={() => openEdit(p.id)}>
                             <Icon name="edit" className="sm" />
                           </button>
+                        )}
+                        {canEditRow && !appMode?.legacyRemote && (
+                          <button
+                            className="iconbtn tip"
+                            data-tip={t("New identity")}
+                            aria-label={t("Start a new identity for {profile}", { profile: p.name })}
+                            disabled={busy[p.id]}
+                            onClick={() => startNewIdentity(p)}
+                          ><Icon name="refresh" className="sm" /></button>
                         )}
                         {canEditRow && (
                           <button

@@ -1,8 +1,11 @@
 import { test, expect } from "bun:test";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { ProfileStore } from "./store.ts";
 import { Launcher, type SpawnFn, type FetchFn, type CookieEnsurer } from "./launcher.ts";
 import {
   handleRequest,
+  handleNewIdentityRequest,
   handleAutomationHealthSnapshot,
   isAdsPowerBrowserControl,
   isAllowedHealthOrigin,
@@ -616,4 +619,39 @@ test("delete-cache (AdsPower V2 shape) returns success", async () => {
     h.store,
   );
   expect((await res.json()).code).toBe(0);
+});
+
+test("new-identity stops a running profile, deletes its data and starts it again with a new seed", async () => {
+  const h = harness();
+  const newIdentity = (body: unknown) => handleNewIdentityRequest(new Request("http://127.0.0.1:50400/api/v2/browser-profile/new-identity", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }), { launcher: h.launcher, store: h.store });
+  const seed = h.store.getProfile("k1d0cd11")!.fingerprintSeed;
+  expect((await (await handleRequest(req("/api/v1/browser/start?user_id=k1d0cd11"), h.launcher, h.store)).json()).code).toBe(0);
+  const dataDir = h.launcher.userDataDir("k1d0cd11");
+  mkdirSync(join(dataDir, "Default", "Network"), { recursive: true });
+  writeFileSync(join(dataDir, "Default", "Network", "Cookies"), "logged-in");
+
+  expect(await (await newIdentity({ profile_id: "k1d0cd11" })).json())
+    .toEqual({ code: 0, msg: "success", data: { profile_id: "k1d0cd11", reopened: true } });
+  const next = h.store.getProfile("k1d0cd11")!;
+  expect(next.fingerprintSeed).not.toBe(seed);
+  expect(next.cookies).toEqual([]);
+  expect(existsSync(join(dataDir, "Default", "Network", "Cookies"))).toBe(false);
+  expect(h.spawnedArgs).toHaveLength(2);
+  expect(h.spawnedArgs[0]).toContain(`--fingerprint=${seed}`);
+  expect(h.spawnedArgs[1]).toContain(`--fingerprint=${next.fingerprintSeed}`);
+  expect(h.store.getLaunch("k1d0cd11")).not.toBeNull();
+
+  expect((await (await newIdentity({})).json()).msg).toBe("missing profile_id");
+  // AdsPower-style clients send JSON and no Origin; a web page names its own origin or cannot send JSON.
+  const page = (headers: Record<string, string>) => handleNewIdentityRequest(new Request("http://127.0.0.1:50400/api/v2/browser-profile/new-identity", {
+    method: "POST", headers, body: JSON.stringify({ profile_id: "k1d0cd11" }),
+  }), { launcher: h.launcher, store: h.store });
+  expect((await (await page({ "Content-Type": "text/plain" })).json()).msg).toBe("content-type must be application/json");
+  expect((await (await page({ "Content-Type": "application/json", Origin: "https://evil.example" })).json()).msg).toBe("non-local origin forbidden");
+  expect(h.store.getProfile("k1d0cd11")!.fingerprintSeed).toBe(next.fingerprintSeed);
+  expect((await (await newIdentity({ profile_id: "missing" })).json())).toMatchObject({ code: -1, msg: "no such profile" });
+  await handleRequest(req("/api/v1/browser/stop?user_id=k1d0cd11"), h.launcher, h.store);
+  rmSync(dataDir, { recursive: true, force: true });
 });

@@ -3038,6 +3038,160 @@ test("delete (standalone) keeps recoverable data without cleanup and is idempote
   s.close();
 });
 
+test("new identity (standalone) resets a closed profile without starting it, and an open one between stop and start", async () => {
+  const s = store();
+  const calls: string[] = [];
+  const launcher: any = {
+    stop: async (id: string, launch: any) => { calls.push(`stop:${launch.ws}`); s.clearLaunch(id); return true; },
+    resetUserDataRefusal: () => undefined,
+    resetUserData: async (id: string) => { calls.push(`reset:${id}:${s.getProfile(id)!.cookies.length}`); },
+    start: async (id: string, _args: string[], options: any) => { calls.push(`start:${JSON.stringify(options)}:${s.getProfile(id)!.cookies.length}`); return { ws: "ws://new", port: 1 }; },
+  };
+  const post = () => handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/new-identity", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }), launcher, s);
+  const before = s.getProfile("k1d0cd11")!;
+  s.saveSessionBundle("k1d0cd11", JSON.stringify({ cookies: before.cookies }));
+
+  expect(await (await post())!.json()).toEqual({ ok: true, profileId: "k1d0cd11", reopened: false });
+  // The browser data goes before the stored identity changes.
+  expect(calls).toEqual(["reset:k1d0cd11:1"]);
+  const after = s.getProfile("k1d0cd11")!;
+  expect(after.fingerprintSeed).not.toBe(before.fingerprintSeed);
+  expect(after).toMatchObject({ cookies: [], name: before.name, group: before.group, password: before.password, proxy: before.proxy, ua: before.ua });
+  expect(s.getSessionBundle("k1d0cd11")).toBeNull();
+
+  calls.length = 0;
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://old", startedAt: 1, headless: true });
+  expect(await (await post())!.json()).toEqual({ ok: true, profileId: "k1d0cd11", reopened: true });
+  expect(calls).toEqual(["stop:ws://old", "reset:k1d0cd11:0", `start:${JSON.stringify({ headless: true })}:0`]);
+  expect(s.getProfile("k1d0cd11")!.fingerprintSeed).not.toBe(after.fingerprintSeed);
+  s.close();
+});
+
+test("new identity (standalone) keeps everything when the browser does not stop, and refuses Remote mode and unknown ids", async () => {
+  const s = store();
+  const seed = s.getProfile("k1d0cd11")!.fingerprintSeed;
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://old", startedAt: 1 });
+  let refusal: string | undefined;
+  const launcher: any = {
+    stop: async () => { if (refusal) throw new Error("a refusal must come before the stop"); return false; },
+    resetUserDataRefusal: () => refusal,
+    resetUserData: async () => { throw new Error("must not delete the data of a running browser"); },
+  };
+  const post = (id: string, remote: any = null) =>
+    handleUiRequest(new Request(`http://x/ui/api/profiles/${id}/new-identity`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }), launcher, s, remote);
+  const unstopped = await post("k1d0cd11");
+  expect(unstopped!.status).toBe(500);
+  expect(s.getProfile("k1d0cd11")!.fingerprintSeed).toBe(seed);
+  refusal = "another profile's id differs from this one only in letter case; they share one folder";
+  expect((await post("k1d0cd11"))!.status).toBe(409);
+  expect(s.getLaunch("k1d0cd11")).not.toBeNull();
+  refusal = undefined;
+  expect((await post("missing"))!.status).toBe(404);
+  expect((await post("..%2F..%2Fetc"))!.status).toBe(400);
+  const remote = await post("k1d0cd11", { listRoster: async () => ({ profiles: [] }) });
+  expect(remote!.status).toBe(400);
+  expect((await remote!.json()).error).toContain("Remote");
+  // Another site's page cannot start it: it would need JSON and its own origin.
+  const page = (headers: Record<string, string>) => handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/new-identity", {
+    method: "POST", headers, body: "{}",
+  }), launcher, s);
+  expect((await page({ "content-type": "text/plain" }))!.status).toBe(415);
+  expect((await page({ "content-type": "application/json", origin: "https://evil.example" }))!.status).toBe(403);
+  expect(s.getProfile("k1d0cd11")!.fingerprintSeed).toBe(seed);
+  s.close();
+});
+
+test("new identity (Cloud) closes the open profile, saves an empty session, wipes this device and opens it again", async () => {
+  const s = store();
+  const appConfig = new AppConfigStore(join(mkdtempSync(join(tmpdir(), "aliasmode-ui-newid-")), "config.json"));
+  appConfig.setMode("cloud", "https://cloud.aliasmode.test");
+  const calls: string[] = [];
+  const updates: any[] = [];
+  const before = s.getProfile("k1d0cd11")!;
+  s.setDisplayScale("k1d0cd11", 1.25);
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://old", startedAt: 1 });
+  let blocked: string | undefined;
+  let activeOpens: unknown[] = [{ deviceId: "this-device" }];
+  const client = {
+    getProfile: async () => {
+      calls.push("cloud-get");
+      return { ok: true, profile: { id: "k1d0cd11", version: 3, activeOpens, permission: "edit" }, payload: encodePortableProfile(before) };
+    },
+    updateProfile: async (_id: string, request: any) => { calls.push("cloud-update"); updates.push(request); },
+  };
+  const cloudBrowser = {
+    newIdentityBlocked: () => blocked,
+    discardSessions: () => { calls.push("discard"); },
+    close: async (id: string) => { calls.push("close"); s.clearLaunch(id); activeOpens = []; return { closed: true, sync: "complete" }; },
+    open: async (_id: string, _args: string[], options: any) => { calls.push(`open:${JSON.stringify(options)}`); return { ok: true, ws: "ws://new", port: 2 }; },
+  };
+  let refusal: string | undefined;
+  let wipeError: Error | undefined;
+  let pushError: Error | undefined;
+  const launcher: any = {
+    resetUserDataRefusal: () => refusal,
+    resetUserData: async () => { calls.push("reset"); if (wipeError) throw wipeError; },
+  };
+  client.updateProfile = async (_id: string, request: any) => {
+    calls.push("cloud-update");
+    if (pushError) throw pushError;
+    updates.push(request);
+  };
+  const post = () => handleUiRequest(new Request("http://x/ui/api/profiles/k1d0cd11/new-identity", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }), launcher, s, null, {
+    appConfig, cloudBrowser: cloudBrowser as any, cloudConnection: { client } as any,
+  } as any);
+
+  expect(await (await post())!.json()).toEqual({ ok: true, profileId: "k1d0cd11", reopened: true });
+  // This computer first, Cloud last.
+  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset", "discard", "cloud-update", "open:{}"]);
+  expect(updates[0].expectedVersion).toBe(3);
+  expect(updates[0].payload.session).toEqual({ cookies: [] });
+  expect(updates[0].payload.profile.fingerprintSeed).not.toBe(before.fingerprintSeed);
+  expect(updates[0].payload.profile).toMatchObject({ name: before.name, username: before.username, password: before.password, proxy: before.proxy });
+  expect(s.getProfile("k1d0cd11")).toMatchObject({ fingerprintSeed: updates[0].payload.profile.fingerprintSeed, cookies: [] });
+  expect(s.getProfile("k1d0cd11")!.displayScale).toBeUndefined();
+
+  // A session this device still owes Cloud must land first, and the refusal leaves the browser open.
+  calls.length = 0;
+  blocked = "This device is still saving this profile to Cloud. Try again in a moment.";
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://new", startedAt: 2 });
+  activeOpens = [{ deviceId: "this-device" }];
+  const owed = await post();
+  expect(owed!.status).toBe(409);
+  expect((await owed!.json()).error).toContain("still saving");
+  expect(calls).toEqual(["cloud-get"]);
+  // So does a profile open on another device.
+  blocked = undefined;
+  activeOpens = [{ deviceId: "this-device" }, { deviceId: "other" }];
+  expect((await post())!.status).toBe(409);
+  expect(calls).toEqual(["cloud-get", "cloud-get"]);
+  // A folder this computer cannot reset refuses before the close, and Cloud is never written.
+  calls.length = 0;
+  activeOpens = [{ deviceId: "this-device" }];
+  refusal = "another profile's id differs from this one only in letter case; they share one folder";
+  expect((await post())!.status).toBe(409);
+  expect(calls).toEqual([]);
+  refusal = undefined;
+  // A wipe that fails after the close leaves Cloud as it was.
+  calls.length = 0;
+  wipeError = new Error("EBUSY: resource busy or locked");
+  const failedWipe = await post();
+  expect(failedWipe!.status).toBe(500);
+  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset"]);
+  wipeError = undefined;
+  // A Cloud save that fails after the wipe says so; this computer keeps the empty folder.
+  calls.length = 0;
+  s.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://new", startedAt: 3 });
+  activeOpens = [{ deviceId: "this-device" }];
+  pushError = new Error("Cloud is offline");
+  const failedPush = await post();
+  expect(failedPush!.status).toBe(500);
+  expect((await failedPush!.json()).error).toMatch(/browser data on this computer was deleted, but Cloud did not save the new identity: Cloud is offline/);
+  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset", "discard", "cloud-update"]);
+  expect(updates).toHaveLength(1);
+  s.close();
+});
+
 test("delete with an unknown id never touches the launcher (no rmSync on a crafted path)", async () => {
   const s = store();
   const launcher: any = {

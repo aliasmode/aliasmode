@@ -4440,6 +4440,67 @@ test("removeUserDataDir refuses ids that escape the data root (path-traversal sa
   store.close();
 });
 
+test("resetUserData deletes a closed profile's whole dir, refuses unsafe or open ones, and keeps the shared components", async () => {
+  const store = seeded();
+  const f = fleet();
+  const root = join(tmpdir(), `cloak-newid-${process.pid}`);
+  const dataRoot = join(root, "profiles");
+  const runtime = join(root, "runtime");
+  // A leaked browser still holds the dir; it is reaped before any file goes.
+  let holders = [4242];
+  const killed: string[] = [];
+  const launcher = new Launcher({
+    store,
+    binaryPath: join(runtime, "chrome"),
+    dataRoot,
+    spawn: f.spawn,
+    fetch: f.fetchFn,
+    ensureCookies: async () => ({ injected: false }),
+    findProfileDirHolderPids: async () => holders,
+    killPid: async (pid) => {
+      killed.push(`${pid}:${existsSync(join(dataRoot, "k1d0cd11", "Default", "History"))}`);
+      holders = [];
+    },
+    cdpReadyTimeoutMs: 500,
+  });
+  const components = join(runtime, "WidevineCdm", "4.10");
+  mkdirSync(components, { recursive: true });
+  const profileDir = join(dataRoot, "k1d0cd11");
+  for (const rel of ["Default/Network", "Default/IndexedDB", "Default/Service Worker", "Default/Cache"]) {
+    mkdirSync(join(profileDir, rel), { recursive: true });
+  }
+  writeFileSync(join(profileDir, "Default", "Network", "Cookies"), "logged-in");
+  writeFileSync(join(profileDir, "Default", "History"), "visits");
+
+  await expect(launcher.resetUserData("../escape")).rejects.toThrow();
+  store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
+  await expect(launcher.resetUserData("k1d0cd11")).rejects.toThrow("close the profile");
+  expect(existsSync(join(profileDir, "Default", "Network", "Cookies"))).toBe(true);
+
+  store.clearLaunch("k1d0cd11");
+  // A profile named after the Cloud folder would hold every Cloud profile; one that differs only in case shares this folder.
+  const cloudDir = join(dataRoot, "cloud-cache", "cloud1");
+  mkdirSync(cloudDir, { recursive: true });
+  store.upsertProfile({ ...store.getProfile("k1d0cd11")!, id: "cloud-cache" });
+  await expect(launcher.resetUserData("cloud-cache")).rejects.toThrow("unsafe");
+  expect(existsSync(cloudDir)).toBe(true);
+  store.upsertProfile({ ...store.getProfile("k1d0cd11")!, id: "K1D0CD11" });
+  await expect(launcher.resetUserData("k1d0cd11")).rejects.toThrow("letter case");
+  expect(killed).toEqual([]);
+  expect(existsSync(join(profileDir, "Default", "Network", "Cookies"))).toBe(true);
+  store.trashProfile("K1D0CD11");
+  await expect(launcher.resetUserData("k1d0cd11")).rejects.toThrow("letter case");
+  store.deleteProfile("K1D0CD11");
+
+  await launcher.resetUserData("k1d0cd11");
+  expect(killed).toEqual(["4242:true"]);
+  expect(existsSync(profileDir)).toBe(false);
+  expect(existsSync(components)).toBe(true);
+
+  rmSync(root, { recursive: true, force: true });
+  store.close();
+});
+
 test("start() repairs a corrupt Preferences but leaves a valid one (and the session) intact", async () => {
   const store = seeded(); // id=k1d0cd11
   const f = fleet();

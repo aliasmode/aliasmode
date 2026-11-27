@@ -890,5 +890,8 @@
   "Keep AliasMode running in the tray so schedules and scripts continue.": "Оставить AliasMode в трее, чтобы расписания и скрипты продолжали работать.",
   "Ask me": "Спрашивать",
   "Keep running in the tray": "Оставить в трее",
-  "Quit": "Выйти"
+  "Quit": "Выйти",
+  "New identity": "Новая личность",
+  "Start a new identity for {profile}": "Начать новую личность для {profile}",
+  "Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser on this computer, and gives it a new fingerprint. Extensions assigned in AliasMode stay.": "Начать новую личность? Будут удалены cookie, входы в аккаунты, история, закладки, сохранённые пароли и дополнения, установленные внутри браузера этого профиля на этом компьютере, а профиль получит новый отпечаток. Расширения, назначенные в AliasMode, сохранятся."
 }

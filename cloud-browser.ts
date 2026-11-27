@@ -119,6 +119,10 @@ export interface CloudBrowserLifecycle {
   noteProfileEdited?(profileId: string): void;
   /** False while this device still owes Cloud a newer session of the profile, so its Cloud session must not change. */
   sessionSettled?(profileId: string): boolean;
+  /** Why a new identity must wait: this device still uploads a session of the profile. Saved sessions Cloud refused do not count. */
+  newIdentityBlocked?(profileId: string): string | undefined;
+  /** Forget this device's saved and unsaved sessions of the profile, which a new identity replaced. */
+  discardSessions?(profileId: string): void;
   create(profile: Profile): Promise<{ id: string }>;
   importProfiles(destination: string, profiles: ProfileExport[]): Promise<ImportProfilesResponse>;
   open(profileId: string, launchArgs?: string[], options?: BrowserOpenOptions): Promise<CloudBrowserOpenResult>;
@@ -443,6 +447,30 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       this.noteProfileEdited(profile.id);
       return true;
     });
+  }
+
+  newIdentityBlocked(profileId: string): string | undefined {
+    let context: { queue: PendingSyncQueue; accountId: string };
+    try {
+      context = this.requireContext(false);
+    } catch (error) {
+      return errorMessage(error);
+    }
+    // An open profile's own checkpoints are not ready yet; its close saves them first.
+    const open = !!this.options.store.getLaunch(profileId);
+    const uploading = context.queue.list(context.accountId).some((pending) => pending.profileId === profileId &&
+      (pending.status === "conflict" ? isResavableConflict(pending) : pending.readyToSubmit || !open));
+    return uploading ? "This device is still saving this profile to Cloud. Try again in a moment." : undefined;
+  }
+
+  discardSessions(profileId: string): void {
+    this.closedUnsaved.delete(profileId);
+    const { queue, accountId } = this.requireContext(false);
+    for (const pending of queue.list(accountId)) {
+      if (pending.profileId === profileId && pending.status === "conflict" && !isResavableConflict(pending)) {
+        queue.remove(pending.id, accountId);
+      }
+    }
   }
 
   sessionSettled(profileId: string): boolean {
@@ -1136,6 +1164,11 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         opened = await this.options.cloud.openProfile(profileId, { deviceId });
       } catch (error) {
         return { ok: false, error: openProfileError(error) };
+      }
+      // A session saved under another fingerprint (before a new identity) would log the new one in as the old.
+      if (parked.payload.profile.fingerprintSeed !== opened.payload.profile.fingerprintSeed) {
+        await this.options.cloud.abandon(opened.registrationId).catch(() => {});
+        return { ok: false, error: "This profile has a new fingerprint since that session was saved, so the session cannot be restored." };
       }
       try {
         const response = await this.options.cloud.closeOpen(opened.registrationId, {

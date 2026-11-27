@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
-import { buildNewProfile, defaultProfileEngine, defaultScreen, generateId, hostScreenFloor } from "./create.ts";
+import { buildNewProfile, defaultProfileEngine, defaultScreen, freshIdentity, generateId, hostScreenFloor } from "./create.ts";
 import { graphicsIdentity } from "./firefox-config.ts";
-import { deterministicSeed, deriveFingerprintFlags, hostPlatformOs, platformFromUA } from "./fingerprint.ts";
+import { deterministicSeed, deriveFingerprintFlags, generateProfileHardware, hostPlatformOs, platformFromUA } from "./fingerprint.ts";
 import { ProfileStore } from "./store.ts";
 
 test("buildNewProfile makes a unique id with a seed-derived fingerprint and no forced UA", () => {
@@ -279,4 +279,60 @@ test.each(["chromium", "firefox"] as const)("new %s profiles preserve every expl
   } finally {
     store.close();
   }
+});
+
+test("a new identity gets an unused random seed and new hardware on the same system, engine and runtime", () => {
+  const cases = [
+    buildNewProfile({ engine: "chromium", chromiumRuntime: "cloakbrowser", platformOs: "macos" }, () => false),
+    buildNewProfile({ engine: "chromium", chromiumRuntime: "aliasmode", platformOs: "linux" }, () => false),
+    buildNewProfile({ engine: "firefox", platformOs: "macos", screen: "1440x900" }, () => false),
+  ];
+  for (const old of cases) {
+    const profile = {
+      ...old, name: "kept", group: "va1", username: "user", password: "pass", tags: ["a"], extensions: ["ext"], customNo: "7",
+      proxy: { type: "http" as const, host: "proxy.example", port: "8080", user: "u", pass: "p" }, timezone: "Asia/Tokyo",
+      cookies: [{ name: "auth", value: "v", domain: ".x.com", path: "/" }], seeded: true,
+      displayScale: 1.25, fpObserved: { ua: "old" }, fpExpected: { ua: "old" }, fpVerdict: { status: "match" } as any,
+      ...(old.chromiumRuntime ? { hardware: { cores: 12 } } : {}),
+    };
+    const otherSeeds = new Set([profile.fingerprintSeed, 1, 2, 3]);
+    const next = freshIdentity(profile, (seed) => otherSeeds.has(seed));
+    expect(otherSeeds.has(next.fingerprintSeed)).toBe(false);
+    expect(next).toMatchObject({
+      id: profile.id, engine: profile.engine, name: "kept", group: "va1", username: "user", password: "pass",
+      tags: ["a"], extensions: ["ext"], customNo: "7", proxy: profile.proxy, timezone: "Asia/Tokyo",
+      platformOs: profile.platformOs, cookies: [], seeded: false,
+    });
+    expect(next.chromiumRuntime).toBe(profile.chromiumRuntime);
+    for (const key of ["displayScale", "fpObserved", "fpExpected", "fpVerdict"]) expect(next).not.toHaveProperty(key);
+    if (profile.engine === "firefox") {
+      // The Firefox identity stays one system: its agent, platform and screen match the profile.
+      expect(next.firefox!.config).not.toEqual(profile.firefox!.config);
+      expect(next.ua).toBe(next.firefox!.config["navigator.userAgent"] as string);
+      expect(platformFromUA(next.ua)).toBe("macos");
+      expect(next.firefox!.config["navigator.platform"]).toBe("MacIntel");
+      expect([next.firefox!.config["screen.width"], next.firefox!.config["screen.height"]]).toEqual([next.screenWidth, next.screenHeight]);
+      expect(next.firefox!.config.timezone).toBe("Asia/Tokyo");
+      expect(graphicsIdentity("macos", next.fingerprintSeed)["webGl:renderer"]).toBe(next.firefox!.config["webGl:renderer"]);
+    } else {
+      expect(deriveFingerprintFlags(next)).toContain(`--fingerprint=${next.fingerprintSeed}`);
+      expect(deriveFingerprintFlags(next)).toContain(`--fingerprint-platform=${profile.platformOs}`);
+    }
+    // CloakBrowser keeps stored hardware, drawn from the new seed; Chromium 155 pins it at the next open.
+    if (profile.chromiumRuntime) expect(next.hardware).toBeUndefined();
+    else if (profile.engine === "chromium") expect(next.hardware).toEqual(generateProfileHardware(next.fingerprintSeed));
+  }
+  // Two new identities of one profile differ.
+  expect(freshIdentity(cases[0]!).fingerprintSeed).not.toBe(freshIdentity(cases[0]!).fingerprintSeed);
+});
+
+test("a new identity keeps a Firefox profile's own language and timezone, never this computer's", () => {
+  const old = buildNewProfile({ engine: "firefox", platformOs: "windows" }, () => false);
+  // A Cloud copy from an older client: no saved locale and no timezone, only its Firefox config.
+  const { locale: _locale, ...rest } = old;
+  const config = { ...old.firefox!.config, "locale:all": "de-DE, de", "navigator.language": "de-DE", "locale:language": "de", "locale:region": "DE", timezone: "Europe/Berlin" };
+  const next = freshIdentity({ ...rest, timezone: "", firefox: { ...old.firefox!, config } });
+  expect(next.locale).toBe("de-DE");
+  expect(next.firefox!.config["navigator.language"]).toBe("de-DE");
+  expect(next.firefox!.config.timezone).toBe("Europe/Berlin");
 });

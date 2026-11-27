@@ -217,6 +217,10 @@ test("route classification covers AdsPower and dashboard lifecycle paths only", 
   expect(await classifyLifecycleRequest(new Request("http://x/ui/api/profiles/p1/open", { method: "POST" }))).toMatchObject({ kind: "start" });
   expect(await classifyLifecycleRequest(new Request("http://x/ui/api/profiles/p1/close", { method: "POST" }))).toMatchObject({ kind: "stop" });
   expect(await classifyLifecycleRequest(new Request("http://x/ui/api/profiles/p1/clear-cache", { method: "POST" }))).toMatchObject({ kind: "cleanup" });
+  expect(await classifyLifecycleRequest(new Request("http://x/ui/api/profiles/p1/new-identity", { method: "POST" }))).toMatchObject({ kind: "cleanup", profileIds: ["p1"] });
+  expect(await classifyLifecycleRequest(new Request("http://x/api/v2/browser-profile/new-identity", {
+    method: "POST", body: JSON.stringify({ profile_id: "p1" }),
+  }))).toMatchObject({ kind: "cleanup", profileIds: ["p1"], protocol: "adspower" });
   expect(await classifyLifecycleRequest(new Request("http://x/api/v2/browser-profile/delete-cache", {
     method: "POST",
     body: JSON.stringify({ profile_id: ["p1", "p2"] }),

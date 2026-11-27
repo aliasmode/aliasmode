@@ -668,3 +668,26 @@ test("a launch row keeps the identity the browser was launched with", () => {
   store.recordLaunch({ profileId: "k1d0cd11", pid: 1, debugPort: 9412, ws: "ws://x", startedAt: 1 });
   expect(store.getLaunch("k1d0cd11")!.persona).toBeUndefined();
 });
+
+test("resetIdentity clears the saved session and cookies and keeps the account fields", () => {
+  const store = memStore();
+  const p = parseExport(SAMPLE).profiles[0]!;
+  store.upsertProfile({ ...p, tags: ["t"], extensions: ["ext"], hardware: { cores: 8 } });
+  store.markSeeded(p.id);
+  store.saveSessionBundle(p.id, JSON.stringify({ cookies: [{ name: "a", value: "b", domain: ".x.com", path: "/" }] }));
+  store.addPendingCookies(p.id, [{ name: "ct0", value: "c", domain: ".x.com", path: "/" }]);
+  store.setDisplayScale(p.id, 1.5);
+  store.saveObservedFingerprint(p.id, { ua: "old" }, { status: "match" } as any);
+
+  const saved = store.getProfile(p.id)!;
+  const { hardware: _hardware, displayScale: _scale, fpObserved: _observed, fpVerdict: _verdict, ...rest } = saved;
+  store.resetIdentity({ ...rest, fingerprintSeed: 424242, screenWidth: 1920, screenHeight: 1080, cookies: [], seeded: false });
+
+  const reset = store.getProfile(p.id)!;
+  expect(store.getSessionBundle(p.id)).toBeNull();
+  expect(store.getPendingCookies(p.id)).toEqual([]);
+  expect(reset).toMatchObject({ cookies: [], seeded: false, fingerprintSeed: 424242, screenWidth: 1920, screenHeight: 1080 });
+  for (const key of ["hardware", "displayScale", "fpObserved", "fpExpected", "fpVerdict"]) expect(reset).not.toHaveProperty(key);
+  expect(reset).toMatchObject({ name: saved.name, group: saved.group, password: saved.password, twofa: saved.twofa, proxy: saved.proxy, tags: ["t"], extensions: ["ext"] });
+  store.close();
+});

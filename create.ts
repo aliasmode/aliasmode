@@ -11,7 +11,7 @@
  */
 
 import type { Profile, ProfileEngine, ProxySpec } from "./types.ts";
-import { completeProfileFingerprint, createFirefoxProfileConfig, normalizeChromiumRuntime, syncFirefoxTimezone } from "./firefox-config.ts";
+import { completeProfileFingerprint, createFirefoxProfileConfig, firefoxPersonaOs, normalizeChromiumRuntime, syncFirefoxTimezone } from "./firefox-config.ts";
 import { chromiumDeviceScale, defaultChromiumRuntime, hostDisplayScale, hostDisplaySize } from "./aliasmode-chromium.ts";
 import { deterministicSeed, generateProfileHardware, hostPlatformOs } from "./fingerprint.ts";
 import { normalizeProxySpec } from "./proxy.ts";
@@ -105,8 +105,13 @@ export function generateId(exists: (id: string) => boolean): string {
   throw new Error("could not generate a unique profile id");
 }
 
-export function buildNewProfile(input: NewProfileInput, exists: (id: string) => boolean): Profile {
+export function buildNewProfile(
+  input: NewProfileInput,
+  exists: (id: string) => boolean,
+  seedFor: (id: string) => number = deterministicSeed,
+): Profile {
   const id = generateId(exists);
+  const seed = seedFor(id);
 
   const proxy: ProxySpec | null = normalizeProxySpec(input.proxy);
 
@@ -122,7 +127,7 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
   const selected = screen ? parseStrictResolution(screen) : engine === "firefox" && display ? display : defaultScreen(display);
   const platformOs = parsePlatformOs(input.platformOs) ?? hostPlatformOs();
   const firefox = engine === "firefox"
-    ? createFirefoxProfileConfig(selected.width, selected.height, platformOs, deterministicSeed(id))
+    ? createFirefoxProfileConfig(selected.width, selected.height, platformOs, seed)
     : undefined;
   const firefoxUa = firefox?.config["navigator.userAgent"];
   const firefoxScreenWidth = firefox?.config["screen.width"];
@@ -133,7 +138,7 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     id,
     engine,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
-    ...(engine === "chromium" && !chromiumRuntime ? { hardware: generateProfileHardware(deterministicSeed(id)) } : {}),
+    ...(engine === "chromium" && !chromiumRuntime ? { hardware: generateProfileHardware(seed) } : {}),
     ...(firefox ? { firefox } : {}),
     accId: "",
     name: (input.name || "").trim() || id, // AdsPower auto-names blank profiles after the id
@@ -155,10 +160,50 @@ export function buildNewProfile(input: NewProfileInput, exists: (id: string) => 
     timezone: typeof firefoxTimezone === "string" ? firefoxTimezone : Intl.DateTimeFormat().resolvedOptions().timeZone,
     screenWidth: typeof firefoxScreenWidth === "number" ? firefoxScreenWidth : selected.width,
     screenHeight: typeof firefoxScreenHeight === "number" ? firefoxScreenHeight : selected.height,
-    fingerprintSeed: deterministicSeed(id),
+    fingerprintSeed: seed,
     cookies: [],
     seeded: false,
   });
+}
+
+/**
+ * "New identity": the profile with the fingerprint a new profile on the same system, engine and
+ * runtime gets: a random seed that `taken` does not use, a new screen and new hardware. Its
+ * cookies, display scale and measured or imported fingerprints go. Name, folder, proxy, login
+ * details, notes, tags and extensions stay.
+ */
+export function freshIdentity(profile: Profile, taken: (seed: number) => boolean = () => false): Profile {
+  let seed: number;
+  do seed = crypto.getRandomValues(new Uint32Array(1))[0]!;
+  while (seed === 0 || seed === profile.fingerprintSeed || taken(seed));
+  const engine = profile.engine ?? "chromium";
+  const fresh = buildNewProfile({
+    engine,
+    ...(engine === "chromium" ? { chromiumRuntime: profile.chromiumRuntime ?? "cloakbrowser" } : {}),
+    platformOs: engine === "firefox" ? firefoxPersonaOs(profile) : profile.platformOs,
+  }, () => false, () => seed);
+  const { displayScale: _scale, fpObserved: _observed, fpExpected: _expected, fpVerdict: _verdict, hardware, ...kept } = profile;
+  const next: Profile = {
+    ...kept,
+    // The old identity's language, never this computer's.
+    locale: completeProfileFingerprint(profile).locale,
+    ...(fresh.firefox ? { firefox: fresh.firefox, ua: fresh.ua, platformOs: fresh.platformOs } : {}),
+    // Without stored hardware, the engine draws it from the seed.
+    ...(hardware && fresh.hardware ? { hardware: fresh.hardware } : {}),
+    screenWidth: fresh.screenWidth,
+    screenHeight: fresh.screenHeight,
+    fingerprintSeed: seed,
+    cookies: [],
+    seeded: false,
+  };
+  if (next.firefox) {
+    // The fresh config carries this computer's timezone; keep the old identity's.
+    const { timezone: _host, ...config } = next.firefox.config;
+    const oldTimezone = profile.firefox?.config.timezone;
+    const timezone = profile.timezone || (typeof oldTimezone === "string" ? oldTimezone : "");
+    next.firefox = { ...next.firefox, config: { ...config, ...(timezone ? { timezone } : {}) } };
+  }
+  return completeProfileFingerprint(next);
 }
 
 /**

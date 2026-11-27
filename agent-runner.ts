@@ -93,8 +93,9 @@ const COMPACTED = "[Older tool output removed to save space. Call the tool again
 /** Tools that return files or images the agent cannot use. */
 /** Tools that return files or images the agent cannot use, and browser_run_code: it runs in a Node `vm`,
     which is no sandbox, so a page that talks the agent into calling it could run code on this computer.
-    Running a library script is the same risk, so the user presses Run on the Scripts page. */
-const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code", "aliasmode_scripts_run"]);
+    Running a library script is the same risk, so the user presses Run on the Scripts page. New identity
+    cannot be undone, and only the user deletes things for good. */
+const HIDDEN_TOOLS = new Set(["browser_take_screenshot", "browser_pdf_save", "browser_start_tracing", "browser_stop_tracing", "browser_install", "browser_run_code", "aliasmode_scripts_run", "aliasmode_profile_new_identity"]);
 /** Downloads and upload files live in one folder; above this size the oldest files are deleted after a run. */
 export const AGENT_FILES_MAX_BYTES = 1024 ** 3;
 /** Older chats beyond this many are deleted when a new chat starts. */

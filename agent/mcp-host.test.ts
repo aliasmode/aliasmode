@@ -14,6 +14,7 @@ class FakeRuntime {
     if (method === "profiles.list") return { profiles: [] };
     if (method === "profiles.create") return { id: "created-profile", temporary: params.temporary === true };
     if (method === "profiles.update") return { profileId: params.profileId, updated: true };
+    if (method === "profiles.newIdentity") return { profileId: params.profileId, reopened: true };
     if (method === "profiles.replaceProxies") {
       return {
         ok: true,
@@ -155,6 +156,7 @@ test("MCP lifecycle tools include directory annotations", async () => {
     openWorldHint: false,
   });
   expect(tools.find((tool) => tool.name === "aliasmode_profile_delete")?.annotations?.destructiveHint).toBe(true);
+  expect(tools.find((tool) => tool.name === "aliasmode_profile_new_identity")?.annotations?.destructiveHint).toBe(true);
   expect(tools.find((tool) => tool.name === "aliasmode_profiles_replace_proxies")?.annotations?.destructiveHint).toBe(true);
   expect(tools.find((tool) => tool.name === "aliasmode_browser_open")?.annotations).toMatchObject({
     destructiveHint: true,
@@ -451,6 +453,43 @@ test("MCP host lists and runs library scripts through the runtime", async () => 
     await client.callTool({ name: `aliasmode_scripts_${name}`, arguments: {} });
     expect(runtime.calls.at(-1)?.method).toBe(`scripts.${name}`);
   }
+
+  await client.close();
+  await host.close();
+});
+
+test("a new identity of the selected browser selects the browser that opens again", async () => {
+  const runtime = new FakeRuntime();
+  const playwright = new FakePlaywright();
+  const host = await createAliasModeMcp({ discovered: { client: runtime }, playwright });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  await client.callTool({ name: "aliasmode_browser_open", arguments: { profileId: "profile1" } });
+  const reset = await client.callTool({ name: "aliasmode_profile_new_identity", arguments: { profileId: "profile1" } });
+  expect(reset.isError).not.toBe(true);
+  expect(reset.structuredContent).toEqual({ profileId: "profile1", reopened: true });
+  expect(runtime.calls.find((call) => call.method === "profiles.newIdentity")?.params).toEqual({ profileId: "profile1" });
+  // Detached before the old browser closes, attached to the one that opened again.
+  expect(playwright.events).toEqual([
+    "initialize",
+    "attach:ws://127.0.0.1:9333/devtools/browser/test",
+    "detach",
+    "attach:ws://127.0.0.1:9333/devtools/browser/test",
+  ]);
+  expect((await client.callTool({ name: "browser_snapshot", arguments: {} })).isError).not.toBe(true);
+
+  // A refusal leaves the open browser selected.
+  const call = runtime.call.bind(runtime);
+  runtime.call = async (method: string, params: Record<string, unknown> = {}) => {
+    if (method === "profiles.newIdentity") throw new Error("profile is open on another device; close it there first");
+    return call(method, params);
+  };
+  const refused = await client.callTool({ name: "aliasmode_profile_new_identity", arguments: { profileId: "profile1" } });
+  expect(refused.isError).toBe(true);
+  expect(playwright.events.filter((event) => event === "detach")).toHaveLength(1);
+  expect((await client.callTool({ name: "browser_snapshot", arguments: {} })).isError).not.toBe(true);
 
   await client.close();
   await host.close();

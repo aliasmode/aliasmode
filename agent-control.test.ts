@@ -11,6 +11,7 @@ import type { ProxyReplacementsRequest } from "./contracts/cloud-v1.ts";
 import { CloudApiError } from "./cloud-client.ts";
 import { buildNewProfile } from "./create.ts";
 import { encodePortableProfile } from "./portable-profile.ts";
+import { ProfileStore } from "./store.ts";
 
 function wire(method: string, params: Record<string, unknown> = {}, id = 1): string {
   return JSON.stringify({ protocol: AGENT_CONTROL_PROTOCOL, id, method, params });
@@ -635,4 +636,45 @@ test.each([
     ["chromium", "aliasmode"],
     ["firefox", undefined],
   ]);
+});
+
+test("a new identity runs as cleanup and the connection keeps owning the browser it opened again", async () => {
+  const store = new ProfileStore(":memory:");
+  const profile = buildNewProfile({ engine: "chromium", chromiumRuntime: "cloakbrowser", name: "kept" }, () => false);
+  store.upsertProfile(profile);
+  const events: string[] = [];
+  let generation = 0;
+  const launcher = {
+    certifiedActive: async () => false,
+    start: async (id: string, _urls: string[], options: { headless?: boolean }) => {
+      generation++;
+      events.push(`start:${options.headless ?? false}`);
+      const ws = `ws://127.0.0.1:9444/devtools/browser/${generation}`;
+      store.recordLaunch({ profileId: id, pid: 12, debugPort: 9444, ws, startedAt: generation, headless: options.headless });
+      return { ws, port: 9444 };
+    },
+    stop: async (id: string) => { events.push("stop"); store.clearLaunch(id); return true; },
+    resetUserDataRefusal: () => undefined,
+    resetUserData: async () => { events.push("reset"); },
+  };
+  const kinds: string[] = [];
+  const session = new AgentControlSession({
+    launcher: launcher as any,
+    store,
+    admission: { run: async (operation: { kind: string }, fn: () => Promise<unknown>) => { kinds.push(operation.kind); return await fn(); } } as any,
+  });
+
+  await session.enqueue(wire("browser.open", { profileId: profile.id, headless: true }));
+  const reset = await session.enqueue(wire("profiles.newIdentity", { profileId: profile.id }));
+  expect(reset).toMatchObject({ ok: true, result: { profileId: profile.id, reopened: true } });
+  expect(kinds).toEqual(["start", "cleanup"]);
+  expect(events).toEqual(["start:true", "stop", "reset", "start:true"]);
+  expect(store.getProfile(profile.id)).toMatchObject({ name: "kept", cookies: [] });
+  expect(store.getProfile(profile.id)!.fingerprintSeed).not.toBe(profile.fingerprintSeed);
+  // The browser opened again is this connection's: closing it is not a "browser changed" refusal.
+  expect(await session.enqueue(wire("browser.close", { profileId: profile.id }))).toMatchObject({ ok: true, result: { closed: true } });
+
+  expect(await session.enqueue(wire("profiles.newIdentity", { profileId: "missing" })))
+    .toMatchObject({ ok: false, error: { code: "profile_not_found" } });
+  store.close();
 });

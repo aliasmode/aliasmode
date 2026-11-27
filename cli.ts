@@ -2854,6 +2854,7 @@ async function main() {
               launcher,
               store,
               cloudBrowser,
+              cloudConnection,
               lifecycleAdmission: lifecycleAdmission!,
               appConfig,
             })

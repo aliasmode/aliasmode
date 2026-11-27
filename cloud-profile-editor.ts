@@ -11,7 +11,7 @@ import { proxyLegacyString } from "./proxy.ts";
 import type { ProfileStore } from "./store.ts";
 import type { CookieRecord, Profile } from "./types.ts";
 
-type CloudProfileEditorClient = Pick<CloudClient, "getProfile" | "moveProfile" | "updateProfile">;
+export type CloudProfileEditorClient = Pick<CloudClient, "getProfile" | "moveProfile" | "updateProfile">;
 type CloudProfileEditorStore = Pick<ProfileStore, "getLaunch">;
 
 export interface CloudProfileEditView {
@@ -282,6 +282,39 @@ export class CloudProfileEditor {
     // Refuse a payload this app could not open again.
     decodePortableProfile(payload);
     await this.cloud.updateProfile(profileId, { expectedVersion: authoritative.profile.version, payload });
+  }
+
+  /**
+   * "New identity" for a closed Cloud profile: an empty session and the identity `fresh` makes.
+   * Every device then opens the empty session, since it differs from the copy each device kept.
+   * `prepare` runs just before the save, so a refusal there leaves Cloud unchanged. Returns the saved profile.
+   */
+  async newIdentity(
+    profileId: string,
+    fresh: (profile: Profile) => Profile,
+    prepare: (next: Profile) => Promise<void> = async () => {},
+  ): Promise<Profile> {
+    assertSafeProfileId(profileId);
+    const authoritative = await this.cloud.getProfile(profileId);
+    this.assertClosed(profileId, authoritative.profile.activeOpens.length);
+    const { profile } = decodePortableProfile(authoritative.payload);
+    if (profile.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
+    const next = fresh(profile);
+    await prepare(next);
+    try {
+      await this.cloud.updateProfile(profileId, {
+        expectedVersion: authoritative.profile.version,
+        payload: encodePortableProfile(next, JSON.stringify({ cookies: [] })),
+      });
+    } catch (error) {
+      if (error instanceof CloudApiError && error.status === 409) {
+        throw new CloudProfileEditorError(error.code === "profile_open"
+          ? "profile is currently open; close it before starting a new identity"
+          : "Cloud profile changed; reload it and try again", 409);
+      }
+      throw error;
+    }
+    return next;
   }
 
   private assertClosed(profileId: string, activeOpenCount: number): void {

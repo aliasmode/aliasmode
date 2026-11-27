@@ -1167,5 +1167,8 @@
   "Keep AliasMode running in the tray so schedules and scripts continue.": "让 AliasMode 在托盘中继续运行,以便计划和脚本持续执行。",
   "Ask me": "每次询问",
   "Keep running in the tray": "在托盘中继续运行",
-  "Quit": "退出"
+  "Quit": "退出",
+  "New identity": "新身份",
+  "Start a new identity for {profile}": "为 {profile} 启用新身份",
+  "Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser on this computer, and gives it a new fingerprint. Extensions assigned in AliasMode stay.": "启用新身份？这将删除此环境在本机上的 Cookie、登录状态、历史记录、书签、已保存的密码以及在浏览器内安装的附加组件，并为其生成新的指纹。在 AliasMode 中分配的扩展会保留。"
 }

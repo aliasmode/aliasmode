@@ -23,6 +23,7 @@ import {
 import { harvestCookies, keepUnreadableOrigins, parseCapturedSessionBundle, sessionCaptureSeed, workerCaptureSeed } from "./session.ts";
 import { isSafeProfileId } from "./profile-id.ts";
 import type { AutomationHealthEntry } from "./remote-types.ts";
+import { startNewIdentity, type NewIdentityDeps } from "./new-identity.ts";
 
 function ok(data?: unknown) {
   return Response.json({ code: 0, msg: "success", data: data ?? {} });
@@ -308,6 +309,27 @@ export async function handleRequest(
   }
 
   return fail(`unknown route: ${pathname}`);
+}
+
+/**
+ * POST { profile_id } → fresh cookies and fingerprint for one profile (see startNewIdentity).
+ * An open profile is closed, reset and opened again; `reopened` says whether it is open now.
+ */
+export async function handleNewIdentityRequest(req: Request, deps: NewIdentityDeps): Promise<Response> {
+  if (req.method !== "POST") return fail("method not allowed");
+  // A web page can post here too. It cannot send JSON without a preflight, and it names its own origin.
+  const contentType = (req.headers.get("content-type") ?? "").split(";", 1)[0]!.trim().toLowerCase();
+  if (contentType !== "application/json") return fail("content-type must be application/json");
+  if (!isAllowedHealthOrigin(req.headers.get("origin"))) return fail("non-local origin forbidden");
+  const body = (await req.json().catch(() => null)) as { profile_id?: unknown } | null;
+  const profileId = typeof body?.profile_id === "string" ? body.profile_id : "";
+  if (!profileId) return fail("missing profile_id");
+  try {
+    const { reopened, warning } = await startNewIdentity(deps, profileId);
+    return ok({ profile_id: profileId, reopened, ...(warning ? { warning } : {}) });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
 }
 
 /**

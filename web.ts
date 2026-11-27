@@ -23,6 +23,7 @@ import {
   handleRequest,
   handleRemoteBrowserControl,
   handleCloudBrowserControl,
+  handleNewIdentityRequest,
   handleAutomationHealthSnapshot,
   isAdsPowerBrowserControl,
   isLoopbackAddress,
@@ -141,7 +142,7 @@ function cloudAutomationError(req: Request, opts: DashboardServerOptions): Respo
   if (
     opts.cloudBrowser &&
     (pathname === "/api/v1/status" || pathname === "/status" || isAdsPowerBrowserControl(pathname) ||
-      isCloudProfileRoute(req))
+      pathname === "/api/v2/browser-profile/new-identity" || isCloudProfileRoute(req))
   ) {
     return null;
   }
@@ -224,6 +225,13 @@ async function handleAutomationRequest(
   const users = await handleUserApi(req, launcher, store, opts.remote);
   if (users) return users;
   const pathname = new URL(req.url).pathname;
+  if (pathname === "/api/v2/browser-profile/new-identity") {
+    return handleNewIdentityRequest(req, {
+      launcher, store, remote: opts.remote,
+      cloudBrowser: opts.cloudBrowser,
+      cloudClient: opts.cloudConnection?.client,
+    });
+  }
   if (opts.remote && isAdsPowerBrowserControl(pathname)) {
     return handleRemoteBrowserControl(req, opts.remote, launcher, store, lifecycle);
   }

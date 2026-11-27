@@ -22,6 +22,7 @@ import {
 import type { LifecycleAdmissionController } from "./lifecycle-admission.ts";
 import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
+import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
 import type { ScriptLibrary, ScriptSupervisor } from "./scripts.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
@@ -239,6 +240,8 @@ export class AgentControlSession {
         return await this.updateProfile(params);
       case "profiles.delete":
         return await this.deleteProfile(stringParam(params, "profileId"));
+      case "profiles.newIdentity":
+        return await this.newIdentity(stringParam(params, "profileId"));
       case "browser.open":
         return await this.openProfile(params);
       case "browser.status":
@@ -667,6 +670,37 @@ export class AgentControlSession {
         return { profileId, deleted: await this.deleteClosedProfile(profileId) };
       },
     );
+  }
+
+  private async newIdentity(profileId: string) {
+    return await this.deps.admission.run({ kind: "cleanup", profileIds: [profileId] }, async () => {
+      let result;
+      try {
+        result = await startNewIdentity({
+          launcher: this.deps.launcher,
+          store: this.deps.store,
+          remote: this.deps.remote,
+          cloudBrowser: this.deps.cloudBrowser,
+          cloudClient: this.deps.cloudConnection?.client,
+        }, profileId);
+      } catch (error) {
+        if (error instanceof CloudApiError) throw agentError(error.code, error.message);
+        if (error instanceof NewIdentityError || error instanceof CloudProfileEditorError) {
+          const codes: Record<number, string> = { 400: "invalid_request", 404: "profile_not_found", 409: "conflict", 503: "cloud_unavailable" };
+          throw agentError(codes[error.status] ?? "operation_failed", error.message);
+        }
+        throw error;
+      }
+      // The browser opened again has a new endpoint; a connection that owned the old one owns it.
+      const launch = result.reopened ? this.deps.store.getLaunch(profileId) : null;
+      if (launch && this.openedEndpoints.has(profileId)) this.openedEndpoints.set(profileId, launch.ws);
+      if (!launch) {
+        this.openedByConnection.delete(profileId);
+        this.openedEndpoints.delete(profileId);
+        this.attachedExisting.delete(profileId);
+      }
+      return result;
+    });
   }
 
   private async deleteClosedProfile(profileId: string): Promise<boolean> {
