@@ -327,3 +327,29 @@ test("system proxy bypass and loopback checks are case-insensitive", () => {
   expect(isLoopbackHost("127.0.0.1")).toBe(true);
   expect(isLoopbackHost("192.168.1.1")).toBe(false);
 });
+
+test("system proxy fetch gives a remembered direct origin no header timeout and keeps the caller's signal", async () => {
+  const signals: Array<AbortSignal | undefined> = [];
+  const baseFetch = (async (_url: string, init?: any) => {
+    signals.push(init?.signal);
+    return new Response("ok");
+  }) as unknown as typeof fetch;
+  const proxied = createSystemProxyFetch(baseFetch, () => ({ host: "proxy.example", port: 20122, bypass: [] as string[] }));
+  const caller = new AbortController();
+
+  await proxied("https://api.example.com/login", { signal: caller.signal });
+  caller.abort();
+  // The probe signal still follows the caller after the headers arrived.
+  expect(signals[0]?.aborted).toBe(true);
+
+  // A large upload to a known direct origin runs without the probe timer.
+  await proxied("https://api.example.com/upload", { method: "POST", body: "x" });
+  expect(signals[1]).toBeUndefined();
+});
+
+test("system proxy keeps environment proxy credentials", () => {
+  const proxy = normalizeProxyAddress("http://user%40corp:p%3Ass@proxy.example:3128");
+  expect(proxy).toEqual({ host: "proxy.example", port: 3128, auth: "user%40corp:p%3Ass" });
+  expect(systemProxyCurlArgs("https://github.com/x.zip", () => ({ ...proxy!, bypass: [] })))
+    .toEqual(["--proxy", "http://user%40corp:p%3Ass@proxy.example:3128"]);
+});

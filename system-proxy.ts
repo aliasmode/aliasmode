@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
+import { win32 } from "node:path";
 
 export interface SystemProxy {
   host: string;
   port: number;
+  /** URL-encoded `user:password` from an environment proxy URL. */
+  auth?: string;
   bypass: string[];
 }
 
-export function normalizeProxyAddress(raw: string): { host: string; port: number } | null {
+export function normalizeProxyAddress(raw: string): { host: string; port: number; auth?: string } | null {
   let value = raw.trim();
   if (!value) return null;
   const entries = value.split(";").map((entry) => entry.trim()).filter(Boolean);
@@ -22,7 +25,9 @@ export function normalizeProxyAddress(raw: string): { host: string; port: number
     if (!hasScheme && !parsed.port) return null;
     const port = Number(parsed.port || 80);
     if (!parsed.hostname || !Number.isInteger(port) || port < 1 || port > 65535) return null;
-    return { host: parsed.hostname.replace(/^\[|\]$/g, ""), port };
+    const host = parsed.hostname.replace(/^\[|\]$/g, "");
+    const auth = parsed.username ? `${parsed.username}${parsed.password ? `:${parsed.password}` : ""}` : undefined;
+    return auth ? { host, port, auth } : { host, port };
   } catch {
     return null;
   }
@@ -64,9 +69,9 @@ function readWindowsProxy(): SystemProxy | null | "pac" {
   if (process.platform !== "win32") return null;
   let output: string;
   try {
-    output = execFileSync("reg", [
+    output = execFileSync(win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "reg.exe"), [
       "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-    ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
   } catch {
     return null;
   }
@@ -121,6 +126,11 @@ const DIRECT_ATTEMPT_TIMEOUT_MS = 3000;
 
 type OriginRoute = "direct" | "proxy";
 
+function systemProxyUrl(proxy: SystemProxy): string {
+  const host = proxy.host.includes(":") ? `[${proxy.host}]` : proxy.host;
+  return `http://${proxy.auth ? `${proxy.auth}@` : ""}${host}:${proxy.port}`;
+}
+
 /** One direct attempt under the probe timeout. A caller-provided abort
  *  signal is forwarded into the attempt, so a rejection can still mean "the
  *  caller gave up" rather than "direct is unreachable". */
@@ -129,19 +139,14 @@ async function attemptDirect(
   url: string,
   init: RequestInit | undefined,
 ): Promise<Response> {
-  const callerSignal = init?.signal ?? undefined;
   const controller = new AbortController();
-  const forwardAbort = () => controller.abort(callerSignal?.reason);
-  if (callerSignal) {
-    if (callerSignal.aborted) controller.abort(callerSignal.reason);
-    else callerSignal.addEventListener("abort", forwardAbort, { once: true });
-  }
+  // The caller's signal keeps covering the body after the headers arrive.
+  const signal = init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
   const timer = setTimeout(() => controller.abort(), DIRECT_ATTEMPT_TIMEOUT_MS);
   try {
-    return await baseFetch(url, { ...init, signal: controller.signal });
+    return await baseFetch(url, { ...init, signal });
   } finally {
     clearTimeout(timer);
-    callerSignal?.removeEventListener("abort", forwardAbort);
   }
 }
 
@@ -151,8 +156,9 @@ async function attemptDirect(
  * under a short header timeout, any HTTP response (even an error status)
  * proves the direct route works, and a connection failure retries once
  * through the proxy. The winning route is remembered for the rest of the
- * process, and a remembered direct origin that starts failing flips to the
- * proxy the same way. When no proxy is detected — or for bypassed and
+ * process. A remembered direct origin gets no header timeout, so slow
+ * responses such as large uploads are not cut off, and it flips to the proxy
+ * only when a request fails at the connection level. When no proxy is detected — or for bypassed and
  * loopback hosts — requests go direct exactly like plain fetch, and when
  * both routes fail the direct error is the one reported.
  */
@@ -164,13 +170,14 @@ export function createSystemProxyFetch(
   return async (url, init) => {
     const proxy = detect();
     if (!proxy || !proxyAppliesTo(url, proxy)) return baseFetch(url, init);
-    const proxyInit = { ...init, proxy: `http://${proxy.host}:${proxy.port}` };
+    const proxyInit = { ...init, proxy: systemProxyUrl(proxy) };
     // proxyAppliesTo only returns true for a URL that parses.
     const origin = new URL(url).origin;
-    if (routes.get(origin) === "proxy") return baseFetch(url, proxyInit);
+    const route = routes.get(origin);
+    if (route === "proxy") return baseFetch(url, proxyInit);
     let directError: unknown;
     try {
-      const response = await attemptDirect(baseFetch, url, init);
+      const response = route === "direct" ? await baseFetch(url, init) : await attemptDirect(baseFetch, url, init);
       routes.set(origin, "direct");
       return response;
     } catch (error) {
@@ -198,12 +205,13 @@ export function systemProxyCurlArgs(
 ): string[] {
   const proxy = detect();
   if (!proxy || !proxyAppliesTo(url, proxy)) return [];
-  return ["--proxy", `http://${proxy.host}:${proxy.port}`];
+  return ["--proxy", systemProxyUrl(proxy)];
 }
 
-/** curl exit codes that mean the connection stage itself failed: 7 could not
- *  connect, 28 timed out. Any other outcome is a result worth reporting. */
-const CURL_CONNECTION_FAILURES: ReadonlySet<number> = new Set([7, 28]);
+/** curl exit codes that mean the connection itself failed: 6 could not resolve
+ *  the host, 7 could not connect, 28 timed out, 35 TLS handshake failed, 56
+ *  connection reset. Any other outcome is a result worth reporting. */
+const CURL_CONNECTION_FAILURES: ReadonlySet<number> = new Set([6, 7, 28, 35, 56]);
 
 /** Runs one curl invocation with the given routing arguments spliced into
  *  the command line and resolves with curl's exit code. */
