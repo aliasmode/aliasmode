@@ -25,6 +25,7 @@ import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replac
 import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
 import type { ScriptLibrary, ScriptSupervisor } from "./scripts.ts";
+import type { Scheduler } from "./scheduler.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
 export const AGENT_CONTROL_PROTOCOL = "aliasmode-agent-v1";
@@ -54,7 +55,7 @@ export interface AgentControlDeps {
   remote?: RemoteCoordinator | null;
   cloudBrowser?: CloudBrowserLifecycle;
   cloudConnection?: CloudConnectionRuntime;
-  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor };
+  scripts?: { library: ScriptLibrary; runner: ScriptSupervisor; scheduler?: Pick<Scheduler, "list"> };
   log?: (message: string) => void;
 }
 
@@ -297,17 +298,25 @@ export class AgentControlSession {
     return this.deps.scripts;
   }
 
-  /** Creates a script, or updates the one named by scriptId; omitted fields keep their current value. */
+  /**
+   * Creates a script, or updates the one named by scriptId; omitted fields keep their current value.
+   * A schedule or run-on-open runs a script's saved source with no click, so an edit of such a script is saved as a copy.
+   */
   private async saveScript(params: Record<string, unknown>) {
-    const { library } = this.scriptTools();
+    const { library, scheduler } = this.scriptTools();
     const current = params.scriptId === undefined ? undefined : await library.get(stringParam(params, "scriptId"));
     const field = (name: "name" | "description" | "language" | "source") => params[name] ?? current?.[name] ?? (name === "description" ? "" : undefined);
+    const state = current && scheduler?.list();
+    const scheduled = !!state && (state.jobs.some((job) => job.scriptId === current!.id) || Object.values(state.onOpen).includes(current!.id));
+    const name = field("name");
     const { source: _source, ...saved } = await library.save(
-      { name: field("name"), description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
-      current?.id,
-      current && (params.expectedRevision === undefined ? current.revision : Number(params.expectedRevision)),
+      { name: scheduled && typeof name === "string" ? `${name.trim()} (AI edit)` : name, description: field("description"), language: field("language"), source: field("source") } as ScriptInput,
+      scheduled ? undefined : current?.id,
+      scheduled ? undefined : current && (params.expectedRevision === undefined ? current.revision : Number(params.expectedRevision)),
     );
-    return { script: saved };
+    return scheduled
+      ? { script: saved, note: "This script is used by a schedule or run-on-open, so the change was saved as a copy. Switch the schedule to the copy on the Scripts page." }
+      : { script: saved };
   }
 
   private cloudMcpConnection(): { connection: CloudConnectionRuntime; deviceId: string } {

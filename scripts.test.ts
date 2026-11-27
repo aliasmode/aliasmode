@@ -805,6 +805,40 @@ test("agent control reads, creates and updates library scripts", async () => {
   expect(await call("scripts.get", { scriptId: "missing" })).toMatchObject({ message: "Script not found" });
 });
 
+test("an agent edit of a scheduled or run-on-open script is saved as a copy, and the dashboard still saves in place", async () => {
+  const h = harness();
+  const scheduler = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope() });
+  const session = new AgentControlSession({ scripts: { library: h.library, runner: h.supervisor, scheduler } } as any);
+  const save = async (params: Record<string, unknown>) => (await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "scripts.save", params }))).result as any;
+  const scheduled = await h.library.save(input);
+  const onOpen = await h.library.save({ ...input, name: "Greet" });
+  const free = await h.library.save({ ...input, name: "Free" });
+  scheduler.save({ scriptId: scheduled.id, profileIds: ["a"], inputs: {}, useCredentials: true, everyHours: 6 });
+  scheduler.setOnOpen("b", onOpen.id);
+
+  for (const original of [scheduled, onOpen]) {
+    const result = await save({ scriptId: original.id, source: "export default async () => { /* agent */ };" });
+    expect(result.note).toContain("saved as a copy");
+    expect(result.script).toMatchObject({ name: `${original.name} (AI edit)`, description: "Example", revision: 1 });
+    expect(result.script.id).not.toBe(original.id);
+    expect((await h.library.get(original.id)).source).toBe(input.source);
+    expect((await h.library.get(result.script.id)).source).toContain("agent");
+  }
+  expect(scheduler.list().jobs[0]!.scriptId).toBe(scheduled.id);
+  expect(scheduler.list().onOpen).toEqual({ b: onOpen.id });
+
+  const edited = await save({ scriptId: free.id, source: "export default async () => { /* agent */ };" });
+  expect(edited).toEqual({ script: expect.objectContaining({ id: free.id, revision: 2 }) });
+
+  const nonce = "f".repeat(64);
+  const response = await handleUiRequest(new Request(`http://127.0.0.1/ui/api/scripts/${scheduled.id}`, {
+    method: "PATCH", headers: { authorization: `Bearer ${nonce}`, "content-type": "application/json" },
+    body: JSON.stringify({ ...input, source: "export default async () => { /* user */ };", expectedRevision: 1 }),
+  }), {} as any, {} as any, null, { scripts: { library: h.library, runner: h.supervisor, scheduler, nonce } });
+  expect(response?.status).toBe(200);
+  expect((await h.library.get(scheduled.id)).source).toContain("user");
+});
+
 test("schedule and run-on-open routes save, list, and delete under the nonce", async () => {
   const h = harness();
   const nonce = "e".repeat(64);
