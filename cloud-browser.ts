@@ -5,6 +5,7 @@ import type {
   CloudProfileSummary,
   ImportProfilesResponse,
   OpenProfileResponse,
+  PortableSessionV1,
 } from "./contracts/cloud-v1.ts";
 import {
   CloudDiagnostics,
@@ -331,6 +332,11 @@ function errorCode(error: unknown): string {
   if (error instanceof PlaywrightWorkerError) return error.code;
   if (error instanceof BrowserLaunchError) return "failed";
   return "transport_error";
+}
+
+function withoutNewIdentity(session: PortableSessionV1): PortableSessionV1 {
+  const { newIdentity: _newIdentity, ...rest } = session;
+  return rest;
 }
 
 export type CloudOpenStage =
@@ -1002,8 +1008,9 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
         profileId,
         registrationId,
         expectedVersion: opened.baseVersion,
-        // The stored profile carries the timezone the launch took from the proxy exit.
-        payload: encodePortableProfile(this.options.store.getProfile(profileId) ?? profile, sessionBundle),
+        // The stored profile carries the timezone the launch took from the proxy exit. A New identity
+        // token this open downloaded stays in its own checkpoints and close, so other devices still see it.
+        payload: encodePortableProfile(this.options.store.getProfile(profileId) ?? profile, sessionBundle, newIdentity),
         readyToSubmit: false,
       });
       // Cloud already holds the session this open restored.
@@ -1187,7 +1194,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       try {
         const response = await this.options.cloud.closeOpen(opened.registrationId, {
           expectedVersion: opened.baseVersion,
-          payload: { ...opened.payload, session: parked.payload.session },
+          // A parked session never carries a New identity token.
+          payload: { ...opened.payload, session: withoutNewIdentity(parked.payload.session) },
         });
         if (!response.ok) {
           await this.options.cloud.abandon(opened.registrationId).catch(() => {});
@@ -1683,7 +1691,8 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       profileId: open.profileId,
       registrationId: open.registrationId,
       expectedVersion: open.expectedVersion,
-      payload: encodePortableProfile(profile, sessionBundle),
+      // Only the token this open downloaded, which its first checkpoint holds; never a new one.
+      payload: encodePortableProfile(profile, sessionBundle, this.openNewIdentity(open, queue)),
       readyToSubmit: false,
     });
     const state = this.checkpointState(open, queue);
@@ -1696,6 +1705,12 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
     if (sessionLoginSignature(sessionBundle) !== upload.loginSignature) upload.soon = true;
     this.diagnosticEvents.record("checkpoint_saved");
     return "saved";
+  }
+
+  /** The New identity token the open downloaded, kept in its current checkpoint. */
+  private openNewIdentity(open: PendingOpenSession, queue: PendingSyncQueue): string | undefined {
+    return this.pendingCapturesForOpen(open, queue)
+      .find((capture) => !capture.readyToSubmit && capture.status !== "conflict")?.payload.session.newIdentity;
   }
 
   private uploadState(open: PendingOpenSession): CloudUploadState {

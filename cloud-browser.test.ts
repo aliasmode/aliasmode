@@ -5150,36 +5150,91 @@ function newIdentitySession(): PortableProfileV1["session"] {
   return { cookies: [], newIdentity: NEW_IDENTITY_TOKEN };
 }
 
-test("a Cloud open deletes this device's data once for a New identity made elsewhere, and no upload carries the token", async () => {
-  const state = setup({ session: newIdentitySession() });
-  const closed = recordClosedPayloads(state);
-  const checkpoints: PortableProfileV1[] = [];
-  (state.coordinator as any).options.cloud.checkpointOpen = async (_registrationId: string, request: { expectedVersion: number; payload: PortableProfileV1 }) => {
-    checkpoints.push(structuredClone(request.payload));
+/** Checkpoint and close uploads of the state's open, as Cloud receives them. */
+function recordUploads(state: ReturnType<typeof setup>) {
+  const uploads: PortableProfileV1[] = [];
+  const cloud = (state.coordinator as any).options.cloud;
+  cloud.checkpointOpen = async (_registrationId: string, request: { expectedVersion: number; payload: PortableProfileV1 }) => {
+    uploads.push(structuredClone(request.payload));
     return { ok: true, status: "saved", version: request.expectedVersion + 1 };
   };
+  cloud.closeOpen = async (_registrationId: string, request: { expectedVersion: number; payload: PortableProfileV1 }) => {
+    uploads.push(structuredClone(request.payload));
+    return { ok: true, status: "accepted", version: request.expectedVersion + 1 };
+  };
+  return uploads;
+}
 
-  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  // The delete comes before the browser starts, and the marker right after it.
-  expect(state.events.filter((event) => event === "reset")).toHaveLength(1);
-  expect(state.events.indexOf("reset")).toBeLessThan(state.events.indexOf("new-identity-marker"));
-  expect(state.events.indexOf("new-identity-marker")).toBeLessThan(state.events.indexOf("start"));
-  expect(state.newIdentityMarker()).toBe(NEW_IDENTITY_TOKEN);
-  expect(state.events).toContain("restore");
-
-  changeSession(state, "new-login");
-  await state.coordinator.heartbeatOnce("profile1");
-  expect(await state.coordinator.close("profile1")).toMatchObject({ closed: true });
-  expect(checkpoints.length + closed.length).toBeGreaterThan(0);
-  for (const uploaded of [...checkpoints, ...closed]) expect("newIdentity" in uploaded.session).toBe(false);
-  const queued = state.queue.list("account1").map((pending) => state.queue.get(pending.id, "account1")!);
-  for (const pending of queued) expect("newIdentity" in pending.payload.session).toBe(false);
-
-  // Cloud still holds the token (this device crashed before its close upload landed): no second delete.
+/** Another device opens the copy that Cloud holds now. */
+function deviceOpening(cloudCopy: PortableProfileV1, marker?: string) {
+  const state = setup({ session: cloudCopy.session });
+  if (marker) (state.coordinator as any).options.launcher.recordNewIdentity("profile1", marker);
   state.events.length = 0;
-  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
-  expect(state.events).not.toContain("reset");
-  expect(state.newIdentityMarker()).toBe(NEW_IDENTITY_TOKEN);
+  return state;
+}
+
+test("New identity reaches every device: A keeps the token through its reopen, then B and C wipe once each", async () => {
+  // A ran New identity: its marker holds T, and it reopens the empty session that carries T.
+  const a = deviceOpening({ ...payload(), session: newIdentitySession() }, NEW_IDENTITY_TOKEN);
+  const aUploads = recordUploads(a);
+  expect((await a.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(a.events).not.toContain("reset");
+  changeSession(a, "new-login");
+  await a.coordinator.heartbeatOnce("profile1");
+  expect(await a.coordinator.close("profile1")).toMatchObject({ closed: true });
+  // The checkpoint and the close keep exactly T, beside the new session.
+  expect(aUploads.length).toBeGreaterThanOrEqual(2);
+  for (const uploaded of aUploads) expect(uploaded.session.newIdentity).toBe(NEW_IDENTITY_TOKEN);
+  const cloudCopy = aUploads.at(-1)!;
+  expect(cloudCopy.session.cookies[0]!.value).toBe("new-login");
+
+  // B never applied T: it wipes once on open, before its browser starts, and writes the marker.
+  const b = deviceOpening(cloudCopy);
+  const bUploads = recordUploads(b);
+  expect((await b.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(b.events.filter((event) => event === "reset")).toHaveLength(1);
+  expect(b.events.indexOf("reset")).toBeLessThan(b.events.indexOf("new-identity-marker"));
+  expect(b.events.indexOf("new-identity-marker")).toBeLessThan(b.events.indexOf("start"));
+  expect(b.newIdentityMarker()).toBe(NEW_IDENTITY_TOKEN);
+  expect(await b.coordinator.close("profile1")).toMatchObject({ closed: true });
+  // B's open downloaded T, so its own close keeps it for the devices still to come.
+  expect(bUploads.at(-1)!.session.newIdentity).toBe(NEW_IDENTITY_TOKEN);
+  // With the marker, B never wipes again.
+  b.events.length = 0;
+  expect((await b.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(b.events).not.toContain("reset");
+
+  // C still holds old data of the profile, and the marker of an earlier New identity: it wipes once.
+  const c = deviceOpening(bUploads.at(-1)!, "0f8fad5b-d9cb-469f-a165-70867728950e");
+  c.store.upsertProfile(decodePortableProfile(payload()).profile);
+  expect((await c.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(c.events.filter((event) => event === "reset")).toHaveLength(1);
+  expect(c.newIdentityMarker()).toBe(NEW_IDENTITY_TOKEN);
+  expect(await c.coordinator.close("profile1")).toMatchObject({ closed: true });
+  c.events.length = 0;
+  expect((await c.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(c.events).not.toContain("reset");
+});
+
+test("a later New identity's token replaces the earlier one, so a device with the old marker wipes once more", async () => {
+  const t2 = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const b = deviceOpening({ ...payload(), session: { cookies: [], newIdentity: t2 } }, NEW_IDENTITY_TOKEN);
+  const uploads = recordUploads(b);
+  expect((await b.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(b.events.filter((event) => event === "reset")).toHaveLength(1);
+  expect(b.newIdentityMarker()).toBe(t2);
+  expect(await b.coordinator.close("profile1")).toMatchObject({ closed: true });
+  expect(uploads.at(-1)!.session.newIdentity).toBe(t2);
+});
+
+test("a parked session never carries the token, even one captured during an open that downloaded it", async () => {
+  const state = setup({ closeConflict: true, session: newIdentitySession() });
+  const parked = await parkRejectedSession(state);
+  expect(state.queue.get(parked.id, "account1")!.payload.session.newIdentity).toBe(NEW_IDENTITY_TOKEN);
+  const saved = cloudMovedOn(state);
+  expect(await state.coordinator.restoreParkedSession("profile1")).toEqual({ ok: true, version: 6 });
+  expect(saved[0]!.session.cookies[0]!.value).toBe("rescued-session");
+  expect("newIdentity" in saved[0]!.session).toBe(false);
 });
 
 test("a New identity from another device discards this device's parked sessions", async () => {
