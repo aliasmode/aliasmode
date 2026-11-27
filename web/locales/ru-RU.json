@@ -897,5 +897,6 @@
   "Succeeded": "Выполнено",
   "Failed": "Ошибка",
   "Skipped": "Пропущено",
-  "skipped: profile closed": "пропущено: профиль закрыт"
+  "skipped: profile closed": "пропущено: профиль закрыт",
+  "Ask AI to fix this script": "Попросить ИИ исправить этот скрипт"
 }

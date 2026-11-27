@@ -22,7 +22,7 @@ function harness(options: { busy?: boolean } = {}) {
       if (state.busy) throw new ScriptError("A script is already running", 409);
       state.started.push(request);
       state.view = {
-        id: `run-${state.started.length}`, scriptName: "Script", status: "finished",
+        id: `run-${state.started.length}`, scriptId: request.scriptId, scriptName: "Script", status: "finished",
         profiles: request.profileIds.map((id) => id === state.failProfile
           ? { id, name: id, status: "failed" as const, error: "Profile is open on another device" }
           : { id, name: id, status: "succeeded" as const }),

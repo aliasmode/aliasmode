@@ -51,6 +51,65 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const FIX_LOG_LINES = 40;
+const FIX_LINE_CHARS = 300;
+
+/**
+ * The agent prompt for a failed run: the script, the profile and its error, and the last lines of
+ * the profile's part of the run log. That part runs from its "--- name ---" line to the next one;
+ * a profile that failed before its browser opened gets the lines the run wrote before any profile.
+ */
+export function fixScriptPrompt(script: { id?: string; name: string }, profile: { id: string; name: string; error?: string }, log: string): string {
+  const marker = `\n--- ${profile.name || profile.id} ---\n`;
+  const at = log.lastIndexOf(marker);
+  const part = log.slice(at < 0 ? 0 : at + marker.length).split(/\n--- .* ---\n/, 1)[0]!;
+  const lines = part.split("\n").filter((line) => line.trim()).slice(-FIX_LOG_LINES)
+    .map((line) => line.length > FIX_LINE_CHARS ? `${line.slice(0, FIX_LINE_CHARS)}…` : line);
+  return `Fix my script "${script.name}"${script.id ? ` (id ${script.id})` : ""}. It failed on profile "${profile.name || profile.id}"${profile.error ? `: ${profile.error}` : "."}`
+    + (lines.length ? `\n\nLast lines of its log:\n${lines.join("\n")}` : "");
+}
+
+/** The whole log of a run while it is the latest one; empty once a newer run replaced it. */
+async function readRunLog(runId: string): Promise<string> {
+  let text = "";
+  try {
+    for (let offset = 0; ;) {
+      const next = await fetchScriptLog(runId, offset);
+      if (next.nextOffset === offset) return text;
+      text += next.text;
+      offset = next.nextOffset;
+    }
+  } catch { return text; }
+}
+
+/** "Customize with AI": the user says what should change, and the agent edits the script. */
+export function ScriptAiCard({ busy, onAsk }: { busy: boolean; onAsk: (change: string) => void }) {
+  const { t } = useTranslation();
+  const [change, setChange] = useState("");
+  return <form className="script-ai" onSubmit={(event) => {
+    event.preventDefault();
+    if (!change.trim()) return;
+    onAsk(change.trim());
+    setChange("");
+  }}>
+    <span className="agent-notice-icon"><Glyph name="sparkle" /></span>
+    <div className="script-ai-body">
+      <strong>{t("Customize with AI")}</strong>
+      <p>{t("Need a change? Our AI agent can edit this script for you.")}</p>
+      <textarea className="input" rows={2} value={change} placeholder={t("What should change?")} aria-label={t("What should change?")}
+        onChange={(event) => setChange(event.target.value)}
+        onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+      <div><button className="btn primary" type="submit" disabled={busy || !change.trim()}>{t("Ask the agent")}</button></div>
+      <small>{t("Uses your free monthly credits, then your workspace balance.")}</small>
+    </div>
+  </form>;
+}
+
+function FixWithAiButton({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation();
+  return <button className="btn accent sm script-ai-fix" type="button" onClick={onClick}><Glyph name="sparkle" />{t("Ask AI to fix this script")}</button>;
+}
+
 type ScriptsTab = "mine" | "schedules" | "library";
 
 function languageName(language: ScriptLanguage): string {
@@ -101,7 +160,7 @@ function PythonRuntimeNote({ status, onDownload }: { status: PythonRuntimeStatus
   return <p className="formnote">{t("Python scripts need the Python runtime ({size}). It downloads once, before the first Python script runs.", { size })} <button className="btn" type="button" onClick={onDownload}>{t("Download now")}</button></p>;
 }
 
-export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: () => void; onAskAgent: (prompt: string) => void; profiles: UiProfile[] }) {
+export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: () => void; onAskAgent: (prompt: string, send?: boolean) => void; profiles: UiProfile[] }) {
   const { t } = useTranslation();
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
   const [script, setScript] = useState<ScriptRecord | null>(null);
@@ -114,7 +173,6 @@ export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: ()
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [currentRun, setCurrentRun] = useState<ScriptRun | null>(null);
-  const [change, setChange] = useState("");
   const importRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
   const selectionRequest = useRef(0);
@@ -163,7 +221,6 @@ export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: ()
     setBusy(true);
     setError(null);
     setScript(null);
-    setChange("");
     setPublicationOpen(false);
     try {
       const nextScript = await fetchScript(id);
@@ -290,7 +347,7 @@ export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: ()
         <button className={`tab${tab === "library" ? " active" : ""}`} role="tab" aria-selected={tab === "library"} type="button" onClick={() => setTab("library")}>{t("Public library")}</button>
       </div>
       {error && <div className="modal-err" role="alert">{error}</div>}
-      {tab === "schedules" ? <SchedulesPanel scripts={scripts} profiles={profiles} /> : tab === "library" ? <PublicLibrary onImported={imported} /> : <>
+      {tab === "schedules" ? <SchedulesPanel scripts={scripts} profiles={profiles} onAskAgent={onAskAgent} /> : tab === "library" ? <PublicLibrary mine={scripts} onImported={imported} onAskAgent={onAskAgent} /> : <>
         {currentRun && <button className="scripts-run-note" type="button" onClick={onViewRun}>{t("{scriptName}: {status}. View run", { scriptName: currentRun.scriptName, status: currentRun.status })}</button>}
         <PythonRuntimeNote status={python} onDownload={downloadPython} />
         <div className="scripts-layout">
@@ -325,22 +382,7 @@ export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: ()
                   <div className="script-publication-preview"><b>{script.name}</b><span>{script.description || t("No description")}</span><span>{languageName(script.language)}</span></div>
                   <div className="script-actions"><button className="btn primary" type="submit" disabled={busy || detailsChanged}>{busy ? t("Publishing…") : isPublished ? t("Update publication") : t("Publish")}</button><button className="btn" type="button" disabled={busy} onClick={() => setPublicationOpen(false)}>{t("Cancel")}</button></div>
                 </form>}
-                <form className="script-ai" onSubmit={(event) => {
-                  event.preventDefault();
-                  if (!change.trim()) return;
-                  onAskAgent(`Change my script "${script.name}" (id ${script.id}): ${change.trim()}`);
-                  setChange("");
-                }}>
-                  <span className="agent-notice-icon"><Glyph name="sparkle" /></span>
-                  <div className="script-ai-body">
-                    <strong>{t("Customize with AI")}</strong>
-                    <p>{t("Need a change? Our AI agent can edit this script for you.")}</p>
-                    <textarea className="input" rows={2} value={change} placeholder={t("What should change?")} aria-label={t("What should change?")}
-                      onChange={(event) => setChange(event.target.value)}
-                      onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-                    <div><button className="btn primary" type="submit" disabled={busy || !change.trim()}>{t("Ask the agent")}</button></div>
-                  </div>
-                </form>
+                <ScriptAiCard key={script.id} busy={busy} onAsk={(change) => onAskAgent(`Change my script "${script.name}" (id ${script.id}): ${change}`)} />
                 <label className="fld"><span>{t("Source")}</span><pre className="script-source">{script.source}</pre></label>
               </div>
             </section>
@@ -353,7 +395,7 @@ export function ScriptsPage({ onViewRun, onAskAgent, profiles }: { onViewRun: ()
   );
 }
 
-function PublicLibrary({ onImported }: { onImported: (script: ScriptRecord) => Promise<void> }) {
+function PublicLibrary({ mine, onImported, onAskAgent }: { mine: ScriptSummary[]; onImported: (script: ScriptRecord) => Promise<void>; onAskAgent: (prompt: string) => void }) {
   const { t } = useTranslation();
   const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
@@ -419,6 +461,24 @@ function PublicLibrary({ onImported }: { onImported: (script: ScriptRecord) => P
     finally { setBusy(false); }
   };
 
+  // The agent edits the user's own copy: an earlier copy with the same name, language and source, or a new import.
+  const customize = async (change: string) => {
+    if (!script) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let copy: ScriptRecord | undefined;
+      for (const item of mine.filter((entry) => entry.name === script.name && entry.language === script.language)) {
+        const candidate = await fetchScript(item.id);
+        if (candidate.source === script.source) { copy = candidate; break; }
+      }
+      copy ??= await importPublishedScript(script.id);
+      onAskAgent(`Change my script "${copy.name}" (id ${copy.id}): ${change}`);
+      await onImported(copy);
+    } catch (nextError) { setError(errorText(nextError)); }
+    finally { setBusy(false); }
+  };
+
   return <div className="scripts-library">
     <form className="scripts-library-search" onSubmit={(event) => { event.preventDefault(); search(); }}>
       <input className="input" aria-label={t("Search public scripts")} placeholder={t("Search scripts")} value={queryInput} onChange={(event) => setQueryInput(event.target.value)} />
@@ -444,6 +504,7 @@ function PublicLibrary({ onImported }: { onImported: (script: ScriptRecord) => P
           <p>{script.description || t("No description")}</p>
           <p className="formnote">{t("By {authorName}", { authorName: script.authorName })}{script.authorEmail && <> · {script.authorEmail}</>} · {new Date(script.updatedAt).toLocaleDateString()}</p>
           <button className="btn primary" type="button" disabled={busy} onClick={() => void importScript()}>{t("Add to my scripts")}</button>
+          <ScriptAiCard key={script.id} busy={busy} onAsk={(change) => void customize(change)} />
           <label className="fld"><span>{t("Source")}</span><pre className="script-source">{script.source}</pre></label>
         </div>
       </section> : <div className="emptystate"><b>{t("Select a public script")}</b><p>{t("Choose a script to view its details and source.")}</p></div>}
@@ -467,7 +528,7 @@ interface ScheduleForm {
 
 const NEW_SCHEDULE: ScheduleForm = { name: "", scriptId: "", profileIds: [], inputs: "{}", useCredentials: false, headless: false, mode: "every", hours: "6", dailyAt: "09:00", enabled: true };
 
-function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profiles: UiProfile[] }) {
+function SchedulesPanel({ scripts, profiles, onAskAgent }: { scripts: ScriptSummary[]; profiles: UiProfile[]; onAskAgent: (prompt: string, send?: boolean) => void }) {
   const { t } = useTranslation();
   const [state, setState] = useState<ScheduleState>({ jobs: [], history: [], onOpen: {} });
   const [form, setForm] = useState<ScheduleForm | null>(null);
@@ -488,6 +549,15 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
   const cadence = (job: ScheduleState["jobs"][number]) => job.dailyAt
     ? t("Daily at {time}", { time: job.dailyAt })
     : t("Every {n} hours", { n: String(job.everyHours) });
+  // The script a history entry ran, while the schedule and the script still exist.
+  const historyScript = (jobId: string) => {
+    const id = jobId.startsWith("open:") ? state.onOpen[jobId.slice(5)] : state.jobs.find((item) => item.id === jobId)?.scriptId;
+    return scripts.some((item) => item.id === id) ? id : undefined;
+  };
+  const askFix = async (entry: ScheduleState["history"][number], scriptId: string) => {
+    const failed = entry.profiles.find((item) => item.status === "failed")!;
+    onAskAgent(fixScriptPrompt({ id: scriptId, name: scriptName(scriptId) }, failed, await readRunLog(entry.runId)), false);
+  };
   const jobLabel = (jobId: string) => {
     if (jobId.startsWith("open:")) return t("Run on open: {name}", { name: profiles.find((item) => item.id === jobId.slice(5))?.name ?? jobId.slice(5) });
     const job = state.jobs.find((item) => item.id === jobId);
@@ -572,13 +642,15 @@ function SchedulesPanel({ scripts, profiles }: { scripts: ScriptSummary[]; profi
     <section className="settings-card">
       <header><h2>{t("History")}</h2></header>
       <div className="card-body">
-        {state.history.length === 0 ? <p className="formnote">{t("Nothing has run yet.")}</p> : state.history.map((entry) => (
-          <div key={`${entry.runId}-${entry.at}`} className={`script-profile ${entry.status}`}>
+        {state.history.length === 0 ? <p className="formnote">{t("Nothing has run yet.")}</p> : state.history.map((entry) => {
+          const scriptId = historyScript(entry.jobId);
+          return <div key={`${entry.runId}-${entry.at}`} className={`script-profile ${entry.status}`}>
             <span>{new Date(entry.at).toLocaleString()} · {jobLabel(entry.jobId)}</span><span>{statusText(entry.status)}</span>
             {(entry.error || entry.profiles.some((item) => item.error)) && <small>{entry.error ? historyError(entry.error) : entry.profiles.filter((item) => item.error).map((item) => `${item.name}: ${item.error}`).join("; ")}</small>}
             {entry.profiles.some((item) => item.warning) && <small className="warning">{entry.profiles.filter((item) => item.warning).map((item) => `${item.name}: ${item.warning}`).join("; ")}</small>}
-          </div>
-        ))}
+            {scriptId && entry.profiles.some((item) => item.status === "failed") && <FixWithAiButton onClick={() => void askFix(entry, scriptId)} />}
+          </div>;
+        })}
       </div>
     </section>
   </div>;
@@ -614,10 +686,11 @@ export function RunOnOpenField({ profileId }: { profileId: string }) {
   </label>;
 }
 
-export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
+export function ScriptRunPanel({ open, selectedProfiles, onClose, onAskAgent }: {
   open: boolean;
   selectedProfiles: UiProfile[];
   onClose: () => void;
+  onAskAgent?: (prompt: string, send?: boolean) => void;
 }) {
   const { t } = useTranslation();
   const [scripts, setScripts] = useState<ScriptSummary[]>([]);
@@ -633,6 +706,7 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
   const offset = useRef(0);
   const desktop = scriptsDesktopAvailable();
   const runActive = run?.status === "running" || run?.status === "stopping";
+  const failed = run?.profiles.find((profile) => profile.status === "failed");
   const [python, downloadPython] = usePythonRuntime(open && desktop && scripts.find((script) => script.id === scriptId)?.language === "python");
 
   useEffect(() => {
@@ -714,7 +788,8 @@ export function ScriptRunPanel({ open, selectedProfiles, onClose }: {
             <label className="script-credentials"><input type="checkbox" checked={headless} onChange={(event) => setHeadless(event.target.checked)} disabled={busy || runActive} />{t("Run hidden (headless)")}</label>
             <label className="fld"><span>{t("Parallel browsers")}</span><input className="input" type="number" min={1} step={1} value={concurrency} onChange={(event) => setConcurrency(event.target.value)} disabled={busy || runActive} /></label>
             <p className="formnote">{t("{n} selected profiles. Run up to this many at a time; the rest wait for a free slot. Browser startup may be staggered. Parallel runs share the log below.", { n: String(selectedProfiles.length) })}</p>
-            {run && <div className="script-progress"><b>{run.scriptName} · {run.status}</b>{run.profiles.map((profile) => <div key={profile.id} className={`script-profile ${profile.status}`}><span>{profile.name}</span><span>{profile.status}</span>{profile.error && <small>{profile.error}</small>}{profile.warning && <small className="warning">{profile.warning}</small>}</div>)}</div>}
+            {run && <div className="script-progress"><b>{run.scriptName} · {run.status}</b>{run.profiles.map((profile) => <div key={profile.id} className={`script-profile ${profile.status}`}><span>{profile.name}</span><span>{profile.status}</span>{profile.error && <small>{profile.error}</small>}{profile.warning && <small className="warning">{profile.warning}</small>}</div>)}
+              {failed && onAskAgent && <FixWithAiButton onClick={() => { onAskAgent(fixScriptPrompt({ id: run.scriptId, name: run.scriptName }, failed, log), false); onClose(); }} />}</div>}
             {run && <pre className="script-log" aria-label={t("Script log")}>{log || t("Waiting for log output…")}</pre>}
           </>}
         </div>

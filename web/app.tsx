@@ -1478,7 +1478,7 @@ function App() {
   const askAgent = (picked: UiProfile[]) => {
     setAgentDraft((current) => ({ text: `Profiles: ${picked.map((profile) => `${profile.name} (${profile.id})`).join(", ")}\n\n`, key: current.key + 1 }));
   };
-  const sendToAgent = (text: string) => setAgentDraft((current) => ({ text, key: current.key + 1, send: true }));
+  const sendToAgent = (text: string, send = true) => setAgentDraft((current) => ({ text, key: current.key + 1, send }));
   const openStore = useCallback((quantity: number, src: ProxySrc) => {
     enterStore(src);
     setStoreRequest((current) => ({ quantity, key: current.key + 1 }));
@@ -5524,6 +5524,7 @@ function App() {
         open={scriptRunOpen}
         selectedProfiles={scriptRunProfiles}
         onClose={() => setScriptRunOpen(false)}
+        onAskAgent={sendToAgent}
       />
     </div>
     </ProxyStoreContext.Provider>
