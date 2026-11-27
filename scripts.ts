@@ -291,7 +291,7 @@ export const executeScript: ScriptExecution = async ({ scriptPath, language, inp
   }
 };
 
-const CREDENTIAL_FIELDS = ["username", "password", "email", "emailPassword", "twofa"] as const;
+export const CREDENTIAL_FIELDS = ["username", "password", "email", "emailPassword", "twofa"] as const;
 
 interface ActiveRun {
   view: ScriptRun;

@@ -870,6 +870,24 @@ test("AI clients get script logs and errors with saved login values masked; the 
   expect(h.supervisor.status()!.profiles[0]!.error).toBe("login failed for user-a");
 });
 
+test("schedule history errors are masked for AI clients", async () => {
+  const h = harness(async () => { throw new Error("login failed for user-b with test-password-b"); });
+  const script = await h.library.save(input);
+  const scheduler = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope() });
+  scheduler.save({ scriptId: script.id, profileIds: ["b"], inputs: {}, useCredentials: true, everyHours: 1 });
+  const job = scheduler.list().jobs[0]!;
+  const later = new Scheduler({ root: h.directory, runner: h.supervisor, scope: () => h.library.scope(), now: () => job.nextRun + 1 });
+  await later.tick();
+  expect(scheduler.list().history[0]!.profiles[0]!.error).toContain("test-password-b");
+  // A new run replaces the one whose values the runner kept; the stored profile still masks the history.
+  h.supervisor.start({ scriptId: script.id, profileIds: ["a"], inputs: {}, useCredentials: false });
+  await h.supervisor.settled();
+  const session = new AgentControlSession({ store: { getProfile: (id: string) => ({ id, username: `user-${id}`, password: `test-password-${id}` }) }, scripts: { library: h.library, runner: h.supervisor, scheduler } } as any);
+  const listed = (await session.enqueue(JSON.stringify({ protocol: "aliasmode-agent-v1", id: 1, method: "schedules.list" }))).result as any;
+  expect(listed.history[0].profiles[0].error).toBe("login failed for *** with ***");
+  expect(JSON.stringify(listed)).not.toContain("test-password");
+});
+
 test("a saved login value cut at the end of a live log is held back until it is whole", async () => {
   const release = Promise.withResolvers<void>();
   let fd = 0;

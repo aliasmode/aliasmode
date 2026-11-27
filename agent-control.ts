@@ -24,7 +24,7 @@ import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
-import type { ScriptLibrary, ScriptRun, ScriptSupervisor } from "./scripts.ts";
+import { CREDENTIAL_FIELDS, type ScriptLibrary, type ScriptRun, type ScriptSupervisor } from "./scripts.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
@@ -183,6 +183,14 @@ export function maskSecrets(text: string, secrets: readonly string[]): string {
   return secrets.reduce((masked, secret) => masked.split(secret).join("***"), text);
 }
 
+function maskProfiles<T extends { error?: string; warning?: string }>(profiles: T[], secrets: readonly string[]): T[] {
+  return profiles.map(({ error, warning, ...item }) => ({
+    ...item,
+    ...(error === undefined ? {} : { error: maskSecrets(error, secrets) }),
+    ...(warning === undefined ? {} : { warning: maskSecrets(warning, secrets) }),
+  }) as T);
+}
+
 export function validAgentAuthorization(header: string | null, nonce: string): boolean {
   return /^[a-f0-9]{64}$/.test(nonce) && header === `Bearer ${nonce}`;
 }
@@ -288,8 +296,13 @@ export class AgentControlSession {
         return { run: this.maskedRun(await this.scriptTools().runner.stop()) };
       case "scripts.onOpen":
         return await this.setScriptOnOpen(params);
-      case "schedules.list":
-        return this.schedules().list();
+      case "schedules.list": {
+        const state = this.schedules().list();
+        return { ...state, history: state.history.map((entry) => {
+          const secrets = this.secrets(entry.runId, entry.profiles.map((item) => item.id));
+          return { ...entry, ...(entry.error === undefined ? {} : { error: maskSecrets(entry.error, secrets) }), profiles: maskProfiles(entry.profiles, secrets) };
+        }) };
+      }
       case "schedules.save":
         return await this.saveSchedule(params);
       case "schedules.delete": {
@@ -326,19 +339,18 @@ export class AgentControlSession {
     return { script: saved };
   }
 
-  /** The saved login values of the run's profiles, which AI clients never see. */
-  private secrets(runId: string): string[] {
-    return this.scriptTools().runner.secrets(runId).filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
+  /** The saved login values of a run's profiles, and of `profileIds` as stored now, which AI clients never see. */
+  private secrets(runId: string, profileIds: string[] = []): string[] {
+    const values = new Set(this.scriptTools().runner.secrets(runId));
+    for (const id of profileIds) {
+      const profile = this.deps.store?.getProfile(id) as unknown as Record<string, unknown> | null | undefined;
+      for (const key of CREDENTIAL_FIELDS) if (typeof profile?.[key] === "string") values.add(profile[key] as string);
+    }
+    return [...values].filter((value) => value.length >= 4).sort((a, b) => b.length - a.length);
   }
 
   private maskedRun(run: ScriptRun | null): ScriptRun | null {
-    if (!run) return run;
-    const secrets = this.secrets(run.id);
-    return { ...run, profiles: run.profiles.map(({ error, warning, ...item }) => ({
-      ...item,
-      ...(error === undefined ? {} : { error: maskSecrets(error, secrets) }),
-      ...(warning === undefined ? {} : { warning: maskSecrets(warning, secrets) }),
-    })) };
+    return run && { ...run, profiles: maskProfiles(run.profiles, this.secrets(run.id)) };
   }
 
   private scriptLog(runId: string, offset: number) {
