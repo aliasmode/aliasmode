@@ -225,10 +225,10 @@
           "wait": 6
         }
       ],
-      "after": "cannot find an account|new to Amazon|Create account|Looks like you.re new|Enter the characters|Solve this puzzle|Access restricted|continue shopping",
-      "block": "Enter the characters you see|Solve this puzzle|Type the characters|Access restricted|unauthorized AI agent|Click the button below to continue shopping",
+      "after": "cannot find an account|new to Amazon|Create account|Looks like you.re new|Enter the characters|Solve this puzzle|Access restricted|continue shopping|Something went wrong",
+      "block": "Enter the characters you see|Solve this puzzle|Type the characters|Access restricted|unauthorized AI agent|Click the button below to continue shopping|Something went wrong on our end",
       "pass": "cannot find an account|new to Amazon|Looks like you.re new|Create account",
-      "notes": "Unregistered address on /ap/signin (FWCIM runs on this page). 2026-11-27 dev box, bench IP: stock Chrome got the 'Click the button below to continue shopping' interstitial and then 'Access restricted ... unauthorized AI agent'; both count as blocks."
+      "notes": "Unregistered address on /ap/signin (FWCIM runs on this page). 2026-11-27 dev box, bench IP: stock Chrome got the 'Click the button below to continue shopping' interstitial and then 'Access restricted ... unauthorized AI agent'; both count as blocks. 'Sorry! Something went wrong on our end' (the dogs page) right after the email step is a block too."
     },
     {
       "id": "px-walmart",

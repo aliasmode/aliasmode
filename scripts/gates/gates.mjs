@@ -82,12 +82,14 @@ function input(...args) {
   if (r.status !== 0) log(`input ${args[0]} failed (${r.status ?? r.error?.message}): ${(r.stderr ?? "").trim().slice(-400)}`);
   return (r.stdout ?? "").trim();
 }
+let stopDisplay = () => {};
 if (!WIN && !MAC) {
   const display = 160 + (process.pid % 30);
   process.env.DISPLAY = `:${display}`;
   process.env.GATES_RUN = join(WORK, "x");
   input("display-start", display);
   process.on("exit", () => input("display-stop", display));
+  stopDisplay = () => input("display-stop", display);
 }
 
 // ---------- engines ----------
@@ -436,7 +438,6 @@ async function gateB(E) {
       if (stable === false) result.blockers.push({ engine, key, detail: "changes across restarts", values: [...Array(n).keys()].flatMap((i) => [1, 2].map((p) => value(`${engine}-${i}-${p}`, key).slice(0, 60))) });
     }
     result.engines[engine] = table;
-    (result.debug ??= {})[engine] = { runs: Object.keys(runs), sample: value(`${engine}-0-1`, "canvas.toDataURL"), type: typeof runs[`${engine}-0-1`] };
   }
   server.close();
   if (opts.buckets) result.status = "info";
@@ -628,6 +629,7 @@ for (const [name, g] of Object.entries(summary.gates)) {
   md.push("");
 }
 writeFileSync(join(OUT, "summary.md"), redact(md.join("\n")));
+stopDisplay(); // before WORK (it holds the X server's pid files) is removed
 rmSync(WORK, { recursive: true, force: true });
 log(`${summary.pass ? "PASS" : "FAIL"}: ${OUT}/summary.md`);
 process.exit(summary.pass ? 0 : 1);
