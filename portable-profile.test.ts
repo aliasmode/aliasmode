@@ -216,3 +216,26 @@ test("portable profile codec writes localeManual as true or leaves it out, never
   expect(decodePortableProfile(on).profile.localeManual).toBe(true);
   expect(() => decodePortableProfile({ ...on, profile: { ...on.profile, localeManual: false } } as any)).toThrow();
 });
+
+test("only the New identity upload carries the token, and decode keeps it out of the session bundle", () => {
+  const token = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+  const pushed = encodePortableProfile(profile(), JSON.stringify({ cookies: [] }), token);
+  expect(pushed.session).toEqual({ cookies: [], newIdentity: token });
+
+  const decoded = decodePortableProfile(pushed);
+  expect(decoded.newIdentity).toBe(token);
+  expect(JSON.parse(decoded.sessionBundle)).toEqual({ cookies: [] });
+  // Checkpoints, closes, captures, parked sessions and exports encode a session bundle without the token.
+  expect("newIdentity" in encodePortableProfile(decoded.profile, decoded.sessionBundle).session).toBe(false);
+  const bundleWithToken = JSON.stringify({ cookies: [], newIdentity: token });
+  expect("newIdentity" in encodePortableProfile(profile(), bundleWithToken).session).toBe(false);
+  expect("newIdentity" in encodePortableProfile(profile()).session).toBe(false);
+  expect("newIdentity" in encodePortableProfile(firefoxProfile(), bundleWithToken).session).toBe(false);
+
+  // A payload without the token (an older client's upload) carries none.
+  expect(decodePortableProfile(encodePortableProfile(profile())).newIdentity).toBeUndefined();
+  // A malformed token is ignored rather than making the profile unopenable.
+  const malformed = { ...pushed, session: { ...pushed.session, newIdentity: "not-a-uuid" } };
+  expect(decodePortableProfile(malformed).newIdentity).toBeUndefined();
+  expect(() => encodePortableProfile(profile(), undefined, "not-a-uuid")).toThrow("invalid new identity token");
+});

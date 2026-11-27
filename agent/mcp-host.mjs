@@ -200,7 +200,7 @@ const ALIAS_TOOLS = [
   },
   {
     name: "aliasmode_profile_new_identity",
-    description: "Give an AliasMode profile a new identity, like Mullvad Browser's New Identity: delete its whole browser data on this computer (cookies, logins, history, bookmarks, saved passwords, site data and add-ons installed inside the browser) and give it a new fingerprint on the same system and browser. Name, folder, proxy, login details, tags and extensions assigned in AliasMode stay. An open profile is closed and opened again. There is no undo.",
+    description: "Give an AliasMode profile a new identity, like Mullvad Browser's New Identity: delete its whole browser data on this computer (cookies, logins, history, bookmarks, saved passwords, site data and add-ons installed inside the browser) and give it a new fingerprint on the same system and browser. Name, folder, proxy, login details, tags and extensions assigned in AliasMode stay. An open profile is closed and opened again. An AliasMode Cloud profile is reset on every computer: other computers finish the reset when they next open it. There is no undo.",
     annotations: toolAnnotations("Start a new identity for an AliasMode profile", { destructive: true }),
     inputSchema: {
       type: "object",

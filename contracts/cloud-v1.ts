@@ -178,6 +178,9 @@ export interface PortableSessionV1 {
   /** Ordered normal web tabs. Duplicates are intentional. */
   tabs?: string[];
   telegramClient?: "a" | "k";
+  /** A UUID only the session a New identity uploads carries. Each other device that opens the profile
+      while Cloud still holds it deletes its own browser data of the profile once. Older clients ignore it. */
+  newIdentity?: string;
 }
 
 export interface CloudProxy {

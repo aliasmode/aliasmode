@@ -898,7 +898,7 @@
   "Quit": "Выйти",
   "New identity": "Новая личность",
   "Start a new identity for {profile}": "Начать новую личность для {profile}",
-  "Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser on this computer, and gives it a new fingerprint. Extensions assigned in AliasMode stay.": "Начать новую личность? Будут удалены cookie, входы в аккаунты, история, закладки, сохранённые пароли и дополнения, установленные внутри браузера этого профиля на этом компьютере, а профиль получит новый отпечаток. Расширения, назначенные в AliasMode, сохранятся.",
+  "Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser, and gives it a new fingerprint. A Cloud profile is reset on every computer: other computers finish the reset when they next open it. Extensions assigned in AliasMode stay.": "Начать новую личность? Будут удалены cookie, входы в аккаунты, история, закладки, сохранённые пароли и дополнения, установленные внутри браузера этого профиля, а профиль получит новый отпечаток. Облачный профиль сбрасывается на каждом компьютере: другие компьютеры завершат сброс, когда снова откроют его. Расширения, назначенные в AliasMode, сохранятся.",
   "Succeeded": "Выполнено",
   "Failed": "Ошибка",
   "Skipped": "Пропущено",

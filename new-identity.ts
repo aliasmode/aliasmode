@@ -4,7 +4,8 @@
  * passwords, cache, site storage, add-ons installed in the browser) and saved session are deleted, and it
  * gets a new seed, screen and hardware on the same system, engine and runtime. Name, folder,
  * proxy, notes, tags, login details and extensions stay. An open profile is closed, reset and
- * opened again; a closed one stays closed. There is no undo.
+ * opened again; a closed one stays closed. There is no undo. A Cloud profile's empty session carries a
+ * one-time token: every other computer that opens the profile while Cloud holds it deletes its own copy too.
  */
 
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
@@ -16,7 +17,7 @@ import type { ProfileStore } from "./store.ts";
 import type { Profile } from "./types.ts";
 
 export interface NewIdentityDeps {
-  launcher: Pick<Launcher, "start" | "stop" | "resetUserData" | "resetUserDataRefusal">;
+  launcher: Pick<Launcher, "start" | "stop" | "resetUserData" | "resetUserDataRefusal" | "recordNewIdentity">;
   store: ProfileStore;
   cloudBrowser?: Pick<CloudBrowserLifecycle, "open" | "close" | "newIdentityBlocked" | "discardSessions">;
   cloudClient?: CloudProfileEditorClient;
@@ -84,11 +85,15 @@ export async function startNewIdentity(deps: NewIdentityDeps, profileId: string)
     const unsaved = cloudBrowser.newIdentityBlocked?.(profileId);
     if (unsaved) throw new NewIdentityError(unsaved, 409);
     let wiped = false;
+    // Other computers delete their copy of the profile's data once when they open it while Cloud holds this token.
+    const token = crypto.randomUUID();
     try {
       await new CloudProfileEditor(deps.cloudClient, store).newIdentity(profileId, fresh, async (next) => {
         await wipe(next);
         wiped = true;
-      });
+        // This computer has applied it already.
+        launcher.recordNewIdentity(profileId, token);
+      }, token);
     } catch (error) {
       if (!wiped) throw error;
       // Nothing links: this computer holds an empty folder, and Cloud still the old identity.

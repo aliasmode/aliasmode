@@ -293,6 +293,7 @@ export class CloudProfileEditor {
     profileId: string,
     fresh: (profile: Profile) => Profile,
     prepare: (next: Profile) => Promise<void> = async () => {},
+    token?: string,
   ): Promise<Profile> {
     assertSafeProfileId(profileId);
     const authoritative = await this.cloud.getProfile(profileId);
@@ -304,7 +305,7 @@ export class CloudProfileEditor {
     try {
       await this.cloud.updateProfile(profileId, {
         expectedVersion: authoritative.profile.version,
-        payload: encodePortableProfile(next, JSON.stringify({ cookies: [] })),
+        payload: encodePortableProfile(next, JSON.stringify({ cookies: [] }), token),
       });
     } catch (error) {
       if (error instanceof CloudApiError && error.status === 409) {

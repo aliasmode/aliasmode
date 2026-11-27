@@ -2079,6 +2079,9 @@ function createCloudCrossDeviceSyntheticRuntime(
     failedStartGeneration() { return undefined; },
     matchesCloudSession() { return false; },
     recordCloudSession() {},
+    newIdentityApplied() { return false; },
+    recordNewIdentity() {},
+    async resetUserData() {},
     async start(profileId, _launchArgs, options) {
       calls.start++;
       generation++;

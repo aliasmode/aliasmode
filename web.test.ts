@@ -437,9 +437,14 @@ test("the Local API gives a closed Cloud profile a new identity through Cloud", 
   const profile = buildNewProfile({ engine: "chromium", chromiumRuntime: "cloakbrowser", name: "cloud" }, () => false);
   const updates: any[] = [];
   const resets: string[] = [];
+  const markers: string[] = [];
   let signedIn = true;
   const server = serveAutomationApi({
-    port: 0, launcher: { resetUserDataRefusal: () => undefined, resetUserData: async (id: string) => { resets.push(id); } } as any, store,
+    port: 0, launcher: {
+      resetUserDataRefusal: () => undefined,
+      resetUserData: async (id: string) => { resets.push(id); },
+      recordNewIdentity: (id: string, token: string) => { markers.push(`${id}:${token}`); },
+    } as any, store,
     appConfig: { read: () => ({ mode: "cloud" }) } as any,
     cloudConnection: { client: {
       getProfile: async () => {
@@ -459,6 +464,7 @@ test("the Local API gives a closed Cloud profile a new identity through Cloud", 
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ expectedVersion: 3, payload: { session: { cookies: [] } } });
     expect(resets).toEqual([profile.id]);
+    expect(markers).toEqual([`${profile.id}:${updates[0].payload.session.newIdentity}`]);
     expect(store.getProfile(profile.id)!.fingerprintSeed).toBe(updates[0].payload.profile.fingerprintSeed);
     signedIn = false;
     expect(await post()).toEqual({ code: -1, msg: "AliasMode Cloud authentication is required", data: {} });

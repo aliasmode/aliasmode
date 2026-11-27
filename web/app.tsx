@@ -2620,7 +2620,7 @@ function App() {
   };
 
   const startNewIdentity = (profile: UiProfile) => {
-    if (!confirm(t("Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser on this computer, and gives it a new fingerprint. Extensions assigned in AliasMode stay."))) return;
+    if (!confirm(t("Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser, and gives it a new fingerprint. A Cloud profile is reset on every computer: other computers finish the reset when they next open it. Extensions assigned in AliasMode stay."))) return;
     void act(profile.id, newProfileIdentity);
   };
 

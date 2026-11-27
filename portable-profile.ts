@@ -5,6 +5,9 @@ import { normalizeProfileHardware } from "./fingerprint.ts";
 import { assertValidProfile, isDisplayScale } from "./profile-validation.ts";
 import { normalizeBundle } from "./session.ts";
 
+const NEW_IDENTITY_TOKEN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The session it carries never includes `newIdentity`: only the New identity upload adds that token. */
 function portableSession(raw: unknown): PortableSessionV1 {
   if (!raw || typeof raw !== "object" || !Array.isArray((raw as { cookies?: unknown }).cookies)) {
     throw new Error("portable session must include a cookies array");
@@ -18,12 +21,14 @@ function portableSession(raw: unknown): PortableSessionV1 {
   };
 }
 
+/** `newIdentity` is for the New identity upload only; every other save leaves it out. */
 export function encodePortableProfile(
   profile: Profile & { engine: "firefox"; firefox: FirefoxProfileConfig },
   sessionBundle?: string,
+  newIdentity?: string,
 ): PortableProfileV2;
-export function encodePortableProfile(profile: Profile, sessionBundle?: string): PortableProfileV1 | PortableProfileV3 | PortableProfileV4;
-export function encodePortableProfile(profile: Profile, sessionBundle?: string): PortableProfile {
+export function encodePortableProfile(profile: Profile, sessionBundle?: string, newIdentity?: string): PortableProfileV1 | PortableProfileV3 | PortableProfileV4;
+export function encodePortableProfile(profile: Profile, sessionBundle?: string, newIdentity?: string): PortableProfile {
   assertValidProfile(profile);
   const engine = normalizeProfileEngine(profile.engine, profile.firefox);
   let session: PortableSessionV1;
@@ -37,6 +42,10 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string):
       throw new Error(`invalid session bundle: ${error instanceof Error ? error.message : String(error)}`);
     }
     session = portableSession(parsed);
+  }
+  if (newIdentity !== undefined) {
+    if (!NEW_IDENTITY_TOKEN.test(newIdentity)) throw new Error("invalid new identity token");
+    session.newIdentity = newIdentity;
   }
 
   const portableProfile: PortableProfileV1["profile"] = {
@@ -88,6 +97,8 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string):
 export function decodePortableProfile(payload: PortableProfile): {
   profile: Profile;
   sessionBundle: string;
+  /** The token of a New identity that Cloud still holds; the session bundle never carries it. */
+  newIdentity?: string;
 } {
   if (!payload?.profile || !payload.session) throw new Error("unsupported portable profile payload");
   const portableProfile = payload.profile as PortableProfileV1["profile"] & {
@@ -171,5 +182,10 @@ export function decodePortableProfile(payload: PortableProfile): {
     seeded: false,
   };
   assertValidProfile(profile);
-  return { profile, sessionBundle: JSON.stringify(session) };
+  const newIdentity = (payload.session as { newIdentity?: unknown }).newIdentity;
+  return {
+    profile,
+    sessionBundle: JSON.stringify(session),
+    ...(typeof newIdentity === "string" && NEW_IDENTITY_TOKEN.test(newIdentity) ? { newIdentity } : {}),
+  };
 }

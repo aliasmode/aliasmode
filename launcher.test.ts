@@ -4497,6 +4497,17 @@ test("resetUserData deletes a closed profile's whole dir, refuses unsafe or open
   expect(existsSync(profileDir)).toBe(false);
   expect(existsSync(components)).toBe(true);
 
+  // The New identity marker lives in the profile's folder, so a reset or a deleted folder forgets it.
+  const token = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+  expect(launcher.newIdentityApplied("k1d0cd11", token)).toBe(false);
+  launcher.recordNewIdentity("k1d0cd11", token);
+  expect(launcher.newIdentityApplied("k1d0cd11", token)).toBe(true);
+  expect(launcher.newIdentityApplied("k1d0cd11", "0f8fad5b-d9cb-469f-a165-70867728950e")).toBe(false);
+  expect(launcher.newIdentityApplied("cloud-cache", token)).toBe(false);
+  expect(() => launcher.recordNewIdentity("cloud-cache", token)).toThrow("unsafe");
+  await launcher.resetUserData("k1d0cd11");
+  expect(launcher.newIdentityApplied("k1d0cd11", token)).toBe(false);
+
   rmSync(root, { recursive: true, force: true });
   store.close();
 });

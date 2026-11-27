@@ -3160,7 +3160,9 @@ test("new identity (Cloud) closes the open profile, saves an empty session, wipe
   const launcher: any = {
     resetUserDataRefusal: () => refusal,
     resetUserData: async () => { calls.push("reset"); if (wipeError) throw wipeError; },
+    recordNewIdentity: (_id: string, token: string) => { calls.push("marker"); markers.push(token); },
   };
+  const markers: string[] = [];
   client.updateProfile = async (_id: string, request: any) => {
     calls.push("cloud-update");
     if (pushError) throw pushError;
@@ -3172,9 +3174,11 @@ test("new identity (Cloud) closes the open profile, saves an empty session, wipe
 
   expect(await (await post())!.json()).toEqual({ ok: true, profileId: "k1d0cd11", reopened: true });
   // This computer first, Cloud last.
-  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset", "discard", "cloud-update", "open:{}"]);
+  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset", "discard", "marker", "cloud-update", "open:{}"]);
   expect(updates[0].expectedVersion).toBe(3);
-  expect(updates[0].payload.session).toEqual({ cookies: [] });
+  // Only this upload carries the one-time token, and this computer noted it has applied it.
+  expect(updates[0].payload.session).toEqual({ cookies: [], newIdentity: markers[0] });
+  expect(markers[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   expect(updates[0].payload.profile.fingerprintSeed).not.toBe(before.fingerprintSeed);
   expect(updates[0].payload.profile).toMatchObject({ name: before.name, username: before.username, password: before.password, proxy: before.proxy });
   expect(s.getProfile("k1d0cd11")).toMatchObject({ fingerprintSeed: updates[0].payload.profile.fingerprintSeed, cookies: [] });
@@ -3216,8 +3220,10 @@ test("new identity (Cloud) closes the open profile, saves an empty session, wipe
   const failedPush = await post();
   expect(failedPush!.status).toBe(500);
   expect((await failedPush!.json()).error).toMatch(/browser data on this computer was deleted, but Cloud did not save the new identity: Cloud is offline/);
-  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset", "discard", "cloud-update"]);
+  expect(calls).toEqual(["cloud-get", "close", "cloud-get", "reset", "discard", "marker", "cloud-update"]);
   expect(updates).toHaveLength(1);
+  // Every New identity gets its own token.
+  expect(new Set(markers).size).toBe(2);
   s.close();
 });
 

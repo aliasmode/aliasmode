@@ -147,7 +147,8 @@ type CloudBrowserLauncher = Pick<
   Launcher,
   "start" | "stop" | "active" | "hasPageTargets" | "verifyRunningIdentity" | "reconcileOrphan" |
   "browserStorageWatchPaths" | "failedStartGeneration" |
-  "matchesCloudSession" | "recordCloudSession" | "navigate"
+  "matchesCloudSession" | "recordCloudSession" | "navigate" |
+  "resetUserData" | "newIdentityApplied" | "recordNewIdentity"
 > & Partial<Pick<Launcher, "closedFirefoxTabs" | "prefetchFirefoxFontPacks" | "nativeSessionReadable">>;
 
 export interface CloudBrowserOptions {
@@ -337,6 +338,7 @@ export type CloudOpenStage =
   | "cloud_registration"
   | "lifecycle_opening"
   | "payload_restore"
+  | "new_identity"
   | "browser_launch"
   | "lifecycle_restoring"
   | "session_restore"
@@ -782,7 +784,7 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (pendingForProfile.some(isResavableConflict)) {
         return { ok: false, error: RESAVE_PENDING_ERROR };
       }
-      const hasTerminalConflict = pendingForProfile.some((pending) => pending.status === "conflict");
+      let hasTerminalConflict = pendingForProfile.some((pending) => pending.status === "conflict");
       if (queue.getOpen(profileId, accountId)) {
         return { ok: false, error: "Cloud profile recovery must finish before opening" };
       }
@@ -830,8 +832,20 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
 
       stage = "payload_restore";
       logStage("payload_restore");
-      const { profile: decoded, sessionBundle } = decodePortableProfile(opened.payload);
+      const { profile: decoded, sessionBundle, newIdentity } = decodePortableProfile(opened.payload);
       if (decoded.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
+      // Another computer started a new identity, and its empty session is still the Cloud copy. This
+      // computer's data of the old identity goes once; the marker stops a second delete after a crash.
+      if (newIdentity && !this.options.launcher.newIdentityApplied(profileId, newIdentity)) {
+        stage = "new_identity";
+        logStage("new_identity");
+        await this.options.launcher.resetUserData(profileId);
+        this.options.store.resetIdentity(completeProfileFingerprint(decoded));
+        this.discardSessions(profileId);
+        hasTerminalConflict = false;
+        this.options.launcher.recordNewIdentity(profileId, newIdentity);
+        this.log(`${profileId}: applied a new identity from another device; deleted this device's browser data`);
+      }
       this.options.store.upsertProfile(completeProfileFingerprint(decoded));
       this.options.store.setTimezone(decoded.id, decoded.timezone);
       this.options.store.setHardware(decoded.id, decoded.hardware);

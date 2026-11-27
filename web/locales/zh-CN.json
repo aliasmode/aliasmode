@@ -1175,7 +1175,7 @@
   "Quit": "退出",
   "New identity": "新身份",
   "Start a new identity for {profile}": "为 {profile} 启用新身份",
-  "Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser on this computer, and gives it a new fingerprint. Extensions assigned in AliasMode stay.": "启用新身份？这将删除此环境在本机上的 Cookie、登录状态、历史记录、书签、已保存的密码以及在浏览器内安装的附加组件，并为其生成新的指纹。在 AliasMode 中分配的扩展会保留。",
+  "Start a new identity? This deletes this profile's cookies, logins, history, bookmarks, saved passwords and add-ons installed inside the browser, and gives it a new fingerprint. A Cloud profile is reset on every computer: other computers finish the reset when they next open it. Extensions assigned in AliasMode stay.": "启用新身份？这将删除此环境的 Cookie、登录状态、历史记录、书签、已保存的密码以及在浏览器内安装的附加组件，并为其生成新的指纹。云端环境会在每台电脑上重置：其他电脑会在下次打开该环境时完成重置。在 AliasMode 中分配的扩展会保留。",
   "Succeeded": "成功",
   "skipped: profile closed": "已跳过：环境已关闭",
   "Official": "官方",

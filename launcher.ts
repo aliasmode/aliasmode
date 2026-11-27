@@ -105,6 +105,8 @@ function needsProxyRelay(profile: Profile): boolean {
 const SEARCH_PROVIDER_BOOTSTRAP_REVISION = 2;
 const SEARCH_PROVIDER_BOOTSTRAP_MARKER = `.aliasmode-search-bootstrap-v${SEARCH_PROVIDER_BOOTSTRAP_REVISION}`;
 const CLOUD_SESSION_AUTHORITY_MARKER = ".aliasmode-cloud-session-authority-v1";
+/** Holds the token of the last New identity this computer applied to the profile's data folder. */
+const NEW_IDENTITY_MARKER = ".aliasmode-new-identity";
 /** App folders that can sit in the profile data root (see profileDataPaths). No profile may use their name. */
 const RESERVED_DATA_DIRS = new Set(["cloud-cache"]);
 const UNGOOGLED_FIRST_RUN_URL = "chrome://ungoogled-first-run/";
@@ -4499,6 +4501,33 @@ export class Launcher {
     if (existsSync(dir)) await this.reapForeignProfileDirHolders(profileId, dir);
     // Async, as in clearCacheDirs: a synchronous delete of a large profile stalls every proxy relay.
     await rm(dir, { recursive: true, force: true });
+  }
+
+  /** Whether this computer already deleted the profile's browser data for the New identity with this token. */
+  newIdentityApplied(profileId: string, token: string): boolean {
+    const base = this.containedUserDataDir(profileId, "newIdentityApplied");
+    if (!base) return false;
+    try {
+      return readFileSync(join(base, NEW_IDENTITY_MARKER), "utf8") === token;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Note, right after resetUserData, that this computer applied the New identity with this token. */
+  recordNewIdentity(profileId: string, token: string): void {
+    const base = this.containedUserDataDir(profileId, "recordNewIdentity");
+    if (!base) throw new Error(`refusing unsafe profile id ${JSON.stringify(profileId)}`);
+    const marker = join(base, NEW_IDENTITY_MARKER);
+    const temporary = `${marker}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      mkdirSync(base, { recursive: true });
+      writeFileSync(temporary, token, { flag: "wx" });
+      renameSync(temporary, marker);
+    } catch (error) {
+      try { rmSync(temporary, { force: true }); } catch {}
+      throw error;
+    }
   }
 
   /** Why resetUserData refuses this profile whether it is open or not; callers check it before they close it. */

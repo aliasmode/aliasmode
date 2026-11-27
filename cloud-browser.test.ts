@@ -99,6 +99,7 @@ function setup(options: {
   const captureSeeds: any[] = [];
   const startOptionsSeen: any[] = [];
   let cloudSessionSignature: string | null = null;
+  let newIdentityMarker: string | null = null;
   const store = new ProfileStore(":memory:");
   const queuePath = join(mkdtempSync(join(tmpdir(), "aliasmode-cloud-browser-")), "pending.sqlite");
   const queue = new PendingSyncQueue(queuePath, new Uint8Array(32).fill(5));
@@ -217,6 +218,19 @@ function setup(options: {
     },
     recordCloudSession(_profileId: string, signature: string | null) {
       cloudSessionSignature = signature;
+    },
+    // The marker sits in the profile's data folder, so a reset deletes it.
+    async resetUserData() {
+      events.push("reset");
+      newIdentityMarker = null;
+      cloudSessionSignature = null;
+    },
+    newIdentityApplied(_profileId: string, token: string) {
+      return newIdentityMarker === token;
+    },
+    recordNewIdentity(_profileId: string, token: string) {
+      events.push("new-identity-marker");
+      newIdentityMarker = token;
     },
     failedStartGeneration(error: unknown) {
       return error === retainedStartFailure
@@ -339,6 +353,7 @@ function setup(options: {
     queue,
     closeCalls: () => closeCalls,
     abandonCalls: () => abandonCalls,
+    newIdentityMarker: () => newIdentityMarker,
     getProfileCalls: () => getProfileCalls,
     startCalls: () => startCalls,
     startedProxy: () => startedProxy,
@@ -5127,4 +5142,81 @@ test("a saved session from before a new identity cannot be restored onto the new
   expect(state.events.at(-1)).toBe("abandon");
   state.queue.close();
   state.store.close();
+});
+
+const NEW_IDENTITY_TOKEN = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+function newIdentitySession(): PortableProfileV1["session"] {
+  return { cookies: [], newIdentity: NEW_IDENTITY_TOKEN };
+}
+
+test("a Cloud open deletes this device's data once for a New identity made elsewhere, and no upload carries the token", async () => {
+  const state = setup({ session: newIdentitySession() });
+  const closed = recordClosedPayloads(state);
+  const checkpoints: PortableProfileV1[] = [];
+  (state.coordinator as any).options.cloud.checkpointOpen = async (_registrationId: string, request: { expectedVersion: number; payload: PortableProfileV1 }) => {
+    checkpoints.push(structuredClone(request.payload));
+    return { ok: true, status: "saved", version: request.expectedVersion + 1 };
+  };
+
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  // The delete comes before the browser starts, and the marker right after it.
+  expect(state.events.filter((event) => event === "reset")).toHaveLength(1);
+  expect(state.events.indexOf("reset")).toBeLessThan(state.events.indexOf("new-identity-marker"));
+  expect(state.events.indexOf("new-identity-marker")).toBeLessThan(state.events.indexOf("start"));
+  expect(state.newIdentityMarker()).toBe(NEW_IDENTITY_TOKEN);
+  expect(state.events).toContain("restore");
+
+  changeSession(state, "new-login");
+  await state.coordinator.heartbeatOnce("profile1");
+  expect(await state.coordinator.close("profile1")).toMatchObject({ closed: true });
+  expect(checkpoints.length + closed.length).toBeGreaterThan(0);
+  for (const uploaded of [...checkpoints, ...closed]) expect("newIdentity" in uploaded.session).toBe(false);
+  const queued = state.queue.list("account1").map((pending) => state.queue.get(pending.id, "account1")!);
+  for (const pending of queued) expect("newIdentity" in pending.payload.session).toBe(false);
+
+  // Cloud still holds the token (this device crashed before its close upload landed): no second delete.
+  state.events.length = 0;
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.events).not.toContain("reset");
+  expect(state.newIdentityMarker()).toBe(NEW_IDENTITY_TOKEN);
+});
+
+test("a New identity from another device discards this device's parked sessions", async () => {
+  const state = setup({ closeConflict: true });
+  await parkRejectedSession(state);
+  expect(state.queue.list("account1")).toHaveLength(1);
+  const options = (state.coordinator as any).options;
+  const current = payload();
+  current.session = newIdentitySession();
+  options.cloud.openProfile = async () => {
+    state.events.push("cloud-open");
+    return { ok: true, registrationId: "registration2", baseVersion: 5, payload: current, activeOpens: [] };
+  };
+
+  const opened = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(opened.ok).toBe(true);
+  expect(opened.warning ?? "").not.toContain("Cloud rejected it");
+  expect(state.events).toContain("reset");
+  expect(state.queue.list("account1").filter((pending) => pending.status === "conflict")).toEqual([]);
+});
+
+test("a Cloud session without the token never deletes this device's data, even with no marker", async () => {
+  // Another device's normal close, or an older client's upload, carries no token.
+  const state = setup();
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(await state.coordinator.close("profile1")).toMatchObject({ closed: true });
+  expect((await state.coordinator.open("profile1", ["--window-size=1200,800"])).ok).toBe(true);
+  expect(state.events).not.toContain("reset");
+  expect(state.newIdentityMarker()).toBeNull();
+});
+
+test("the roster's background refresh never applies a New identity", async () => {
+  const state = setup({ session: newIdentitySession() });
+  await rosterReconciled(state.coordinator);
+  await (state.coordinator as any).proxyBackfillTask;
+  expect(state.getProfileCalls()).toBeGreaterThan(0);
+  expect(state.store.getProfile("profile1")).not.toBeNull();
+  expect(state.events).not.toContain("reset");
+  expect(state.newIdentityMarker()).toBeNull();
 });
