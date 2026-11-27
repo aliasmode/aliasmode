@@ -5,6 +5,10 @@ name: Release gates
 # GATES_SITE_TOKEN, read access); without it Gate A is skipped. Gate C runs only when the secret GATES_PROXY
 # (an http:// proxy URL) exists, because runner IPs are datacenter IPs.
 on:
+  # TEMPORARY: runner smoke test before the workflow reaches main (dispatch needs it on the default branch).
+  push:
+    branches: [gates/runner]
+    paths: [.github/workflows/gates.yml, scripts/gates/**]
   workflow_dispatch:
     inputs:
       engine_build:
