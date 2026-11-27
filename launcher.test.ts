@@ -4507,6 +4507,9 @@ test("resetUserData deletes a closed profile's whole dir, refuses unsafe or open
   expect(() => launcher.recordNewIdentity("cloud-cache", token)).toThrow("unsafe");
   await launcher.resetUserData("k1d0cd11");
   expect(launcher.newIdentityApplied("k1d0cd11", token)).toBe(false);
+  // Only a missing marker means "not applied"; a marker it cannot read throws, so nothing is deleted.
+  mkdirSync(join(profileDir, ".aliasmode-new-identity"), { recursive: true });
+  expect(() => launcher.newIdentityApplied("k1d0cd11", token)).toThrow();
 
   rmSync(root, { recursive: true, force: true });
   store.close();

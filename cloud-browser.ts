@@ -842,15 +842,19 @@ export class CloudBrowserCoordinator implements CloudBrowserLifecycle {
       if (decoded.id !== profileId) throw new Error("Cloud returned a mismatched profile payload");
       // Another computer started a new identity, and its empty session is still the Cloud copy. This
       // computer's data of the old identity goes once; the marker stops a second delete after a crash.
-      if (newIdentity && !this.options.launcher.newIdentityApplied(profileId, newIdentity)) {
+      if (newIdentity) {
+        // A marker this device cannot read fails the open here, and nothing is deleted.
         stage = "new_identity";
-        logStage("new_identity");
-        await this.options.launcher.resetUserData(profileId);
-        this.options.store.resetIdentity(completeProfileFingerprint(decoded));
-        this.discardSessions(profileId);
-        hasTerminalConflict = false;
-        this.options.launcher.recordNewIdentity(profileId, newIdentity);
-        this.log(`${profileId}: applied a new identity from another device; deleted this device's browser data`);
+        if (!this.options.launcher.newIdentityApplied(profileId, newIdentity)) {
+          logStage("new_identity");
+          await this.options.launcher.resetUserData(profileId);
+          this.options.store.resetIdentity(completeProfileFingerprint(decoded));
+          this.discardSessions(profileId);
+          hasTerminalConflict = false;
+          this.options.launcher.recordNewIdentity(profileId, newIdentity);
+          this.log(`${profileId}: applied a new identity from another device; deleted this device's browser data`);
+        }
+        stage = "payload_restore";
       }
       this.options.store.upsertProfile(completeProfileFingerprint(decoded));
       this.options.store.setTimezone(decoded.id, decoded.timezone);

@@ -4509,8 +4509,10 @@ export class Launcher {
     if (!base) return false;
     try {
       return readFileSync(join(base, NEW_IDENTITY_MARKER), "utf8") === token;
-    } catch {
-      return false;
+    } catch (error) {
+      // Only a missing marker means "not applied". Any other read error fails the open instead of deleting data.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+      throw error;
     }
   }
 

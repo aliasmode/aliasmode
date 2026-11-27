@@ -5227,6 +5227,18 @@ test("a later New identity's token replaces the earlier one, so a device with th
   expect(uploads.at(-1)!.session.newIdentity).toBe(t2);
 });
 
+test("an unreadable New identity marker fails the open and deletes nothing", async () => {
+  const state = deviceOpening({ ...payload(), session: newIdentitySession() });
+  (state.coordinator as any).options.launcher.newIdentityApplied = () => {
+    throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+  };
+  const opened = await state.coordinator.open("profile1", ["--window-size=1200,800"]);
+  expect(opened.ok).toBe(false);
+  expect(state.events).not.toContain("reset");
+  expect(state.events).not.toContain("start");
+  expect(state.logs.some((line) => line.includes("Cloud open failed at new_identity"))).toBe(true);
+});
+
 test("a parked session never carries the token, even one captured during an open that downloaded it", async () => {
   const state = setup({ closeConflict: true, session: newIdentitySession() });
   const parked = await parkRejectedSession(state);
