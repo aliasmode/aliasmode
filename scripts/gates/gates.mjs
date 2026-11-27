@@ -303,6 +303,8 @@ function openStock(name, dir, url, proxy) {
       // The terms-of-use screen a new user accepts once; without this it replaces the first page.
       "termsofuse.acceptedVersion": 4, "termsofuse.acceptedDate": String(Date.now()), "termsofuse.bypassNotification": true,
       "datareporting.policy.dataSubmissionPolicyBypassNotification": true,
+      // No update check during a run: on a writable install its "Update available" panel takes the keyboard focus.
+      "app.update.lastUpdateTime.background-update-timer": Math.floor(Date.now() / 1000), "app.update.timerFirstInterval": 86_400_000,
       ...(proxy ? { "network.proxy.type": 1, "network.proxy.http": "127.0.0.1", "network.proxy.http_port": proxy.port, "network.proxy.ssl": "127.0.0.1",
         "network.proxy.ssl_port": proxy.port, "network.proxy.share_proxy_settings": true } : {}) };
     writeFileSync(join(dir, "user.js"), Object.entries(prefs).map(([k, v]) => `user_pref(${JSON.stringify(k)}, ${JSON.stringify(v)});`).join("\n"));
@@ -573,7 +575,8 @@ async function visit(E, target, site, proxy, server) {
 /** Host check: OS input reaches a stock Chrome window, the page sees itself visible and focused, and copying works. */
 async function preflight(server, proxy) {
   const pending = server.wait("focus", 90_000);
-  const b = openStock("chrome", join(WORK, "focus"), "about:blank", proxy);
+  // A fresh profile per check: a reused one opens Chrome's "Restore pages?" bubble, which takes the focus.
+  const b = openStock("chrome", join(WORK, `focus-${Date.now()}`), "about:blank", proxy);
   for (let i = 0; i < 30 && input("activate") === "none"; i++) await sleep(1500);
   await sleep(2000); input("activate"); input("open", server.url("focus", "focus"));
   const seen = (await pending) ?? { visibility: "no result" };

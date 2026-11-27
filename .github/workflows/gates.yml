@@ -120,6 +120,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/firefox-159" && cp -R "$RUNNER_TEMP/ffmnt/Firefox.app" "$RUNNER_TEMP/firefox-159/"
           hdiutil detach "$RUNNER_TEMP/ffmnt"
           echo "FIREFOX_BIN=$RUNNER_TEMP/firefox-159/Firefox.app/Contents/MacOS/firefox" >> "$GITHUB_ENV"
+      # Stock browsers on Windows follow the system time zone (elsewhere gates.mjs gives them TZ=): use the proxy's.
+      - name: Time zone of the proxy (Windows, Gate C)
+        if: runner.os == 'Windows' && contains(format(',{0},', needs.spec.outputs.only), ',c,') && env.GATES_PROXY != ''
+        shell: pwsh
+        run: |
+          $tz = (curl.exe -fsS -x "$env:GATES_PROXY" https://ipinfo.io/timezone).Trim()
+          $id = $null
+          if (-not [System.TimeZoneInfo]::TryConvertIanaIdToWindowsId($tz, [ref]$id)) { throw "no Windows time zone for the proxy's zone" }
+          Set-TimeZone -Id $id
       - name: Gates
         shell: bash
         # GATES_ names only: the lab's run.mjs reads ONLY as its probe filter.
