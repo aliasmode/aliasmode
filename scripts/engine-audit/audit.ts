@@ -113,7 +113,7 @@ function killTree(pid: number): void {
 export function ownBrowserPid(pid: number): boolean {
   try { process.kill(pid, 0); } catch { return false; }
   const r = WIN
-    ? spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8" })
+    ? spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}').CommandLine`], { encoding: "utf8" })
     : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
   // The engines run from the audit runtimes folder (gates-builds inside it); a Firefox owner names itself.
   return /aliasmode-engine-audit|gates-builds|aliasmode-firefox-owner/i.test(r.stdout ?? "");
