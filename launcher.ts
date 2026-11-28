@@ -273,7 +273,7 @@ const PREFLIGHT_GUIDANCE = {
   firefox_arguments: "Firefox profiles cannot use Chromium launch arguments.",
   firefox_fonts_download: "The fonts for this profile's operating system could not be downloaded. Check your internet connection, then open the profile again.",
   cloakbrowser_download: "CloakBrowser could not be downloaded. Check your internet connection, then open the profile again.",
-  chromium155_host: "AliasMode Chromium requires Windows x64, Apple Silicon macOS, or Linux x64.",
+  chromium155_host: "AliasMode Chromium requires Windows x64, macOS, or Linux x64.",
   chromium155_macos_on_windows: "AliasMode Chromium cannot open a macOS profile on Windows. Open it on a Mac, or set its operating system to Windows.",
   chromium_sandbox: "This Linux computer blocks the Chrome sandbox. Run the AliasMode install command again. It asks for your password once to allow Chrome.",
   chromium155_download: "AliasMode Chromium could not be downloaded. Check your internet connection, then open the profile again.",

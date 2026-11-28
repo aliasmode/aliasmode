@@ -328,8 +328,9 @@
   "Readable TXT, CSV, JSON, or XLSX exports from AdsPower, GoLogin, Multilogin, Dolphin Anty, HideMyAcc, Incogniton, Donut, and similar browsers": "可读的 TXT、CSV、JSON 或 XLSX 导出文件，来自 AdsPower、GoLogin、Multilogin、Dolphin Anty、HideMyAcc、Incogniton、Donut 及类似浏览器",
   "Chrome version": "Chrome 版本",
   "CloakBrowser 146 (default)": "CloakBrowser 146（默认）",
-  "AliasMode Chromium 155 (default)": "AliasMode Chromium 155（默认）",
-  "Downloads once (about 190 MB) on each computer that opens it.": "每台打开它的电脑只需下载一次（约 190 MB）。",
+  "CloakBrowser 145 (default)": "CloakBrowser 145（默认）",
+  "AliasMode Chromium 159 (default)": "AliasMode Chromium 159（默认）",
+  "Downloads once (about 215 MB) on each computer that opens it.": "每台打开它的电脑只需下载一次（约 215 MB）。",
   "CloakBrowser profiles on one computer can be linked to each other. Use AliasMode Chromium or AliasMode Firefox for separate identities.": "同一台电脑上的 CloakBrowser 环境可能会被相互关联。如需相互独立的身份，请使用 AliasMode Chromium 或 AliasMode Firefox。",
   "User agent": "用户代理",
   "Browser version": "浏览器版本",
@@ -1179,5 +1180,6 @@
   "Succeeded": "成功",
   "skipped: profile closed": "已跳过：环境已关闭",
   "Official": "官方",
-  "Ask AI to fix this script": "让 AI 修复此脚本"
+  "Ask AI to fix this script": "让 AI 修复此脚本",
+  "Less safe on strict sites like Amazon, Nike and Google.": "在 Amazon、Nike 和 Google 等严格的网站上不太安全。"
 }

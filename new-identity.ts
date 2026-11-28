@@ -11,6 +11,7 @@
 import type { CloudBrowserLifecycle } from "./cloud-browser.ts";
 import { CloudProfileEditor, cloudProfileEditorErrorStatus, type CloudProfileEditorClient } from "./cloud-profile-editor.ts";
 import { freshIdentity } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import type { Launcher } from "./launcher.ts";
 import { assertSafeProfileId } from "./profile-id.ts";
 import type { ProfileStore } from "./store.ts";
@@ -55,6 +56,7 @@ export async function startNewIdentity(deps: NewIdentityDeps, profileId: string)
   if (deps.scriptBusy?.(profileId)) throw new NewIdentityError("A script is using this profile; stop it first", 409);
   const launch = store.getLaunch(profileId);
   const headless = launch?.headless !== undefined ? { headless: launch.headless } : {};
+  await waitForHostGpu();
   const seeds = new Set(store.listProfiles().map((profile) => profile.fingerprintSeed));
   const fresh = (profile: Profile) => freshIdentity(profile, (seed) => seeds.has(seed));
   // This computer goes first, and Cloud last: a refusal here must leave the browser open and Cloud unchanged.

@@ -248,18 +248,18 @@ test("a Firefox launch names the font pack folder of this computer only, never a
     .toBe("/data/runtimes/firefox-fonts/macos-1/fonts");
 });
 
-test("a Firefox profile saved for engine 152 moves to 156 like a browser update, everywhere it is completed", () => {
+test("a Firefox profile saved for engine 152 moves to the current engine like a browser update, everywhere it is completed", () => {
   const ua = (version: string) => `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:${version}) Gecko/20100101 Firefox/${version}`;
   const legacy: Profile = {
     ...profile(9, { "navigator.userAgent": ua("152.0"), "headers.User-Agent": ua("152.0"), "navigator.appVersion": "5.0 (Windows)", fonts: ["Arial"] }, "152.0.4-beta.30"),
     ua: ua("152.0"), locale: "en-US", timezone: "UTC",
   };
   const current = completeProfileFingerprint(legacy);
-  expect(current.firefox!.runtimeVersion).toBe("156.0.1-beta.36");
-  expect(current.ua).toBe(ua("156.0"));
-  expect(current.firefox!.config).toMatchObject({ "navigator.userAgent": ua("156.0"), "headers.User-Agent": ua("156.0") });
+  expect(current.firefox!.runtimeVersion).toBe("159.0-beta.43");
+  expect(current.ua).toBe(ua("159.0"));
+  expect(current.firefox!.config).toMatchObject({ "navigator.userAgent": ua("159.0"), "headers.User-Agent": ua("159.0") });
   // Nothing else of the identity changes.
-  const unchanged = completeProfileFingerprint({ ...legacy, firefox: { ...legacy.firefox!, runtimeVersion: "156.0.1-beta.36" } });
+  const unchanged = completeProfileFingerprint({ ...legacy, firefox: { ...legacy.firefox!, runtimeVersion: "159.0-beta.43" } });
   expect({ ...current.firefox!.config, "navigator.userAgent": "", "headers.User-Agent": "" })
     .toEqual({ ...unchanged.firefox!.config, "navigator.userAgent": "", "headers.User-Agent": "" });
   expect({ ...current, ua: "", firefox: undefined }).toEqual({ ...unchanged, ua: "", firefox: undefined });
@@ -268,11 +268,11 @@ test("a Firefox profile saved for engine 152 moves to 156 like a browser update,
   const payload = encodePortableProfile(completeProfileFingerprint(legacy) as Profile & { engine: "firefox"; firefox: FirefoxProfileConfig });
   expect(payload.schemaVersion).toBe(2);
   expect(Object.keys(payload.profile.firefox).sort()).toEqual(["config", "runtimeVersion", "version"]);
-  expect(payload.profile.firefox.runtimeVersion).toBe("156.0.1-beta.36");
+  expect(payload.profile.firefox.runtimeVersion).toBe("159.0-beta.43");
   expect(decodePortableProfile(payload).profile.firefox).toEqual(current.firefox);
   // A profile from a newer engine is left for the launcher to refuse.
-  const newer = { ...legacy, firefox: { ...legacy.firefox!, runtimeVersion: "157.0-beta.1" } };
-  expect(completeProfileFingerprint(newer).firefox!.runtimeVersion).toBe("157.0-beta.1");
+  const newer = { ...legacy, firefox: { ...legacy.firefox!, runtimeVersion: "160.0-beta.1" } };
+  expect(completeProfileFingerprint(newer).firefox!.runtimeVersion).toBe("160.0-beta.1");
   expect(completeProfileFingerprint(newer).ua).toBe(ua("152.0"));
 });
 

@@ -80,6 +80,7 @@ import { installFirefox } from "./firefox-install.ts";
 import { applySourceRuntime, setupSourceRuntime } from "./source-runtime.ts";
 import { resolveEgressEndpoints } from "./egress.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import {
   DESKTOP_PROTOCOL,
   DesktopCredentialBridge,
@@ -388,7 +389,7 @@ function makeLauncher(
   remoteMode = false,
   defaultDataRoot = "profiles",
   ensureSearchProvider = ensureDuckDuckGoDefault,
-  // Local and Cloud profiles share one downloaded Chromium 155 runtime.
+  // Local and Cloud profiles share one downloaded Chromium 159 runtime.
   chromiumRuntimeRoot?: string,
 ): Launcher {
   const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
@@ -2853,6 +2854,8 @@ async function main() {
       const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);
       startMemoryAttributionLog();
       prefetchBrowserRuntimes(launcher, store);
+      // New profiles keep to this computer's GPU family: read it now, off the event loop.
+      void waitForHostGpu();
       if (configuredMode.mode === "cloud") {
         console.log("cloud mode: waiting for verified authentication before loading profiles");
         if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser, mcpTunnel);

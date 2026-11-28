@@ -102,7 +102,7 @@ export async function downloadResumable(
 
 /** A browser runtime download in progress, as the dashboard shows it. */
 export interface RuntimeDownload {
-  /** The profiles that wait for it: "aliasmode" (Chromium 155), "cloakbrowser", or "firefox" (a font pack). */
+  /** The profiles that wait for it: "aliasmode" (Chromium 159), "cloakbrowser", or "firefox" (a font pack). */
   runtime: "aliasmode" | "cloakbrowser" | "firefox";
   receivedBytes: number;
   totalBytes: number;

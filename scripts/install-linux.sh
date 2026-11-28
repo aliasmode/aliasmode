@@ -48,7 +48,7 @@ has_library() {
 }
 
 # The app window needs WebKitGTK 4.1; the Chrome runtimes need the usual desktop libraries,
-# and Chromium 155 arrives as a zstd archive.
+# and Chromium 159 arrives as a zstd archive.
 apt_package() {
   # Ubuntu 24.04 renamed several libraries with a t64 suffix; the old name is then virtual.
   local name

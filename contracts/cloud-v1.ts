@@ -346,7 +346,32 @@ export interface PortableProfileV4 {
   session: PortableSessionV1;
 }
 
-export type PortableProfile = PortableProfileV1 | PortableProfileV2 | PortableProfileV3 | PortableProfileV4;
+/**
+ * Identity inputs fixed when a profile is made, never empty. Each string is a short lowercase id
+ * (`^[a-z0-9][a-z0-9._-]{0,63}$`); a client keeps a value it does not know unchanged.
+ */
+export interface PortableProfileIdentity {
+  /**
+   * The GPU vendor of the computer the profile was made on, and the GPU decision made then: the full
+   * engine family id (--fingerprint-anchor), or "host" for the engine's host-GPU switch.
+   */
+  gpu?: { vendor: string; anchor?: string };
+  /** Reserved for real variation: the profile's text rendering bucket. */
+  textBucket?: string;
+  /** The engine's media device catalogue of the profile (a positive integer, e.g. 2). */
+  mediaCatalogue?: number;
+}
+
+/** AliasMode Chromium with a stored identity. Older clients reject it instead of opening it without the identity. */
+export interface PortableProfileV5 {
+  schemaVersion: 5;
+  profile: PortableProfileV3["profile"] & {
+    identity: PortableProfileIdentity;
+  };
+  session: PortableSessionV1;
+}
+
+export type PortableProfile = PortableProfileV1 | PortableProfileV2 | PortableProfileV3 | PortableProfileV4 | PortableProfileV5;
 
 export interface CloudProfileSummary {
   id: string;

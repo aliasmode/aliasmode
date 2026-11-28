@@ -17,8 +17,9 @@ export const NODE_WINDOWS_X64_VERSION = "22.23.2";
 export const NODE_WINDOWS_X64_SHA256 = "1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97";
 export const NODE_WINDOWS_X64_URL = `https://nodejs.org/dist/v${NODE_WINDOWS_X64_VERSION}/node-v${NODE_WINDOWS_X64_VERSION}-win-x64.zip`;
 
-export const ALIASMODE_FIREFOX_VERSION = "156.0.1-beta.36";
-export const ALIASMODE_FIREFOX_ARCHIVE_NAME = "aliasmode-156.0.1-beta.36-win.x86_64.zip";
+// TODO-PIN-FINAL: Firefox 159 pin (see firefox-install.ts).
+export const ALIASMODE_FIREFOX_VERSION = "159.0-beta.43";
+export const ALIASMODE_FIREFOX_ARCHIVE_NAME = "aliasmode-159.0-beta.43-win.x86_64.zip";
 export const ALIASMODE_FIREFOX_EXECUTABLE_NAME = "aliasmode.exe";
 
 export interface PreparedFirefoxMetadata {

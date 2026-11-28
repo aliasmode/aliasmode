@@ -25,6 +25,7 @@ import type { ProfileStore } from "./store.ts";
 import type { RemoteCoordinator } from "./remote.ts";
 import type { Profile, ProxySpec } from "./types.ts";
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import { attachTimezones, lookupExitLocation, type ExitLocation } from "./geoip.ts";
 import { localeAfterProxyExit } from "./profile-locale.ts";
 import { normalizeProxySpec, proxyIdentityKey } from "./proxy.ts";
@@ -271,6 +272,7 @@ export async function handleUserApi(
         const { id } = await remote.createProfile(input);
         return ok({ id });
       }
+      await waitForHostGpu();
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
       // Match the browser clock to the proxy's geo, exactly as /ui/api create and
       // AdsPower's automatic_timezone do. Best-effort: never fail create on geoip.

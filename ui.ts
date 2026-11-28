@@ -38,6 +38,7 @@ import { handleTrashRequest } from "./trash.ts";
 import { importInbox, importBuffers, prepareImportBuffers, ProfileImportError, type ImportOverrides } from "./inbox.ts";
 import { hostChromiumRuntime, supportsChromium155Host } from "./aliasmode-chromium.ts";
 import { buildNewProfile, defaultProfileEngine, type NewProfileInput } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import { firefoxGraphicsRenderer } from "./firefox-config.ts";
 import { attachTimezones, lookupExitLocation, type ExitLocation, type FetchLike } from "./geoip.ts";
 import { localeAfterProxyExit, localeForCountry, localeForTimezone, normalizeProfileLocale } from "./profile-locale.ts";
@@ -60,7 +61,7 @@ import {
 import { decodePortableProfile } from "./portable-profile.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { normalizeProxySpec, proxyHostPort, proxyLegacyString, type ProxyInput } from "./proxy.ts";
-import { convertMobilePersonaToDesktop, editedProfileHardware, isMobileUserAgent } from "./fingerprint.ts";
+import { convertMobilePersonaToDesktop, editedProfileHardware, hostPlatformOs, isMobileUserAgent } from "./fingerprint.ts";
 import { setFirefoxScreen, syncFirefoxTimezone } from "./firefox-config.ts";
 import { join, resolve, dirname } from "node:path";
 import { readdirSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -875,7 +876,7 @@ export async function handleUiRequest(
       ...(options.runtimeMode ? { restartRequired: config.mode !== options.runtimeMode } : {}),
       ...(hostChromiumRuntime() ? { chromiumRuntime: hostChromiumRuntime() } : {}),
       ...(!remote && supportsChromium155Host(process.platform, process.arch) ? { defaultChromiumRuntime: "aliasmode" } : {}),
-      ...(!remote ? { defaultEngine: defaultProfileEngine() } : {}),
+      ...(!remote ? { defaultEngine: defaultProfileEngine(), hostOs: hostPlatformOs() } : {}),
     });
   }
 
@@ -1584,6 +1585,7 @@ export async function handleUiRequest(
         const { id } = await remote.createProfile(input);
         return Response.json({ ok: true, id });
       }
+      await waitForHostGpu();
       const profile = buildNewProfile(input, (id) => !!store.getProfile(id));
       if (!options.cloudBrowser) store.applyGroupExtensionDefaults(profile, null, false);
       // Best-effort: match the browser clock to the proxy's exit location. A

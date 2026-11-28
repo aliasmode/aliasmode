@@ -52,9 +52,9 @@ test("buildNewProfile generates and fixes a selected Windows identity for Firefo
 
   expect(p.engine).toBe("firefox");
   expect(p.firefox!.version).toBe(1);
-  expect(p.firefox!.runtimeVersion).toBe("156.0.1-beta.36");
+  expect(p.firefox!.runtimeVersion).toBe("159.0-beta.43");
   expect(p.firefox!.config["navigator.platform"]).toBe("Win32");
-  expect(p.firefox!.config["navigator.userAgent"]).toContain("Firefox/156.0");
+  expect(p.firefox!.config["navigator.userAgent"]).toContain("Firefox/159.0");
   const config = p.firefox!.config as Record<string, number>;
   expect([config["screen.width"], config["screen.height"]]).toEqual([1440, 900]);
   expect([p.screenWidth, p.screenHeight]).toEqual([1440, 900]);
@@ -64,7 +64,7 @@ test("buildNewProfile generates and fixes a selected Windows identity for Firefo
   expect(p.timezone).toBe(configTimezone as string);
   expect(p.timezone).toBeString();
   expect(p.timezone).not.toBe("");
-  expect(p.ua).toContain("Firefox/156.0");
+  expect(p.ua).toContain("Firefox/159.0");
   expect(p.platformOs).toBe("windows");
 });
 

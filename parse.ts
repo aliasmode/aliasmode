@@ -22,8 +22,8 @@
  */
 
 import { normalizeChromiumRuntime, normalizeProfileEngine } from "./firefox-config.ts";
-import type { ChromiumRuntime, CookieRecord, Profile, ProfileHardware, ProxySpec } from "./types.ts";
-import { deterministicSeed, normalizeProfileHardware, parseResolution, platformFromUA } from "./fingerprint.ts";
+import type { ChromiumRuntime, CookieRecord, Profile, ProfileHardware, ProfileIdentity, ProxySpec } from "./types.ts";
+import { deterministicSeed, normalizeProfileHardware, normalizeProfileIdentity, parseResolution, platformFromUA } from "./fingerprint.ts";
 import { normalizeProxyType, parseProxySpec, proxyLegacyString } from "./proxy.ts";
 import { isSafeProfileId, PROFILE_ID_ERROR } from "./profile-id.ts";
 import { attestationFields, expectationFromRecord, FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
@@ -486,10 +486,17 @@ export function recordToProfile(
     const cores = rec.hardware_cores?.trim();
     hardware = normalizeProfileHardware(cores ? { cores: Number(cores) } : undefined);
   } catch (error) { validationErrors.push(error instanceof Error ? error.message : String(error)); }
+  let identity: ProfileIdentity | undefined;
+  try {
+    const raw = rec.identity?.trim();
+    identity = raw ? normalizeProfileIdentity(JSON.parse(raw)) : undefined;
+    if (identity && !chromiumRuntime) throw new Error("only AliasMode Chromium profiles store an identity");
+  } catch (error) { validationErrors.push(`invalid identity: ${error instanceof Error ? error.message : String(error)}`); }
   const profile: Profile = {
     id,
     ...browser,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
+    ...(identity ? { identity } : {}),
     ...(hardware ? { hardware } : {}),
     accId: (rec.acc_id ?? "").trim(),
     name: (rec.name ?? "").trim(),
@@ -797,6 +804,7 @@ function profileFields(p: ProfileExport): Record<string, string> {
     // Named for every Chromium profile: an import that names none gets the computer's default browser.
     chromium_runtime: p.engine === "firefox" ? "" : p.chromiumRuntime ?? "cloakbrowser",
     hardware_cores: p.hardware ? String(p.hardware.cores) : "",
+    identity: p.identity ? JSON.stringify(p.identity) : "",
     // Attested fields: a photograph of the identity, never an input to one.
     ...attestationFields(fp),
   };
@@ -833,7 +841,7 @@ export function serializeAdsTxt(profiles: ProfileExport[]): string {
   const blocks = profiles.map((p) => {
     const f = profileFields(p);
     const keys: readonly string[] = p.engine === "firefox" ? [...TXT_KEYS, ...FIREFOX_EXPORT_KEYS]
-      : [...TXT_KEYS, "chromium_runtime", ...(p.hardware ? ["hardware_cores"] : [])];
+      : [...TXT_KEYS, "chromium_runtime", ...(p.hardware ? ["hardware_cores"] : []), ...(p.identity ? ["identity"] : [])];
     return [...keys.map((k) => `${k}=${f[k]}`), "******************"].join("\n");
   });
   return blocks.join("\n") + (blocks.length ? "\n" : "");
@@ -849,6 +857,7 @@ export function serializeXlsxRows(profiles: ProfileExport[]): { headers: string[
     ...(profiles.some((profile) => profile.engine === "firefox") ? FIREFOX_XLSX_COLUMNS : XLSX_COLUMNS),
     ...(profiles.some((profile) => profile.engine !== "firefox") ? ["chromium_runtime"] : []),
     ...(profiles.some((profile) => profile.hardware) ? ["hardware_cores"] : []),
+    ...(profiles.some((profile) => profile.identity) ? ["identity"] : []),
   ];
   return {
     headers: [...columns],

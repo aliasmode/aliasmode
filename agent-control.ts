@@ -1,4 +1,5 @@
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { attachTimezones, lookupExitLocation } from "./geoip.ts";
@@ -585,6 +586,7 @@ export class AgentControlSession {
     if (this.deps.remote) {
       id = (await this.deps.remote.createProfile(input as NewProfileInput)).id;
     } else {
+      await waitForHostGpu();
       const profile = buildNewProfile(input as NewProfileInput, (candidate) => !!this.deps.store.getProfile(candidate));
       if (profile.proxy) {
         await attachTimezones([profile], undefined, true).catch(() => {});
