@@ -61,7 +61,7 @@ function launcher(store: ProfileStore, spec: Spec, dataRoot: string, autofill?: 
     ensureAliasmodeChromium: async () => spec.chromium,
     ...(spec.firefox ? { firefoxBinaryPath: spec.firefox.path, expectedFirefoxBinarySha256: spec.firefox.sha256 } : {}),
     baseArgs: spec.baseArgs, chromiumSandboxBlocked: () => false, ensureSearchProvider: ensureDuckDuckGoDefault,
-    gracefulStopMs: 1000, teardownTimeoutMs: 1500, log: () => {},
+    gracefulStopMs: 1000, teardownTimeoutMs: 1500, log: (line: string) => { if (/rejected|fail/i.test(line)) process.stderr.write(`launcher: ${line}\n`); },
   });
 }
 
