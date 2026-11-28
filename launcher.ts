@@ -14,7 +14,6 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import {
   closeSync,
   copyFileSync,
-  createReadStream,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -51,6 +50,7 @@ import type { SearchProviderBootstrapOptions, SearchProviderSetupResult } from "
 import { assertSafeProfileId } from "./profile-id.ts";
 import { dpapiKeysReadable, localStateDpapiKey } from "./dpapi.ts";
 import { captureFingerprint, recordCapture } from "./fingerprint-capture.ts";
+import { openChromiumPages } from "./cdp.ts";
 import type { FingerprintSample } from "./diagnose.ts";
 import { claimedScreenArea, watchWindowFit } from "./window-fit.ts";
 import { applySessionToEndpoint, bundleTabUrls, canonicalUserPageUrl, parseCapturedSessionBundle, readSessionInSubprocess, sessionCaptureSeed, SessionRestoreError, telegramHomeClient } from "./session.ts";
@@ -66,7 +66,7 @@ import {
   chromiumFontconfigFile, ensureFirefoxFontPack, FIREFOX_FONT_PACKS, firefoxFontPackFor, firefoxFontPackPrefs, pruneFirefoxFontPacks,
   type FirefoxFontPack,
 } from "./firefox-fonts.ts";
-import { renameWhenUnlocked, windowsSystemTool } from "./browser-install.ts";
+import { renameWhenUnlocked, sha256FileCached, windowsSystemTool } from "./browser-install.ts";
 import {
   ALIASMODE_CHROMIUM_EXECUTABLE_SHA256,
   ALIASMODE_CHROMIUM_HOST_SCALE,
@@ -470,16 +470,6 @@ function isHttpUrl(raw: string): boolean {
   } catch {
     return false;
   }
-}
-
-function sha256File(path: string): Promise<string> {
-  return new Promise((resolveHash, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(path);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", () => resolveHash(hash.digest("hex")));
-  });
 }
 
 const TELEGRAM_PLATFORM_ALIASES = new Set(["telegram.org", "telegram", "web.telegram.org"]);
@@ -1281,16 +1271,17 @@ export class Launcher {
     }
     if (!stat.isFile()) throw new Error(`${engine} binary is not a regular file`);
 
-    const key = [expected, path, stat.dev, stat.ino, stat.size, stat.mtimeMs].join(":");
+    const key = [expected, path, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
     if (!forceHash && this.verifiedBinaryCache?.key === key) return this.verifiedBinaryCache;
     if (!forceHash && this.binaryVerificationInFlight?.key === key) return this.binaryVerificationInFlight.promise;
 
     let promise!: Promise<{ key: string; path: string; sha256: string }>;
-    promise = sha256File(path)
+    promise = sha256FileCached(path)
       .then((actual) => {
         // Detect an updater replacing the executable while it is being read.
         // The forced pre-spawn pass below also closes the longer preflight
         // window between the initial approval check and process creation.
+        // It reads the file again only when its identity (inode, size, mtime, ctime) changed.
         let finalPath: string;
         let finalStat: ReturnType<typeof statSync>;
         try {
@@ -1302,7 +1293,7 @@ export class Launcher {
             (error instanceof Error ? error.message : String(error)),
           );
         }
-        const finalKey = [expected, finalPath, finalStat.dev, finalStat.ino, finalStat.size, finalStat.mtimeMs].join(":");
+        const finalKey = [expected, finalPath, finalStat.dev, finalStat.ino, finalStat.size, finalStat.mtimeMs, finalStat.ctimeMs].join(":");
         if (finalPath !== path || finalKey !== key || !finalStat.isFile()) {
           throw new Error("approved CloakBrowser binary changed while it was being verified; refusing to launch");
         }
@@ -2123,6 +2114,9 @@ export class Launcher {
     // the profile, so pages see the timezone of the IP they come from. Without an answer the saved
     // timezone stays, and so does one the user typed. The language follows only while it is still the
     // default of the saved timezone. The exit IP is WebRTC's public address below.
+    // Chromium's binary check (a download, or a full hash on the first open) runs during the lookup.
+    const earlyBinary = profile.engine === "firefox" ? undefined : this.verifyConfiguredBinary(false, binaryKind(profile));
+    earlyBinary?.catch(() => {});
     const proxy = profile.proxy;
     const lookupExit = () => proxy && this.lookupExitLocationFn ? this.lookupExitLocationFn(proxy).catch(() => null) : Promise.resolve(null);
     let exit = await lookupExit();
@@ -2130,7 +2124,7 @@ export class Launcher {
     const needsExitTimezone = !!proxy && !!this.lookupExitLocationFn && !profile.timezoneManual && (!profile.timezone || profile.timezone === this.hostTimezone);
     // Without the exit IP, WebRTC behind the proxy finds no address at all, which a real browser
     // never shows, and a timezone that is still this computer's would show next to the proxy's IP.
-    // A slow lookup gets more time and a failed one a second try, both through the proxy.
+    // A slow lookup gets more time through the proxy; a failed one is asked again after a minute.
     if ((needsExitIp && !exit?.ip) || (needsExitTimezone && !exit?.timezone)) exit = await lookupExit();
     if (exit?.timezone && exit.timezone !== profile.timezone && !profile.timezoneManual) {
       const unchanged = this.requireUnchangedProfile(profileId, profileSnapshot, "proxy exit lookup");
@@ -2157,7 +2151,7 @@ export class Launcher {
     // been canonicalized and matched byte-for-byte against the deployment pin.
     let verifiedBinary: { path: string; sha256: string };
     try {
-      verifiedBinary = await this.verifyConfiguredBinary(false, binaryKind(profile));
+      verifiedBinary = await (earlyBinary ?? this.verifyConfiguredBinary(false, binaryKind(profile)));
     } catch (error) {
       if (error instanceof BrowserLaunchError) throw error;
       throw new BrowserLaunchError("binary_verification");
@@ -5719,6 +5713,9 @@ async function writeFileAtomic(path: string, data: string): Promise<void> {
 }
 
 const defaultNavigate: LaunchNavigator = async (ws, urls, replacePages = false) => {
+  // Chromium opens pages over raw CDP from this process: a Playwright worker costs 0.6-1.4 s per open
+  // and attaches to every tab.
+  if (!replacePages && !ws.startsWith("firefox://")) return openChromiumPages(ws, urls);
   await runPlaywrightWorker("navigate", {
     endpoint: ws,
     urls,

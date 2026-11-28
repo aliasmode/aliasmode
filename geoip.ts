@@ -176,7 +176,8 @@ function withIp<T extends object>(location: T, raw: unknown): T & { ip?: string 
 }
 
 // Profiles that share a proxy often open together, and ip-api.com answers 45 requests a minute
-// per address, so one answer serves each proxy for a minute. A failed lookup is not kept.
+// per address, so one answer serves each proxy for a minute. A failed lookup is kept for the same
+// minute: a lookup service that hangs would otherwise add its full wait to every open.
 const EXIT_REUSE_MS = 60_000;
 const exits = new Map<string, { at: number; location: Promise<ExitLocation | null> }>();
 
@@ -196,7 +197,6 @@ export async function lookupProxyExitLocation(
     for (const [old, value] of exits) if (now() - value.at >= EXIT_REUSE_MS) exits.delete(old);
     const created = { at: now(), location: lookupExitLocation(proxy, opts.fetchFn) };
     exits.set(key, created);
-    void created.location.then((location) => { if (!location && exits.get(key) === created) exits.delete(key); });
     entry = created;
   }
   let timer: ReturnType<typeof setTimeout> | undefined;

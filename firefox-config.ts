@@ -492,6 +492,12 @@ export function firefoxStartupPrefs(profile: Profile, hostPlatform?: NodeJS.Plat
     "browser.cache.disk.smart_size.enabled": false,
     "browser.cache.disk.capacity": SITE_CACHE_CAP_BYTES / 1024,
     ...(host && host !== os ? personaOsPrefs(os) : {}),
+    // Never this computer's location: no OS or network provider. A profile behind a proxy gets the
+    // geolocation:* position near the exit; one without fails like a computer that cannot locate itself.
+    "geo.provider.use_corelocation": false,
+    "geo.provider.ms-windows-location": false,
+    "geo.provider.use_geoclue": false,
+    "geo.provider.network.url": "",
     // "Save proxy traffic": no images (2 = block), and no video that plays before a click (5 = block all).
     ...(profile.blockMedia ? { "permissions.default.image": 2, "media.autoplay.default": 5 } : {}),
   };
