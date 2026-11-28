@@ -14,7 +14,7 @@
  */
 
 import { availableParallelism } from "node:os";
-import type { Profile, ProfileEngine, ProfileHardware } from "./types.ts";
+import type { Profile, ProfileEngine, ProfileHardware, ProfileIdentity } from "./types.ts";
 import { proxyUrl } from "./proxy.ts";
 
 /** FNV-1a 32-bit hash → positive integer. Stable across runs and platforms. */
@@ -55,6 +55,88 @@ export function normalizeProfileHardware(value: unknown): ProfileHardware | unde
     throw new Error("unsupported profile hardware");
   }
   return { cores };
+}
+
+const IDENTITY_VALUE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** Validate a stored identity (types.ts ProfileIdentity). A value this version does not know is kept as it is. */
+export function normalizeProfileIdentity(value: unknown): ProfileIdentity | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const fail = () => { throw new Error("unsupported profile identity"); };
+  const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  const id = (v: unknown) => typeof v === "string" && IDENTITY_VALUE.test(v);
+  if (!isObject(value) || Object.keys(value).some((key) => key !== "gpu" && key !== "textBucket" && key !== "mediaCatalogue")) fail();
+  const { gpu, textBucket, mediaCatalogue } = value as Record<string, unknown>;
+  if (gpu !== undefined && (!isObject(gpu) || !id(gpu.vendor) || (gpu.anchor !== undefined && !id(gpu.anchor))
+    || Object.keys(gpu).some((key) => key !== "vendor" && key !== "anchor"))) fail();
+  if (textBucket !== undefined && !id(textBucket)) fail();
+  if (mediaCatalogue !== undefined && !(Number.isSafeInteger(mediaCatalogue) && (mediaCatalogue as number) > 0)) fail();
+  const identity: ProfileIdentity = {
+    ...(isObject(gpu) ? { gpu: { vendor: gpu.vendor as string, ...(gpu.anchor !== undefined ? { anchor: gpu.anchor as string } : {}) } } : {}),
+    ...(textBucket !== undefined ? { textBucket: textBucket as string } : {}),
+    ...(mediaCatalogue !== undefined ? { mediaCatalogue: mediaCatalogue as number } : {}),
+  };
+  return Object.keys(identity).length ? identity : undefined;
+}
+
+/**
+ * Internal switches, for finding which change fails a gate: ALIASMODE_SWITCHES_OFF is a comma-separated
+ * list of switch names. "gpu-family": new profiles store no host GPU and get no GPU flags at launch.
+ */
+export function switchOff(name: "gpu-family", env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.ALIASMODE_SWITCHES_OFF ?? "").split(",").map((part) => part.trim()).includes(name);
+}
+
+/**
+ * The 159 engine's measured GPU families (aliasmode-chromium docs/guides/gpu.mdx), by system and vendor.
+ * Read only when a profile is made: the profile stores the full id, so a later table never moves it.
+ */
+const CHROMIUM_GPU_ANCHORS: Record<string, string> = {
+  "windows-intel": "windows-d3d11-intel-79dfeb5b4f99",
+  "windows-nvidia": "windows-d3d11-nvidia-0947761dfbe9",
+  "windows-qualcomm": "windows-d3d11-qualcomm-6388f9914f3f",
+  "macos-apple": "macos-metal-apple-850a91233555",
+  "linux-nvidia": "linux-vulkan-nvidia-adf287b8f0ee",
+};
+/** Host GPUs with no measured family that the engine shows as they are, on their own system. */
+const CHROMIUM_HOST_GPU_FAMILIES = new Set(["windows-amd", "linux-intel", "linux-amd", "macos-intel", "macos-amd"]);
+/** Selects a GPU family by its full id. */
+export const CHROMIUM_ANCHOR_SWITCH = "--fingerprint-anchor";
+/** The stored anchor for the engine's host-GPU switch. */
+export const CHROMIUM_HOST_GPU_ANCHOR = "host";
+/** Shows this computer's own GPU while the rest of the identity is composed. */
+export const CHROMIUM_HOST_GPU_ARG = "--fingerprint-gpu-host";
+
+/**
+ * The GPU decision of a new AliasMode Chromium profile (GPU-family rule), for a profile with this
+ * computer's system only: the engine family of this computer's GPU vendor, or the host-GPU switch
+ * where the engine has no family. None for another system, a computer without a known GPU, or a
+ * vendor with neither: the engine then draws a GPU from the seed, as for every profile made before.
+ */
+export function newProfileGpuIdentity(platformOs: string, hostOs: string, vendor: string | undefined): ProfileIdentity["gpu"] {
+  if (!vendor || platformOs !== hostOs) return undefined;
+  const key = `${platformOs}-${vendor}`;
+  const anchor = CHROMIUM_GPU_ANCHORS[key] ?? (CHROMIUM_HOST_GPU_FAMILIES.has(key) ? CHROMIUM_HOST_GPU_ANCHOR : undefined);
+  return anchor ? { vendor, anchor } : undefined;
+}
+
+/**
+ * The GPU flags of one AliasMode Chromium launch: only the decision stored at creation. Profiles
+ * without a stored anchor get none. A stored family is sent only while the profile has that family's
+ * system, and the host switch only on a computer of the profile's system, so a system changed after
+ * creation, or a Cloud profile opened on another system, never shows a GPU of another system.
+ */
+export function chromiumGpuArgs(
+  profile: Pick<Profile, "chromiumRuntime" | "identity"> & Partial<Pick<Profile, "platformOs" | "ua">>,
+  env: NodeJS.ProcessEnv = process.env,
+  hostOs: string = hostPlatformOs(),
+): string[] {
+  const anchor = profile.chromiumRuntime ? profile.identity?.gpu?.anchor : undefined;
+  if (!anchor || switchOff("gpu-family", env)) return [];
+  // Without a platform flag the engine shows macOS on a Mac and Windows elsewhere.
+  const platform = profile.platformOs || platformFromUA(profile.ua ?? "") || (hostOs === "macos" ? "macos" : "windows");
+  if (anchor === CHROMIUM_HOST_GPU_ANCHOR) return platform === hostOs ? [CHROMIUM_HOST_GPU_ARG] : [];
+  return anchor.startsWith(`${platform}-`) ? [`${CHROMIUM_ANCHOR_SWITCH}=${anchor}`] : [];
 }
 
 /** The hardware after the user types a processor count, or clears it: CloakBrowser then draws its count from the seed again. */
@@ -245,6 +327,7 @@ export function deriveFingerprintFlags(profile: Profile, hostCores = availablePa
   // and WebGL image, so a site can link them. The noise comes from the profile seed,
   // so each profile keeps its own image on every launch.
   if (profile.chromiumRuntime) flags.push("--fingerprint-noise");
+  flags.push(...chromiumGpuArgs(profile));
   return flags;
 }
 

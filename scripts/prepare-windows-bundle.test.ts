@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareWindowsBundle, WINDOWS_SIDECAR_TARGET } from "./prepare-windows-bundle.ts";
+import { prepareWindowsBundle, SIDECAR_BUILD_FLAGS, WINDOWS_SIDECAR_TARGET } from "./prepare-windows-bundle.ts";
 import { MCP_MODE } from "../sidecar-entry.ts";
 import { ALIASMODE_VERSION } from "../version.ts";
 
@@ -73,6 +73,26 @@ test("one sidecar program also runs the MCP helper behind the aliasmode-mcp laun
   expect(JSON.parse(failed.stdout.toString())).toMatchObject({ ok: false });
 });
 
+// An import cycle through a module with top-level await runs fine from source but hangs the bundled
+// sidecar before it prints anything, as main 109dcb5 did (agent-control.ts <-> scripts.ts).
+test("the bundled sidecar finishes loading its modules", async () => {
+  const repo = join(import.meta.dir, "..");
+  const out = mkdtempSync(join(tmpdir(), "aliasmode-sidecar-bundle-"));
+  try {
+    const build = Bun.spawnSync([process.execPath, "build", "--target=bun", ...SIDECAR_BUILD_FLAGS, "sidecar-entry.ts", "--outdir", out], { cwd: repo });
+    expect(build.exitCode).toBe(0);
+    // A command with no side effects that answers only once cli.ts and all it imports have loaded.
+    const child = Bun.spawn([process.execPath, join(out, "sidecar-entry.js"), "__import-cloakpit"], { cwd: out, stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => child.kill(), 30_000);
+    const stdout = await new Response(child.stdout).text();
+    clearTimeout(timer);
+    expect(await child.exited).toBe(1);
+    expect(JSON.parse(stdout)).toMatchObject({ ok: false, message: expect.stringContaining("No Cloakpit source was selected") });
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+}, 60_000);
+
 function workspace(): string {
   const cwd = mkdtempSync(join(tmpdir(), "aliasmode-windows-bundle-"));
   mkdirSync(join(cwd, "src-tauri"), { recursive: true });
@@ -132,7 +152,7 @@ test("Windows bundle preparation packages owned Firefox with verified hashes and
       firefox: {
         executable: "firefox/aliasmode.exe",
         sha256: firefox.executableSha256,
-        version: "156.0.1-beta.36",
+        version: "159.0-beta.43",
         archiveSha256: firefox.archiveSha256,
       },
     });

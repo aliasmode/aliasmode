@@ -133,6 +133,8 @@ export interface AppModeConfig {
   defaultChromiumRuntime?: "aliasmode";
   /** The engine of new profiles on this computer: Chromium on Windows, Firefox on macOS and Linux. Absent in legacy Remote mode. */
   defaultEngine?: "chromium" | "firefox";
+  /** This computer's operating system, which new profiles match unless the user picks another. Absent in legacy Remote mode. */
+  hostOs?: "windows" | "macos" | "linux";
 }
 
 export async function fetchAppMode(): Promise<AppModeConfig> {

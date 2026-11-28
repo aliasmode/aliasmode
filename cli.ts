@@ -67,6 +67,7 @@ import { encodePortableProfile } from "./portable-profile.ts";
 import { createFirefoxProfileConfig } from "./firefox-config.ts";
 import type { Profile, ProfileEngine } from "./types.ts";
 import { SupabaseAuthClient } from "./supabase-auth.ts";
+import { systemProxyFetch } from "./system-proxy.ts";
 import { runDiagnostics } from "./diagnose.ts";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -79,6 +80,7 @@ import { installFirefox } from "./firefox-install.ts";
 import { applySourceRuntime, setupSourceRuntime } from "./source-runtime.ts";
 import { resolveEgressEndpoints } from "./egress.ts";
 import { ALIASMODE_VERSION } from "./version.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import {
   DESKTOP_PROTOCOL,
   DesktopCredentialBridge,
@@ -387,7 +389,7 @@ function makeLauncher(
   remoteMode = false,
   defaultDataRoot = "profiles",
   ensureSearchProvider = ensureDuckDuckGoDefault,
-  // Local and Cloud profiles share one downloaded Chromium 155 runtime.
+  // Local and Cloud profiles share one downloaded Chromium 159 runtime.
   chromiumRuntimeRoot?: string,
 ): Launcher {
   const unsafeCanary = has(rest, "unsafe-disable-identity-gates");
@@ -2625,6 +2627,7 @@ async function main() {
         new SupabaseAuthClient({
           baseUrl: cloudConfig.authUrl,
           anonKey: cloudConfig.anonKey,
+          fetchFn: systemProxyFetch,
         }),
         undefined,
         desktopCredentials
@@ -2646,6 +2649,7 @@ async function main() {
     ? new CloudConnectionRuntime({
         baseUrl: cloudConfig.apiUrl,
         accessToken: () => cloudAuth.accessTokenOrRefresh(),
+        fetchFn: systemProxyFetch,
         installation: {
           installationId: defaultOperatorName(identityDbPath),
           label: hostname(),
@@ -2741,7 +2745,7 @@ async function main() {
         await launcher.reconcileOrphans();
         prefetchBrowserRuntimes(launcher, store);
         const coord = new RemoteCoordinator({
-          hub: new HubClient(hubUrl, password, owner),
+          hub: new HubClient(hubUrl, password, owner, systemProxyFetch),
           launcher,
           store,
           readSession: (endpoint, captureSeed) => readSessionInSubprocess(endpoint, { captureSeed }),
@@ -2850,6 +2854,8 @@ async function main() {
       const cloudBrowser = makeCloudBrowser(launcher, store, cloudConnection, pendingSync);
       startMemoryAttributionLog();
       prefetchBrowserRuntimes(launcher, store);
+      // New profiles keep to this computer's GPU family: read it now, off the event loop.
+      void waitForHostGpu();
       if (configuredMode.mode === "cloud") {
         console.log("cloud mode: waiting for verified authentication before loading profiles");
         if (cloudBrowser && !desktopHealth) installCloudShutdown(cloudBrowser, mcpTunnel);

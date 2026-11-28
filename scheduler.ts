@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ScriptError, maskProfiles, type ScriptRun } from "./scripts.ts";
+import { ScriptError, type ScriptRun } from "./scripts.ts";
+import { maskProfiles } from "./script-secrets.ts";
 
 export interface ScheduleJob {
   id: string;

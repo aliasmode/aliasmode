@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { completeProfileFingerprint } from "./firefox-config.ts";
 import { withDefaultBrowser } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import type { ParsedProfileImport } from "./parse.ts";
 import { parseImportFile } from "./import-formats.ts";
 import { FP_BLOCK_KEYS } from "./fingerprint-attestation.ts";
@@ -206,6 +207,7 @@ export async function prepareImportBuffers(
 
   // A new profile whose import names no browser gets this computer's default. Stored
   // hardware belongs to CloakBrowser. A saved profile never changes its browser.
+  await waitForHostGpu();
   for (const entry of collected) {
     if (saved(entry.profile.id) || entry.profile.engine === "firefox" || entry.profile.hardware) continue;
     if (entry.sourceFields.chromium_runtime?.trim()) continue;

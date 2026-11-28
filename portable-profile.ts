@@ -1,7 +1,7 @@
-import type { PortableProfile, PortableProfileV1, PortableProfileV2, PortableProfileV3, PortableProfileV4, PortableSessionV1 } from "./contracts/cloud-v1.ts";
+import type { PortableProfile, PortableProfileV1, PortableProfileV2, PortableProfileV3, PortableProfileV4, PortableProfileV5, PortableSessionV1 } from "./contracts/cloud-v1.ts";
 import type { ChromiumRuntime, FirefoxProfileConfig, Profile, ProfileHardware } from "./types.ts";
 import { normalizeChromiumRuntime, normalizeProfileEngine } from "./firefox-config.ts";
-import { normalizeProfileHardware } from "./fingerprint.ts";
+import { normalizeProfileHardware, normalizeProfileIdentity } from "./fingerprint.ts";
 import { assertValidProfile, isDisplayScale } from "./profile-validation.ts";
 import { normalizeBundle } from "./session.ts";
 
@@ -27,7 +27,7 @@ export function encodePortableProfile(
   sessionBundle?: string,
   newIdentity?: string,
 ): PortableProfileV2;
-export function encodePortableProfile(profile: Profile, sessionBundle?: string, newIdentity?: string): PortableProfileV1 | PortableProfileV3 | PortableProfileV4;
+export function encodePortableProfile(profile: Profile, sessionBundle?: string, newIdentity?: string): PortableProfileV1 | PortableProfileV3 | PortableProfileV4 | PortableProfileV5;
 export function encodePortableProfile(profile: Profile, sessionBundle?: string, newIdentity?: string): PortableProfile {
   assertValidProfile(profile);
   const engine = normalizeProfileEngine(profile.engine, profile.firefox);
@@ -87,7 +87,11 @@ export function encodePortableProfile(profile: Profile, sessionBundle?: string, 
   const chromiumRuntime = normalizeChromiumRuntime(profile.chromiumRuntime, engine.engine);
   if (chromiumRuntime) {
     const displayScale = profile.displayScale !== undefined ? { displayScale: profile.displayScale } : {};
-    return { schemaVersion: 3, profile: { ...portableProfile, chromiumRuntime, ...(hardware ? { hardware } : {}), ...displayScale }, session };
+    const chromium = { ...portableProfile, chromiumRuntime, ...(hardware ? { hardware } : {}), ...displayScale };
+    // Also a new version for a stored identity: an older client would open the profile without it and save it without it.
+    const identity = normalizeProfileIdentity(profile.identity);
+    if (identity) return { schemaVersion: 5, profile: { ...chromium, identity }, session };
+    return { schemaVersion: 3, profile: chromium, session };
   }
   // Also a new version: an older client would open the profile with the engine default and then save it without the hardware.
   if (hardware) return { schemaVersion: 4, profile: { ...portableProfile, hardware }, session };
@@ -110,12 +114,16 @@ export function decodePortableProfile(payload: PortableProfile): {
     localeManual?: unknown;
     blockMedia?: unknown;
     displayScale?: unknown;
+    identity?: unknown;
   };
   let engine;
   let chromiumRuntime: ChromiumRuntime | undefined;
   let hardware: ProfileHardware | undefined;
-  try { hardware = normalizeProfileHardware(portableProfile.hardware); }
-  catch { throw new Error("unsupported portable profile payload"); }
+  let identity: Profile["identity"];
+  try {
+    hardware = normalizeProfileHardware(portableProfile.hardware);
+    identity = normalizeProfileIdentity(portableProfile.identity);
+  } catch { throw new Error("unsupported portable profile payload"); }
   if (portableProfile.localeManual !== undefined && portableProfile.localeManual !== true) {
     throw new Error("unsupported portable profile payload");
   }
@@ -125,19 +133,22 @@ export function decodePortableProfile(payload: PortableProfile): {
   if (portableProfile.blockMedia !== undefined && portableProfile.blockMedia !== true) {
     throw new Error("unsupported portable profile payload");
   }
-  // Only Chromium 155 (V3) profiles carry a display scale.
-  if (portableProfile.displayScale !== undefined && (payload.schemaVersion !== 3 || !isDisplayScale(portableProfile.displayScale))) {
+  // Only AliasMode Chromium (V3, and V5 with a stored identity) profiles carry a display scale.
+  const schemaVersion = payload.schemaVersion as number;
+  if (portableProfile.displayScale !== undefined && ((schemaVersion !== 3 && schemaVersion !== 5) || !isDisplayScale(portableProfile.displayScale))) {
     throw new Error("unsupported portable profile payload");
   }
-  if (payload.schemaVersion === 1 || payload.schemaVersion === 3 || payload.schemaVersion === 4) {
+  if (portableProfile.identity !== undefined && schemaVersion !== 5) throw new Error("unsupported portable profile payload");
+  if (schemaVersion === 1 || schemaVersion === 3 || schemaVersion === 4 || schemaVersion === 5) {
     if (portableProfile.engine !== undefined || portableProfile.firefox !== undefined) {
       throw new Error("portable Chromium profile cannot include a Firefox config");
     }
     engine = normalizeProfileEngine(undefined, undefined);
     chromiumRuntime = normalizeChromiumRuntime(portableProfile.chromiumRuntime, engine.engine);
-    // V1 carries neither; V3 always has a runtime and may have hardware; V4 is CloakBrowser with hardware.
-    const carried = chromiumRuntime ? 3 : hardware ? 4 : 1;
-    if (payload.schemaVersion !== carried) throw new Error("unsupported portable profile payload");
+    // V1 carries neither; V3 always has a runtime and may have hardware; V4 is CloakBrowser with hardware;
+    // V5 is V3 with a stored identity.
+    const carried = chromiumRuntime ? identity ? 5 : 3 : hardware ? 4 : 1;
+    if (schemaVersion !== carried) throw new Error("unsupported portable profile payload");
   } else if (payload.schemaVersion === 2) {
     if (portableProfile.engine !== "firefox") throw new Error("unsupported portable profile payload");
     engine = normalizeProfileEngine(portableProfile.engine, portableProfile.firefox);
@@ -151,6 +162,7 @@ export function decodePortableProfile(payload: PortableProfile): {
     engine: engine.engine,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
     ...(hardware ? { hardware } : {}),
+    ...(identity ? { identity } : {}),
     ...(engine.firefox ? { firefox: engine.firefox } : {}),
     accId: portableProfile.accId,
     name: portableProfile.name,

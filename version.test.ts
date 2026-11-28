@@ -124,7 +124,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
     job.indexOf(nextStep),
   );
 
-  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.75");
+  expect(ALIASMODE_VERSION).toBe("0.1.0-beta.76");
   expect(packageJson.version).toBe(ALIASMODE_VERSION);
   expect(packageJson.scripts["desktop:build:nsis"]).toBe("bun run desktop:prepare && tauri build --bundles nsis --no-sign");
   expect(tauriConfig.version).toBe(ALIASMODE_VERSION);
@@ -424,7 +424,7 @@ test("release version and updater trust stay aligned across the desktop bundle",
   expect(runtimeOwnershipShard).not.toContain("browser close --profile $preexistingProfileId");
   expect(runtimeOwnershipShard).not.toContain("Remove-PersistentProfile $helper $preexistingProfileId");
   for (const contract of [
-    '$metadata.firefox.version -ne "156.0.1-beta.36"',
+    '$metadata.firefox.version -ne "159.0-beta.43"',
     '"ALIASMODE_FIREFOX_BINARY_PATH"',
     '"ALIASMODE_FIREFOX_BINARY_SHA256"',
     "candidate Firefox metadata is invalid",

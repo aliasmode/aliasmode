@@ -2,6 +2,7 @@ import { accessSync, constants, createWriteStream, existsSync, mkdirSync, mkdtem
 import { join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { browserEnvText, sha256File, windowsSystemTool } from "./browser-install.ts";
+import { systemProxyFetch } from "./system-proxy.ts";
 
 export interface FirefoxRuntimeBuild {
   platform: NodeJS.Platform;
@@ -11,30 +12,32 @@ export interface FirefoxRuntimeBuild {
   executableSha256: string;
 }
 
-export const FIREFOX_RUNTIME_VERSION = "156.0.1-beta.36";
-const FIREFOX_RUNTIME_RELEASE = `aliasmode-runtime-${FIREFOX_RUNTIME_VERSION}-r14`;
+// TODO-PIN-FINAL: build run 46028990365 (engine/159-port bdefc97); release aliasmode-runtime-159.0-beta.43-r1
+// is not published yet. Swap in the published release's values.
+export const FIREFOX_RUNTIME_VERSION = "159.0-beta.43";
+const FIREFOX_RUNTIME_RELEASE = `aliasmode-runtime-${FIREFOX_RUNTIME_VERSION}-r1`;
 const FIREFOX_RELEASE_BASE = `https://github.com/aliasmode/aliasmode-firefox/releases/download/${FIREFOX_RUNTIME_RELEASE}`;
 
 export const FIREFOX_RUNTIME_BUILDS: readonly FirefoxRuntimeBuild[] = [
   {
     platform: "linux", arch: "x64", executablePath: "aliasmode",
-    archiveSha256: "33c976a7015a468f647e4cdd71c064e5a6e58c75d960ad74d48de755b4212f4b",
-    executableSha256: "fba911c6baa1e73d19187bf5242faf42d33c22d5204ec761cb913f8818816bb7",
+    archiveSha256: "a0ad9b627792603ce18b8650a987972327a0a33d17b1a83f7a77c0c0c8435408",
+    executableSha256: "a58aae01b134a77ac26d86e340a92c8c076736a47c1b5fc6edc11ddb3e42c992",
   },
   {
     platform: "darwin", arch: "arm64", executablePath: "AliasMode.app/Contents/MacOS/aliasmode",
-    archiveSha256: "64b56f0c6a8aa0a9e4ec2ffe058060131dfd385692747a717fabea6c4d2424bc",
-    executableSha256: "2ae46440c758f1dfc74c2be6f5fd95f9bc85f60cab6ae8afbc2e4c4762ff3c05",
+    archiveSha256: "22db36c694406644692c610ebfe49130a95cf3f94a5e44ac734dab932e179f6a",
+    executableSha256: "fa804b6489a11432bdc61e3aaa38db0fe23debe99b2def6887125c6586df8d03",
   },
   {
     platform: "darwin", arch: "x64", executablePath: "AliasMode.app/Contents/MacOS/aliasmode",
-    archiveSha256: "ce4cca8228ab48fb711166be8933b6cb118dfa5660f87eed16a3334d64a9c42f",
-    executableSha256: "6dddcdbb8c93f1b9bc3f57276c1846f11df5b3cd7a63869489db393e6a402edf",
+    archiveSha256: "aa239225f176b486060cec0fbfffaab67af87dcf72b777b72ecad147af4b8a84",
+    executableSha256: "3935dabce322eaf597068e4bc513d6ab9a5d0d1953c744e2787371e354885a91",
   },
   {
     platform: "win32", arch: "x64", executablePath: "aliasmode.exe",
-    archiveSha256: "23d2531f5a72dbfde049319259bcee55407a2ba7afc570398446da5c1f20cfcb",
-    executableSha256: "1a031ad448359f65b299634dd6fd0027c556f4c7807c2e0fb17f48a76fba7337",
+    archiveSha256: "0342b417d14c39dda3488dcdcbdadfc677568a100ba4c7d2c7a00acb0348b9e4",
+    executableSha256: "fcfdea8975e727965fc1f0fe010a084e16a73ee2b546cf75c1cac6ec7a174c84",
   },
 ];
 
@@ -106,7 +109,7 @@ export async function installFirefox(
   const cwd = resolve(options.cwd ?? process.cwd());
   const downloaded = options.archive
     ? undefined
-    : await downloadFirefoxArchive(build, cwd, dependencies.fetch ?? fetch);
+    : await downloadFirefoxArchive(build, cwd, dependencies.fetch ?? systemProxyFetch);
   const archive = options.archive ? resolve(options.archive) : downloaded!.archive;
   try {
     if (await sha256File(archive) !== build.archiveSha256) {

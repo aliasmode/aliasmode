@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, win32 } from "node:path";
+import { runCurlDirectFirst } from "./system-proxy.ts";
 
 /** A program in Windows' System32 folder by full path, so it starts even when PATH has no System32. */
 export function windowsSystemTool(name: string): string {
@@ -77,18 +78,22 @@ async function preparePinnedWindowsArchive(cacheDir: string): Promise<void> {
     let downloaded = false;
     for (const url of WINDOWS_ARCHIVE_URLS) {
       try {
-        const download = Bun.spawn([
-          windowsSystemTool("curl.exe"),
-          "--fail",
-          "--location",
-          "--retry",
-          "2",
-          "--retry-all-errors",
-          "--output",
-          archivePath,
-          url,
-        ], { stdout: "inherit", stderr: "inherit" });
-        if (await download.exited === 0 &&
+        const exitCode = await runCurlDirectFirst(url, async (routingArgs) => {
+          const download = Bun.spawn([
+            windowsSystemTool("curl.exe"),
+            "--fail",
+            "--location",
+            "--retry",
+            "2",
+            "--retry-all-errors",
+            ...routingArgs,
+            "--output",
+            archivePath,
+            url,
+          ], { stdout: "inherit", stderr: "inherit" });
+          return download.exited;
+        });
+        if (exitCode === 0 &&
           await sha256File(archivePath) === CLOAKBROWSER_WINDOWS_X64_ARCHIVE_SHA256) {
           downloaded = true;
           break;

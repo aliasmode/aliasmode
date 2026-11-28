@@ -69,15 +69,17 @@ permissions:
   actions: read
   contents: read
 
-# The aliasmode/aliasmode-firefox build.yml run under test (release aliasmode-runtime-156.0.1-beta.36-r14).
+# The aliasmode/aliasmode-firefox build.yml run under test (release aliasmode-runtime-159.0-beta.43-r1).
 # The macOS and Linux jobs install the archive of the release that the app pins; its archives are
 # that run's archives, without fonts of other operating systems (the app downloads font packs).
+# TODO-PIN-FINAL: build run 46028990365 (engine/159-port bdefc97); release aliasmode-runtime-159.0-beta.43-r1
+# is not published yet. Swap in the published release's values.
 env:
-  ALIASMODE_FIREFOX_RELEASE: aliasmode-runtime-156.0.1-beta.36-r14
-  ALIASMODE_FIREFOX_BUILD_RUN_ID: "42258259106"
+  ALIASMODE_FIREFOX_RELEASE: aliasmode-runtime-159.0-beta.43-r1
+  ALIASMODE_FIREFOX_BUILD_RUN_ID: "46028990365"
   ALIASMODE_FIREFOX_BUILD_EVENT: workflow_dispatch
-  ALIASMODE_FIREFOX_BUILD_BRANCH: fix/canvas-noise-audit
-  ALIASMODE_FIREFOX_BUILD_SHA: 7eeccbdf0b2c7562dce9d11175c35667b9025a7f
+  ALIASMODE_FIREFOX_BUILD_BRANCH: engine/159-port
+  ALIASMODE_FIREFOX_BUILD_SHA: bdefc97d3792f9bc28e53d2187247311fc1f9712
 
 jobs:
   windows:
@@ -127,12 +129,20 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $root = Resolve-Path ".\artifacts\firefox"
+          # The build artifact carries the archive and its checksum file.
+          $sums = Join-Path $root "SHA256SUMS-windows-x86_64"
+          if (Test-Path -LiteralPath $sums) {
+            $listed = ((Get-Content -LiteralPath $sums -Raw).Trim() -split '\s+')[0]
+            $actual = (Get-FileHash -LiteralPath (Join-Path $root "aliasmode-159.0-beta.43-win.x86_64.zip") -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($listed -cne $actual) { throw "AliasMode Firefox archive does not match its checksum file" }
+            Remove-Item -LiteralPath $sums
+          }
           $entries = @(Get-ChildItem -LiteralPath $root -Force)
           if (
             $entries.Count -ne 1 -or
             $entries[0].PSIsContainer -or
             (($entries[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
-            $entries[0].Name -cne "aliasmode-156.0.1-beta.36-win.x86_64.zip"
+            $entries[0].Name -cne "aliasmode-159.0-beta.43-win.x86_64.zip"
           ) {
             throw "AliasMode Firefox artifact must contain exactly the approved archive"
           }
@@ -150,8 +160,8 @@ jobs:
           Write-Host "stdout: $version"
           Write-Host "stderr: $versionError"
           (Get-Item -LiteralPath $executables[0].FullName).VersionInfo | Select-Object ProductVersion, FileVersion, CompanyName, ProductName | Format-List
-          if ($process.ExitCode -ne 0 -or $version -notmatch '156\.0\.1') {
-            throw "owned AliasMode Firefox did not report Firefox 156.0.1"
+          if ($process.ExitCode -ne 0 -or $version -notmatch '159\.0') {
+            throw "owned AliasMode Firefox did not report Firefox 159.0"
           }
           "ALIASMODE_FIREFOX_BINARY_PATH=$($executables[0].FullName)" | Add-Content $env:GITHUB_ENV
           "ALIASMODE_FIREFOX_BINARY_SHA256=$((Get-FileHash -LiteralPath $executables[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
@@ -257,17 +267,17 @@ jobs:
             runner: ubuntu-24.04
             platform: linux
             architecture: x86_64
-            archive: aliasmode-156.0.1-beta.36-lin.x86_64.zip
+            archive: aliasmode-159.0-beta.43-lin.x86_64.zip
           - name: macOS arm64
             runner: macos-15
             platform: darwin
             architecture: arm64
-            archive: aliasmode-156.0.1-beta.36-mac.arm64.zip
+            archive: aliasmode-159.0-beta.43-mac.arm64.zip
           - name: macOS x64
             runner: macos-15-intel
             platform: darwin
             architecture: x86_64
-            archive: aliasmode-156.0.1-beta.36-mac.x86_64.zip
+            archive: aliasmode-159.0-beta.43-mac.x86_64.zip
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -349,7 +359,7 @@ jobs:
             grep -Eq 'Mach-O.*${{ matrix.architecture }}' <<<"$binary_info"
           fi
           version="$("$ALIASMODE_FIREFOX_BINARY_PATH" --version 2>&1)"
-          [[ "$version" =~ 156\.0\.1 ]]
+          [[ "$version" =~ 159\.0 ]]
           printf 'Firefox native binary: %s\n' "$binary_info"
           printf 'Firefox version: %s\n' "$version"
       - name: Prove source setup supplies Cloud browser runtimes
@@ -381,10 +391,11 @@ jobs:
           else
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --headless --state-root "$proof"
           fi
-          # A Cloud V3 payload on Apple Silicon must download and open AliasMode's own Mac Chromium 155 build.
+          # A Cloud V3 payload on Apple Silicon must download and open AliasMode's own Mac Chromium build.
           if [[ "${{ matrix.platform }}" == "darwin" && "${{ matrix.architecture }}" == "arm64" ]]; then
             bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --chromium-runtime aliasmode --headless --state-root "$proof/cloud-beta-state"
-            test -x "$proof/cloud-beta-state/runtimes/chromium-155.0.8059.85-aliasmode.5/Chromium.app/Contents/MacOS/Chromium"
+            runtime_dir="$(cd "$GITHUB_WORKSPACE" && bun --no-env-file -e 'const m = await import("./aliasmode-chromium.ts"); console.log(m.ALIASMODE_CHROMIUM_RUNTIME_DIR)')"
+            test -x "$proof/cloud-beta-state/runtimes/$runtime_dir/Chromium.app/Contents/MacOS/Chromium"
           fi
           bun --no-env-file "$GITHUB_WORKSPACE/cli.ts" __cloud-launcher-smoke --engine firefox --headless --state-root "$proof"
           printf 'ALIASMODE_SOURCE_RUNTIME_ROOT=%s\n' "$proof" >> "$GITHUB_ENV"

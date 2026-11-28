@@ -1,4 +1,5 @@
 import { buildNewProfile, type NewProfileInput } from "./create.ts";
+import { waitForHostGpu } from "./host-gpu.ts";
 import { syncFirefoxTimezone } from "./firefox-config.ts";
 import { callFirefoxOwner, type FirefoxOwner } from "./firefox-runtime.ts";
 import { attachTimezones, lookupExitLocation } from "./geoip.ts";
@@ -24,7 +25,8 @@ import type { RemoteCoordinator } from "./remote.ts";
 import { ProxyReplacementInputError, runProxyReplacements } from "./proxy-replacements.ts";
 import { NewIdentityError, startNewIdentity } from "./new-identity.ts";
 import type { ProfileStore } from "./store.ts";
-import { CREDENTIAL_FIELDS, LOG_READ_BYTES, maskProfiles, maskSecrets, maskableSecrets, type ScriptLibrary, type ScriptRun, type ScriptSupervisor } from "./scripts.ts";
+import { CREDENTIAL_FIELDS, LOG_READ_BYTES, maskProfiles, maskSecrets, maskableSecrets } from "./script-secrets.ts";
+import type { ScriptLibrary, ScriptRun, ScriptSupervisor } from "./scripts.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScriptInput } from "./contracts/cloud-v1.ts";
 
@@ -584,6 +586,7 @@ export class AgentControlSession {
     if (this.deps.remote) {
       id = (await this.deps.remote.createProfile(input as NewProfileInput)).id;
     } else {
+      await waitForHostGpu();
       const profile = buildNewProfile(input as NewProfileInput, (candidate) => !!this.deps.store.getProfile(candidate));
       if (profile.proxy) {
         await attachTimezones([profile], undefined, true).catch(() => {});

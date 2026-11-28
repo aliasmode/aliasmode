@@ -34,9 +34,10 @@ fn main() {
             "Firefox metadata is missing {key}"
         );
     }
+    // TODO-PIN-FINAL: Firefox 159 pin (see firefox-install.ts).
     assert_eq!(
         firefox.get("version").and_then(|value| value.as_str()),
-        Some("156.0.1-beta.36"),
+        Some("159.0-beta.43"),
         "Firefox metadata must use the approved runtime version"
     );
     let firefox_executable = firefox

@@ -30,9 +30,10 @@ jobs:
       matrix:
         include:
           # arch is the file name part of the release files, as Tauri names a .dmg.
-          - { arch: aarch64, runner: macos-15, artifact: aliasmode-macos-arm64, chrome: AliasMode Chromium, chrome_runtime: chromium-155.0.8059.85-aliasmode.5 }
-          # There is no Intel Mac build of Chromium 155, so Chrome profiles on an Intel Mac use CloakBrowser.
-          - { arch: x64, runner: macos-15-intel, artifact: aliasmode-macos-x64, chrome: CloakBrowser, chrome_runtime: cloakbrowser- }
+          - { arch: aarch64, runner: macos-15, artifact: aliasmode-macos-arm64, chrome: AliasMode Chromium }
+          # New Chrome profiles on an Intel Mac use AliasMode Chromium too; CloakBrowser opens only existing ones.
+          # TODO-PIN-FINAL: this leg needs the published Intel Mac build pinned in aliasmode-chromium.ts.
+          - { arch: x64, runner: macos-15-intel, artifact: aliasmode-macos-x64, chrome: AliasMode Chromium }
     env:
       ARCH: ${{ matrix.arch }}
       BUNDLE: src-tauri/target/release/bundle
@@ -206,7 +207,7 @@ jobs:
           close_browser
           ui click 'buttons.byName("New Profile")'
           sleep 2
-          # A new Chrome profile uses Chromium 155 on Apple Silicon and CloakBrowser on Intel, and the help text must say so.
+          # A new Chrome profile uses AliasMode Chromium on every Mac, and the help text must say so.
           ui find 'buttons.byName("Chrome: ${{ matrix.chrome }}")'
           ui click 'uiElements.byName("Buy static residential proxies from NobleProxy'
           browser_shows "https://nobleproxy.com/t/aliasmode?src=profile-dialog"
@@ -241,6 +242,8 @@ jobs:
           "$helper" browser status --profile "$profile" | tee "$RUNNER_TEMP/evidence/status.json" | jq -e '.ok'
 
           # A Firefox profile with a Windows identity must show its own stored graphics card, not this Mac's.
+          # GPU-family rule: on a Mac with an Intel or AMD GPU the card is of that vendor (a Boot Camp
+          # computer). No Windows computer has an Apple GPU, so on Apple Silicon any Direct3D card stays.
           created="$(curl --fail --silent --show-error -X POST "http://127.0.0.1:$port/ui/api/profiles" -H 'content-type: application/json' -d '{"name":"ci-firefox-windows","engine":"firefox","platformOs":"windows"}')"
           winfx="$(jq -er '.profile.id // .id' <<<"$created")"
           "$helper" browser open --profile "$winfx" --url https://example.com/ | jq -e '.ok'
@@ -252,14 +255,22 @@ jobs:
           done
           jq '{userAgent, platform, webglVendor, webglRenderer, hardwareConcurrency}' <<<"$observed" | tee "$RUNNER_TEMP/evidence/firefox-windows-identity.json"
           jq -e '(.webglRenderer | contains("Direct3D11")) and (.webglVendor | startswith("Google Inc.")) and (.platform == "Win32")' <<<"$observed"
+          gpus="$(system_profiler SPDisplaysDataType -json | jq -r '[.SPDisplaysDataType[]? | [.spdisplays_vendor, .sppci_vendor, .sppci_model, ._name] | map(. // "") | join(" ")] | join(" ") | ascii_downcase')"
+          echo "host GPUs: $gpus"
+          if [[ "$ARCH" == x64 && "$gpus" == *intel* ]]; then
+            jq -e '.webglVendor == "Google Inc. (Intel)"' <<<"$observed"
+          elif [[ "$ARCH" == x64 && "$gpus" =~ amd|radeon|vendor_ati ]]; then
+            jq -e '.webglVendor == "Google Inc. (AMD)"' <<<"$observed"
+          fi
           "$helper" browser close --profile "$winfx" | jq -e '.ok'
 
-          # No runtime flag: a Chromium profile defaults to Chromium 155 on Apple Silicon and to CloakBrowser on Intel.
+          # No runtime flag: a Chromium profile defaults to AliasMode Chromium on every Mac.
           created="$("$helper" profiles create --name ci-chromium --temporary --engine chromium)"
           chromium="$(jq -er 'select(.ok) | .result.id' <<<"$created")"
           "$helper" browser open --profile "$chromium" --url https://example.com/ | jq -e '.ok and (.result.port | type == "number")'
           sleep 5
-          pgrep -f "runtimes/${{ matrix.chrome_runtime }}.*/Chromium.app/Contents/MacOS/Chromium" >/dev/null
+          runtime_dir="$(bun --no-env-file -e 'const m = await import("./aliasmode-chromium.ts"); console.log(m.ALIASMODE_CHROMIUM_RUNTIME_DIR)')"
+          pgrep -f "runtimes/$runtime_dir.*/Chromium.app/Contents/MacOS/Chromium" >/dev/null
           screencapture -x "$RUNNER_TEMP/evidence/chromium-profile.png"
           # Chromium 155 must accept the DuckDuckGo default search setup, which runs after launch.
           sleep 10

@@ -13,7 +13,8 @@
 import type { Profile, ProfileEngine, ProxySpec } from "./types.ts";
 import { completeProfileFingerprint, createFirefoxProfileConfig, firefoxPersonaOs, normalizeChromiumRuntime, syncFirefoxTimezone } from "./firefox-config.ts";
 import { chromiumDeviceScale, defaultChromiumRuntime, hostDisplayScale, hostDisplaySize } from "./aliasmode-chromium.ts";
-import { deterministicSeed, generateProfileHardware, hostPlatformOs } from "./fingerprint.ts";
+import { deterministicSeed, generateProfileHardware, hostPlatformOs, newProfileGpuIdentity, platformFromUA, switchOff } from "./fingerprint.ts";
+import { hostGpuVendor } from "./host-gpu.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { isFirefoxAddonId } from "./extensions.ts";
 import { parseStrictCustomNo, parseStrictResolution, parsePlatformOs } from "./parse.ts";
@@ -21,7 +22,7 @@ import { parseStrictCustomNo, parseStrictResolution, parsePlatformOs } from "./p
 export interface NewProfileInput {
   /** Browser identity engine. Omitted means this computer's default engine. */
   engine?: ProfileEngine;
-  /** "aliasmode" (Chromium 155) or "cloakbrowser". Omitted means Chromium 155 where this computer can run it. */
+  /** "aliasmode" (Chromium 159) or "cloakbrowser". Omitted means Chromium 159 where this computer can run it. */
   chromiumRuntime?: string;
   name?: string;
   group?: string;
@@ -105,10 +106,17 @@ export function generateId(exists: (id: string) => boolean): string {
   throw new Error("could not generate a unique profile id");
 }
 
+/** This computer's GPU vendor for a new profile, unless the gpu-family switch is off. */
+function newProfileGpuVendor(): string | undefined {
+  return switchOff("gpu-family") ? undefined : hostGpuVendor();
+}
+
+/** `gpuVendor` is this computer's GPU vendor: a new profile claims a GPU of that vendor where it can. */
 export function buildNewProfile(
   input: NewProfileInput,
   exists: (id: string) => boolean,
   seedFor: (id: string) => number = deterministicSeed,
+  gpuVendor = newProfileGpuVendor(),
 ): Profile {
   const id = generateId(exists);
   const seed = seedFor(id);
@@ -127,8 +135,9 @@ export function buildNewProfile(
   const selected = screen ? parseStrictResolution(screen) : engine === "firefox" && display ? display : defaultScreen(display);
   const platformOs = parsePlatformOs(input.platformOs) ?? hostPlatformOs();
   const firefox = engine === "firefox"
-    ? createFirefoxProfileConfig(selected.width, selected.height, platformOs, seed)
+    ? createFirefoxProfileConfig(selected.width, selected.height, platformOs, seed, gpuVendor)
     : undefined;
+  const gpu = chromiumRuntime ? newProfileGpuIdentity(platformOs, hostPlatformOs(), gpuVendor) : undefined;
   const firefoxUa = firefox?.config["navigator.userAgent"];
   const firefoxScreenWidth = firefox?.config["screen.width"];
   const firefoxScreenHeight = firefox?.config["screen.height"];
@@ -138,6 +147,7 @@ export function buildNewProfile(
     id,
     engine,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
+    ...(gpu ? { identity: { gpu } } : {}),
     ...(engine === "chromium" && !chromiumRuntime ? { hardware: generateProfileHardware(seed) } : {}),
     ...(firefox ? { firefox } : {}),
     accId: "",
@@ -169,10 +179,15 @@ export function buildNewProfile(
 /**
  * "New identity": the profile with the fingerprint a new profile on the same system, engine and
  * runtime gets: a random seed that `taken` does not use, a new screen and new hardware. Its
- * cookies, display scale and measured or imported fingerprints go. Name, folder, proxy, login
+ * cookies, display scale, stored identity and measured or imported fingerprints go; the GPU decision
+ * is made again on this computer. Name, folder, proxy, login
  * details, notes, tags and extensions stay.
  */
-export function freshIdentity(profile: Profile, taken: (seed: number) => boolean = () => false): Profile {
+export function freshIdentity(
+  profile: Profile,
+  taken: (seed: number) => boolean = () => false,
+  gpuVendor = newProfileGpuVendor(),
+): Profile {
   let seed: number;
   do seed = crypto.getRandomValues(new Uint32Array(1))[0]!;
   while (seed === 0 || seed === profile.fingerprintSeed || taken(seed));
@@ -181,8 +196,9 @@ export function freshIdentity(profile: Profile, taken: (seed: number) => boolean
     engine,
     ...(engine === "chromium" ? { chromiumRuntime: profile.chromiumRuntime ?? "cloakbrowser" } : {}),
     platformOs: engine === "firefox" ? firefoxPersonaOs(profile) : profile.platformOs,
-  }, () => false, () => seed);
-  const { displayScale: _scale, fpObserved: _observed, fpExpected: _expected, fpVerdict: _verdict, hardware, ...kept } = profile;
+  }, () => false, () => seed, gpuVendor);
+  // The stored identity goes too: the new one takes this computer's GPU decision, as a new profile does.
+  const { displayScale: _scale, fpObserved: _observed, fpExpected: _expected, fpVerdict: _verdict, hardware, identity: _identity, ...kept } = profile;
   const next: Profile = {
     ...kept,
     // The old identity's language, never this computer's.
@@ -190,6 +206,7 @@ export function freshIdentity(profile: Profile, taken: (seed: number) => boolean
     ...(fresh.firefox ? { firefox: fresh.firefox, ua: fresh.ua, platformOs: fresh.platformOs } : {}),
     // Without stored hardware, the engine draws it from the seed.
     ...(hardware && fresh.hardware ? { hardware: fresh.hardware } : {}),
+    ...(fresh.identity ? { identity: fresh.identity } : {}),
     screenWidth: fresh.screenWidth,
     screenHeight: fresh.screenHeight,
     fingerprintSeed: seed,
@@ -211,14 +228,17 @@ export function freshIdentity(profile: Profile, taken: (seed: number) => boolean
  * browser of every other new profile on this computer. It keeps its screen, system, seed and
  * timezone. Chrome extensions need Chromium.
  */
-export function withDefaultBrowser(profile: Profile): Profile {
+export function withDefaultBrowser(profile: Profile, gpuVendor = newProfileGpuVendor()): Profile {
   const engine = profile.engine ?? (profile.extensions?.some((id) => !isFirefoxAddonId(id)) ? "chromium" : defaultProfileEngine());
   if (engine === "chromium") {
     const chromiumRuntime = defaultChromiumRuntime();
-    return { ...profile, engine, ...(chromiumRuntime ? { chromiumRuntime } : {}) };
+    const gpu = chromiumRuntime
+      ? newProfileGpuIdentity(parsePlatformOs(profile.platformOs) ?? platformFromUA(profile.ua) ?? hostPlatformOs(), hostPlatformOs(), gpuVendor)
+      : undefined;
+    return { ...profile, engine, ...(chromiumRuntime ? { chromiumRuntime } : {}), ...(gpu ? { identity: { gpu } } : {}) };
   }
   const platformOs = parsePlatformOs(profile.platformOs) ?? hostPlatformOs();
-  const firefox = createFirefoxProfileConfig(profile.screenWidth, profile.screenHeight, platformOs, profile.fingerprintSeed);
+  const firefox = createFirefoxProfileConfig(profile.screenWidth, profile.screenHeight, platformOs, profile.fingerprintSeed, gpuVendor);
   const { "navigator.userAgent": ua, "screen.width": width, "screen.height": height, timezone } = firefox.config;
   const imported: Profile = {
     ...profile,

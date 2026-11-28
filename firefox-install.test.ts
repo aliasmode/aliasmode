@@ -66,15 +66,15 @@ test("Firefox setup includes approved builds for every supported host", () => {
 
 test("Firefox setup uses the exact approved public release archive for each host", () => {
   const expected = {
-    "linux-x64": "aliasmode-156.0.1-beta.36-lin.x86_64.zip",
-    "darwin-arm64": "aliasmode-156.0.1-beta.36-mac.arm64.zip",
-    "darwin-x64": "aliasmode-156.0.1-beta.36-mac.x86_64.zip",
-    "win32-x64": "aliasmode-156.0.1-beta.36-win.x86_64.zip",
+    "linux-x64": "aliasmode-159.0-beta.43-lin.x86_64.zip",
+    "darwin-arm64": "aliasmode-159.0-beta.43-mac.arm64.zip",
+    "darwin-x64": "aliasmode-159.0-beta.43-mac.x86_64.zip",
+    "win32-x64": "aliasmode-159.0-beta.43-win.x86_64.zip",
   };
   for (const [platform, arch] of [["linux", "x64"], ["darwin", "arm64"], ["darwin", "x64"], ["win32", "x64"]] as const) {
     const archive = expected[`${platform}-${arch}` as keyof typeof expected];
     expect(firefoxReleaseArchiveUrl(firefoxBuildForHost(platform, arch))).toBe(
-      `https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-156.0.1-beta.36-r14/${archive}`,
+      `https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-159.0-beta.43-r1/${archive}`,
     );
   }
 });
@@ -91,7 +91,7 @@ test("Firefox setup downloads, verifies, and pins the host release without envir
     },
   });
 
-  expect(requested).toBe("https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-156.0.1-beta.36-r14/aliasmode-156.0.1-beta.36-mac.arm64.zip");
+  expect(requested).toBe("https://github.com/aliasmode/aliasmode-firefox/releases/download/aliasmode-runtime-159.0-beta.43-r1/aliasmode-159.0-beta.43-mac.arm64.zip");
   expect(result.sha256).toBe(f.build.executableSha256);
   expect(existsSync(join(f.cwd, ".env"))).toBe(false);
   expect(readdirSync(f.cwd).some((entry) => entry.startsWith(".aliasmode-firefox-download-"))).toBe(false);

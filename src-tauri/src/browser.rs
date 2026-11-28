@@ -6,7 +6,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const FIREFOX_VERSION: &str = "156.0.1-beta.36";
+// TODO-PIN-FINAL: Firefox 159 pin (see firefox-install.ts).
+const FIREFOX_VERSION: &str = "159.0-beta.43";
 const FIREFOX_EXECUTABLE_NAME: &str = if cfg!(windows) {
     "aliasmode.exe"
 } else {
