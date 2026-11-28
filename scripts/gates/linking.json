@@ -1,0 +1,9 @@
+{
+  "_notes": "Gate B. Each mustDiffer signal is a page-readable value derived from the device that sites hash; it must take a different value in each of 3 profiles on one computer and keep its value when a profile reopens. Keys are probe.js/scene.js/worker.js output names (xprofile/).",
+  "mustDiffer": [
+    "canvas.toDataURL", "canvas.getImageData", "canvas.textOnly.getImageData", "canvas.emoji.getImageData",
+    "webgl.readPixels", "webgl.toDataURL", "audio.offlineHash", "audio.biquadHash",
+    "text.domRect", "text.measureText", "text.emojiRect", "fonts.widthsHash",
+    "w.canvas.getImageData", "w.webgl.readPixels"
+  ]
+}
