@@ -46,7 +46,9 @@ function normalizeHost(value: unknown): string {
   if (hasOpeningBracket && isIP(host) !== 6) {
     throw new Error("proxy host brackets are only valid around an IPv6 address");
   }
-  if (/[\s\u0000-\u001f\u007f]/.test(host)) throw new Error("proxy host contains whitespace or control characters");
+  if (/[\s\u0000-\u001f\u007f]/.test(host)) {
+    throw new Error(`proxy host ${JSON.stringify(host)} contains whitespace or control characters`);
+  }
   if (/[\[\]\\/@?#%]/.test(host)) throw new Error("proxy host contains a URL delimiter or invalid bracket");
   if (host.includes(":")) {
     if (isIP(host) !== 6) throw new Error("proxy host contains an invalid IPv6 address");
@@ -125,10 +127,38 @@ function parseProxyUrl(raw: string): ProxySpec {
  * `type`, which lets header-less imports safely carry their own protocol.
  */
 export function parseProxySpec(type: unknown, value: unknown): ProxySpec | null {
-  const raw = String(value ?? "").trim();
+  // Copied text often carries invisible marks or no-break spaces.
+  const raw = String(value ?? "").replace(/[\u200b-\u200d\u2060\ufeff]/g, "").replace(/\u00a0/g, " ").trim();
   if (!raw) return null;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return parseProxyUrl(raw);
+  // A type word in front: "socks5 1.2.3.4:1080:user:pass".
+  const typed = raw.match(/^(https?|socks5?)\s+(\S.*)$/i);
+  if (typed) return parseProxySpec(typed[1], typed[2]);
+  try {
+    return parseLegacyProxy(type, raw);
+  } catch (error) {
+    // Other common pastes, tried only when the strict form fails so valid proxies never change.
+    // "user:pass@host:port" without a scheme.
+    const at = raw.lastIndexOf("@");
+    if (at > 0 && !/\s/.test(raw)) {
+      try {
+        const [user, ...pass] = raw.slice(0, at).split(":");
+        const target = parseLegacyProxy(type, raw.slice(at + 1));
+        if (target && user && !target.user) return normalizeProxySpec({ ...target, user, pass: pass.join(":") });
+      } catch {}
+    }
+    // Spaces or tabs instead of colons: "1.2.3.4 8080 user pass" or "1.2.3.4:8080 user:pass".
+    const words = raw.split(/\s+/);
+    if (words.length > 1) {
+      try {
+        return parseLegacyProxy(type, words.join(":"));
+      } catch {}
+    }
+    throw error;
+  }
+}
 
+function parseLegacyProxy(type: unknown, raw: string): ProxySpec | null {
   // Bracketed IPv6 legacy form: [2001:db8::1]:1080:user:password.
   const ipv6 = raw.match(/^\[([^\]]+)]:(\d+)(?::([^:]*)(?::(.*))?)?$/);
   if (ipv6) {
