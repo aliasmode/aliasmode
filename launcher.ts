@@ -2218,6 +2218,7 @@ export class Launcher {
 
     if (profile.proxy) await this.persistWebRtcPolicyPreference(profileId);
     await this.persistImagesPreference(profileId, !!profile.blockMedia);
+    if (profile.chromiumRuntime === "aliasmode" && this.hostPlatform === "win32") await this.persistProtectedContentPreference(profileId);
 
     // Identity bookmark (#2): `<name> · #<serial>` on a visible bookmark bar, pointing at the card.
     if (SESSION_LAUNCH) {
@@ -4330,6 +4331,38 @@ export class Launcher {
     mkdirSync(join(base, "Default"), { recursive: true });
     try { await writeFileAtomic(file, JSON.stringify(prefs)); }
     catch (error) { throw new Error(`cannot persist image setting for ${profileId}: ${error instanceof Error ? error.message : error}`); }
+  }
+
+  /**
+   * Chromium 155 on Windows: turn "protected content" (Widevine) off by default. The build has no Verified Media
+   * Path, so production Widevine licenses (Spotify, Netflix) fail anyway, and the unverified Widevine session a page
+   * can open marks the browser as inconsistent on fingerprint checks such as iphey.com. `false` is written only when
+   * the setting is not already a boolean: a user who turns protected content back on gets `true` saved by Chromium,
+   * and keeps it. A cosmetic setting never stops a launch, so unreadable Preferences are left alone.
+   */
+  private async persistProtectedContentPreference(profileId: string): Promise<void> {
+    const base = this.containedUserDataDir(profileId, "persistProtectedContentPreference");
+    if (!base) throw new Error(`cannot persist protected content setting for unsafe profile id ${JSON.stringify(profileId)}`);
+    const file = join(base, "Default", "Preferences");
+    let prefs: any = {};
+    if (existsSync(file)) {
+      try { prefs = JSON.parse(readFileSync(file, "utf8")); }
+      catch (error) {
+        this.log(`${profileId}: protected content setting skipped, Preferences is unreadable (${error instanceof Error ? error.message : error})`);
+        return;
+      }
+    }
+    if (!prefs || typeof prefs !== "object" || Array.isArray(prefs)) {
+      this.log(`${profileId}: protected content setting skipped, Preferences root is not an object`);
+      return;
+    }
+    const webkit = prefs.webkit && typeof prefs.webkit === "object" && !Array.isArray(prefs.webkit) ? prefs.webkit : {};
+    const webprefs = webkit.webprefs && typeof webkit.webprefs === "object" && !Array.isArray(webkit.webprefs) ? webkit.webprefs : {};
+    if (typeof webprefs.encrypted_media_enabled === "boolean") return;
+    prefs.webkit = { ...webkit, webprefs: { ...webprefs, encrypted_media_enabled: false } };
+    mkdirSync(join(base, "Default"), { recursive: true });
+    try { await writeFileAtomic(file, JSON.stringify(prefs)); }
+    catch (error) { throw new Error(`cannot persist protected content setting for ${profileId}: ${error instanceof Error ? error.message : error}`); }
   }
 
   /** Persist the WebRTC routing floor as profile state as well as argv state. */

@@ -5353,6 +5353,41 @@ test("Chromium 155 keeps WebGL without a graphics card, sharp pages on scaled Wi
   expect(await launchArgs("win32", "cloakbrowser")).not.toContain("--fingerprint-noise");
 });
 
+test("AliasMode Chromium on Windows starts with protected content off and keeps a choice the user made", async () => {
+  const launchPrefs = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser", saved?: object) => {
+    const store = new ProfileStore(":memory:");
+    const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
+    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
+    store.upsertProfile(profile);
+    const file = join(testDataRoot(store), profile.id, "Default", "Preferences");
+    if (saved) { mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, JSON.stringify(saved)); }
+    const f = fleet();
+    const launcher = newLauncher(store, f, [], undefined, undefined, {
+      hostPlatform,
+      hostArch: hostPlatform === "darwin" ? "arm64" : "x64",
+      chromiumRuntimeRoot: "/fake/runtimes",
+      ensureAliasmodeChromium: async () => "/fake/runtimes/chromium-155/chrome.exe",
+    });
+    await launcher.start(profile.id);
+    await launcher.stop(profile.id);
+    store.close();
+    return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  };
+  // The Windows build has no Verified Media Path: Widevine only gives the browser away.
+  expect((await launchPrefs("win32", "aliasmode")).webkit?.webprefs?.encrypted_media_enabled).toBe(false);
+  const kept = await launchPrefs("win32", "aliasmode", { other: 1, webkit: { webprefs: { fonts: { standard: { Zyyy: "Arial" } } } } });
+  expect(kept).toMatchObject({ other: 1, webkit: { webprefs: { encrypted_media_enabled: false, fonts: { standard: { Zyyy: "Arial" } } } } });
+  // A user who turned it back on keeps it.
+  expect((await launchPrefs("win32", "aliasmode", { webkit: { webprefs: { encrypted_media_enabled: true } } })).webkit.webprefs.encrypted_media_enabled).toBe(true);
+  // A value Chromium did not write is replaced.
+  expect((await launchPrefs("win32", "aliasmode", { webkit: { webprefs: { encrypted_media_enabled: "true" } } })).webkit.webprefs.encrypted_media_enabled).toBe(false);
+  // Other systems and CloakBrowser are not touched.
+  expect((await launchPrefs("linux", "aliasmode")).webkit?.webprefs?.encrypted_media_enabled).toBeUndefined();
+  expect((await launchPrefs("darwin", "aliasmode")).webkit?.webprefs?.encrypted_media_enabled).toBeUndefined();
+  expect((await launchPrefs("win32", "cloakbrowser")).webkit?.webprefs?.encrypted_media_enabled).toBeUndefined();
+});
+
 test("AliasMode Chromium starts without the missing Google API keys bar; CloakBrowser keeps its environment", async () => {
   const launchEnv = async (engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
