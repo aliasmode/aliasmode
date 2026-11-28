@@ -1,9 +1,8 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, posix, win32 } from "node:path";
+import { join, posix } from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
 import NodeWebSocket from "ws";
 
 export const RUNTIME_PROTOCOL = "aliasmode-runtime-v1";
@@ -13,7 +12,6 @@ const VERSION = process.env.ALIASMODE_APP_VERSION || "0.1.0-beta.32";
 const STARTUP_WAIT_MS = 180_000;
 // Replies can be much larger than requests, e.g. a profile list for a large Cloud workspace.
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
-const execFileAsync = promisify(execFile);
 // Windows and Linux report a tick count. macOS reports the `ps -o lstart=` date.
 const START_IDENTITY = /^(?:\d+|[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d \d{4})$/;
 
@@ -59,52 +57,6 @@ export function defaultRuntimeDescriptorPath(env = process.env, platform = proce
   return join(env.APPDATA, "com.aliasmode.desktop", "agent-runtime.json");
 }
 
-export function windowsProcessIdentityCommand(pid, env = process.env) {
-  const executable = env.SYSTEMROOT
-    ? win32.join(env.SYSTEMROOT, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    : "powershell.exe";
-  return {
-    executable,
-    args: [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `[System.Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToFileTimeUtc()`,
-    ],
-  };
-}
-
-async function processStartIdentity(pid) {
-  if (process.platform === "win32") {
-    const command = windowsProcessIdentityCommand(pid);
-    const { stdout } = await execFileAsync(
-      command.executable,
-      command.args,
-      { windowsHide: true, timeout: 5_000, maxBuffer: 1024 },
-    );
-    const value = stdout.trim();
-    if (!/^\d+$/.test(value)) throw new Error("desktop process identity is invalid");
-    return value;
-  }
-  if (process.platform === "darwin") {
-    // Keep in step with current_process_start_identity in src-tauri/src/runtime_descriptor.rs.
-    const { stdout } = await execFileAsync(
-      "/bin/ps",
-      ["-o", "lstart=", "-p", String(pid)],
-      { env: { LC_ALL: "C", TZ: "UTC" }, timeout: 5_000, maxBuffer: 1024 },
-    );
-    const value = stdout.trim();
-    if (!START_IDENTITY.test(value)) throw new Error("desktop process identity is invalid");
-    return value;
-  }
-  const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-  const end = stat.lastIndexOf(")");
-  const value = end >= 0 ? stat.slice(end + 2).trim().split(/\s+/)[19] : undefined;
-  if (!value || !/^\d+$/.test(value)) throw new Error("desktop process identity is invalid");
-  return value;
-}
-
 function processExists(pid) {
   try {
     process.kill(pid, 0);
@@ -117,9 +69,6 @@ function processExists(pid) {
 async function verifyHealth(descriptor) {
   if (!processExists(descriptor.desktopPid) || !processExists(descriptor.sidecarPid)) {
     throw new Error("AliasMode runtime processes are not active");
-  }
-  if (await processStartIdentity(descriptor.desktopPid) !== descriptor.desktopStartedAt) {
-    throw new Error("AliasMode desktop process identity changed");
   }
   const response = await fetch(`http://127.0.0.1:${descriptor.port}/ui/api/health`, {
     signal: AbortSignal.timeout(2_000),

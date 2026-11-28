@@ -32,7 +32,7 @@ class FakeSocket extends EventEmitter {
 class FakeChild extends EventEmitter {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
-  readonly stderr = null;
+  readonly stderr = new PassThrough();
   input = "";
 
   constructor() {
@@ -61,12 +61,14 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 test("remote MCP tunnel owns one safely-closing child per Cloud session", async () => {
   const sockets: FakeSocket[] = [];
   const children: FakeChild[] = [];
+  const logs: string[] = [];
   const runtime = new McpTunnelRuntime({
     baseUrl: "https://cloud.example.test",
     accessToken: () => "access-token",
     deviceId: () => "device-id",
     deviceCredential: () => "device-credential",
     reconnectDelayMs: 1,
+    log: (message) => logs.push(message),
     connect: () => {
       const socket = new FakeSocket();
       sockets.push(socket);
@@ -94,6 +96,8 @@ test("remote MCP tunnel owns one safely-closing child per Cloud session", async 
     sessionId: "session-2",
   })));
   expect(children).toHaveLength(2);
+  children[0]!.stderr.write("AliasMode MCP could not reach AliasMode: reason\n");
+  await waitFor(() => logs.includes("remote MCP host: AliasMode MCP could not reach AliasMode: reason"));
 
   socket.emit("message", Buffer.from(JSON.stringify({
     protocol: MCP_TUNNEL_PROTOCOL,

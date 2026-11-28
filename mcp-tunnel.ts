@@ -10,7 +10,7 @@ import {
   type McpTunnelToDevice,
 } from "./contracts/cloud-v1.ts";
 
-interface TunnelChild extends ChildProcessByStdio<Writable, Readable, null> {}
+interface TunnelChild extends ChildProcessByStdio<Writable, Readable, Readable> {}
 
 interface TunnelSocket {
   readonly readyState: number;
@@ -213,7 +213,7 @@ export class McpTunnelRuntime implements McpTunnelLifecycle {
       this.options.helperPath ?? defaultHelperPath(),
       ["serve"],
       {
-        stdio: ["pipe", "pipe", "ignore"],
+        stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
         env: helperEnvironment(),
       },
@@ -252,6 +252,10 @@ export class McpTunnelRuntime implements McpTunnelLifecycle {
       } catch {
         this.closeChild(sessionId);
       }
+    });
+    // The host reports why it could not start or reach AliasMode on stderr.
+    createInterface({ input: child.stderr, crlfDelay: Infinity }).on("line", (line) => {
+      if (line.trim()) this.options.log?.(`remote MCP host: ${line}`);
     });
     child.once("error", () => this.finishChild(sessionId, false));
     child.once("close", (code) => this.finishChild(sessionId, code === 0));
