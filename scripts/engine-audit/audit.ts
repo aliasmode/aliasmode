@@ -106,10 +106,23 @@ function killTree(pid: number): void {
 }
 
 /** Kills what a run left behind: only the PIDs our own `open` command recorded. */
+/**
+ * Whether a recorded pid still runs one of our browsers or Firefox owners: Windows reuses pids within seconds,
+ * so a browser that already exited can leave its pid to another process (once the runner's own agent).
+ */
+export function ownBrowserPid(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  const r = WIN
+    ? spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8" })
+    : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+  // The engines run from the audit runtimes folder (gates-builds inside it); a Firefox owner names itself.
+  return /aliasmode-engine-audit|gates-builds|aliasmode-firefox-owner/i.test(r.stdout ?? "");
+}
+
 function reap(pidFile: string): void {
   if (!existsSync(pidFile)) return;
   for (const pid of JSON.parse(readFileSync(pidFile, "utf8")) as number[]) {
-    try { process.kill(pid, 0); killTree(pid); } catch {}
+    if (ownBrowserPid(pid)) killTree(pid);
   }
   rmSync(pidFile, { force: true });
 }

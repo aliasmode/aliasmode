@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { defaultChromiumRuntime, ensureAliasmodeChromium, linuxChromiumSandboxBlocked } from "../../aliasmode-chromium.ts";
 import { sha256File, windowsSystemTool } from "../../browser-install.ts";
 import { firefoxBuildForHost } from "../../firefox-install.ts";
-import { buildProfile, HOST_OS, installFirefoxRelease, PINNED_FIREFOX_RELEASE, readHostGpu } from "../engine-audit/audit.ts";
+import { buildProfile, HOST_OS, installFirefoxRelease, ownBrowserPid, PINNED_FIREFOX_RELEASE, readHostGpu } from "../engine-audit/audit.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
@@ -280,16 +280,17 @@ function openOurs(E, engine, mode, profile, dir, url, extra = {}) {
   writeFileSync(join(dir, "spec.json"), JSON.stringify(spec));
   rmSync(`${spec.pidFile}.stop`, { force: true });
   const child = spawn(process.execPath, [AUDIT, "open", join(dir, "spec.json"), dir, url], { stdio: ["ignore", "ignore", "pipe"], detached: !WIN, env: process.env });
-  let err = ""; child.stderr.on("data", (d) => { err = (err + d).slice(-2000); });
-  const exited = new Promise((r) => child.on("exit", r));
+  let err = "", done = false; child.stderr.on("data", (d) => { err = (err + d).slice(-2000); });
+  const exited = new Promise((r) => child.on("exit", () => { done = true; r(); }));
   return {
     exited,
     error: () => err,
     stop: async () => {
       writeFileSync(`${spec.pidFile}.stop`, "");
       await Promise.race([exited, sleep(20_000)]);
-      killTree(child.pid);
-      if (existsSync(spec.pidFile)) for (const pid of readJson(spec.pidFile)) { try { process.kill(pid, 0); killTree(pid); } catch {} }
+      // Only live processes of ours: an exited one's pid may already belong to another process.
+      if (!done) killTree(child.pid);
+      if (existsSync(spec.pidFile)) for (const pid of readJson(spec.pidFile)) if (ownBrowserPid(pid)) killTree(pid);
     },
   };
 }
@@ -315,10 +316,11 @@ function openStock(name, dir, url, proxy) {
     args = ["-profile", dir, "-no-remote", "-width", "1600", "-height", "900", url];
   }
   const child = spawn(STOCK[name], args, { stdio: "ignore", env, detached: !WIN });
+  let done = false; child.on("exit", () => { done = true; });
   return {
     error: () => "",
     stop: async () => {
-      killTree(child.pid);
+      if (!done) killTree(child.pid);
       // Stock Firefox on Windows leaves processes that taskkill /T misses: kill everything that uses this profile.
       if (WIN) spawnSync("powershell.exe", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process | ? { $_.CommandLine -like '*${dir}*' } | % { Stop-Process -Id $_.ProcessId -Force }`], { stdio: "ignore" });
       await sleep(1500);
