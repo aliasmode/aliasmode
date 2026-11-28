@@ -447,8 +447,11 @@ async function gateB(E) {
     }
     mkdirSync(join(OUT, "B"), { recursive: true });
     writeFileSync(join(OUT, "B", `${engine}-runs.json`), JSON.stringify(runs));
-    const value = (run, key) => runs[run] ? JSON.stringify(at(runs[run], key) ?? runs[run][key] ?? null) : "<no run>";
-    const keys = [...new Set(Object.values(runs).filter(Boolean).flatMap((r) => Object.keys(r)))].filter((k) => k !== "run").sort();
+    // Judged from the saved file: Bun (Linux, Windows, macOS) at times read runs it had just stored as missing,
+    // which gave "<no run>" values and false linkable verdicts; the same data read back judges right.
+    const saved = readJson(join(OUT, "B", `${engine}-runs.json`));
+    const value = (run, key) => saved[run] ? JSON.stringify(at(saved[run], key) ?? saved[run][key] ?? null) : "<no run>";
+    const keys = [...new Set(Object.values(saved).filter(Boolean).flatMap((r) => Object.keys(r)))].filter((k) => k !== "run").sort();
     const table = {};
     for (const key of keys) {
       const first = [...Array(n).keys()].map((i) => value(`${engine}-${i}-1`, key));
@@ -464,10 +467,10 @@ async function gateB(E) {
       if (opts.buckets) continue;
       const hint = switchHint(key);
       // Named runs instead of a "<no run>" marker search: runners reported missing runs that the saved runs held.
-      const missing = [...Array(n).keys()].map((i) => `${engine}-${i}-1`).filter((run) => !runs[run]);
+      const missing = [...Array(n).keys()].map((i) => `${engine}-${i}-1`).filter((run) => !saved[run]);
       if (first.every((v) => v === "null")) {
         // Null everywhere passes only when this host cannot read it (stock reads null too) and no probe step failed.
-        const errors = [...new Set(Object.values(runs).filter(Boolean).flatMap((r) => Object.keys(r).filter((k) => k.endsWith(".error") && key.startsWith(k.slice(0, -5) + ".")).map((k) => `${k}: ${r[k]}`)))];
+        const errors = [...new Set(Object.values(saved).filter(Boolean).flatMap((r) => Object.keys(r).filter((k) => k.endsWith(".error") && key.startsWith(k.slice(0, -5) + ".")).map((k) => `${k}: ${r[k]}`)))];
         const stockValue = value(stockRun, key);
         if (errors.length) result.blockers.push({ engine, key, detail: `not measured: ${errors.join("; ").slice(0, 200)}`, switchHint: hint });
         else if (stockValue !== "null" && stockValue !== "<no run>") result.blockers.push({ engine, key, detail: `stock reads a value, ours reads null`, stock: stockValue.slice(0, 60), switchHint: hint });
