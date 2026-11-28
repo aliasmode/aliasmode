@@ -578,7 +578,8 @@ async function visit(E, target, site, proxy, server) {
   }
   input("shot", join(shots, `${site.id}.png`));
   await browser.stop();
-  rmSync(dir, { recursive: true, force: true });
+  // A profile still locked (a browser that outlived stop) must not end the whole run.
+  try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 1000 }); } catch (e) { log(`C: ${name}: profile not removed (${e.code})`); }
   const verdict = { ...judge(site, page.text, page.ready), ready: page.ready, seconds: Math.round((Date.now() - t0) / 1000), window: win !== "none" };
   log(`C: ${name}: ${verdict.status} ${JSON.stringify(verdict.metrics)}`);
   return verdict;
