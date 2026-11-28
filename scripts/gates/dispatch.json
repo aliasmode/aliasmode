@@ -1,11 +1,11 @@
 {
   "_notes": "Run spec for .github/workflows/gates.yml when the branch gates/dispatch is pushed: commit a change here on gates/dispatch (based on the branch under test) and push it. Same fields as the manual inputs: engine_build (released | chromium:<tag or URL>,firefox:<tag or URL>), only (p,a,b,c; c needs the GATES_PROXY secret and runs the OSes one at a time), switches (comma separated, turned off), sites (Gate C site ids, comma separated; empty = all), os (runners: windows, macos, macos-intel; default all three), chrome_channel (stable | beta), chrome_major (the stock Chrome major the control must have; empty = any), firefox_version (stock Firefox control, e.g. 159.0.1). Match the controls to the engines under test.",
-  "engine_build": "released",
-  "only": "p,a,b",
+  "engine_build": "chromium:gates-candidate-chromium-159-1,firefox:gates-candidate-firefox-159-1",
+  "only": "p,c",
   "switches": "",
-  "sites": "",
-  "os": "windows,macos,macos-intel",
-  "chrome_channel": "stable",
-  "chrome_major": "",
+  "sites": "datadome,cloudflare,cloudflare2,cloudflare3,recaptcha,fingerprintpro,creepjs,browserscan,pixelscan,iphey",
+  "os": "windows",
+  "chrome_channel": "beta",
+  "chrome_major": "159",
   "firefox_version": "159.0.1"
 }
