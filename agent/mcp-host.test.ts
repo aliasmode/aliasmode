@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createAliasModeMcp, sanitizeEnvironment } from "./mcp-host.mjs";
 
 class FakeRuntime {
@@ -169,6 +171,24 @@ test("MCP lifecycle tools include directory annotations", async () => {
   });
   expect(tools.find((tool) => tool.name === "aliasmode_browser_close")?.annotations?.destructiveHint).toBe(true);
   expect(tools.find((tool) => tool.name === "browser_close")?.annotations?.destructiveHint).toBe(true);
+
+  await client.close();
+  await host.close();
+});
+
+test("MCP answers initialize without the app and reports why a tool call could not reach it", async () => {
+  const host = await createAliasModeMcp({
+    runtime: { descriptorPath: join(tmpdir(), "aliasmode-missing", "agent-runtime.json"), desktopExecutable: join(tmpdir(), "aliasmode-missing.exe") },
+    playwright: new FakePlaywright(),
+  });
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([host.server.connect(serverTransport), client.connect(clientTransport)]);
+
+  expect((await client.listTools()).tools.some((tool) => tool.name === "aliasmode_profiles_list")).toBe(true);
+  const listed = await client.callTool({ name: "aliasmode_profiles_list", arguments: {} });
+  expect(listed.isError).toBe(true);
+  expect(JSON.stringify(listed.content)).toContain("AliasMode is not installed at the expected path");
 
   await client.close();
   await host.close();

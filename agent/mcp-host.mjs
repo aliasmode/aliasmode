@@ -423,8 +423,19 @@ function profileInput(args) {
 export async function createAliasModeMcp(options = {}) {
   const playwright = options.playwright ?? new PlaywrightToolProxy(VERSION);
   await playwright.initialize();
-  const discovered = options.discovered ?? await discoverRuntime(options.runtime);
-  const runtime = discovered.client;
+  // Clients give up on a slow initialize, so the host answers at once and finds the app in the
+  // background. Tool calls wait for it, and a failed search reports its reason and starts again.
+  let discovering;
+  const discover = () => discovering ??= (options.discovered ? Promise.resolve(options.discovered) : discoverRuntime(options.runtime))
+    .catch((error) => {
+      discovering = undefined;
+      throw error;
+    });
+  discover().catch((error) => console.error(`AliasMode MCP could not reach AliasMode: ${safeError(error)}`));
+  const runtime = {
+    call: async (method, params) => (await discover()).client.call(method, params),
+    close: async () => { await discovering?.then((found) => found.client.close(), () => {}); },
+  };
   const server = new Server(
     { name: "aliasmode", version: VERSION },
     { capabilities: { tools: {} } },
@@ -638,7 +649,7 @@ export async function createAliasModeMcp(options = {}) {
         diagnose(`owned browser close finished closed=${closed}`);
         if (closed) ownedProfileIds.delete(profileId);
       }
-      runtime.close();
+      await runtime.close();
       diagnose("runtime closed");
     })();
     return closing;

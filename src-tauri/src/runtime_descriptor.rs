@@ -197,7 +197,7 @@ fn current_process_start_identity() -> Result<String, String> {
     Ok(((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)).to_string())
 }
 
-// Keep in step with processStartIdentity in agent/runtime-client.mjs.
+// Keep in step with START_IDENTITY in agent/runtime-client.mjs.
 #[cfg(target_os = "macos")]
 fn current_process_start_identity() -> Result<String, String> {
     let output = std::process::Command::new("/bin/ps")
