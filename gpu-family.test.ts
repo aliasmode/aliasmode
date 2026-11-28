@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildNewProfile, freshIdentity, withDefaultBrowser } from "./create.ts";
-import { chromiumGpuArgs, deriveFingerprintFlags, hostPlatformOs, newProfileGpuIdentity, normalizeProfileIdentity } from "./fingerprint.ts";
+import { chromiumGpuArgs, chromiumMediaArgs, deriveFingerprintFlags, hostPlatformOs, newProfileGpuIdentity, normalizeProfileIdentity } from "./fingerprint.ts";
 import { createFirefoxProfileConfig } from "./firefox-config.ts";
 import { detectHostGpu, hostGpuVendor, linuxGpuVendor, resetHostGpuForTest, spawnText, waitForHostGpu, windowsGpuVendor } from "./host-gpu.ts";
 import { parseExport, serializeAdsTxt, serializeXlsxRows } from "./parse.ts";
@@ -92,19 +92,21 @@ test("New identity makes the GPU decision again on this computer and drops the o
     identity: { gpu: { vendor: "intel", anchor: `${host}-other-computer-dead` }, mediaCatalogue: 2 },
   };
   const expected = newProfileGpuIdentity(host, host, "nvidia");
-  expect(freshIdentity(old, () => false, "nvidia").identity).toEqual(expected ? { gpu: expected } : undefined);
+  // A new identity is a new profile: it also takes the second media device table.
+  const fresh = { ...(expected ? { gpu: expected } : {}), mediaCatalogue: 2 };
+  expect(freshIdentity(old, () => false, "nvidia").identity).toEqual(fresh);
   // This computer's GPU is not read: the profile stores no decision, not the old one.
-  expect(freshIdentity(old, () => false, undefined)).not.toHaveProperty("identity");
+  expect(freshIdentity(old, () => false, undefined).identity).toEqual({ mediaCatalogue: 2 });
   // A profile made before identities existed gets this computer's decision.
   const { identity: _identity, ...older } = old;
-  expect(freshIdentity(older, () => false, "nvidia").identity).toEqual(expected ? { gpu: expected } : undefined);
+  expect(freshIdentity(older, () => false, "nvidia").identity).toEqual(fresh);
   // The store forgets the old decision too, here and on every computer that applies the new identity.
   const store = new ProfileStore(":memory:");
   store.upsertProfile(old);
   store.resetIdentity(freshIdentity(store.getProfile(old.id)!, () => false, undefined));
-  expect(store.getProfile(old.id)).not.toHaveProperty("identity");
+  expect(store.getProfile(old.id)?.identity).toEqual({ mediaCatalogue: 2 });
   store.resetIdentity(freshIdentity(store.getProfile(old.id)!, () => false, "nvidia"));
-  expect(store.getProfile(old.id)?.identity).toEqual(expected ? { gpu: expected } : undefined);
+  expect(store.getProfile(old.id)?.identity).toEqual(fresh);
   // CloakBrowser stores no GPU decision.
   const cloak = { ...buildNewProfile({ engine: "chromium", chromiumRuntime: "cloakbrowser", platformOs: host }, () => false), identity: old.identity };
   expect(freshIdentity(cloak, () => false, "nvidia")).not.toHaveProperty("identity");
@@ -157,16 +159,16 @@ test("new AliasMode Chromium profiles store the host GPU; CloakBrowser and hosts
   const nvidia = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "nvidia");
   const nvidiaAnchor = { windows: "windows-d3d11-nvidia-0947761dfbe9", linux: "linux-vulkan-nvidia-adf287b8f0ee" }[host as "windows" | "linux"];
   if (nvidiaAnchor) {
-    expect(nvidia.identity).toEqual({ gpu: { vendor: "nvidia", anchor: nvidiaAnchor } });
+    expect(nvidia.identity).toEqual({ gpu: { vendor: "nvidia", anchor: nvidiaAnchor }, mediaCatalogue: 2 });
     expect(deriveFingerprintFlags(nvidia)).toContain(`--fingerprint-anchor=${nvidiaAnchor}`);
   }
-  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "amd").identity).toEqual({ gpu: { vendor: "amd", anchor: "host" } });
-  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "").identity).toBeUndefined();
-  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host === "windows" ? "linux" : "windows" }, () => false, undefined, "nvidia").identity).toBeUndefined();
+  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "amd").identity).toEqual({ gpu: { vendor: "amd", anchor: "host" }, mediaCatalogue: 2 });
+  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host }, () => false, undefined, "").identity).toEqual({ mediaCatalogue: 2 });
+  expect(buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: host === "windows" ? "linux" : "windows" }, () => false, undefined, "nvidia").identity).toEqual({ mediaCatalogue: 2 });
   expect(buildNewProfile({ chromiumRuntime: "cloakbrowser", platformOs: host }, () => false, undefined, "nvidia").identity).toBeUndefined();
   expect(buildNewProfile({ engine: "firefox", platformOs: host }, () => false, undefined, "nvidia").identity).toBeUndefined();
   const imported = withDefaultBrowser({ ...buildNewProfile({ chromiumRuntime: "cloakbrowser", platformOs: host }, () => false), engine: undefined, extensions: ["abcdefghijklmnopabcdefghijklmnop"] }, "amd");
-  if (imported.chromiumRuntime) expect(imported.identity).toEqual({ gpu: { vendor: "amd", anchor: "host" } });
+  if (imported.chromiumRuntime) expect(imported.identity).toEqual({ gpu: { vendor: "amd", anchor: "host" }, mediaCatalogue: 2 });
 });
 
 test("new Firefox profiles get a card of the host GPU vendor where their system has one", () => {
@@ -222,7 +224,7 @@ test("a stored identity stays through edits, travels in Cloud schema V5, and old
 test("export and import keep the stored identity", () => {
   const identity = { gpu: { vendor: "nvidia", anchor: "windows-d3d11-nvidia-0947761dfbe9" }, mediaCatalogue: 2 };
   const profile = { ...buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, ""), identity };
-  const legacy = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, "");
+  const { identity: _none, ...legacy } = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs: "windows" }, () => false, undefined, "");
   const text = serializeAdsTxt([profile, legacy]);
   expect(text.match(/^identity=.*$/gm)).toEqual([`identity=${JSON.stringify(identity)}`]);
   const imported = parseExport(text);
@@ -246,4 +248,12 @@ test("export and import keep the stored identity", () => {
   expect(invalid("{not json")[0]).toStartWith("invalid identity");
   expect(invalid(JSON.stringify({ gpu: { vendor: "NVIDIA" } }))[0]).toStartWith("invalid identity");
   expect(invalid(JSON.stringify(identity), "cloakbrowser")).toContain("invalid identity: only AliasMode Chromium profiles store an identity");
+});
+
+test("only AliasMode Chromium profiles made with the second media table launch with it", () => {
+  expect(chromiumMediaArgs({ chromiumRuntime: "aliasmode", identity: { mediaCatalogue: 2 } })).toEqual(["--fingerprint-media-catalogue=2"]);
+  expect(chromiumMediaArgs({ chromiumRuntime: "aliasmode", identity: { gpu: { vendor: "intel" } } })).toEqual([]);
+  expect(chromiumMediaArgs({ chromiumRuntime: "aliasmode", identity: { mediaCatalogue: 3 } })).toEqual([]);
+  expect(chromiumMediaArgs({ identity: { mediaCatalogue: 2 } })).toEqual([]);
+  expect(chromiumMediaArgs(buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false))).toEqual(["--fingerprint-media-catalogue=2"]);
 });

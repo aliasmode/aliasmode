@@ -5246,7 +5246,7 @@ test("a stopped Chromium 155 profile shares its components beside the browser; C
   const run = async (engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
     store.upsertProfile(profile);
     const runtimes = join(testDataRoot(store), "runtimes");
@@ -5283,7 +5283,7 @@ test("a stopped Chromium 155 profile shares its components beside the browser; C
 test("at app start, stopped Chromium 155 profiles share their components; CloakBrowser profiles keep theirs", async () => {
   const store = new ProfileStore(":memory:");
   const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
-  const { chromiumRuntime: _runtime, ...cloak } = buildNewProfile({ engine: "chromium" }, () => false);
+  const { chromiumRuntime: _runtime, identity: _identity, ...cloak } = buildNewProfile({ engine: "chromium" }, () => false);
   store.upsertProfile(chromium155);
   store.upsertProfile(cloak);
   const runtimes = join(testDataRoot(store), "runtimes");
@@ -5324,7 +5324,7 @@ test("Chromium 155 keeps WebGL without a graphics card, sharp pages on scaled Wi
   const launchArgs = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
     store.upsertProfile(profile);
     const f = fleet();
@@ -5357,7 +5357,7 @@ test("AliasMode Chromium starts without the missing Google API keys bar; CloakBr
   const launchEnv = async (engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
     store.upsertProfile(profile);
     const f = fleet();
@@ -5451,7 +5451,7 @@ test("Chromium 155 on a scaled Windows display reports the screen in CSS pixels,
   ) => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode", screen }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     if (options.storedAvailableScreen) {
       store.saveObservedFingerprint(chromium155.id, { availableScreen: options.storedAvailableScreen }, null);
@@ -5513,7 +5513,7 @@ test("only Chromium 155 gets a window label, through a launch switch", async () 
   const launch = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser") => {
     const store = new ProfileStore(":memory:");
     const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), name: "sophie" };
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     const spawnedArgs: string[][] = [];
     const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
@@ -5543,7 +5543,7 @@ test("a Cloud launch of Chromium 155 keeps the browser after its last window; ot
   const launch = async (hostPlatform: NodeJS.Platform, engine: "aliasmode" | "cloakbrowser", keepAliveWithoutWindows?: boolean) => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     const spawnedArgs: string[][] = [];
     const launcher = newLauncher(store, fleet(), spawnedArgs, undefined, undefined, {
@@ -5580,7 +5580,7 @@ test("a Windows profile of Chromium 155 on Linux gets the Windows font pack thro
   ) => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode", platformOs }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     const f = fleet();
     const envs: Array<Record<string, string> | undefined> = [];
@@ -5636,7 +5636,7 @@ test("AliasMode Chromium gets a location near the proxy exit and closed loopback
   const launch = async (engine: "aliasmode" | "cloakbrowser", profileProxy: typeof proxy | null) => {
     const store = new ProfileStore(":memory:");
     const own = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy: profileProxy };
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = own;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = own;
     store.upsertProfile(engine === "aliasmode" ? own : cloakbrowser);
     const spawnedArgs: string[][] = [];
     const exit = { timezone: own.timezone, ip: "203.0.113.7", latitude: 40.7128, longitude: -74.006, cityLevel: true };
@@ -5673,7 +5673,7 @@ test("Chromium 155 shows the proxy exit IP to WebRTC; CloakBrowser does not", as
   ) => {
     const store = new ProfileStore(":memory:");
     const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy: profileProxy };
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     const asked: unknown[] = [];
     const spawnedArgs: string[][] = [];
@@ -5729,7 +5729,7 @@ test("every proxied Chromium launch takes the proxy exit's timezone, and no answ
       ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy, timezone: "Europe/London",
       ...(timezoneManual ? { timezoneManual: true } : {}),
     };
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     const f = fleet();
     const spawnedArgs: string[][] = [];
@@ -5816,7 +5816,7 @@ const PROXY_TIMEZONE_CASES = (["aliasmode", "cloakbrowser"] as const)
 test.each(PROXY_TIMEZONE_CASES)("proxied launch, %s", async (_name, engine, row) => {
   const store = new ProfileStore(":memory:");
   const chromium155 = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), proxy: PROXY_TIMEZONE_PROXY, ...row.saved };
-  const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+  const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
   const profile = engine === "aliasmode" ? chromium155 : cloakbrowser;
   store.upsertProfile(profile);
   const spawnedArgs: string[][] = [];
@@ -5845,7 +5845,7 @@ test("a headed Chromium 155 window is kept on the profile's available screen unt
   const watched = async (engine: "aliasmode" | "cloakbrowser", headless: boolean) => {
     const store = new ProfileStore(":memory:");
     const chromium155 = buildNewProfile({ chromiumRuntime: "aliasmode", screen: "1440x900" }, () => false);
-    const { chromiumRuntime: _runtime, ...cloakbrowser } = chromium155;
+    const { chromiumRuntime: _runtime, identity: _identity, ...cloakbrowser } = chromium155;
     store.upsertProfile(engine === "aliasmode" ? chromium155 : cloakbrowser);
     const calls: Array<{ ws: string; area: unknown }> = [];
     let stops = 0;

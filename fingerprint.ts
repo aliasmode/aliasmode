@@ -139,6 +139,19 @@ export function chromiumGpuArgs(
   return anchor.startsWith(`${platform}-`) ? [`${CHROMIUM_ANCHOR_SWITCH}=${anchor}`] : [];
 }
 
+/** Selects the engine's media device table. */
+export const CHROMIUM_MEDIA_CATALOGUE_SWITCH = "--fingerprint-media-catalogue";
+/** The media device table new AliasMode Chromium profiles store (ProfileIdentity.mediaCatalogue). */
+export const NEW_PROFILE_MEDIA_CATALOGUE = 2;
+
+/**
+ * The media device flag of one AliasMode Chromium launch: only for a profile made with the second
+ * table. Every other profile keeps the devices the engine's first table gave it.
+ */
+export function chromiumMediaArgs(profile: Pick<Profile, "chromiumRuntime" | "identity">): string[] {
+  return profile.chromiumRuntime && profile.identity?.mediaCatalogue === 2 ? [`${CHROMIUM_MEDIA_CATALOGUE_SWITCH}=2`] : [];
+}
+
 /** The hardware after the user types a processor count, or clears it: CloakBrowser then draws its count from the seed again. */
 export function editedProfileHardware(profile: Profile, cores: number | undefined): ProfileHardware | undefined {
   if (cores !== undefined) return { cores };

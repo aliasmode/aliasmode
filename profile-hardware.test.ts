@@ -68,7 +68,9 @@ test("a typed count reaches every engine, and Chromium 155 shows at most this co
 });
 
 test("Cloud carries typed cores for Firefox and Chromium 155 in their own schema versions", () => {
-  const beta = { ...buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false), hardware: { cores: 6 } };
+  // Without the stored identity a new profile now has (which travels in V5), the runtime alone is V3.
+  const { identity: _identity, ...made } = buildNewProfile({ chromiumRuntime: "aliasmode" }, () => false);
+  const beta = { ...made, hardware: { cores: 6 } };
   const betaPayload = encodePortableProfile(beta);
   expect(betaPayload).toMatchObject({ schemaVersion: 3, profile: { hardware: { cores: 6 } } });
   expect(decodePortableProfile(betaPayload).profile.hardware).toEqual({ cores: 6 });

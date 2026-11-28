@@ -41,7 +41,7 @@ import { AUTOFILL_EXTENSION_REVISION, autofillExtensionDir } from "./autofill-ex
 import { isFirefoxAddonId } from "./extensions.ts";
 import { allocatePort, closedLoopbackPorts } from "./ports.ts";
 import {
-  DEFAULT_WINDOW_HEIGHT_SCALE, DEFAULT_WINDOW_WIDTH_SCALE, deriveFingerprintFlags, isMobileUserAgent, launchWindowSize,
+  chromiumMediaArgs, DEFAULT_WINDOW_HEIGHT_SCALE, DEFAULT_WINDOW_WIDTH_SCALE, deriveFingerprintFlags, isMobileUserAgent, launchWindowSize,
   platformFromUA, proxyServerFlag,
 } from "./fingerprint.ts";
 export { isMobileUserAgent } from "./fingerprint.ts";
@@ -1513,6 +1513,8 @@ export class Launcher {
       // machine. Cookies/site data are separate stores; this only trims asset caching.
       `--disk-cache-size=${20 * 1024 * 1024}`,
       ...deriveFingerprintFlags(screen),
+      // Only profiles made with the engine's second media device table; the rest keep their devices.
+      ...chromiumMediaArgs(profile),
     ];
     // Chromium builds with different signatures share one "Chromium Safe Storage" Keychain item,
     // and macOS stops the second build with a password prompt. The runtimes that the app

@@ -13,7 +13,7 @@
 import type { Profile, ProfileEngine, ProxySpec } from "./types.ts";
 import { completeProfileFingerprint, createFirefoxProfileConfig, firefoxPersonaOs, normalizeChromiumRuntime, syncFirefoxTimezone } from "./firefox-config.ts";
 import { chromiumDeviceScale, defaultChromiumRuntime, hostDisplayScale, hostDisplaySize } from "./aliasmode-chromium.ts";
-import { deterministicSeed, generateProfileHardware, hostPlatformOs, newProfileGpuIdentity, platformFromUA, switchOff } from "./fingerprint.ts";
+import { deterministicSeed, generateProfileHardware, hostPlatformOs, NEW_PROFILE_MEDIA_CATALOGUE, newProfileGpuIdentity, platformFromUA, switchOff } from "./fingerprint.ts";
 import { hostGpuVendor } from "./host-gpu.ts";
 import { normalizeProxySpec } from "./proxy.ts";
 import { isFirefoxAddonId } from "./extensions.ts";
@@ -147,7 +147,7 @@ export function buildNewProfile(
     id,
     engine,
     ...(chromiumRuntime ? { chromiumRuntime } : {}),
-    ...(gpu ? { identity: { gpu } } : {}),
+    ...(chromiumRuntime ? { identity: { ...(gpu ? { gpu } : {}), mediaCatalogue: NEW_PROFILE_MEDIA_CATALOGUE } } : {}),
     ...(engine === "chromium" && !chromiumRuntime ? { hardware: generateProfileHardware(seed) } : {}),
     ...(firefox ? { firefox } : {}),
     accId: "",
@@ -235,7 +235,11 @@ export function withDefaultBrowser(profile: Profile, gpuVendor = newProfileGpuVe
     const gpu = chromiumRuntime
       ? newProfileGpuIdentity(parsePlatformOs(profile.platformOs) ?? platformFromUA(profile.ua) ?? hostPlatformOs(), hostPlatformOs(), gpuVendor)
       : undefined;
-    return { ...profile, engine, ...(chromiumRuntime ? { chromiumRuntime } : {}), ...(gpu ? { identity: { gpu } } : {}) };
+    return {
+      ...profile,
+      engine,
+      ...(chromiumRuntime ? { chromiumRuntime, identity: { ...(gpu ? { gpu } : {}), mediaCatalogue: NEW_PROFILE_MEDIA_CATALOGUE } } : {}),
+    };
   }
   const platformOs = parsePlatformOs(profile.platformOs) ?? hostPlatformOs();
   const firefox = createFirefoxProfileConfig(profile.screenWidth, profile.screenHeight, platformOs, profile.fingerprintSeed, gpuVendor);

@@ -257,7 +257,7 @@ test("new profiles keep their Chromium runtime fixed locally and in Cloud payloa
 
   store.upsertProfile(beta);
   store.upsertProfile(standard);
-  const { chromiumRuntime: _runtime, ...edited } = store.getProfile(beta.id)!;
+  const { chromiumRuntime: _runtime, identity: _identity, ...edited } = store.getProfile(beta.id)!;
   store.upsertProfile({ ...edited, name: "renamed" });
   expect(store.getProfile(beta.id)).toMatchObject({ name: "renamed", chromiumRuntime: "aliasmode" });
   const { hardware: _stored, ...standardEdit } = store.getProfile(standard.id)!;
@@ -267,7 +267,10 @@ test("new profiles keep their Chromium runtime fixed locally and in Cloud payloa
 
   // Cloud carries the runtime in schema V3, which older clients reject
   // instead of opening it on CloakBrowser. Default profiles stay V1.
-  const payload = encodePortableProfile(beta);
+  // (A new profile also stores an identity, which travels in V5; without it the runtime alone is V3.)
+  const { identity: _identity5, ...betaV3 } = beta;
+  expect(encodePortableProfile(beta).schemaVersion).toBe(5);
+  const payload = encodePortableProfile(betaV3);
   expect(payload.schemaVersion).toBe(3);
   expect(payload.profile).toMatchObject({ chromiumRuntime: "aliasmode" });
   expect(decodePortableProfile(payload).profile.chromiumRuntime).toBe("aliasmode");
