@@ -15,9 +15,11 @@
  *     [--sha256 <hex>] [--out <dir>] [--runtimes <dir>]
  *   <engine-build>: released (the app's pins) | stock (controls only) | chromium:<src> and/or firefox:<src>,
  *     comma separated; <src> = an unpacked build folder or executable, a .zip/.tar.zst archive, an https URL, or a
- *     release tag (v158.0.8127.90-aliasmode.1, aliasmode-runtime-159.0-beta.43-r1; checked against SHA256SUMS).
+ *     release tag (v158.0.8127.90-aliasmode.1, aliasmode-runtime-159.0-beta.43-r1, gates-candidate-<name>; the asset
+ *     for this computer is found by platform in the release's SHA256SUMS and checked against it).
  *   <os>: linux | windows | macos | macos-intel, and it must be this computer's OS (personas follow the host OS).
- *   --switch name=off turns one internal switch off for bisecting (the app code reads ALIASMODE_SWITCHES_OFF=name,...).
+ *   --switch name=off turns one internal switch off for bisecting (the app code reads ALIASMODE_SWITCHES_OFF=name,...);
+ *     a name with no switchOff("name") call in this checkout's app sources stops the run.
  * Output: <out>/summary.json and summary.md (default $GATES_RESULTS or ~/gates-results, /gates-<date>-<engine>-<os>/;
  * never commit them: the repo is public). Proxy addresses never reach the output: an exit IP appears only as a short
  * hash. Every blocker names the switch to bisect with (switches.json). Exit code 0 only when every gate that ran passed.
@@ -34,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { defaultChromiumRuntime, ensureAliasmodeChromium, linuxChromiumSandboxBlocked } from "../../aliasmode-chromium.ts";
 import { sha256File, windowsSystemTool } from "../../browser-install.ts";
 import { firefoxBuildForHost } from "../../firefox-install.ts";
-import { buildProfile, HOST_OS, installFirefoxRelease, PINNED_FIREFOX_RELEASE } from "../engine-audit/audit.ts";
+import { buildProfile, HOST_OS, installFirefoxRelease, PINNED_FIREFOX_RELEASE, readHostGpu } from "../engine-audit/audit.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
@@ -42,7 +44,11 @@ const AUDIT = join(ROOT, "scripts", "engine-audit", "audit.ts");
 const WIN = process.platform === "win32", MAC = process.platform === "darwin";
 const HOST = WIN ? "windows" : MAC ? (process.arch === "arm64" ? "macos" : "macos-intel") : "linux";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+// Page texts can echo addresses (block pages, checkers): logs and summaries keep none, also after a "/" (URLs).
+// (Version numbers stay: they have an octet over 255 or end in .0.0.0.)
+const redact = (text) => text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (ip) =>
+  ip.split(".").some((o) => Number(o) > 255) || ip.endsWith(".0.0.0") || /^(127|10|0)\.|^192\.168\./.test(ip) ? ip : "[ip]");
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), redact(a.join(" ")));
 const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
 // The internal switch a blocker names for bisecting (switches.json).
 const HINTS = readJson(join(HERE, "switches.json")).hints;
@@ -62,6 +68,10 @@ if (!engineBuild || !os) { console.error("usage: gates.mjs <engine-build> <linux
 if (os !== HOST) { console.error(`<os> is ${os} but this computer is ${HOST}; the gates must run on the OS under test`); process.exit(2); }
 const only = new Set((opts.only ?? "a,b,c").split(","));
 const switchesOff = opts.switch.map((s) => s.replace(/=off$/, ""));
+// A switch this checkout never reads would make a bisect run change nothing and wrongly clear that switch.
+const appSources = readdirSync(ROOT).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => readFileSync(join(ROOT, f), "utf8")).join("\n");
+const notHere = switchesOff.filter((name) => !appSources.includes(`switchOff("${name}"`));
+if (notHere.length) { console.error(`switch ${notHere.join(", ")}: this checkout has no switchOff("${notHere[0]}") call; run the gates from a branch that implements it`); process.exit(2); }
 if (switchesOff.length) process.env.ALIASMODE_SWITCHES_OFF = [process.env.ALIASMODE_SWITCHES_OFF, ...switchesOff].filter(Boolean).join(",");
 const date = new Date().toISOString().slice(0, 10);
 const engineLabel = engineBuild.replace(/[^A-Za-z0-9.]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
@@ -128,30 +138,24 @@ function extract(file, dir) {
     : WIN ? [windowsSystemTool("tar.exe"), "-xf", file, "-C", dir] : MAC ? ["ditto", "-x", "-k", file, dir] : ["unzip", "-q", file, "-d", dir];
   if (spawnSync(command[0], command.slice(1), { stdio: "inherit" }).status !== 0) throw new Error(`could not unpack ${file}`);
 }
-/** A release tag's archive for this computer and its SHA-256 from the release's SHA256SUMS. */
+/** A release tag's archive for this computer (found by platform in the release's SHA256SUMS) and its SHA-256. */
 async function releaseAsset(engine, tag) {
-  const arch = process.arch === "arm64" ? "arm64" : "x64";
-  let repo, asset;
-  if (engine === "chromium") {
-    const version = tag.replace(/^v/, "").replace(/-aliasmode\.\d+$/, "");
-    repo = "aliasmode-chromium";
-    asset = `aliasmode-chromium-${version}-${WIN ? "windows" : MAC ? "macos" : "linux"}-${arch}.${!WIN && !MAC ? "tar.zst" : "zip"}`;
-  } else {
-    const version = tag.replace(/^aliasmode-runtime-/, "").replace(/-r\d+$/, "");
-    repo = "aliasmode-firefox";
-    asset = `aliasmode-${version}-${WIN ? "win.x86_64" : MAC ? `mac.${arch === "arm64" ? "arm64" : "x86_64"}` : "lin.x86_64"}.zip`;
-  }
+  const arm = process.arch === "arm64";
+  const repo = engine === "chromium" ? "aliasmode-chromium" : "aliasmode-firefox";
+  const pattern = engine === "chromium"
+    ? new RegExp(`^aliasmode-chromium-[\\d.]+-${WIN ? "windows" : MAC ? "macos" : "linux"}-${arm ? "arm64" : "x64"}\\.${!WIN && !MAC ? "tar\\.zst" : "zip"}$`)
+    : new RegExp(`^aliasmode-.+-${WIN ? "win\\.x86_64" : MAC ? `mac\\.${arm ? "arm64" : "x86_64"}` : "lin\\.x86_64"}\\.zip$`);
   const base = `https://github.com/aliasmode/${repo}/releases/download/${tag}`;
   // aliasmode-chromium publishes SHA256SUMS.txt, aliasmode-firefox SHA256SUMS.
   let sums = "";
   for (const name of ["SHA256SUMS.txt", "SHA256SUMS"]) { const r = await fetch(`${base}/${name}`); if (r.ok) { sums = await r.text(); break; } }
-  const sha = sums.split("\n").find((l) => l.trim().endsWith(asset))?.split(/\s+/)[0];
-  if (!sha) throw new Error(`${asset} is not in ${tag}'s SHA256SUMS`);
-  return { url: `${base}/${asset}`, sha };
+  const line = sums.split("\n").map((l) => l.trim().split(/\s+\*?/)).find(([, name]) => pattern.test(name ?? ""));
+  if (!line) throw new Error(`no ${pattern} in ${tag}'s SHA256SUMS`);
+  return { url: `${base}/${line[1]}`, sha: line[0] };
 }
 async function resolveBuild(engine, src) {
   let archive, sha = opts.sha256;
-  if (/^(v\d+\.\d+\.\d+\.\d+-aliasmode\.\d+|aliasmode-runtime-.+-r\d+)$/.test(src)) ({ url: src, sha } = await releaseAsset(engine, src));
+  if (/^(v\d+\.\d+\.\d+\.\d+-aliasmode\.\d+|aliasmode-runtime-.+-r\d+|gates-candidate-[\w.-]+)$/.test(src)) ({ url: src, sha } = await releaseAsset(engine, src));
   if (/^https:\/\//.test(src)) {
     archive = join(RUNTIMES, "gates-builds", basename(new URL(src).pathname));
     mkdirSync(dirname(archive), { recursive: true });
@@ -438,6 +442,8 @@ async function gateB(E) {
       runs[stockRun] = await pending;
       await browser.stop();
       log(`B: ${stockRun} ${runs[stockRun] ? "ok" : "no result"}`);
+      // Without it a signal ours never reads cannot be told from one this host lacks.
+      if (!runs[stockRun]) result.blockers.push({ engine, key: stockRun, detail: "the stock run gave no result: the all-null check is not possible", switchHint: "none" });
     }
     mkdirSync(join(OUT, "B"), { recursive: true });
     writeFileSync(join(OUT, "B", `${engine}-runs.json`), JSON.stringify(runs));
@@ -574,11 +580,13 @@ async function visit(E, target, site, proxy, server) {
 }
 /** Host check: OS input reaches a stock Chrome window, the page sees itself visible and focused, and copying works. */
 async function preflight(server, proxy) {
-  const pending = server.wait("focus", 90_000);
   // A fresh profile per check: a reused one opens Chrome's "Restore pages?" bubble, which takes the focus.
   const b = openStock("chrome", join(WORK, `focus-${Date.now()}`), "about:blank", proxy);
-  for (let i = 0; i < 30 && input("activate") === "none"; i++) await sleep(1500);
-  await sleep(2000); input("activate"); input("open", server.url("focus", "focus"));
+  // A fresh Windows runner takes minutes for Chrome's first launch: the page's wait starts once the URL is typed.
+  for (let i = 0; i < 80 && input("activate") === "none"; i++) await sleep(1500);
+  await sleep(2000); input("activate");
+  const pending = server.wait("focus", 180_000);
+  input("open", server.url("focus", "focus"));
   const seen = (await pending) ?? { visibility: "no result" };
   const file = join(WORK, "focus.txt");
   input("copytext", file);
@@ -637,7 +645,7 @@ async function gateC(E) {
 // ---------- main ----------
 const E = await engines();
 const summary = {
-  date: new Date().toISOString(), engineBuild, os, host: `${process.platform} ${process.arch}`, switches: opts.switch,
+  date: new Date().toISOString(), engineBuild, os, host: `${process.platform} ${process.arch}`, hostGpu: await readHostGpu(), switches: opts.switch,
   engines: E.versions, stock: { chrome: stockVersion("chrome"), firefox: stockVersion("firefox") }, gates: {},
 };
 // The stock control should be the engine's major; a different one shows as version differences in Gate A.
@@ -652,10 +660,6 @@ if (only.has("c")) summary.gates.C = await gateC(E);
 const ran = Object.values(summary.gates).filter((g) => g.status !== "skipped" && g.status !== "info");
 // An info-only run (--buckets) passes when it ran.
 summary.pass = ran.every((g) => g.status === "pass") && Object.values(summary.gates).some((g) => g.status !== "skipped");
-// Page texts can echo addresses (block pages, checkers): the summaries keep none.
-// (Version numbers stay: they have an octet over 255, end in .0.0.0, or follow a "/".)
-const redact = (text) => text.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (ip, at, all) =>
-  ip.split(".").some((o) => Number(o) > 255) || ip.endsWith(".0.0.0") || all[at - 1] === "/" || /^(127|10|0)\.|^192\.168\./.test(ip) ? ip : "[ip]");
 writeFileSync(join(OUT, "summary.json"), redact(JSON.stringify(summary, null, 1)));
 const md = [`# Gates ${summary.date}`, "", `Engine build: ${engineBuild} on ${os} (${summary.host}). Engines: ${JSON.stringify(E.versions)}. Stock: Chrome ${summary.stock.chrome}, Firefox ${summary.stock.firefox}.${mismatch.length ? ` Major differs from the control: ${mismatch.join(", ")}.` : ""}${opts.switch.length ? ` Switches: ${opts.switch.join(", ")}.` : ""}`, ""];
 for (const [name, g] of Object.entries(summary.gates)) {

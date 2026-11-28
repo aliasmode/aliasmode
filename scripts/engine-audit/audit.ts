@@ -308,5 +308,12 @@ async function main(): Promise<void> {
   console.log(`\n${summary}\nSaved ${out}`);
 }
 
+/** The app's host GPU read, awaited (branches with the GPU-family rule), so every new profile gets the same GPU decision. */
+export async function readHostGpu(): Promise<string> {
+  const file = join(import.meta.dir, "..", "..", "host-gpu.ts");
+  if (!existsSync(file)) return "no GPU rule in this checkout";
+  return (await (await import(file)).waitForHostGpu()) ?? "none";
+}
+
 if (process.argv[2] === "open") await open(process.argv[3]!, process.argv[4]!, process.argv[5]!);
-else if (import.meta.main) await main();
+else if (import.meta.main) { await readHostGpu(); await main(); }

@@ -1,7 +1,7 @@
 name: Release gates
 
-# Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (Google's current stable)
-# and stock Firefox 159.0.1. Start it by hand (inputs below) or, from any branch, by pushing the branch
+# Runs scripts/gates/gates.mjs on GitHub's Windows and Mac runners against stock Chrome (Google's stable or beta
+# channel, checked against chrome_major) and stock Firefox of the version named (match the engines under test). Start it by hand (inputs below) or, from any branch, by pushing the branch
 # gates/dispatch with scripts/gates/dispatch.json as the run spec. Gate A needs the detection lab: it comes from
 # scripts/gates/lab.enc with the secret GATES_LAB_KEY (without it Gate A is skipped). Gate C needs the secret
 # GATES_PROXY (an http:// proxy URL; runner IPs are datacenter IPs) and then runs one OS at a time, so one IP never
@@ -35,6 +35,21 @@ on:
         required: false
         default: windows,macos,macos-intel
         type: string
+      chrome_channel:
+        description: "Stock Chrome control channel: stable or beta"
+        required: false
+        default: stable
+        type: string
+      chrome_major:
+        description: "Stock Chrome major the control must have (empty = any); the run stops if the channel has another"
+        required: false
+        default: ""
+        type: string
+      firefox_version:
+        description: "Stock Firefox control version (Mozilla release archive), e.g. 159.0.1"
+        required: false
+        default: 159.0.1
+        type: string
   push:
     branches: [gates/dispatch]
 
@@ -51,6 +66,9 @@ jobs:
       parallel: ${{ steps.spec.outputs.parallel }}
       matrix: ${{ steps.spec.outputs.matrix }}
       sites: ${{ steps.spec.outputs.sites }}
+      chrome_channel: ${{ steps.spec.outputs.chrome_channel }}
+      chrome_major: ${{ steps.spec.outputs.chrome_major }}
+      firefox_version: ${{ steps.spec.outputs.firefox_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,19 +83,28 @@ jobs:
           IN_SWITCHES: ${{ inputs.switches }}
           IN_OS: ${{ inputs.os }}
           IN_SITES: ${{ inputs.sites }}
+          IN_CHROME_CHANNEL: ${{ inputs.chrome_channel }}
+          IN_CHROME_MAJOR: ${{ inputs.chrome_major }}
+          IN_FIREFOX_VERSION: ${{ inputs.firefox_version }}
         run: |
           if [ "$EVENT" = push ]; then
             f=scripts/gates/dispatch.json
             engine=$(jq -r '.engine_build // "released"' $f); only=$(jq -r '.only // "p,a,b"' $f); switches=$(jq -r '.switches // ""' $f)
             os=$(jq -r '.os // ""' $f); sites=$(jq -r '.sites // ""' $f)
+            chrome_channel=$(jq -r '.chrome_channel // ""' $f); chrome_major=$(jq -r '.chrome_major // ""' $f); firefox_version=$(jq -r '.firefox_version // ""' $f)
           else
             engine=$IN_ENGINE; only=$IN_ONLY; switches=$IN_SWITCHES; os=$IN_OS; sites=$IN_SITES
+            chrome_channel=$IN_CHROME_CHANNEL; chrome_major=$IN_CHROME_MAJOR; firefox_version=$IN_FIREFOX_VERSION
           fi
+          chrome_channel=${chrome_channel:-stable}; firefox_version=${firefox_version:-159.0.1}
+          case $chrome_channel in stable|beta) ;; *) echo "chrome_channel must be stable or beta" >&2; exit 1;; esac
+          [[ $chrome_major =~ ^[0-9]*$ && $firefox_version =~ ^[0-9]+\.[0-9.]+$ ]] || { echo "bad chrome_major or firefox_version" >&2; exit 1; }
           matrix=$(jq -cn --arg os "${os:-windows,macos,macos-intel}" '{windows: "windows-latest", macos: "macos-15", "macos-intel": "macos-15-intel"} as $r
             | [$os | split(",")[] | select($r[.]) | {os: ., runner: $r[.]}]')
           case ",$only," in *,c,*) parallel=1;; *) parallel=3;; esac
-          echo "engine_build=$engine only=$only switches=$switches sites=$sites parallel=$parallel matrix=$matrix"
-          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "sites=$sites"; echo "parallel=$parallel"; echo "matrix=$matrix"; } >> "$GITHUB_OUTPUT"
+          echo "engine_build=$engine only=$only switches=$switches sites=$sites parallel=$parallel matrix=$matrix chrome=$chrome_channel/${chrome_major:-any} firefox=$firefox_version"
+          { echo "engine_build=$engine"; echo "only=$only"; echo "switches=$switches"; echo "sites=$sites"; echo "parallel=$parallel"; echo "matrix=$matrix"
+            echo "chrome_channel=$chrome_channel"; echo "chrome_major=$chrome_major"; echo "firefox_version=$firefox_version"; } >> "$GITHUB_OUTPUT"
 
   gates:
     needs: spec
@@ -91,6 +118,9 @@ jobs:
     env:
       GATES_LAB_KEY: ${{ secrets.GATES_LAB_KEY }}
       GATES_PROXY: ${{ secrets.GATES_PROXY }}
+      CHROME_CHANNEL: ${{ needs.spec.outputs.chrome_channel }}
+      CHROME_MAJOR: ${{ needs.spec.outputs.chrome_major }}
+      FIREFOX_VERSION: ${{ needs.spec.outputs.firefox_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -100,37 +130,48 @@ jobs:
       - name: Detection lab (encrypted in scripts/gates/lab.enc)
         if: env.GATES_LAB_KEY != ''
         run: bun scripts/gates/lab.mjs unpack site
-      - name: Stock Chrome stable (Windows)
+      - name: Stock Chrome (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi" -OutFile "$env:RUNNER_TEMP\chrome.msi"
+          $beta = $env:CHROME_CHANNEL -eq "beta"
+          $msi = if ($beta) { "beta/googlechromebetastandaloneenterprise64.msi" } else { "googlechromestandaloneenterprise64.msi" }
+          Invoke-WebRequest "https://dl.google.com/dl/chrome/install/$msi" -OutFile "$env:RUNNER_TEMP\chrome.msi"
           Start-Process msiexec.exe -Wait -ArgumentList "/i `"$env:RUNNER_TEMP\chrome.msi`" /qn /norestart"
-          (Get-Item "C:\Program Files\Google\Chrome\Application\chrome.exe").VersionInfo.ProductVersion
-      - name: Stock Chrome stable (macOS)
+          $exe = if ($beta) { "C:\Program Files\Google\Chrome Beta\Application\chrome.exe" } else { "C:\Program Files\Google\Chrome\Application\chrome.exe" }
+          $version = (Get-Item $exe).VersionInfo.ProductVersion
+          "Chrome $env:CHROME_CHANNEL $version"
+          if ($env:CHROME_MAJOR -and $version.Split(".")[0] -ne $env:CHROME_MAJOR) { throw "Chrome $env:CHROME_CHANNEL is $version, not major $env:CHROME_MAJOR" }
+          "CHROME_BIN=$exe" >> $env:GITHUB_ENV
+      - name: Stock Chrome (macOS)
         if: runner.os == 'macOS'
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/chrome.dmg" "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg"
+          if [ "$CHROME_CHANNEL" = beta ]; then url=beta/googlechromebeta.dmg app="Google Chrome Beta"; else url=stable/GGRO/googlechrome.dmg app="Google Chrome"; fi
+          curl -fsSL -o "$RUNNER_TEMP/chrome.dmg" "https://dl.google.com/chrome/mac/universal/$url"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/chmnt" "$RUNNER_TEMP/chrome.dmg"
-          mkdir -p "$RUNNER_TEMP/chrome" && cp -R "$RUNNER_TEMP/chmnt/Google Chrome.app" "$RUNNER_TEMP/chrome/"
+          mkdir -p "$RUNNER_TEMP/chrome" && cp -R "$RUNNER_TEMP/chmnt/$app.app" "$RUNNER_TEMP/chrome/"
           hdiutil detach "$RUNNER_TEMP/chmnt"
-          echo "CHROME_BIN=$RUNNER_TEMP/chrome/Google Chrome.app/Contents/MacOS/Google Chrome" >> "$GITHUB_ENV"
-      - name: Stock Firefox 159.0.1 (Windows)
+          bin="$RUNNER_TEMP/chrome/$app.app/Contents/MacOS/$app"
+          version=$(defaults read "$RUNNER_TEMP/chrome/$app.app/Contents/Info.plist" CFBundleShortVersionString)
+          echo "Chrome $CHROME_CHANNEL $version"
+          if [ -n "$CHROME_MAJOR" ] && [ "${version%%.*}" != "$CHROME_MAJOR" ]; then echo "Chrome $CHROME_CHANNEL is $version, not major $CHROME_MAJOR" >&2; exit 1; fi
+          echo "CHROME_BIN=$bin" >> "$GITHUB_ENV"
+      - name: Stock Firefox (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dir = "$env:RUNNER_TEMP\firefox-159"
-          Invoke-WebRequest "https://ftp.mozilla.org/pub/firefox/releases/159.0.1/win64/en-US/Firefox%20Setup%20159.0.1.exe" -OutFile "$env:RUNNER_TEMP\ff.exe"
+          $dir = "$env:RUNNER_TEMP\firefox-$env:FIREFOX_VERSION"
+          Invoke-WebRequest "https://ftp.mozilla.org/pub/firefox/releases/$env:FIREFOX_VERSION/win64/en-US/Firefox%20Setup%20$env:FIREFOX_VERSION.exe" -OutFile "$env:RUNNER_TEMP\ff.exe"
           7z x "$env:RUNNER_TEMP\ff.exe" "-o$dir" -y | Out-Null
           "FIREFOX_BIN=$dir\core\firefox.exe" >> $env:GITHUB_ENV
-      - name: Stock Firefox 159.0.1 (macOS)
+      - name: Stock Firefox (macOS)
         if: runner.os == 'macOS'
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/ff.dmg" "https://ftp.mozilla.org/pub/firefox/releases/159.0.1/mac/en-US/Firefox%20159.0.1.dmg"
+          curl -fsSL -o "$RUNNER_TEMP/ff.dmg" "https://ftp.mozilla.org/pub/firefox/releases/$FIREFOX_VERSION/mac/en-US/Firefox%20$FIREFOX_VERSION.dmg"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/ffmnt" "$RUNNER_TEMP/ff.dmg"
-          mkdir -p "$RUNNER_TEMP/firefox-159" && cp -R "$RUNNER_TEMP/ffmnt/Firefox.app" "$RUNNER_TEMP/firefox-159/"
+          mkdir -p "$RUNNER_TEMP/firefox-$FIREFOX_VERSION" && cp -R "$RUNNER_TEMP/ffmnt/Firefox.app" "$RUNNER_TEMP/firefox-$FIREFOX_VERSION/"
           hdiutil detach "$RUNNER_TEMP/ffmnt"
-          echo "FIREFOX_BIN=$RUNNER_TEMP/firefox-159/Firefox.app/Contents/MacOS/firefox" >> "$GITHUB_ENV"
+          echo "FIREFOX_BIN=$RUNNER_TEMP/firefox-$FIREFOX_VERSION/Firefox.app/Contents/MacOS/firefox" >> "$GITHUB_ENV"
       # Stock browsers on Windows follow the system time zone (elsewhere gates.mjs gives them TZ=): use the proxy's.
       - name: Time zone of the proxy (Windows, Gate C)
         if: runner.os == 'Windows' && contains(format(',{0},', needs.spec.outputs.only), ',c,') && env.GATES_PROXY != ''
