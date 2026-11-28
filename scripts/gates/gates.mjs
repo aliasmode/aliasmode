@@ -270,6 +270,13 @@ function killTree(pid) {
   if (WIN) { spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" }); return; }
   for (const target of [-pid, pid]) try { process.kill(target, "SIGKILL"); } catch {}
 }
+/**
+ * Windows: browsers can leave processes that taskkill /T misses (stock Firefox; a browser that relaunched itself).
+ * Left running, they pile up over a Gate C run until the hosted runner starves. Kill everything that uses the folder.
+ */
+function killProfileProcesses(dir) {
+  if (WIN) spawnSync("powershell.exe", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process | ? { $_.CommandLine -like '*${dir}*' } | % { Stop-Process -Id $_.ProcessId -Force }`], { stdio: "ignore" });
+}
 /** Opens one profile the app's way (audit.ts open); returns a stop function that closes it the app's way. */
 function openOurs(E, engine, mode, profile, dir, url, extra = {}) {
   mkdirSync(dir, { recursive: true });
@@ -291,6 +298,7 @@ function openOurs(E, engine, mode, profile, dir, url, extra = {}) {
       // Only live processes of ours: an exited one's pid may already belong to another process.
       if (!done) killTree(child.pid);
       if (existsSync(spec.pidFile)) for (const pid of readJson(spec.pidFile)) if (ownBrowserPid(pid)) killTree(pid);
+      killProfileProcesses(dir);
     },
   };
 }
@@ -321,8 +329,7 @@ function openStock(name, dir, url, proxy) {
     error: () => "",
     stop: async () => {
       if (!done) killTree(child.pid);
-      // Stock Firefox on Windows leaves processes that taskkill /T misses: kill everything that uses this profile.
-      if (WIN) spawnSync("powershell.exe", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process | ? { $_.CommandLine -like '*${dir}*' } | % { Stop-Process -Id $_.ProcessId -Force }`], { stdio: "ignore" });
+      killProfileProcesses(dir);
       await sleep(1500);
     },
   };
