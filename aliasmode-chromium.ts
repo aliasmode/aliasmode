@@ -24,30 +24,26 @@ import { runCurlDirectFirst } from "./system-proxy.ts";
 const OWN_VERSION = "159.0.8154.34";
 const OWN_RELEASE = "aliasmode.1";
 const PINS = {
-  // TODO-PIN-FINAL: replace with the fix rebuild.
+  // GATES ONLY (branch gates/with-undetect, never merged): the gates-candidate-chromium-159-1 builds.
   windows: {
-    archiveSha256: "0bfc9c6baafc15a6665b03599382f96b1f65b77923edd5b4354c31f4d3d98bbe",
-    size: 214879214,
-    executableSha256: "155bbba8b639e252c1988786b8899ef7ae355bec7b891ed80ee7419fc1673de5",
+    archiveSha256: "69b15ba0a5c0064a0653721d99c63e4d522a5acb8acee3dad312bca5651c546d",
+    size: 214878179,
+    executableSha256: "637289c785714691e2c0feeed1405111f5d674609cba403389b9af6993f19e72",
   },
-  // TODO-PIN-FINAL: the 159 Mac arm64 build (these are 155's).
   macosArm64: {
-    archiveSha256: "5723d95c1d13e5efa6eba581ff799472cb9f4042a6a46961f43ba7eac7f78084",
-    size: 159506881,
-    executableSha256: "cb03f4622ea0dbbcb4fc0a5b8a2a3d63ed2e59f427230d4dcb6d494fdabf1744",
+    archiveSha256: "03e4fb374a39159ed83cfc8248cec119ad94cc5669d3f33a3e99aa5f1da2f04c",
+    size: 167691557,
+    executableSha256: "cefb8981ec7f4bb55ba94434251f7986d39e448e80a59a407953843690a5aefa",
   },
-  // TODO-PIN-FINAL: the Intel Mac build exists from the 159 release on. Until it is pinned, an Intel Mac
-  // fails the download check (chromium155_download).
   macosX64: {
-    archiveSha256: "0000000000000000000000000000000000000000000000000000000000000000",
-    size: 0,
-    executableSha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    archiveSha256: "efb777e3dcaf9692bc6c79ff627b39380421ca18a0145631056bb2c65a2b7cd8",
+    size: 177481569,
+    executableSha256: "317d8f62d3cedfc1000a143d2a1f22027c001181fa07134cc3c605e0f76ee097",
   },
-  // TODO-PIN-FINAL: the 159 Linux build (these are 155's).
   linux: {
-    archiveSha256: "86e6c4304161ece6628ceb79eb6c9e5f57a148f5bec211753b8b4399319220d0",
-    size: 197916653,
-    executableSha256: "a49eb6c62fe794d9cf32d14ddfd59731a96074af02e5563da7b7fc800ffce2f1",
+    archiveSha256: "ce54a5afef3735ecb2ecb415fe536d9f35892c8c645c03690d0ad8b26f21165e",
+    size: 207424321,
+    executableSha256: "399a9bde3611123d927637c2ba2b0b3b4e8cfa988ad7837d7437d1267cf21a6f",
   },
 };
 const OWN_RELEASE_URL = `https://github.com/aliasmode/aliasmode-chromium/releases/download/v${OWN_VERSION}-${OWN_RELEASE}`;
