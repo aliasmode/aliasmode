@@ -4,8 +4,8 @@ name: Release gates
 # channel, checked against chrome_major) and stock Firefox of the version named (match the engines under test). Start it by hand (inputs below) or, from any branch, by pushing the branch
 # gates/dispatch with scripts/gates/dispatch.json as the run spec. Gate A needs the detection lab: it comes from
 # scripts/gates/lab.enc with the secret GATES_LAB_KEY (without it Gate A is skipped). Gate C needs the secret
-# GATES_PROXY (an http:// proxy URL; runner IPs are datacenter IPs) and then runs one OS at a time, so one IP never
-# sees two runs at once. This repo is public: the results and the log leave the runner only encrypted with
+# GATES_PROXY (an http:// proxy URL; runner IPs are datacenter IPs; GATES_PROXY_SPARE, optional, is the second IP
+# for sites where stock fails on the first) and then runs one OS at a time, so one IP never sees two runs at once. This repo is public: the results and the log leave the runner only encrypted with
 # GATES_LAB_KEY (artifact gates-<os>; bun scripts/gates/lab.mjs open gates-<os>.enc <dir>).
 on:
   workflow_dispatch:
@@ -118,6 +118,7 @@ jobs:
     env:
       GATES_LAB_KEY: ${{ secrets.GATES_LAB_KEY }}
       GATES_PROXY: ${{ secrets.GATES_PROXY }}
+      GATES_PROXY_SPARE: ${{ secrets.GATES_PROXY_SPARE }}
       CHROME_CHANNEL: ${{ needs.spec.outputs.chrome_channel }}
       CHROME_MAJOR: ${{ needs.spec.outputs.chrome_major }}
       FIREFOX_VERSION: ${{ needs.spec.outputs.firefox_version }}
@@ -191,6 +192,8 @@ jobs:
           GATES_SITES: ${{ needs.spec.outputs.sites }}
         run: |
           proxy=(); case ",$GATES_ONLY," in *,c,*) proxy=(--proxy env:GATES_PROXY);; esac
+          # A second IP: a site where stock fails on the first IP is retried there (stock, then ours).
+          if [ ${#proxy[@]} -gt 0 ] && [ -n "$GATES_PROXY_SPARE" ]; then proxy+=(--spare-proxy env:GATES_PROXY_SPARE); fi
           switches=(); for s in ${GATES_SWITCHES//,/ }; do switches+=(--switch "$s=off"); done
           sites=(); if [ -n "$GATES_SITES" ]; then sites=(--sites "$GATES_SITES"); fi
           out="results/gates-${{ matrix.os }}"; mkdir -p "$out"
